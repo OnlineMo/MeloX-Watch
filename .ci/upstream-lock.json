@@ -15,6 +15,27 @@
       "commit": "09713edb847a0f0a3515a34f779cc630d4fe5985",
       "localPath": "research/MeloX",
       "role": "Watch product behavior and interaction reference"
+    },
+    {
+      "name": "MetingJS",
+      "url": "https://github.com/metowolf/MetingJS.git",
+      "commit": "1ad6814f4136a15b41658b117ed709d6b9acf1ce",
+      "localPath": "research/MetingJS",
+      "role": "Protocol reference only for user-configured Meting service; not an application runtime dependency"
+    },
+    {
+      "name": "Meting-API",
+      "url": "https://github.com/injahow/meting-api.git",
+      "commit": "230e38df9aff90e41d02e9bdeec5f0c866764ac7",
+      "localPath": "research/Meting-API",
+      "role": "Protocol reference only for user-configured Meting service; not an application runtime dependency"
+    },
+    {
+      "name": "Meting",
+      "url": "https://github.com/metowolf/Meting.git",
+      "commit": "e812b0e8596e6891f5615769b969693e5f92b614",
+      "localPath": "research/Meting",
+      "role": "Protocol reference only for user-configured Meting service; not an application runtime dependency"
     }
   ]
 }
