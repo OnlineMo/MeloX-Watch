@@ -45,6 +45,21 @@ class GitHub:
     def get(self, path):
         return self.request('GET', '/repos/' + REPOSITORY + path)
 
+    def graphql(self, query):
+        require(query.lstrip().startswith('query '), 'Only read-only GraphQL queries are allowed')
+        request = urllib.request.Request('https://api.github.com/graphql',
+            data=json.dumps({'query': query}).encode(),
+            headers={'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read(2_000_001)
+        except urllib.error.HTTPError as error:
+            raise ValueError(f'GitHub GraphQL failed: HTTP {error.code}') from None
+        require(len(data) <= 2_000_000, 'GraphQL response exceeds limit')
+        value = json.loads(data)
+        require(not value.get('errors') and value.get('data') is not None, 'GraphQL protection query failed')
+        return value['data']
+
     def pages(self, path, key=None):
         result = []
         separator = '&' if '?' in path else '?'

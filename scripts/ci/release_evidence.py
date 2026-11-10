@@ -10,6 +10,23 @@ GATES = {'P0_device_and_login', 'P1_playback_foundation', 'P2_online_features', 
          'reference_device_background_audio', 'privacy_and_source_licenses',
          'install_and_known_limitations_docs', 'branch_and_tag_protections', 'signing_backup_verified'}
 
+PROTECTION_QUERY = '''query BranchProtection {
+  repository(owner: "OnlineMo", name: "MeloX-Watch") {
+    main: ref(qualifiedName: "refs/heads/main") { branchProtectionRule { ...RequiredProtection } }
+    contribution: ref(qualifiedName: "refs/heads/contribution") { branchProtectionRule { ...RequiredProtection } }
+  }
+}
+fragment RequiredProtection on BranchProtectionRule {
+  pattern isAdminEnforced allowsForcePushes allowsDeletions
+  requiresConversationResolution requiresApprovingReviews requiredApprovingReviewCount
+  requiresCodeOwnerReviews requireLastPushApproval requiresStatusChecks requiresStrictStatusChecks
+  requiredStatusChecks { context app { databaseId slug } }
+  bypassPullRequestAllowances { totalCount }
+  bypassForcePushAllowances { totalCount }
+  branchProtectionRuleConflicts { totalCount }
+}
+'''
+
 
 def candidate_identity(manifest, provenance):
     return {'run_id': provenance['run_id'], 'run_attempt': provenance['run_attempt'],
@@ -95,6 +112,22 @@ def validate_branch_protection(value, actions_app_id):
     require(not any(reviews.get('bypass_pull_request_allowances', {}).values()), 'Permanent PR bypass is forbidden')
 
 
+def validate_graphql_protection(rule, branch, actions_app_id):
+    require(isinstance(rule, dict) and rule.get('pattern') == branch, 'Exact branch protection rule is missing')
+    expected = {'isAdminEnforced': True, 'allowsForcePushes': False, 'allowsDeletions': False,
+                'requiresConversationResolution': True, 'requiresApprovingReviews': True,
+                'requiredApprovingReviewCount': 0, 'requiresCodeOwnerReviews': False,
+                'requireLastPushApproval': False, 'requiresStatusChecks': True, 'requiresStrictStatusChecks': True}
+    for key, value in expected.items():
+        require(type(rule.get(key)) is type(value) and rule[key] == value, 'Branch protection mismatch: ' + key)
+    for key in ('bypassPullRequestAllowances', 'bypassForcePushAllowances', 'branchProtectionRuleConflicts'):
+        require(rule.get(key, {}).get('totalCount') == 0, 'Branch protection has bypasses or conflicts')
+    checks = {(item['context'], (item.get('app') or {}).get('databaseId'), (item.get('app') or {}).get('slug'))
+              for item in rule.get('requiredStatusChecks', [])}
+    require({('cloud-gate', actions_app_id, 'github-actions'), ('pr-policy', actions_app_id, 'github-actions')} <= checks,
+            'Required checks are not bound to GitHub Actions')
+
+
 def verify_protections(client, approval, tag):
     repository = client.request('GET', '/repos/OnlineMo/MeloX-Watch')
     require(repository['private'] is False, 'Public visibility requires separate owner approval before publication')
@@ -113,8 +146,10 @@ def verify_protections(client, approval, tag):
     policies = [entry for entry in head_checks if entry['name'] == 'pr-policy' and entry['app']['id'] == actions_app_id]
     require(bool(policies) and max(policies, key=lambda entry: entry['id'])['conclusion'] == 'success',
             'Approval promotion lacks a successful trusted PR policy')
+    # REST完整保护端点需要administration-read；短期GITHUB_TOKEN用只读GraphQL核对同一组字段。
+    rules = client.graphql(PROTECTION_QUERY)['repository']
     for branch in ('main', 'contribution'):
-        validate_branch_protection(client.get('/branches/' + branch + '/protection'), actions_app_id)
+        validate_graphql_protection((rules.get(branch) or {}).get('branchProtectionRule'), branch, actions_app_id)
     protected = False
     target = 'refs/tags/' + tag
     for item in client.pages('/rulesets?includes_parents=true'):

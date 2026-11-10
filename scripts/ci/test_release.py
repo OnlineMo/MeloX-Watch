@@ -11,7 +11,8 @@ from unittest.mock import patch
 import candidate
 from ci_common import OWNER, OWNER_EMAIL, git
 from release import publish_assets, validate_release_target
-from release_evidence import GATES, validate_approval, validate_approval_history, validate_branch_protection
+from release_evidence import (GATES, validate_approval, validate_approval_history,
+                              validate_branch_protection, validate_graphql_protection)
 
 
 class SnapshotTests(unittest.TestCase):
@@ -86,6 +87,24 @@ class SnapshotTests(unittest.TestCase):
 
 
 class AcceptanceTests(unittest.TestCase):
+    def test_graphql_rule_requires_exact_branch_all_controls_and_app_identity(self):
+        rule = {'pattern': 'main', 'isAdminEnforced': True, 'allowsForcePushes': False, 'allowsDeletions': False,
+                'requiresConversationResolution': True, 'requiresApprovingReviews': True,
+                'requiredApprovingReviewCount': 0, 'requiresCodeOwnerReviews': False,
+                'requireLastPushApproval': False, 'requiresStatusChecks': True, 'requiresStrictStatusChecks': True,
+                'requiredStatusChecks': [{'context': name, 'app': {'databaseId': 15368, 'slug': 'github-actions'}}
+                                         for name in ('cloud-gate', 'pr-policy')],
+                'bypassPullRequestAllowances': {'totalCount': 0}, 'bypassForcePushAllowances': {'totalCount': 0},
+                'branchProtectionRuleConflicts': {'totalCount': 0}}
+        validate_graphql_protection(rule, 'main', 15368)
+        for changes in [{'pattern': '*'}, {'requiresApprovingReviews': False}, {'requiredApprovingReviewCount': False},
+                        {'bypassForcePushAllowances': {'totalCount': 1}}, {'requiredStatusChecks': []},
+                        {'branchProtectionRuleConflicts': {'totalCount': 1}}]:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_graphql_protection(rule | changes, 'main', 15368)
+        with self.assertRaises(ValueError):
+            validate_graphql_protection(None, 'main', 15368)
+
     def test_all_true_without_candidate_or_real_report_is_rejected(self):
         identity = {'version': {'versionName': '0.1.0'}, 'apk_sha256': 'a' * 64}
         readiness = {'schema_version': 2, 'candidate': None, 'owner_approved': True,
