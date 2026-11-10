@@ -75,3 +75,5 @@ jobs:
           else
             echo 'Planning/configuration only; no APK build or device validation.' >> "$GITHUB_STEP_SUMMARY"
           fi
+
+# Policy validation fixture: never merge.
