@@ -10,6 +10,19 @@ new File(repositoryRoot, 'version.properties').withInputStream { releaseVersion.
 if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
     throw new GradleException('Gradle version differs from the cloud toolchain lock')
 }
+// 稳定证书永远不进入 Gradle。最终 DSL 清除 AGP 默认 Debug 签名，交给新 runner 签名。
+gradle.beforeProject { project ->
+    project.plugins.withId('com.android.application') {
+        def components = project.extensions.getByName('androidComponents')
+        components.finalizeDsl { android ->
+            if (System.getenv('CI_UNSIGNED_APK') == 'true') {
+                android.buildTypes.configureEach { buildType -> buildType.signingConfig = null }
+                android.productFlavors.configureEach { flavor -> flavor.signingConfig = null }
+                android.defaultConfig.signingConfig = null
+            }
+        }
+    }
+}
 gradle.projectsEvaluated {
     gradle.rootProject.allprojects { project ->
         def android = project.extensions.findByName('android')

@@ -2,7 +2,7 @@
 
 ## Start here and scope
 
-- The user has requested a final planning review, not application construction. No Android source, APK or device results exist. Do not execute the ignored start prompt during planning. Start implementation only after the user explicitly authorizes it.
+- The user authorized implementation, then narrowed this session to development prerequisites: CI-01–04, toolchain/wrapper and read-only device checks. Do not create Android probe or business code until the user resumes that scope. The user is adding planning details; read their changed contracts before application work. No Android source, APK or device acceptance exists.
 - Read [20 final review and startup order](docs/20-终审结论与开工清单.md), [05 tasks](docs/05-开发阶段与任务清单.md), [13 actual status](docs/13-仓库状态.md), and the documents relevant to the current task. Read the entire relevant contract before editing it; do not reread all documents for every small change.
 - Product: a local/online music app for **Android smartwatches**, not an OPPO-specific client or a CI/planning product. Watch X2 is only the user's first available physical test device. Adapt by actual API/ABI/window shape/size/input capabilities, no model whitelist or OPPO assumptions; distinguish round and rectangular layouts. No mandatory GMS or companion. Unmeasured devices are not declared supported. Performance first, visual quality second, readable code mandatory; correctness, privacy and accessible controls are not tradeoffs.
 - First prerelease includes online NetEase, complete account-independent local music, and optional user-configured/self-hosted Meting (default off, no bundled public endpoint). Online downloads are P4. Unknown future providers get only necessary generic interfaces, not speculative SDKs/modules or fixed capability assumptions.
@@ -10,9 +10,9 @@
 
 ## Current infrastructure limitations
 
-- CI-01–04 in20 are **not implemented**. Current build.py passes signing environment into Gradle, and Owner release checks final gates before building and publishing immediately. Do not run it to obtain a candidate by setting gates true.
+- CI-01–04 scripts are under implementation; workflow changes remain proposed until owner Issue review and maintenance. Consult docs/13 and docs/ci/CI-01–04建设记录.md for actual evidence. The legacy deployed workflows are unsafe for trusted application signing/release; never use them by setting gates true.
 - Before trusted Android builds, implement CI-01: compile/test/lint with no signing secrets or write token; sign on a fresh runner without running application build scripts; grant ephemeral contents-write only to publication. PR event names alone do not ensure secret isolation.
-- CI-02/03 must provide nonpublishing candidates and publication/recovery of the exact accepted APK. CI-04 must align owner version proposals, auto versionCode and branch resynchronization. Workflow changes follow the owner's Issue maintenance route. This review changes documents only.
+- CI-02/03 must provide nonpublishing candidates and publication/recovery of the exact accepted APK. CI-04 must align owner version proposals, auto versionCode and branch resynchronization. Workflow changes follow the owner's Issue maintenance route. Policy tests and skipped Android jobs do not complete APK/device acceptance.
 
 ## Development loop
 

@@ -44,6 +44,67 @@ async function readVersion(github, repo, ref) {
   return parseVersion(Buffer.from(data.content, 'base64').toString('utf8'));
 }
 
+function countReachable(commits, head) {
+  const objects = new Map(commits.map(commit => [commit.sha, commit]));
+  if (objects.size !== commits.length || objects.size > 100000) throw new Error('Invalid or excessive history inventory');
+  const pending = [head], seen = new Set();
+  while (pending.length) {
+    const sha = pending.pop();
+    if (seen.has(sha)) continue;
+    const commit = objects.get(sha);
+    if (!commit) throw new Error('Incomplete Git history; candidate code cannot be estimated');
+    seen.add(sha);
+    pending.push(...commit.parents.map(parent => parent.sha));
+  }
+  if (seen.size !== objects.size) throw new Error('History includes unreachable objects');
+  return seen.size;
+}
+
+async function fullHistoryCount(github, repo, head) {
+  // 只读 API 提供的 Git commit/parent 对象，不 checkout 或执行 PR head。
+  const commits = [];
+  for await (const response of github.paginate.iterator(github.rest.repos.listCommits, {...repo, sha: head, per_page: 100})) {
+    commits.push(...response.data);
+    if (commits.length > 100000) throw new Error('History exceeds bounded policy traversal; owner review required');
+  }
+  return countReachable(commits, head);
+}
+
+function validateVersionCeiling(candidate, count, history) {
+  if (!Number.isSafeInteger(count) || count < 1) throw new Error('Full reachable commit count is required');
+  const highest = history.reduce((value, version) => BigInt(version.versionCode) > value ? BigInt(version.versionCode) : value, 0n);
+  const ceiling = BigInt(count) + 1n > highest + 1n ? BigInt(count) + 1n : highest + 1n;
+  if (ceiling > 2100000000n || BigInt(candidate.versionCode) > ceiling) throw new Error('Owner versionCode exceeds the automatic candidate ceiling');
+}
+
+function isOwnerSync(pr, repository) {
+  return pr.user.login.toLowerCase() === OWNER && pr.head.ref === 'main' && pr.base.ref === 'contribution'
+    && pr.head.repo?.full_name === repository && pr.base.repo?.full_name === repository;
+}
+
+async function validateReviewedSync(github, repo, pr) {
+  const {data: main} = await github.rest.git.getRef({...repo, ref: 'heads/main'});
+  if (main.object.sha !== pr.head.sha) throw new Error('Sync must use current main');
+  const {data: current} = await github.rest.repos.getContent({...repo, path: 'version.properties', ref: pr.head.sha});
+  let inspected = 0;
+  for await (const response of github.paginate.iterator(github.rest.pulls.list, {...repo, base: 'main', state: 'closed', sort: 'updated', direction: 'desc', per_page: 100})) {
+    for (const promotion of response.data) {
+      if (++inspected > 1000) throw new Error('Promotion history exceeds bounded policy review');
+      if (!promotion.merged_at || promotion.user.login.toLowerCase() !== OWNER || promotion.head.ref !== 'contribution'
+          || promotion.head.repo?.full_name !== pr.head.repo.full_name) continue;
+      const {data: comparison} = await github.rest.repos.compareCommitsWithBasehead({...repo, basehead: `${promotion.merge_commit_sha}...${pr.head.sha}`});
+      if (!['ahead', 'identical'].includes(comparison.status)) continue;
+      const {data: reviewed} = await github.rest.repos.getContent({...repo, path: 'version.properties', ref: promotion.merge_commit_sha});
+      const {data: merged} = await github.rest.repos.getCommit({...repo, ref: promotion.merge_commit_sha});
+      if (merged.parents.length !== 2) throw new Error('Reviewed promotions must preserve ancestry with a merge commit');
+      if (current.type === 'file' && current.sha === reviewed.sha) return;
+      // 最近的祖先提升已足以确定已审阅字节；不从更旧记录寻找任意可放行值。
+      throw new Error('Sync version bytes differ from the reviewed main promotion');
+    }
+  }
+  throw new Error('No reviewed owner promotion proves these sync version bytes');
+}
+
 function commitProblems(commit) {
   const errors = [];
   for (const role of ['author', 'committer']) {
@@ -98,18 +159,28 @@ async function run({github, context, core}) {
     for (const problem of fileProblems(file, isOwner)) core.setFailed(`${file.filename}: ${problem}`);
   }
   const versionChanged = files.some(file => [file.filename, file.previous_filename].includes('version.properties'));
-  if (isOwner && versionChanged) {
+  const pureSync = isOwnerSync(pr, context.payload.repository.full_name);
+  if (isOwner && versionChanged && pureSync) {
+    await validateReviewedSync(github, context.repo, pr);
+    await core.summary.addHeading('Reviewed main version synchronized', 2)
+      .addRaw('Exact reviewed main bytes; this sync does not allocate a new version. Use a merge commit.\n').write();
+  } else if (isOwner && versionChanged) {
     const candidate = await readVersion(github, {owner:pr.head.repo.owner.login, repo:pr.head.repo.name}, pr.head.sha);
     const baseline = await readVersion(github, context.repo, pr.base.sha);
     validateVersionAdvance(candidate, baseline);
     const tags = await github.paginate(github.rest.repos.listTags, {...context.repo, per_page:100});
     if (tags.length > 1000) throw new Error('Release history too large for this policy; owner must review the policy before continuing');
+    const history = [];
     for (const tag of tags) {
-      if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag.name)) continue;
+      if (!tag.name.startsWith('v')) continue;
+      if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag.name)) throw new Error('Noncanonical release tag');
       const released = await readVersion(github, context.repo, tag.commit.sha);
       if ('v' + released.versionName !== tag.name || released.versionCode === '0') throw new Error('Existing release tag metadata is invalid');
       validateVersionAdvance(candidate, released);
+      history.push(released);
     }
+    const count = await fullHistoryCount(github, context.repo, pr.head.sha);
+    validateVersionCeiling(candidate, count, history);
     await core.summary.addHeading('Owner version change validated', 2)
       .addRaw(`Version ${candidate.versionName} / ${candidate.versionCode} exceeds the base branch and published tag history.\n`).write();
   }
@@ -121,4 +192,5 @@ async function run({github, context, core}) {
   await core.summary.addHeading('Trusted PR policy').addRaw('Checked base-branch policy, version ownership, governance paths, commit privacy and attribution. No PR code was executed.').write();
 }
 
-module.exports = {run, commitProblems, fileProblems, parseVersion, compareVersions, validateVersionAdvance};
+module.exports = {run, commitProblems, fileProblems, parseVersion, compareVersions, validateVersionAdvance,
+  countReachable, validateVersionCeiling, isOwnerSync, validateReviewedSync};
