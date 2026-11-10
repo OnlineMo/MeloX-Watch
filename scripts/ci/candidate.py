@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shutil
 
-from apk_verify import build_tools, certificate, inspect_apk
+from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk
 from artifact_io import GitHub, fetch_artifact
 from ci_common import (ROOT, OWNER, OWNER_EMAIL, REPOSITORY, SHA_PATTERN, expected_identity,
                        git, no_signing_secrets, properties, require, sha256, trusted_context,
@@ -155,8 +155,10 @@ def fetch_signed(client, mode, artifact_id, descriptor, has_instrumentation=Fals
         require(sha256(apk) == entry['sha256'] and entry['signing'] == 'stable', 'Signed APK hash/signing mismatch')
         expected = expected_identity(mode, descriptor['version'])
         if entry.get('role') == 'instrumentation':
-            expected.update(package=expected['package'] + '.test', debuggable=True, profileable=False)
-        inspect_apk(apk, tools, expected)
+            actual = inspect_test_apk(apk, tools, expected['package'])
+            require(all(entry.get(key) == value for key, value in actual.items()), 'Test APK metadata mismatch')
+        else:
+            inspect_apk(apk, tools, expected)
         digest = certificate(apk, tools, pins['release' if mode == 'release' else 'debug'])
         require(entry['certificate_sha256'] == digest, 'Manifest certificate mismatch')
     return provenance, manifest

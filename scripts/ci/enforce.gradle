@@ -14,13 +14,13 @@ if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
 gradle.beforeProject { project ->
     project.plugins.withId('com.android.application') {
         def components = project.extensions.getByName('androidComponents')
-        components.finalizeDsl { android ->
+        components.finalizeDsl({ android ->
             if (System.getenv('CI_UNSIGNED_APK') == 'true') {
                 android.buildTypes.configureEach { buildType -> buildType.signingConfig = null }
                 android.productFlavors.configureEach { flavor -> flavor.signingConfig = null }
                 android.defaultConfig.signingConfig = null
             }
-        }
+        } as org.gradle.api.Action)
     }
 }
 gradle.projectsEvaluated {

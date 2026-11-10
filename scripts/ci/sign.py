@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from apk_verify import build_tools, certificate, inspect_apk, require_unsigned
+from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk, require_unsigned
 from artifact_io import GitHub, fetch_artifact, verify_checksums
 from ci_common import (ROOT, expected_identity, properties, require, run_tool, sha256,
                        trusted_context, write_checksums, write_json)
@@ -64,11 +64,10 @@ def prepare(mode, artifact_id, snapshot=None):
         require(sha256(apk) == entry['sha256'], 'Unsigned APK hash mismatch')
         identity = expected_identity(mode, version)
         if entry.get('role') == 'instrumentation':
-            identity.update(package=identity['package'] + '.test', debuggable=True, profileable=False)
-            badging = run_tool([str(tools / 'aapt'), 'dump', 'badging', str(apk)])
-            require(f"targetPackage='{expected_identity(mode, version)['package']}'" in badging,
-                    'Instrumentation target mismatch')
-        inspect_apk(apk, tools, identity)
+            identity = inspect_test_apk(apk, tools, identity['package'])
+            entry.update(identity)
+        else:
+            inspect_apk(apk, tools, identity)
         require_unsigned(apk, tools)
         entry['identity'] = identity
     write_json(ROOT / 'verified-signing-input.json', {'manifest': manifest, 'input_artifact': provenance})

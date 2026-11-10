@@ -16,7 +16,7 @@ def build_tools(lock):
 
 
 def parse_badging(text, xml):
-    match = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", text, re.MULTILINE)
+    match = re.search(r"^package: name='([^']+)' versionCode='([^']+)' versionName='([^']*)'", text, re.MULTILINE)
     require(match is not None, 'APK has no valid package/version metadata')
     # profileable 是元素而非 application 属性；其 shell=true 才允许 shell 性能采集。
     profileable = re.search(r'E: profileable\b(?:(?!\n\s*E:).)*android:shell[^\n]*=\(type 0x12\)0xffffffff',
@@ -30,6 +30,17 @@ def inspect_apk(apk, tools, expected):
     xml = run_tool([str(tools / 'aapt'), 'dump', 'xmltree', str(apk), 'AndroidManifest.xml'])
     actual = parse_badging(badging, xml)
     require(actual == expected, 'APK package/version/debug/profileable identity mismatch')
+    return actual
+
+
+def inspect_test_apk(apk, tools, target_package):
+    """AGP测试APK版本可独立于被测包；固定包名/target并记录真实测试包版本。"""
+    badging = run_tool([str(tools / 'aapt'), 'dump', 'badging', str(apk)])
+    xml = run_tool([str(tools / 'aapt'), 'dump', 'xmltree', str(apk), 'AndroidManifest.xml'])
+    actual = parse_badging(badging, xml)
+    require(actual['package'] == target_package + '.test' and actual['debuggable'] is True
+            and actual['profileable'] is False, 'Instrumentation APK identity mismatch')
+    require(f"targetPackage='{target_package}'" in badging, 'Instrumentation target mismatch')
     return actual
 
 

@@ -50,3 +50,32 @@ assert.equal(isOwnerSync({...sync, head: {...sync.head, ref: 'topic'}}, reposito
 assert.equal(isOwnerSync({...sync, user: {login: 'other'}}, repository), false);
 assert.equal(isOwnerSync({...sync, head: {...sync.head, repo: {full_name: 'other/MeloX-Watch'}}}, repository), false);
 console.log('Complete-history ceiling and owner synchronization boundaries passed.');
+
+async function testReviewedSync() {
+  const {validateReviewedSync} = require('./pr-policy.cjs');
+  const reviewed = {...sync, head: {...sync.head, sha: 'current-main'}};
+  const promotion = {merged_at: '2026-11-11T00:00:00Z', user: {login: 'OnlineMo'},
+    head: {ref: 'contribution', repo: {full_name: repository}}, merge_commit_sha: 'reviewed-merge'};
+  function client(overrides = {}) {
+    return {
+      rest: {
+        git: {getRef: async () => ({data: {object: {sha: overrides.main || 'current-main'}}})},
+        repos: {
+          getContent: async ({ref}) => ({data: {type: 'file', sha: ref === 'current-main' ? 'version-blob' : overrides.blob || 'version-blob'}}),
+          compareCommitsWithBasehead: async () => ({data: {status: overrides.status || 'ahead'}}),
+          getCommit: async () => ({data: {parents: overrides.parents || [{sha: 'base'}, {sha: 'contribution'}]}}),
+        },
+        pulls: {list: 'list'},
+      },
+      paginate: {iterator: async function* () { yield {data: overrides.promotions || [promotion]}; }},
+    };
+  }
+  await validateReviewedSync(client(), {}, reviewed);
+  for (const changes of [{main: 'new-main'}, {blob: 'unreviewed-version'}, {status: 'diverged'},
+                         {parents: [{sha: 'squashed'}]}, {promotions: []},
+                         {promotions: [{...promotion, user: {login: 'other'}}]}]) {
+    await assert.rejects(() => validateReviewedSync(client(changes), {}, reviewed));
+  }
+  console.log('Exact reviewed sync bytes, current main and merge ancestry passed.');
+}
+testReviewedSync().catch(error => { console.error(error.message); process.exitCode = 1; });
