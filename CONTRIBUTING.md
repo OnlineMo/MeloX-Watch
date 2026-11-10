@@ -1,6 +1,8 @@
 # 贡献指南
 
-本项目使用 **本地编写 → GitHub Actions 编译/单测/lint → 下载产物 → 本地实机验证**。开发者和 agent 遵守同一套规则。当前应用仍为规划，Android 工程尚未实施，没有 APK 或设备测试结果；治理与云端设置是否生效，以 [仓库实际状态](docs/13-仓库状态.md) 为准。
+本项目使用 **本地编写 → GitHub Actions 编译/单测/lint → 下载产物 → 本地实机验证**。开发者和 agent 遵守同一套规则。当前应用仍为规划，没有APK或设备结果。终审发现CI-01–04仍需建设，先读 [20开工清单](docs/20-终审结论与开工清单.md)；实际能力以 [13](docs/13-仓库状态.md) 为准。
+
+产品是面向Android智能手表的音乐App，开发流程不是产品定位。Watch X2仅为当前首个实测设备；按能力和屏幕形状适配，不在通用层增加型号白名单。其他机型未测时如实记录，不借通用定位宣称已全面兼容。
 
 ## 性能、界面与代码质量
 
@@ -41,7 +43,7 @@ PR 填写仓库模板，附云端 run、被测试提交、产物校验值和实�
 
 **仅当 PR 作者不是 OnlineMo 时，拒绝新增、修改、删除或重命名 `version.properties`；OnlineMo 的 PR 可以更新版本。所有 PR（包括所有者 PR）仍禁止改动 `.github/workflows/` 和 `.github/actions/`。** 重命名检查原路径与新路径。其他治理政策与构建配置变更只能由所有者发起 PR。
 
-可信检查使用 `pull_request_target`，仅从固定 base SHA 读取受信任策略，通过只读 API 检查文件、提交和身份；不 checkout 或执行 PR head/合并结果中的代码。变更列表无法完整检查时拒绝。普通 PR 编译另用 `pull_request`，不提供 secrets。
+可信检查使用`pull_request_target`，从固定base SHA策略通过只读API检查文件/提交，不执行PR源码。CI-04如需读取Git对象计数，只读对象、不执行head；不可信PR编译单独用pull_request，权限与secrets由CI-01显式隔离，不能仅凭事件名保证安全。
 
 **修改 Actions 请提交“Actions 流程变更申请”Issue。** 所有者审阅后以本人认证直接在 PR 之外维护，没有专用维护工作流。若保护阻止该维护，只在必要时临时调整，随后立即恢复并验证，记录 Issue、精确提交、理由和保护设置前后状态，不设置永久绕过。
 
@@ -50,9 +52,9 @@ PR 填写仓库模板，附云端 run、被测试提交、产物校验值和实�
 1. 从最新 contribution 创建主题分支，本地编辑代码和文档。
 2. 按改动运行 `python scripts/ci/check.py` 等不编译 Android 的文本/配置检查；低影响文档改动不要求测试。禁止本地 Gradle、Android Studio Build/Run 和 APK/AAB 编译，Gradle 单测与 lint 也走云端。
 3. 经授权提交、推送并打开 PR。应用接入后，Cloud build 对 PR 合并结果编译，manifest 同时记录 PR head SHA 和实际 build SHA；当前规划检查不代表应用构建通过。
-4. 有 APK 后，从 Actions 下载 APK、`build-manifest.json` 和 `SHA256SUMS`。核对 source/build SHA、run、版本、证书及 SHA-256，安装云端 APK，在 Watch X2 验证并填写 [记录模板](docs/templates/本地验证记录.md)。
+4. 有APK后下载manifest/SHA256SUMS并核对来源、版本、证书。用对应云端APK在实际测试手表验证，当前首个设备为Watch X2，填写 [记录模板](docs/templates/本地验证记录.md)；新增设备分别记录，不直接复用另一固件的结果。
 5. 失败则本地修改后重新云端构建。不在本机补编 APK 代替 CI 产物。
-6. 由所有者人工审阅、合并到 contribution；阶段通过后以提升 PR 进入 main。保护要求与当前限制见 [仓库治理](docs/10-仓库治理与发布.md)。
+6. 所有者审阅合入contribution，阶段通过后提升到main。保护启用后用GitHub PR合并；main产生合并提交时再用所有者main→contribution同步PR回同步，CI-04补齐该例外后使用。规则与限制见 [10](docs/10-仓库治理与发布.md)。
 
 PR 构建不接触签名秘密，使用临时调试证书；可信分支构建使用独立、稳定的 Debug 证书和 `.dev` 包名。正式包不带该后缀，使用独立 Release 证书。指纹固定在 [.ci/signing-certificates.json](.ci/signing-certificates.json)。签名不一致不能直接覆盖安装，不自动卸载旧包或丢弃数据；需要稳定签名验收包时，用已审阅的 contribution 云端构建。
 
@@ -68,9 +70,11 @@ PR 构建不接触签名秘密，使用临时调试证书；可信分支构建�
 
 当前 `version.properties` 的 **0.0.0 / 0** 仅为初始占位，没有永久固定值或特殊字节校验。[版本 PR 规则](docs/10-仓库治理与发布.md#2-开发版本与可信-pr-检查) 拒绝普通贡献者改版本；OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）与不超过项目采用的 Google Play 兼容上限 2100000000 的整数 versionCode，两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，使用 source SHA、build SHA 和 Actions run 区分产物。
 
-Cloud build 与 Owner release 分开。只有 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main 触发发布，无需本地电脑或命令行。临时 runner 创建仅改版本文件的 detached 快照并打 tag，不创建发布分支。网页输入的 versionName 必须高于全部发布 tag 且不低于 main 候选 versionName；最终 versionCode 自动取 `max(main 完整可达提交数 + 1, 既有发布 tag 最大 code + 1)`，无 tag 时最大 code 为 0。必须 `fetch-depth: 0`，浅克隆失败，统计精确 main 源 SHA 的全部可达历史，不使用 `--first-parent`；加 1 计入本次发布版本提交。main 手填 code 不参与发布计算，所有者版本 PR 仍按上述规则校验；最终 code 不超过项目采用的 Google Play 兼容上限 2100000000。`build-manifest.json` 记录 source/build SHA、main 完整可达提交数及含本次发布提交的计数。云端校验后仅用短期 `GITHUB_TOKEN` 推送新 tag、发布 Release，不回写 main/contribution、不合回快照，不使用 deploy keys。
+Cloud build与发行分开。**现有Owner release尚不具备候选准备和同包晋升，CI-02/03完成前不得真实发版。** 目标为OnlineMo在网页先prepare-candidate，冻结source/snapshot、提交数与正式签名APK；验收后publish-candidate只发布原包，不重新编译/签名。公式仍为`max(候选源main完整提交数+1, 已发布最大code+1)`，报告提交不重算code；源、产物或发布历史改变时按10判断候选失效，不回写开发分支，不增加发布分支或长期写入密钥。
 
-首次公开 `0.1.0` prerelease 必须完成 P0–P3、[全部首次公开门槛](docs/12-首个公开版本与责任清单.md)、证据审阅及用户明确批准；`1.0.0` 需完成 P0–P5。普通 push、合并 PR 或手工 tag 不自动授权发布。
+所有者版本提案与纯分支同步按10的CI-04规则区分。编译、签名、发布不同job；Gradle不可见正式/稳定Debug密钥。候选和报告绑定方式、同tag中断恢复及公开保护只以10/12为准，避免在贡献指南复制另一套执行流程。
+
+首次公开 `0.1.0` prerelease 必须完成CI前置与P0–P3（含P2-L/P2-M）、[全部首次公开门槛](docs/12-首个公开版本与责任清单.md)、证据审阅及用户明确批准；`1.0.0` 需完成 P0–P5。普通 push、合并 PR 或手工 tag 不自动授权发布。
 
 签名 secrets 按仓库级配置，私有套餐的 environments 可能不支持；不要假定 secrets 已完整配置，参见 [实际状态](docs/13-仓库状态.md)。研究快照、凭据、签名私钥和本地产物不进入本项目。用户单独授权的 p12、明文密码和恢复元数据只存于独立、永久私有、关闭 Actions 且无协作者的恢复仓库；不在本文或项目中记录其名称、地址或凭据。
 
