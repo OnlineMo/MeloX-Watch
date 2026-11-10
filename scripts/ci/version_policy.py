@@ -1,14 +1,6 @@
-"""Immutable branch version and release sequence rules, independent of Gradle."""
+"""Owner-only release authorization and version sequence, independent of Gradle."""
 import os
 import re
-
-DEVELOPMENT_VERSION = b'# Development branches keep this exact file; versions exist only in release tags.\nversionName=0.0.0\nversionCode=0\n'
-
-
-def assert_development_version(data):
-    if data != DEVELOPMENT_VERSION:
-        raise ValueError('main/contribution/PR version.properties must remain byte-for-byte at 0.0.0 / 0')
-
 
 def authorize_release():
     expected = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
@@ -19,7 +11,7 @@ def authorize_release():
         raise SystemExit('Only the owner-dispatched main Release workflow may build a release snapshot')
 
 
-def next_release(requested, history):
+def next_release(requested, history, main_commit_count, development=None):
     pattern = r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)'
     if not re.fullmatch(pattern, requested):
         raise ValueError('Use an exact x.y.z without a v prefix; prerelease is a separate flag')
@@ -29,7 +21,16 @@ def next_release(requested, history):
     codes = [code for _, code in history]
     if any(code < 1 for code in codes) or len(set(codes)) != len(codes):
         raise ValueError('Release history has invalid or reused versionCode values')
-    code = max(codes, default=0) + 1
+    if not isinstance(main_commit_count, int) or isinstance(main_commit_count, bool) or main_commit_count < 1:
+        raise ValueError('main must have a positive complete-history commit count')
+    # One additional commit is created for the release version metadata.
+    code = max(main_commit_count + 1, max(codes, default=0) + 1)
+    if development:
+        current_name = tuple(map(int, development['versionName'].split('.')))
+        requested_name = tuple(map(int, requested.split('.')))
+        if requested_name < current_name:
+            raise ValueError('Requested release must not be below the version prepared by the owner in main')
+        # The release code comes from complete history and previous tags, never manual input.
     if code > 2100000000:
         raise ValueError('versionCode exceeds the Android limit')
     return code

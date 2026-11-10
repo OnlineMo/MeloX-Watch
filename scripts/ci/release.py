@@ -31,9 +31,8 @@ def prepare():
     git('fetch', 'origin', 'main', 'contribution', '--tags')
     if git('rev-parse', 'HEAD') != git('rev-parse', 'origin/main'):
         raise SystemExit('main advanced after dispatch; rerun against its current head')
-    baseline = (ROOT / 'version.properties').read_bytes()
-    if git('show', 'origin/contribution:version.properties') != baseline.decode().strip():
-        raise SystemExit('contribution version differs from the immutable development version')
+    if git('rev-parse', '--is-shallow-repository') != 'false':
+        raise SystemExit('Release versionCode requires complete Git history, never a shallow clone')
     history = []
     for tag in git('tag', '--list', 'v*').splitlines():
         if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
@@ -43,7 +42,9 @@ def prepare():
         if values.get('versionName') != tag[1:]:
             raise SystemExit('Release tag metadata mismatch: ' + tag)
         history.append((values['versionName'], int(values['versionCode'])))
-    code = next_release(requested, history)
+    current = properties(ROOT / 'version.properties')
+    main_commit_count = int(git('rev-list', '--count', 'HEAD'))
+    code = next_release(requested, history, main_commit_count, current)
     if git('tag', '--list', 'v' + requested):
         raise SystemExit('Release tag already exists; recover its existing artifacts, never overwrite it')
     git('config', 'user.name', 'OnlineMo')
@@ -53,6 +54,8 @@ def prepare():
                                             f'versionName={requested}\nversionCode={code}\n', encoding='utf-8')
     git('add', 'version.properties')
     git('commit', '-m', f'chore(release): v{requested}')
+    if int(git('rev-list', '--count', 'HEAD')) != main_commit_count + 1:
+        raise SystemExit('Unexpected release commit history count')
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
         stream.write(f'version={requested}\nrelease-sha={git("rev-parse", "HEAD")}\n')
 

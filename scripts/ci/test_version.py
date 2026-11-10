@@ -1,25 +1,26 @@
 import unittest
 from unittest.mock import patch
-from version_policy import DEVELOPMENT_VERSION, assert_development_version, authorize_release, next_release
+from version_policy import authorize_release, next_release
 
 
 class VersionPolicyTests(unittest.TestCase):
-    def test_development_metadata_is_byte_immutable(self):
-        assert_development_version(DEVELOPMENT_VERSION)
-        for data in [DEVELOPMENT_VERSION.replace(b'0.0.0', b'0.1.0'), DEVELOPMENT_VERSION + b'\n', b'']:
-            with self.assertRaises(ValueError):
-                assert_development_version(data)
-
     def test_versions_increment_from_all_tags_not_development_sentinel(self):
-        self.assertEqual(next_release('0.1.0', []), 1)
-        self.assertEqual(next_release('0.3.0', [('0.2.0', 4), ('0.1.0', 1)]), 5)
+        self.assertEqual(next_release('0.1.0', [], 10), 11)
+        self.assertEqual(next_release('0.3.0', [('0.2.0', 40), ('0.1.0', 1)], 10), 41)
+        self.assertEqual(next_release('0.3.0', [('0.2.0', 4)], 10, {'versionName':'0.3.0','versionCode':'5'}),11)
+        self.assertEqual(next_release('0.4.0', [('0.2.0', 4)], 10, {'versionName':'0.3.0','versionCode':'50'}),11)
+        with self.assertRaises(ValueError):
+            next_release('0.3.0', [('0.2.0', 4)], 10, {'versionName':'0.4.0','versionCode':'5'})
         for version in ['0.2.0', '0.1.0', 'v0.3.0', '0.3.0-beta', '00.3.0']:
             with self.assertRaises(ValueError):
-                next_release(version, [('0.2.0', 4)])
+                next_release(version, [('0.2.0', 4)], 10)
         with self.assertRaises(ValueError):
-            next_release('1.0.0', [('0.1.0', 2100000000)])
+            next_release('1.0.0', [('0.1.0', 2100000000)], 10)
         with self.assertRaises(ValueError):
-            next_release('1.0.0', [('0.1.0', 1), ('0.2.0', 1)])
+            next_release('1.0.0', [('0.1.0', 1), ('0.2.0', 1)], 10)
+        for count in [0, -1, True, 2100000000]:
+            with self.assertRaises(ValueError):
+                next_release('0.1.0', [], count)
 
     def test_release_needs_owner_main_dispatch_and_cloud(self):
         valid = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
