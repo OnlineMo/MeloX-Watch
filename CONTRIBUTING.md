@@ -4,12 +4,12 @@
 
 ## 分支与提交
 
-| 分支 | 用途 | 合入规则 |
+| 分支或标签 | 用途 | 合入规则 |
 | --- | --- | --- |
-| `main` | 已验收的集成基线、发布快照来源 | 所有者提交 `contribution → main` 提升 PR；开发版本始终 0.0.0 / 0 |
-| `contribution` | 日常开发集成 | 功能 PR 的目标分支；开发版本始终 0.0.0 / 0 |
+| `main` | 已验收的集成基线、发布快照来源 | 所有者提交 `contribution → main` 提升 PR；版本更新仅允许 OnlineMo 发起的 PR |
+| `contribution` | 日常开发集成 | 功能 PR 的目标分支；版本更新仅允许 OnlineMo 发起的 PR |
 | `feat/*`、`fix/*`、`docs/*`、`chore/*` | 从 contribution 创建的工作分支 | 单一问题、小步提交，完成后向 contribution 发 PR |
-| `vX.Y.Z` 标签 | detached 发布快照的不可变版本点 | 仅所有者授权发布时创建；快照不合回开发分支 |
+| `vX.Y.Z` 标签 | 临时 detached 发布快照的不可变版本点，不是分支 | 仅所有者授权发布时创建；快照不合回开发分支 |
 
 仓库目前保持私有，仅 OnlineMo 有写权限。已记录的 rulesets GET 返回 403，需要升级 GitHub Pro 或公开后才能启用所需保护，当前没有强制分支/tag 保护。CI 不能阻止管理员直接推送，所有者也始终可以重新配置规则。
 
@@ -25,7 +25,7 @@
 
 PR 填写仓库模板，附云端 run、被测试提交、产物校验值和实际本地验证情况。低影响文档改动核对内容与链接，应用测试写“不适用”；未做设备测试写“未测”。
 
-**所有 PR，包括所有者 PR，都禁止新增、修改、删除或重命名 `version.properties`、`.github/workflows/`、`.github/actions/` 路径下的文件。** 重命名检查原路径与新路径。其他治理政策与构建配置变更只能由所有者发起 PR。
+**仅当 PR 作者不是 OnlineMo 时，拒绝新增、修改、删除或重命名 `version.properties`；OnlineMo 的 PR 可以更新版本。所有 PR（包括所有者 PR）仍禁止改动 `.github/workflows/` 和 `.github/actions/`。** 重命名检查原路径与新路径。其他治理政策与构建配置变更只能由所有者发起 PR。
 
 可信检查使用 `pull_request_target`，仅从固定 base SHA 读取受信任策略，通过只读 API 检查文件、提交和身份；不 checkout 或执行 PR head/合并结果中的代码。变更列表无法完整检查时拒绝。普通 PR 编译另用 `pull_request`，不提供 secrets。
 
@@ -52,9 +52,9 @@ PR 构建不接触签名秘密，使用临时调试证书；可信分支构建�
 
 工具链唯一来源是 [.ci/toolchain.properties](.ci/toolchain.properties)，具体接入见 [云端构建与本地验证](docs/09-云端构建与本地验证.md)。未来应用必须读取这些参数和版本文件，不允许 flavor/buildType 或输出重写版本。
 
-main/contribution 的 `version.properties` 在所有发布前后都保持开发版本 **0.0.0 / 0** 的固定完整字节。`scripts/ci/check.py` 必须在所有普通 PR、push、手动构建中与 [规范字节](docs/10-仓库治理与发布.md#2-开发版本与可信-pr-检查) 比较；打包后还要读取 APK 内实际版本。普通 Debug 版本恒定，使用 source SHA、build SHA 和 Actions run 区分产物。
+当前 `version.properties` 的 **0.0.0 / 0** 仅为初始占位，没有永久固定值或特殊字节校验。[版本 PR 规则](docs/10-仓库治理与发布.md#2-开发版本与可信-pr-检查) 拒绝普通贡献者改版本；OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）与不超过 2100000000 的整数 versionCode，两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，使用 source SHA、build SHA 和 Actions run 区分产物。
 
-Cloud build 与 Owner release 分开。只有 OnlineMo 在 main 手动授权后，发布流程才从已审阅提交创建 detached 快照，仅改 `version.properties`；versionCode 取所有既有精确 `v<major>.<minor>.<patch>` 发布 tag 中最大值加 1（无 tag 时从 1 开始），SemVer 必须高于所有既有发布版本。快照完成云端测试、编译及实际版本/签名检查后，只用本次运行的短期 `GITHUB_TOKEN` 推送全新不可变 tag、发布 Release。绝不推送 main/contribution，也不合回发布快照；不使用 deploy keys。
+Cloud build 与 Owner release 分开。只有 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main 触发发布，无需本地电脑或命令行。临时 runner 创建仅改版本文件的 detached 快照并打 tag，不创建发布分支，仓库仍使用 main/contribution 和普通主题分支。请求版本必须高于全部发布 tag 且不低于 main 候选版本；相同时使用 main code（须高于全部已发布 code），更高版本则取 `max(最高已发布 code + 1, main code + 1)`，无 tag 时最高已发布 code 为 0，并遵守版本格式及 2100000000 上限。云端校验后仅用短期 `GITHUB_TOKEN` 推送新 tag、发布 Release，不回写 main/contribution，不合回快照，不使用 deploy keys。
 
 首次公开 `0.1.0` prerelease 必须完成 P0–P3、[全部首次公开门槛](docs/12-首个公开版本与责任清单.md)、证据审阅及用户明确批准；`1.0.0` 需完成 P0–P5。普通 push、合并 PR 或手工 tag 不自动授权发布。
 

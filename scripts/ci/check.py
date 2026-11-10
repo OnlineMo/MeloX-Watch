@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from version_policy import assert_development_version, authorize_release
+from version_policy import authorize_release
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -26,8 +26,6 @@ def check(require_android=False, release_snapshot=False):
     version = properties(ROOT / 'version.properties')
     if release_snapshot:
         authorize_release()
-    else:
-        assert_development_version((ROOT / 'version.properties').read_bytes())
     assert re.fullmatch(r'(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', version['versionName']), 'Invalid versionName'
     assert version['versionCode'].isdigit() and int(version['versionCode']) <= 2100000000, 'Invalid versionCode'
     assert re.fullmatch(r'[0-9a-f]{64}', env['gradle.sha256']), 'Missing Gradle checksum'

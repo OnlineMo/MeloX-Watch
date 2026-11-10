@@ -17,11 +17,11 @@
 5. Once an application exists, download the cloud APK, verify checksum/source/version/certificate, and test that exact artifact on the watch. Record device/firmware and results in the [validation template](docs/templates/本地验证记录.md).
 6. On failure, fix locally and repeat the cloud build. Do not substitute a local APK, claim an unrun build passed, or claim device validation without a device.
 
-## Immutable development versions and PR policy
+## Versions and PR policy
 
-- `main`, `contribution`, and ordinary development builds keep `version.properties` byte-for-byte at development `0.0.0 / 0`, including after releases. [Governance and release](docs/10-仓库治理与发布.md) defines the exact UTF-8, no-BOM, LF bytes, including the comment and final newline.
-- `scripts/ci/check.py` must compare those fixed bytes on every normal PR, push, and manual build. Release snapshots require separate release validation. Future APK validation must inspect the actual packaged version; reading Gradle inputs alone is insufficient.
-- **Every PR, including owner PRs, must reject additions, changes, deletions, and renames involving `version.properties`, `.github/workflows/`, or `.github/actions/`.** Inspect both old and new rename paths.
+- Current `0.0.0 / 0` only marks an unstarted application; there is no permanent version value or byte-for-byte guard. Normal builds read `version.properties`, and APK validation checks the packaged version against it.
+- Version protection checks PR author and changed paths, with no constant-byte guard. When OnlineMo changes the version in a PR, automatically validate exact `x.y.z` syntax (no `v`, suffix, or leading zeros), an integer versionCode no greater than 2100000000, and strict increases of both versionName and versionCode over the base branch and every release tag. Compare version components numerically; `0.0.0 / 0` is only the initial sentinel.
+- **Reject additions, changes, deletions, or renames involving `version.properties` only when the PR author is not `OnlineMo`. Owner-authored PRs may update versions on contribution/main.** For `.github/workflows/` and `.github/actions/`, all PRs remain prohibited, including owner PRs. Inspect both old and new rename paths.
 - `Trusted PR policy` runs through `pull_request_target`, reads trusted policy only from the fixed base SHA, and uses read-only APIs for PR files/commits. It never checks out or executes PR head/merge code or accesses signing/release secrets. Incomplete API results must fail closed.
 - Request Actions changes through an Actions Issue. The owner reviews and performs direct authenticated maintenance outside PRs; there is no dedicated maintenance workflow. If protection must temporarily change, restore and verify it immediately afterward and record the Issue, exact commits, reason, and settings before/after. Never leave a permanent bypass. Other governance/build-policy changes require owner-authored PRs.
 - Commits use the developer's own identity. Do not add AI collaborators, AI author/committer identities, `Co-authored-by` trailers, or generated-by AI signatures.
@@ -36,9 +36,9 @@
 
 ## Release contract
 
-- Only OnlineMo may request or dispatch `Owner release` from main. Validate repository, actor, and ref, including reruns. Do not publish based on contributor requests.
-- Compute versionCode as the maximum stored versionCode across all existing exact `v<major>.<minor>.<patch>` release tags plus one, starting at 1 if none exist. New SemVer must exceed all existing release versions numerically. Prerelease status is a GitHub Release flag, not a tag suffix. Incomplete/invalid tag data must stop release.
-- From the reviewed main SHA, create a detached snapshot commit whose only change is `version.properties`. Build/test/lint that snapshot in the cloud and validate APK version, package, certificate, and checksum.
+- Only OnlineMo may request or dispatch `Owner release` from main. Use GitHub's web UI: Actions → Owner release → Run workflow; no local computer or command line is needed to trigger the cloud release. Validate repository, actor, and ref, including reruns. Discussing this option does not authorize or execute a release.
+- Release requests must use exact `x.y.z`, exceed every existing exact `v<major>.<minor>.<patch>` release tag, and be at least main's prepared version. If equal to main's candidate, use main's prepared versionCode only if it exceeds every released code. If newer, use `max(maxReleasedCode + 1, mainVersionCode + 1)`; take maxReleasedCode as 0 when no release tags exist. Enforce the integer limit of 2100000000 and fail on incomplete/invalid version data. Prerelease status is a GitHub Release flag, not a version suffix.
+- In the temporary cloud runner, create a detached snapshot commit from the reviewed main SHA, changing only `version.properties`, and tag that commit. No release branch is created; repository branches remain main, contribution, and ordinary topic branches. Build/test/lint the snapshot and validate APK version, package, certificate, and checksum.
 - Serialize releases and recheck tags before publishing. Use only the run's ephemeral `GITHUB_TOKEN` with contents-write permission for publication: push a new immutable snapshot tag and publish its Release. **Never push main/contribution or merge release snapshots back.** Do not use deploy keys or long-lived PATs.
 - Preserve an existing tag if Release publication fails; recover the same Release and verified snapshot artifacts without replacing/deleting the tag or reusing its version.
 - First public `0.1.0` is a prerelease after P0–P3, all [public-release gates](docs/12-首个公开版本与责任清单.md), evidence, and explicit user approval. `1.0.0` requires P0–P5. No application or device evidence exists yet.
@@ -47,7 +47,7 @@
 ## Signing and recovery
 
 - Independent Release/Debug certificates have been generated: RSA 3072, SHA-256, 30-year validity; respective CNs are `OnlineMo MeloX Watch Release` and `OnlineMo MeloX Watch Debug`, with `O=OnlineMo` and `OU=MeloX Watch`. No C/ST/L/email attributes. Public fingerprints are pinned in [.ci/signing-certificates.json](.ci/signing-certificates.json).
-- Trusted Debug builds use the stable `.dev` application ID and separate Debug certificate. Their version stays `0.0.0 / 0`; distinguish artifacts by source SHA, build SHA, and Actions run. PR builds use ephemeral certificates and no secrets. Release uses its own certificate and no `.dev` suffix.
+- Trusted Debug builds use the stable `.dev` application ID and separate Debug certificate. Their version comes from `version.properties`; distinguish artifacts by source SHA, build SHA, and Actions run. PR builds use ephemeral certificates and no secrets. Release uses its own certificate and no `.dev` suffix.
 - Use repository-scoped Actions secrets; environments may be unsupported on the current private plan. Do not claim secrets, environment approvals, or release readiness are configured/verified based on these instructions; consult the actual status document.
 - The user explicitly authorized p12 files, plaintext passwords, and recovery metadata in a **separate, permanently private recovery repository**. It must have Actions disabled and no collaborators. Keep its name/address, passwords, and private signing material out of this project and public output. This narrow authorization does not permit publication of recovery contents.
 - Keep local research snapshots unchanged and excluded from Git. Respect upstream licenses when implementation starts.

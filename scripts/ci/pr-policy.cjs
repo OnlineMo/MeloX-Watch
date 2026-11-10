@@ -3,13 +3,45 @@ const OWNER = 'onlinemo';
 const workflowPath = /^\.github\/(?:workflows|actions)\//;
 const protectedPath = /^(?:\.github\/|\.ci\/|scripts\/ci\/|AGENTS\.md$|CONTRIBUTING\.md$|version\.properties$)/;
 const aiIdentity = /(?:\b(?:codex|claude|copilot|chatgpt|openai|anthropic|gemini|cursor|aider)\b)/i;
-const developmentVersion = '# Development branches keep this exact file; versions exist only in release tags.\nversionName=0.0.0\nversionCode=0\n';
 
-function versionProblems(file) {
-  if (file.type !== 'file' || file.encoding !== 'base64' || Buffer.from(file.content || '', 'base64').toString('utf8') !== developmentVersion) {
-    return ['Development version.properties must stay byte-for-byte at the fixed 0.0.0 / 0 baseline'];
+function parseVersion(text) {
+  const values = {};
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
+    const match = /^\s*(versionName|versionCode)\s*=\s*([^\s]+)\s*$/.exec(line);
+    if (!match || Object.hasOwn(values, match[1])) throw new Error('Version file has unknown, duplicate or malformed properties');
+    values[match[1]] = match[2];
   }
-  return [];
+  if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(values.versionName || '')) {
+    throw new Error('versionName must be x.y.z without v, suffixes or leading zeros');
+  }
+  if (!/^(0|[1-9]\d*)$/.test(values.versionCode || '') || BigInt(values.versionCode) > 2100000000n) {
+    throw new Error('versionCode must be an integer from 0 to 2100000000');
+  }
+  if ((values.versionName === '0.0.0') !== (values.versionCode === '0')) {
+    throw new Error('Zero is reserved for the initial 0.0.0 / 0 development state');
+  }
+  return values;
+}
+
+function compareVersions(left, right) {
+  const a = left.split('.').map(BigInt), b = right.split('.').map(BigInt);
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i] ? 1 : -1;
+  }
+  return 0;
+}
+
+function validateVersionAdvance(candidate, previous) {
+  if (compareVersions(candidate.versionName, previous.versionName) <= 0 || BigInt(candidate.versionCode) <= BigInt(previous.versionCode)) {
+    throw new Error('Both versionName and versionCode must strictly exceed the target branch and every existing release');
+  }
+}
+
+async function readVersion(github, repo, ref) {
+  const {data} = await github.rest.repos.getContent({...repo, path:'version.properties', ref});
+  if (data.type !== 'file' || data.encoding !== 'base64') throw new Error('version.properties must be a regular file');
+  return parseVersion(Buffer.from(data.content, 'base64').toString('utf8'));
 }
 
 function commitProblems(commit) {
@@ -33,7 +65,7 @@ function commitProblems(commit) {
 
 function fileProblems(file, isOwner) {
   const paths = [file.filename, file.previous_filename].filter(Boolean);
-  if (paths.includes('version.properties')) return ['PRs must not change version.properties; use Owner release'];
+  if (!isOwner && paths.includes('version.properties')) return ['Only OnlineMo may change version.properties; contributor PRs must not change version metadata'];
   if (paths.some(path => workflowPath.test(path))) return ['WORKFLOW CHANGE BLOCKED: open an Actions change Issue; workflows/actions must not be changed through PRs, including owner PRs'];
   if (!isOwner && paths.some(path => protectedPath.test(path))) return ['Build/governance policy changes require an owner-authored PR'];
   return [];
@@ -65,17 +97,28 @@ async function run({github, context, core}) {
   for (const file of files) {
     for (const problem of fileProblems(file, isOwner)) core.setFailed(`${file.filename}: ${problem}`);
   }
+  const versionChanged = files.some(file => [file.filename, file.previous_filename].includes('version.properties'));
+  if (isOwner && versionChanged) {
+    const candidate = await readVersion(github, {owner:pr.head.repo.owner.login, repo:pr.head.repo.name}, pr.head.sha);
+    const baseline = await readVersion(github, context.repo, pr.base.sha);
+    validateVersionAdvance(candidate, baseline);
+    const tags = await github.paginate(github.rest.repos.listTags, {...context.repo, per_page:100});
+    if (tags.length > 1000) throw new Error('Release history too large for this policy; owner must review the policy before continuing');
+    for (const tag of tags) {
+      if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag.name)) continue;
+      const released = await readVersion(github, context.repo, tag.commit.sha);
+      if ('v' + released.versionName !== tag.name || released.versionCode === '0') throw new Error('Existing release tag metadata is invalid');
+      validateVersionAdvance(candidate, released);
+    }
+    await core.summary.addHeading('Owner version change validated', 2)
+      .addRaw(`Version ${candidate.versionName} / ${candidate.versionCode} exceeds the base branch and published tag history.\n`).write();
+  }
   const commits = await github.paginate(github.rest.pulls.listCommits, params);
   if (commits.length !== pr.commits) throw new Error('Incomplete commit inventory');
   for (const entry of commits) {
     for (const problem of commitProblems(entry.commit)) core.setFailed(`${entry.sha.slice(0, 12)}: ${problem}`);
   }
-  // Read data through the API; do not execute any code from the proposed tree.
-  for (const [label, ref] of [['base', pr.base.sha], ['head', pr.head.sha]]) {
-    const {data} = await github.rest.repos.getContent({...context.repo, path: 'version.properties', ref});
-    for (const problem of versionProblems(data)) core.setFailed(`${label}: ${problem}`);
-  }
   await core.summary.addHeading('Trusted PR policy').addRaw('Checked base-branch policy, version ownership, governance paths, commit privacy and attribution. No PR code was executed.').write();
 }
 
-module.exports = {run, commitProblems, fileProblems, versionProblems, developmentVersion};
+module.exports = {run, commitProblems, fileProblems, parseVersion, compareVersions, validateVersionAdvance};

@@ -32,8 +32,6 @@ def prepare():
     if git('rev-parse', 'HEAD') != git('rev-parse', 'origin/main'):
         raise SystemExit('main advanced after dispatch; rerun against its current head')
     baseline = (ROOT / 'version.properties').read_bytes()
-    if git('show', 'origin/contribution:version.properties') != baseline.decode().strip():
-        raise SystemExit('contribution version differs from the immutable development version')
     history = []
     for tag in git('tag', '--list', 'v*').splitlines():
         if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
@@ -43,7 +41,8 @@ def prepare():
         if values.get('versionName') != tag[1:]:
             raise SystemExit('Release tag metadata mismatch: ' + tag)
         history.append((values['versionName'], int(values['versionCode'])))
-    code = next_release(requested, history)
+    current = properties(ROOT / 'version.properties')
+    code = next_release(requested, history, current)
     if git('tag', '--list', 'v' + requested):
         raise SystemExit('Release tag already exists; recover its existing artifacts, never overwrite it')
     git('config', 'user.name', 'OnlineMo')

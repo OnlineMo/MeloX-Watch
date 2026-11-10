@@ -53,17 +53,19 @@
 4. 系统 API、ABI、屏幕逻辑密度、安装入口、表冠事件和后台策略仍需实机核验。
 5. 应用开发从 `DEV-001` 开始；仓库基础设施独立于应用里程碑。
 6. 本地编写、云端编译、本地验证；只使用云端 APK 做设备验收。
-7. main/contribution 的版本文件永久逐字节保持 **0.0.0 / 0**，包括发版后；发布版本只存在于独立快照 tag。提交使用 noreply，禁止 AI 协作者署名。
+7. contribution/main 的版本变更只允许 OnlineMo 发起的 PR，普通贡献者的版本 PR 一律拒绝。当前 0.0.0 / 0 仅表示尚未开始发布。提交使用 noreply，禁止 AI 协作者署名。
 8. 上游固定完整 SHA，不自动更新；首个公开版为 **0.1.0 prerelease**，须完成 P0–P3、全部首次公开门槛、证据与用户明确批准；1.0.0 须完成 P0–P5。
 
 ## 治理与发布约定
 
-所有 PR，包括所有者 PR，都不得新增、修改、删除或重命名 `version.properties`、`.github/workflows/`、`.github/actions/` 路径下的文件。可信 `pull_request_target` 检查只使用固定 base SHA 与只读 API，不执行 PR 代码。Actions 变更通过 Actions Issue，由所有者审阅后直接认证、在 PR 之外维护；没有专用维护工作流，必要时临时调整保护并立即恢复、验证和留档。
+PR 作者不是 OnlineMo 时，新增、修改、删除或重命名 `version.properties` 一律拒绝；OnlineMo 的 PR 可以更新版本。`.github/workflows/`、`.github/actions/` 仍禁止所有 PR 改动，包括所有者 PR。可信 `pull_request_target` 检查只使用固定 base SHA 的策略与只读 API 检查作者和变更路径，不执行 PR 代码。Actions 变更通过 Actions Issue，由所有者审阅后直接认证、在 PR 之外维护；必要时临时调整保护并立即恢复、验证和留档。
 
 未来 main/contribution 均强制 PR，必需 `cloud-gate`/`pr-policy` 检查绑定预期 GitHub App、启用 strict，禁止强推/删除，管理员受约束且无绕过。单人仓库批准审阅数为 **0**，仍由 OnlineMo 人工审阅并独自合并。tag 禁止更新/删除，创建只允许写入者；只有所有者与其手动触发发布的临时 token 有所需内容写权限，公开贡献者不获得写权限。
 
-`Cloud build` 与 `Owner release` 分开。所有普通构建中的 `scripts/ci/check.py` 必须核对版本文件的固定完整字节；未来 APK 也必须核对实际版本。发布从已审阅 main SHA 创建 detached 快照提交，只改版本文件；versionCode 为所有既有精确 `v<major>.<minor>.<patch>` 发布 tag 中最大值加 1（无 tag 时从 1 开始），SemVer 严格递增并高于所有既有发布版本。经云端验证后，只用短期 `GITHUB_TOKEN` 推送新不可变 tag 并发布 Release，绝不推送 main/contribution，也不把快照合并回去。不使用 deploy keys。
+OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）及不超过 2100000000 的整数 versionCode；两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，不做固定值或固定字节限制。
 
-可信 Debug 固定为 0.0.0 / 0，使用稳定 `.dev` 包名和独立 Debug 证书，以 source SHA、build SHA、Actions run 区分产物；PR 使用临时证书且无 secrets。独立生成的 Release/Debug 证书指纹固定在 [.ci/signing-certificates.json](.ci/signing-certificates.json)，签名参数见 [治理与签名约定](docs/10-仓库治理与发布.md)。secrets 采用仓库级范围，私有套餐的 environments 可能不支持，不视为已配置完成。
+`Cloud build` 与 `Owner release` 分开。仅 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main，触发云端发布，无需本地电脑。请求版本必须高于全部发布 tag 且不低于 main 候选版本；与候选相同时采用 main code（须高于全部已发布 code），更高版本取 `max(最高已发布 code + 1, main code + 1)`，无 tag 时最高已发布 code 为 0，并遵守上述格式及 code 上限。临时 detached 快照只改版本文件并打 tag，**不创建额外发布分支**，仓库仍使用 main/contribution 和普通主题分支。只用短期 `GITHUB_TOKEN` 推送新不可变 tag 并发布 Release，不回写分支或合回快照，不使用 deploy keys。网页操作的说明不代表本次获准发布，本次未执行发布。
+
+可信 Debug 从版本文件读取版本，使用稳定 `.dev` 包名和独立 Debug 证书，以 source SHA、build SHA、Actions run 区分产物；PR 使用临时证书且无 secrets。独立生成的 Release/Debug 证书指纹固定在 [.ci/signing-certificates.json](.ci/signing-certificates.json)，签名参数见 [治理与签名约定](docs/10-仓库治理与发布.md)。secrets 采用仓库级范围，私有套餐的 environments 可能不支持，不视为已配置完成。
 
 用户已单独授权将 p12、明文密码与恢复元数据存入独立、永久私有、关闭 Actions 且无协作者的恢复仓库；本项目不披露其名称、地址或凭据。发布和公开须满足 [首个公开版本门槛](docs/12-首个公开版本与责任清单.md)，本轮规划与文档工作不产生应用验收证据。
