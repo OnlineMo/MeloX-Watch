@@ -1,0 +1,77 @@
+name: Cloud build
+on:
+  push:
+    branches: [main, contribution]
+  pull_request:
+    branches: [main, contribution]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cloud-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      android-ready: ${{ steps.check.outputs.android-ready }}
+      runner: ${{ steps.check.outputs.runner }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - id: check
+        run: python3 scripts/ci/check.py
+  android:
+    needs: preflight
+    if: needs.preflight.outputs.android-ready == 'true' && (github.event_name == 'pull_request' || (github.repository == 'OnlineMo/MeloX-Watch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/contribution')))
+    runs-on: ${{ needs.preflight.outputs.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build
+      - name: Test, lint, compile and package
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          SIGNING_KEY_B64: ${{ github.event_name != 'pull_request' && secrets.CI_DEBUG_KEYSTORE_B64 || '' }}
+          SIGNING_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.CI_DEBUG_STORE_PASSWORD || '' }}
+          SIGNING_ALIAS: melox-debug
+        run: python3 scripts/ci/build.py debug
+      - name: Upload installable cloud artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: watch-debug-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload reports even after failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: reports-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            android/**/build/reports/
+            android/**/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+  gate:
+    name: cloud-gate
+    if: always()
+    needs: [preflight, android]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          ANDROID_READY: ${{ needs.preflight.outputs.android-ready }}
+          ANDROID_RESULT: ${{ needs.android.result }}
+        run: |
+          test "$PREFLIGHT_RESULT" = success
+          if [ "$ANDROID_READY" = true ]; then
+            test "$ANDROID_RESULT" = success
+          else
+            echo 'Planning/configuration only; no APK build or device validation.' >> "$GITHUB_STEP_SUMMARY"
+          fi

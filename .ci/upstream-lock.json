@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "policy": "exact-commit-only; no automatic upstream upgrades",
+  "repositories": [
+    {
+      "name": "MeloX-Android",
+      "url": "https://github.com/lladlam/MeloX-Android.git",
+      "commit": "83632b17e1ee857bc428134528e0fd86c5fd4d01",
+      "localPath": "research/MeloX-Android",
+      "role": "Android business logic and parsers"
+    },
+    {
+      "name": "MeloX",
+      "url": "https://github.com/youshen2/MeloX.git",
+      "commit": "09713edb847a0f0a3515a34f779cc630d4fe5985",
+      "localPath": "research/MeloX",
+      "role": "Watch product behavior and interaction reference"
+    }
+  ]
+}

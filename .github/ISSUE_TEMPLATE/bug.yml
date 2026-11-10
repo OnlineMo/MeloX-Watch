@@ -1,0 +1,30 @@
+name: 缺陷报告
+description: 报告可复现的问题，请勿填写 Cookie、令牌或真实邮箱。
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: 版本与设备
+      description: 填写版本/source SHA、Actions run、设备型号与固件、网络和耳机条件。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤、期望行为与实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据
+      description: 仅提供必要日志。删除 Cookie、二维码 key、带签名音频 URL、邮箱与设备标识。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认
+      options:
+        - label: 我已搜索现有 Issue，并检查提交内容不含敏感信息。
+          required: true

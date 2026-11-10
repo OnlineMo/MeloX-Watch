@@ -1,0 +1,23 @@
+name: Trusted PR policy
+on:
+  pull_request_target:
+    branches: [main, contribution]
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+jobs:
+  policy:
+    name: pr-policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const policy = require(process.env.GITHUB_WORKSPACE + '/scripts/ci/pr-policy.cjs');
+            await policy.run({github, context, core});

@@ -1,0 +1,19 @@
+# Local upstream research is not part of the product repository.
+/research/*
+!/research/README.md
+/.local/
+/artifacts/
+/.gradle/
+**/.gradle/
+**/build/
+**/local.properties
+**/__pycache__/
+.idea/
+*.iml
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+.env
+.env.*

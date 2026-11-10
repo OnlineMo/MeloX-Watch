@@ -1,0 +1,25 @@
+name: 功能或迁移任务
+description: 提议功能、拆分计划任务或复用上游代码。
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 用户场景与目标
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与上游依据
+      description: 关联 DEV 编号；列出上游提交和文件、所需依赖、哪些部分要重写。
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收条件
+      description: 写出云端检查、本地设备用例及异常场景。请勿指定自行修改版本号。
+    validations:
+      required: true

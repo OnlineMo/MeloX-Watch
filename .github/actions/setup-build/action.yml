@@ -1,0 +1,32 @@
+name: Locked Android environment
+description: Configure the repository-owned toolchain on a GitHub-hosted runner.
+inputs:
+  bootstrap:
+    description: Install the pinned Gradle distribution to generate the initial wrapper in the cloud.
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - id: config
+      shell: bash
+      run: python3 scripts/ci/check.py
+    - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+      with:
+        distribution: ${{ steps.config.outputs.java-distribution }}
+        java-version: ${{ steps.config.outputs.java-version }}
+        architecture: x64
+    - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3.2.2
+      with:
+        cmdline-tools-version: ${{ steps.config.outputs.cmdline-tools }}
+        packages: ${{ steps.config.outputs.sdk-packages }}
+        log-accepted-android-sdk-licenses: false
+    - uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+      with:
+        gradle-version: ${{ inputs.bootstrap == 'true' && steps.config.outputs.gradle-version || '' }}
+        cache-read-only: ${{ github.event_name == 'pull_request' }}
+        validate-wrappers: true
+    - name: Record actual tools
+      shell: bash
+      run: |
+        java -version
+        sdkmanager --list_installed

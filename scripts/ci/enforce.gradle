@@ -1,0 +1,36 @@
+// Supplied by CI with --init-script. Application builds also opt in from settings.
+if (System.getenv('GITHUB_ACTIONS') != 'true' || System.getenv('CI') != 'true') {
+    throw new GradleException('Android compilation is cloud-only. Use the Cloud build workflow.')
+}
+def repositoryRoot = new File(gradle.startParameter.currentDir, '..').canonicalFile
+def toolchain = new Properties()
+new File(repositoryRoot, '.ci/toolchain.properties').withInputStream { toolchain.load(it) }
+def releaseVersion = new Properties()
+new File(repositoryRoot, 'version.properties').withInputStream { releaseVersion.load(it) }
+if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
+    throw new GradleException('Gradle version differs from the cloud toolchain lock')
+}
+gradle.projectsEvaluated {
+    gradle.rootProject.allprojects { project ->
+        def android = project.extensions.findByName('android')
+        if (android != null) {
+            if (android.compileSdk != toolchain.getProperty('android.compileSdk').toInteger() ||
+                android.buildToolsVersion != toolchain.getProperty('android.buildTools')) {
+                throw new GradleException("SDK/build tools drift in ${project.path}")
+            }
+            def components = project.extensions.findByName('androidComponents')
+            if (components.pluginVersion.toString() != toolchain.getProperty('agp.version')) {
+                throw new GradleException("AGP version drift in ${project.path}")
+            }
+        }
+        if (project.plugins.hasPlugin('com.android.application')) {
+            def config = android.defaultConfig
+            if (config.minSdk != toolchain.getProperty('android.minSdk').toInteger() ||
+                config.targetSdk != toolchain.getProperty('android.targetSdk').toInteger() ||
+                config.versionName != releaseVersion.getProperty('versionName') ||
+                config.versionCode != releaseVersion.getProperty('versionCode').toInteger()) {
+                throw new GradleException('Application SDK/version must come from the repository policy files')
+            }
+        }
+    }
+}

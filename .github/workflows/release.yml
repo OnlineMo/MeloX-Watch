@@ -1,0 +1,86 @@
+name: Owner release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Next version, x.y.z (without v)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as a test release (required for the first 0.1.0 release)'
+        type: boolean
+        default: true
+permissions:
+  contents: read
+concurrency:
+  group: owner-release
+  cancel-in-progress: false
+jobs:
+  authorize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          ACTOR: ${{ github.actor }}
+          TRIGGER_ACTOR: ${{ github.triggering_actor }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          test "${ACTOR,,}" = onlinemo
+          test "${TRIGGER_ACTOR,,}" = onlinemo
+          test "${REPOSITORY,,}" = onlinemo/melox-watch
+          test "$REF" = refs/heads/main
+  release:
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-build
+      - id: prepare
+        name: Validate readiness and prepare owner version commit
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$RELEASE_VERSION" = 0.1.0 ]; then test "$PRERELEASE" = true; fi
+          python3 scripts/ci/release.py prepare
+      - name: Test, lint, compile, sign and verify
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SIGNING_KEY_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+          SIGNING_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          SIGNING_ALIAS: melox-release
+        run: python3 scripts/ci/build.py release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: watch-release-${{ steps.prepare.outputs.version }}-${{ github.run_id }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Push only the immutable release tag (never update development branches)
+        run: python3 scripts/ci/release.py publish
+      - name: Create draft, attach verified artifacts, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "v$RELEASE_VERSION" --verify-tag --draft --generate-notes "${flags[@]}" --title "MeloX Watch v$RELEASE_VERSION" artifacts/*.apk artifacts/build-manifest.json artifacts/SHA256SUMS
+          gh release edit "v$RELEASE_VERSION" --draft=false
+      - name: Reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-reports-${{ github.run_id }}
+          path: |
+            android/**/build/reports/
+            android/**/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

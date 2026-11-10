@@ -1,0 +1,47 @@
+name: Bootstrap cloud toolchain
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Owner only
+        env:
+          ACTOR: ${{ github.actor }}
+          TRIGGER_ACTOR: ${{ github.triggering_actor }}
+          REF: ${{ github.ref }}
+        run: |
+          test "${ACTOR,,}" = onlinemo
+          test "${TRIGGER_ACTOR,,}" = onlinemo
+          test "$REF" = refs/heads/main
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-build
+        with:
+          bootstrap: 'true'
+      - name: Generate future wrapper in the cloud
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, sys
+          sys.path.insert(0, 'scripts/ci')
+          from check import properties
+          lock = properties(Path('.ci/toolchain.properties'))
+          target = Path('artifacts/wrapper')
+          target.mkdir(parents=True, exist_ok=True)
+          (target / 'settings.gradle.kts').write_text('rootProject.name = "wrapper-bootstrap"\n')
+          subprocess.run(['gradle', '--no-daemon', 'wrapper', '--gradle-version', lock['gradle.version'],
+                          '--distribution-type', 'bin', '--gradle-distribution-sha256-sum', lock['gradle.sha256']], cwd=target, check=True)
+          (target / 'settings.gradle.kts').unlink()
+          PY
+          echo 'Toolchain and wrapper generation verified in the cloud. This is not an application APK build.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gradle-wrapper-${{ github.run_id }}
+          path: artifacts/wrapper/
+          if-no-files-found: error
+          retention-days: 30

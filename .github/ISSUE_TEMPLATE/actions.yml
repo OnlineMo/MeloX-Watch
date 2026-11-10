@@ -1,0 +1,26 @@
+name: Actions 流程变更申请
+description: 构建、检查、发版 workflow 的修改请提 Issue，不要提交 PR。
+title: "[Actions] "
+labels: [ci-policy]
+body:
+  - type: textarea
+    id: reason
+    attributes:
+      label: 为什么需要修改
+      description: 描述当前问题和相关 Actions run，勿提供 secrets。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案与涉及路径
+      description: 写出影响的 workflow、权限、版本/签名保护和回退方式。
+    validations:
+      required: true
+  - type: checkboxes
+    id: acknowledgement
+    attributes:
+      label: 处理方式
+      options:
+        - label: 我了解 Actions 文件不能通过 PR 修改，由所有者审阅本 Issue 后维护。
+          required: true
