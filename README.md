@@ -62,7 +62,7 @@ PR 作者不是 OnlineMo 时，新增、修改、删除或重命名 `version.pro
 
 未来 main/contribution 均强制 PR，必需 `cloud-gate`/`pr-policy` 检查绑定预期 GitHub App、启用 strict，禁止强推/删除，管理员受约束且无绕过。单人仓库批准审阅数为 **0**，仍由 OnlineMo 人工审阅并独自合并。tag 禁止更新/删除，创建只允许写入者；只有所有者与其手动触发发布的临时 token 有所需内容写权限，公开贡献者不获得写权限。
 
-OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）及不超过 2100000000 的整数 versionCode；两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，不做固定值或固定字节限制。
+OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）及不超过项目采用的 Google Play 兼容上限 2100000000 的整数 versionCode；两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，不做固定值或固定字节限制。
 
 `Cloud build` 与 `Owner release` 分开。仅 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main，触发云端发布，无需本地电脑。请求版本必须高于全部发布 tag 且不低于 main 候选版本；与候选相同时采用 main code（须高于全部已发布 code），更高版本取 `max(最高已发布 code + 1, main code + 1)`，无 tag 时最高已发布 code 为 0，并遵守上述格式及 code 上限。临时 detached 快照只改版本文件并打 tag，**不创建额外发布分支**，仓库仍使用 main/contribution 和普通主题分支。只用短期 `GITHUB_TOKEN` 推送新不可变 tag 并发布 Release，不回写分支或合回快照，不使用 deploy keys。网页操作的说明不代表本次获准发布，本次未执行发布。
 

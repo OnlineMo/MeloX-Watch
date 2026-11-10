@@ -52,9 +52,9 @@ PR 构建不接触签名秘密，使用临时调试证书；可信分支构建�
 
 工具链唯一来源是 [.ci/toolchain.properties](.ci/toolchain.properties)，具体接入见 [云端构建与本地验证](docs/09-云端构建与本地验证.md)。未来应用必须读取这些参数和版本文件，不允许 flavor/buildType 或输出重写版本。
 
-当前 `version.properties` 的 **0.0.0 / 0** 仅为初始占位，没有永久固定值或特殊字节校验。[版本 PR 规则](docs/10-仓库治理与发布.md#2-开发版本与可信-pr-检查) 拒绝普通贡献者改版本；OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）与不超过 2100000000 的整数 versionCode，两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，使用 source SHA、build SHA 和 Actions run 区分产物。
+当前 `version.properties` 的 **0.0.0 / 0** 仅为初始占位，没有永久固定值或特殊字节校验。[版本 PR 规则](docs/10-仓库治理与发布.md#2-开发版本与可信-pr-检查) 拒绝普通贡献者改版本；OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）与不超过项目采用的 Google Play 兼容上限 2100000000 的整数 versionCode，两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，使用 source SHA、build SHA 和 Actions run 区分产物。
 
-Cloud build 与 Owner release 分开。只有 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main 触发发布，无需本地电脑或命令行。临时 runner 创建仅改版本文件的 detached 快照并打 tag，不创建发布分支，仓库仍使用 main/contribution 和普通主题分支。请求版本必须高于全部发布 tag 且不低于 main 候选版本；相同时使用 main code（须高于全部已发布 code），更高版本则取 `max(最高已发布 code + 1, main code + 1)`，无 tag 时最高已发布 code 为 0，并遵守版本格式及 2100000000 上限。云端校验后仅用短期 `GITHUB_TOKEN` 推送新 tag、发布 Release，不回写 main/contribution，不合回快照，不使用 deploy keys。
+Cloud build 与 Owner release 分开。只有 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main 触发发布，无需本地电脑或命令行。临时 runner 创建仅改版本文件的 detached 快照并打 tag，不创建发布分支，仓库仍使用 main/contribution 和普通主题分支。请求版本必须高于全部发布 tag 且不低于 main 候选版本；相同时使用 main code（须高于全部已发布 code），更高版本则取 `max(最高已发布 code + 1, main code + 1)`，无 tag 时最高已发布 code 为 0，并遵守版本格式及项目采用的 Google Play 兼容上限 2100000000。云端校验后仅用短期 `GITHUB_TOKEN` 推送新 tag、发布 Release，不回写 main/contribution，不合回快照，不使用 deploy keys。
 
 首次公开 `0.1.0` prerelease 必须完成 P0–P3、[全部首次公开门槛](docs/12-首个公开版本与责任清单.md)、证据审阅及用户明确批准；`1.0.0` 需完成 P0–P5。普通 push、合并 PR 或手工 tag 不自动授权发布。
 

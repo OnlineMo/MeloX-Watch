@@ -82,6 +82,9 @@ def build(mode):
                 'repository': os.environ['GITHUB_REPOSITORY'], 'mode': mode, 'version': version,
                 'toolchain': lock, 'tasks': tasks, 'artifacts': entries,
                 'device_validation': 'NOT RUN; install these cloud artifacts on the target watch'}
+    if mode == 'release':
+        manifest['release_commit_count'] = int(run(['git', 'rev-list', '--count', 'HEAD'], capture_output=True).stdout.strip())
+        manifest['version_code_policy'] = 'max(main full-history count + release commit, highest previous release code + 1)'
     (output / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
     files = [output / entry['file'] for entry in entries] + [output / 'build-manifest.json']
     (output / 'SHA256SUMS').write_text(''.join(hashlib.sha256(file.read_bytes()).hexdigest() + '  ' + file.name + '\n' for file in files), encoding='utf-8')
