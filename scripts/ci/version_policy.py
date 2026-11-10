@@ -32,5 +32,5 @@ def next_release(requested, history, main_commit_count, development=None):
             raise ValueError('Requested release must not be below the version prepared by the owner in main')
         # The release code comes from complete history and previous tags, never manual input.
     if code > 2100000000:
-        raise ValueError('versionCode exceeds the Android limit')
+        raise ValueError('versionCode exceeds the project Google Play-compatible limit')
     return code
