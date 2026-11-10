@@ -64,7 +64,9 @@ PR 作者不是 OnlineMo 时，新增、修改、删除或重命名 `version.pro
 
 OnlineMo 的版本 PR 自动校验精确 `x.y.z`（无 `v`、后缀、前导零）及不超过项目采用的 Google Play 兼容上限 2100000000 的整数 versionCode；两者都必须严格高于 base 和全部发布 tag。普通构建读取版本文件并核对 APK 实际版本，不做固定值或固定字节限制。
 
-`Cloud build` 与 `Owner release` 分开。仅 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main，触发云端发布，无需本地电脑。请求版本必须高于全部发布 tag 且不低于 main 候选版本；与候选相同时采用 main code（须高于全部已发布 code），更高版本取 `max(最高已发布 code + 1, main code + 1)`，无 tag 时最高已发布 code 为 0，并遵守上述格式及 code 上限。临时 detached 快照只改版本文件并打 tag，**不创建额外发布分支**，仓库仍使用 main/contribution 和普通主题分支。只用短期 `GITHUB_TOKEN` 推送新不可变 tag 并发布 Release，不回写分支或合回快照，不使用 deploy keys。网页操作的说明不代表本次获准发布，本次未执行发布。
+`Cloud build` 与 `Owner release` 分开。仅 OnlineMo 可在网页 **Actions → Owner release → Run workflow** 选择 main 触发云端发布，无需本地电脑。输入的 versionName 必须高于全部发布 tag 且不低于 main 候选 versionName。最终 versionCode 自动取 `max(main 完整可达提交数 + 1, 既有发布 tag 最大 code + 1)`，无 tag 时最大 code 为 0，且遵守上述 Google Play 兼容上限；main 手填 code 不参与计算，所有者版本 PR 仍须通过格式和递增校验。
+
+发布必须 `fetch-depth: 0`，浅克隆失败；从精确 main 源 SHA 统计所有可达提交，包含合并历史，不使用 `--first-parent`，加 1 计入本次发布版本提交。临时 detached 快照仅改版本文件并打 tag，**不创建额外发布分支**；仓库仍使用 main/contribution 和普通主题分支。`build-manifest.json` 记录 source/build SHA、main 完整可达提交数及含发布提交的计数。仅用短期 `GITHUB_TOKEN` 推送新 tag 并发布 Release，不回写分支、不合回快照，不使用 deploy keys。本次文档更新未授权或执行发布。
 
 可信 Debug 从版本文件读取版本，使用稳定 `.dev` 包名和独立 Debug 证书，以 source SHA、build SHA、Actions run 区分产物；PR 使用临时证书且无 secrets。独立生成的 Release/Debug 证书指纹固定在 [.ci/signing-certificates.json](.ci/signing-certificates.json)，签名参数见 [治理与签名约定](docs/10-仓库治理与发布.md)。secrets 采用仓库级范围，私有套餐的 environments 可能不支持，不视为已配置完成。
 

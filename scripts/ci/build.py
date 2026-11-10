@@ -83,6 +83,7 @@ def build(mode):
                 'toolchain': lock, 'tasks': tasks, 'artifacts': entries,
                 'device_validation': 'NOT RUN; install these cloud artifacts on the target watch'}
     if mode == 'release':
+        manifest['main_commit_count'] = int(run(['git', 'rev-list', '--count', 'HEAD^'], capture_output=True).stdout.strip())
         manifest['release_commit_count'] = int(run(['git', 'rev-list', '--count', 'HEAD'], capture_output=True).stdout.strip())
         manifest['version_code_policy'] = 'max(main full-history count + release commit, highest previous release code + 1)'
     (output / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
