@@ -1,0 +1,28 @@
+name: Isolated APK verification tools
+description: Install only pinned JDK and APK inspection/signing tools; no Gradle or build cache.
+runs:
+  using: composite
+  steps:
+  - id: lock
+    shell: bash
+    run: |-
+      python3 - <<'PY'
+      import os, sys
+      sys.path.insert(0, 'scripts/ci')
+      from ci_common import ROOT, properties
+      lock = properties(ROOT / '.ci/toolchain.properties')
+      with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+          for key, value in {'java': lock['java.version'], 'distribution': lock['java.distribution'],
+                             'cli': lock['android.commandLineTools'], 'packages': 'build-tools;' + lock['android.buildTools']}.items():
+              stream.write(key + '=' + value + '\n')
+      PY
+  - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00
+    with:
+      distribution: ${{ steps.lock.outputs.distribution }}
+      java-version: ${{ steps.lock.outputs.java }}
+      architecture: x64
+  - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+    with:
+      cmdline-tools-version: ${{ steps.lock.outputs.cli }}
+      packages: ${{ steps.lock.outputs.packages }}
+      log-accepted-android-sdk-licenses: false

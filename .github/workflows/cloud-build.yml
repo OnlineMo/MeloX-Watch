@@ -1,10 +1,14 @@
 name: Cloud build
-on:
+'on':
   push:
-    branches: [main, contribution]
+    branches:
+    - main
+    - contribution
   pull_request:
-    branches: [main, contribution]
-  workflow_dispatch:
+    branches:
+    - main
+    - contribution
+  workflow_dispatch: {}
 permissions:
   contents: read
 concurrency:
@@ -12,66 +16,140 @@ concurrency:
   cancel-in-progress: true
 jobs:
   preflight:
+    name: preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Repository policy checks
+      run: python3 scripts/ci/check.py
+      id: check
+    - name: Install the pinned policy-only YAML parser
+      run: 'python3 -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes --target "$RUNNER_TEMP/ci-python" -r .ci/policy-requirements.txt'
+    - name: Verify workflow trust boundaries
+      run: python3 scripts/ci/workflow_policy.py
+      env:
+        PYTHONPATH: ${{ runner.temp }}/ci-python
     outputs:
       android-ready: ${{ steps.check.outputs.android-ready }}
-      runner: ${{ steps.check.outputs.runner }}
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - id: check
-        run: python3 scripts/ci/check.py
-  android:
-    needs: preflight
-    if: needs.preflight.outputs.android-ready == 'true' && (github.event_name == 'pull_request' || (github.repository == 'OnlineMo/MeloX-Watch' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/contribution')))
-    runs-on: ${{ needs.preflight.outputs.runner }}
+  compile:
+    name: android-compile
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-build
-      - name: Test, lint, compile and package
-        env:
-          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          SIGNING_KEY_B64: ${{ github.event_name != 'pull_request' && secrets.CI_DEBUG_KEYSTORE_B64 || '' }}
-          SIGNING_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.CI_DEBUG_STORE_PASSWORD || '' }}
-          SIGNING_ALIAS: melox-debug
-        run: python3 scripts/ci/build.py debug
-      - name: Upload installable cloud artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: watch-debug-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Upload reports even after failure
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: reports-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            android/**/build/reports/
-            android/**/build/test-results/
-          if-no-files-found: ignore
-          retention-days: 7
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - uses: ./.github/actions/setup-build
+    - name: Test, lint and compile without signing secrets
+      run: python3 scripts/ci/build.py debug
+      env:
+        SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      id: compile
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: ${{ format('{0}-debug-{1}-{2}', github.event_name == 'pull_request' && 'pr' || 'unsigned', github.run_id, github.run_attempt) }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 14
+    - name: Preserve reports
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: reports-debug-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          android/**/build/reports/
+          android/**/build/test-results/
+        if-no-files-found: ignore
+        retention-days: 7
+    needs:
+    - preflight
+    if: needs.preflight.outputs.android-ready == 'true' && (github.event_name == 'pull_request' || (github.repository == 'OnlineMo/MeloX-Watch' && github.actor == 'OnlineMo' && github.triggering_actor ==
+      'OnlineMo' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/contribution')))
+    outputs:
+      artifact-id: ${{ steps.archive.outputs.artifact-id }}
+  sign-debug:
+    name: sign-debug
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /scripts/ci/
+          /.ci/
+          /.github/actions/setup-verify/
+          /version.properties
+          /docs/
+    - uses: ./.github/actions/setup-verify
+    - name: Verify producing run, attempt, artifact and APK
+      run: python3 scripts/ci/sign.py prepare debug --artifact-id "$ARTIFACT_ID"
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ARTIFACT_ID: ${{ needs.compile.outputs.artifact-id }}
+    - name: Sign with the independent stable Debug certificate
+      run: python3 scripts/ci/sign.py sign debug
+      env:
+        SIGNING_KEY_B64: ${{ secrets.CI_DEBUG_KEYSTORE_B64 }}
+        SIGNING_PASSWORD: ${{ secrets.CI_DEBUG_STORE_PASSWORD }}
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: watch-debug-${{ github.run_id }}-${{ github.run_attempt }}
+        path: signed-artifacts/
+        if-no-files-found: error
+        retention-days: 14
+    needs:
+    - preflight
+    - compile
+    if: needs.compile.result == 'success' && github.event_name != 'pull_request' && github.repository == 'OnlineMo/MeloX-Watch' && github.actor == 'OnlineMo' && github.triggering_actor == 'OnlineMo' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/contribution')
   gate:
     name: cloud-gate
-    if: always()
-    needs: [preflight, android]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - env:
-          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
-          ANDROID_READY: ${{ needs.preflight.outputs.android-ready }}
-          ANDROID_RESULT: ${{ needs.android.result }}
-        run: |
-          test "$PREFLIGHT_RESULT" = success
-          if [ "$ANDROID_READY" = true ]; then
-            test "$ANDROID_RESULT" = success
+    - name: Require applicable compile and signing results
+      run: |-
+        test "$PREFLIGHT_RESULT" = success
+        if [ "$ANDROID_READY" = true ]; then
+          test "$COMPILE_RESULT" = success
+          if [ "$EVENT" = pull_request ]; then
+            test "$SIGN_RESULT" = skipped
           else
-            echo 'Planning/configuration only; no APK build or device validation.' >> "$GITHUB_STEP_SUMMARY"
+            test "$SIGN_RESULT" = success
           fi
+        else
+          echo 'Infrastructure checks only. No Android build, APK signing or device validation.' >> "$GITHUB_STEP_SUMMARY"
+        fi
+      env:
+        PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+        ANDROID_READY: ${{ needs.preflight.outputs.android-ready }}
+        COMPILE_RESULT: ${{ needs.compile.result }}
+        SIGN_RESULT: ${{ needs.sign-debug.result }}
+        EVENT: ${{ github.event_name }}
+    needs:
+    - preflight
+    - compile
+    - sign-debug
+    if: always()

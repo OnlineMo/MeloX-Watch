@@ -1,15 +1,38 @@
 name: Owner release
-on:
+'on':
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Next version, x.y.z (without v)'
+      operation:
+        description: Prepare a nonpublishing candidate or publish the exact accepted candidate
         required: true
+        type: choice
+        options:
+        - prepare-candidate
+        - publish-candidate
+        default: prepare-candidate
+      version:
+        description: 'Preparation only: canonical x.y.z'
         type: string
+        default: 0.1.0
       prerelease:
-        description: 'Mark as a test release (required for the first 0.1.0 release)'
+        description: 'Preparation only: required for 0.1.0'
         type: boolean
         default: true
+      candidate_run:
+        description: 'Publication only: accepted run ID'
+        type: string
+      candidate_attempt:
+        description: 'Publication only: accepted run attempt'
+        type: string
+      candidate_artifact:
+        description: 'Publication only: accepted artifact ID'
+        type: string
+      approval_sha:
+        description: 'Publication only: current main approval SHA'
+        type: string
+      confirmation:
+        description: 'Explicit publication approval: run/attempt/artifact:APK_SHA256'
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -17,70 +40,365 @@ concurrency:
   cancel-in-progress: false
 jobs:
   authorize:
+    name: verify-request
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
     steps:
-      - env:
-          ACTOR: ${{ github.actor }}
-          TRIGGER_ACTOR: ${{ github.triggering_actor }}
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref }}
-        run: |
-          test "${ACTOR,,}" = onlinemo
-          test "${TRIGGER_ACTOR,,}" = onlinemo
-          test "${REPOSITORY,,}" = onlinemo/melox-watch
-          test "$REF" = refs/heads/main
-  release:
-    needs: authorize
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Verify owner request and repository policy
+      run: |-
+        python3 -c "import sys; sys.path.insert(0, 'scripts/ci'); from ci_common import trusted_context; trusted_context('Owner release')"
+        python3 scripts/ci/check.py
+    - name: Install the pinned policy-only YAML parser
+      run: 'python3 -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes --target "$RUNNER_TEMP/ci-python" -r .ci/policy-requirements.txt'
+    - name: Verify workflow trust boundaries
+      run: python3 scripts/ci/workflow_policy.py
+      env:
+        PYTHONPATH: ${{ runner.temp }}/ci-python
+    if: github.repository == 'OnlineMo/MeloX-Watch' && github.actor == 'OnlineMo' && github.triggering_actor == 'OnlineMo' && github.ref == 'refs/heads/main'
+  prepare:
+    name: prepare-snapshot
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Freeze source, complete count and snapshot without publication
+      run: python3 scripts/ci/candidate.py prepare
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_VERSION: ${{ inputs.version }}
+        PRERELEASE: ${{ inputs.prerelease }}
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+        path: snapshot-artifacts/
+        if-no-files-found: error
+        retention-days: 90
+    needs:
+    - authorize
+    if: inputs.operation == 'prepare-candidate'
+    outputs:
+      artifact-id: ${{ steps.archive.outputs.artifact-id }}
+  compile-release:
+    name: compile-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Verify and restore original snapshot objects
+      run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID" --checkout
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
+    - uses: ./.github/actions/setup-build
+    - name: Test, lint and compile optimized release
+      run: python3 scripts/ci/build.py release
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        SOURCE_SHA: ${{ github.sha }}
+      id: compile
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: unsigned-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 90
+    - name: Preserve reports
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: reports-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          android/**/build/reports/
+          android/**/build/test-results/
+        if-no-files-found: ignore
+        retention-days: 30
+    needs:
+    - authorize
+    - prepare
+    if: inputs.operation == 'prepare-candidate'
+    outputs:
+      artifact-id: ${{ steps.archive.outputs.artifact-id }}
+      has-instrumentation: ${{ steps.compile.outputs.has-instrumentation }}
+  sign-release:
+    name: sign-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /scripts/ci/
+          /.ci/
+          /.github/actions/setup-verify/
+          /version.properties
+          /docs/
+    - uses: ./.github/actions/setup-verify
+    - name: Verify and restore original snapshot objects
+      run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID"
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
+    - name: Verify unsigned APKs before exposing the key
+      run: python3 scripts/ci/sign.py prepare release --artifact-id "$ARTIFACT_ID" --snapshot snapshot-input/snapshot-manifest.json
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        ARTIFACT_ID: ${{ needs.compile-release.outputs.artifact-id }}
+        HAS_INSTRUMENTATION: ${{ needs.compile-release.outputs.has-instrumentation }}
+    - name: Sign verified release APKs
+      run: python3 scripts/ci/sign.py sign release
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        SIGNING_KEY_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
+        SIGNING_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: signed-release-${{ github.run_id }}-${{ github.run_attempt }}
+        path: signed-artifacts/
+        if-no-files-found: error
+        retention-days: 90
+    needs:
+    - authorize
+    - prepare
+    - compile-release
+    if: inputs.operation == 'prepare-candidate'
+    outputs:
+      artifact-id: ${{ steps.archive.outputs.artifact-id }}
+  compile-diagnostic:
+    name: compile-diagnostic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+    - name: Verify and restore original snapshot objects
+      run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID" --checkout
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
+    - uses: ./.github/actions/setup-build
+    - name: Test, lint and compile optimized diagnostic
+      run: python3 scripts/ci/build.py diagnostic
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        SOURCE_SHA: ${{ github.sha }}
+      id: compile
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: unsigned-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+        path: artifacts/
+        if-no-files-found: error
+        retention-days: 90
+    - name: Preserve reports
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: reports-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          android/**/build/reports/
+          android/**/build/test-results/
+        if-no-files-found: ignore
+        retention-days: 30
+    needs:
+    - authorize
+    - prepare
+    if: inputs.operation == 'prepare-candidate'
+    outputs:
+      artifact-id: ${{ steps.archive.outputs.artifact-id }}
+      has-instrumentation: ${{ steps.compile.outputs.has-instrumentation }}
+  sign-diagnostic:
+    name: sign-diagnostic
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /scripts/ci/
+          /.ci/
+          /.github/actions/setup-verify/
+          /version.properties
+          /docs/
+    - uses: ./.github/actions/setup-verify
+    - name: Verify and restore original snapshot objects
+      run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID"
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
+    - name: Verify unsigned APKs before exposing the key
+      run: python3 scripts/ci/sign.py prepare diagnostic --artifact-id "$ARTIFACT_ID" --snapshot snapshot-input/snapshot-manifest.json
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        ARTIFACT_ID: ${{ needs.compile-diagnostic.outputs.artifact-id }}
+        HAS_INSTRUMENTATION: ${{ needs.compile-diagnostic.outputs.has-instrumentation }}
+    - name: Sign verified diagnostic APKs
+      run: python3 scripts/ci/sign.py sign diagnostic
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        SIGNING_KEY_B64: ${{ secrets.CI_DEBUG_KEYSTORE_B64 }}
+        SIGNING_PASSWORD: ${{ secrets.CI_DEBUG_STORE_PASSWORD }}
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: signed-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+        path: signed-artifacts/
+        if-no-files-found: error
+        retention-days: 90
+    needs:
+    - authorize
+    - prepare
+    - compile-diagnostic
+    if: inputs.operation == 'prepare-candidate'
+    outputs:
+      artifact-id: ${{ steps.archive.outputs.artifact-id }}
+  seal:
+    name: seal-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      actions: read
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /scripts/ci/
+          /.ci/
+          /.github/actions/setup-verify/
+          /version.properties
+          /docs/
+    - uses: ./.github/actions/setup-verify
+    - name: Verify and restore original snapshot objects
+      run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID"
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
+    - name: Assemble immutable candidate and separate diagnostic provenance
+      run: python3 scripts/ci/candidate.py seal --release-id "$RELEASE_ID" --diagnostic-id "$DIAGNOSTIC_ID"
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        RELEASE_ID: ${{ needs.sign-release.outputs.artifact-id }}
+        DIAGNOSTIC_ID: ${{ needs.sign-diagnostic.outputs.artifact-id }}
+        HAS_INSTRUMENTATION: ${{ needs.compile-diagnostic.outputs.has-instrumentation }}
+    - id: archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: candidate-${{ github.run_id }}-${{ github.run_attempt }}
+        path: candidate-artifacts/
+        if-no-files-found: error
+        retention-days: 90
+    - name: Record externally assigned candidate ID
+      run: |-
+        python3 - <<'PY'
+        import json, os
+        from pathlib import Path
+        record = {key: os.environ[key] for key in ('RUN_ID', 'RUN_ATTEMPT', 'ARTIFACT_ID', 'ARTIFACT_DIGEST')}
+        Path('candidate-locator.json').write_text(json.dumps(record, indent=2) + '\n')
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+            stream.write('Candidate prepared without publication: ' + json.dumps(record) + '\nDevice acceptance and publication approval remain required.\n')
+        PY
+      env:
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        ARTIFACT_ID: ${{ steps.archive.outputs.artifact-id }}
+        ARTIFACT_DIGEST: ${{ steps.archive.outputs.artifact-digest }}
+    - id: locator
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: candidate-locator-${{ github.run_id }}-${{ github.run_attempt }}
+        path: candidate-locator.json
+        if-no-files-found: error
+        retention-days: 90
+    needs:
+    - authorize
+    - prepare
+    - sign-release
+    - sign-diagnostic
+    - compile-diagnostic
+    if: inputs.operation == 'prepare-candidate'
+  publish:
+    name: publish-accepted-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       contents: write
+      actions: read
+      checks: read
+      pull-requests: read
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
-      - uses: ./.github/actions/setup-build
-      - id: prepare
-        name: Validate readiness and prepare owner version commit
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          PRERELEASE: ${{ inputs.prerelease }}
-        run: |
-          if [ "$RELEASE_VERSION" = 0.1.0 ]; then test "$PRERELEASE" = true; fi
-          python3 scripts/ci/release.py prepare
-      - name: Test, lint, compile, sign and verify
-        env:
-          SOURCE_SHA: ${{ github.sha }}
-          SIGNING_KEY_B64: ${{ secrets.RELEASE_KEYSTORE_B64 }}
-          SIGNING_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          SIGNING_ALIAS: melox-release
-        run: python3 scripts/ci/build.py release
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: watch-release-${{ steps.prepare.outputs.version }}-${{ github.run_id }}
-          path: artifacts/
-          if-no-files-found: error
-          retention-days: 30
-      - name: Push only the immutable release tag (never update development branches)
-        run: python3 scripts/ci/release.py publish
-      - name: Create draft, attach verified artifacts, then publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ steps.prepare.outputs.version }}
-          PRERELEASE: ${{ inputs.prerelease }}
-        run: |
-          flags=()
-          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
-          gh release create "v$RELEASE_VERSION" --verify-tag --draft --generate-notes "${flags[@]}" --title "MeloX Watch v$RELEASE_VERSION" artifacts/*.apk artifacts/build-manifest.json artifacts/SHA256SUMS
-          gh release edit "v$RELEASE_VERSION" --draft=false
-      - name: Reports
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: release-reports-${{ github.run_id }}
-          path: |
-            android/**/build/reports/
-            android/**/build/test-results/
-          if-no-files-found: ignore
-          retention-days: 7
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      with:
+        persist-credentials: false
+        fetch-depth: 0
+        sparse-checkout-cone-mode: false
+        sparse-checkout: |
+          /scripts/ci/
+          /.ci/
+          /.github/actions/setup-verify/
+          /version.properties
+          /docs/
+    - uses: ./.github/actions/setup-verify
+    - name: Publish or recover the original accepted bytes
+      run: python3 scripts/ci/release.py --run-id "$CANDIDATE_RUN" --attempt "$CANDIDATE_ATTEMPT" --artifact-id "$CANDIDATE_ARTIFACT" --approval-sha "$APPROVAL_SHA"
+      env:
+        CANDIDATE_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+        CANDIDATE_RUN: ${{ inputs.candidate_run }}
+        CANDIDATE_ATTEMPT: ${{ inputs.candidate_attempt }}
+        CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
+        APPROVAL_SHA: ${{ inputs.approval_sha }}
+        CANDIDATE_CONFIRMATION: ${{ inputs.confirmation }}
+    needs:
+    - authorize
+    if: inputs.operation == 'publish-candidate'
