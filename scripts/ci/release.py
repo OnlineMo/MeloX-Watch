@@ -1,86 +1,135 @@
-"""Owner releases use a tag-only snapshot; development branch versions never change."""
+"""仅发布已验原候选。该入口不编译、不重签、不重新创建版本快照。"""
 import argparse
+import base64
+import hashlib
 import json
 import os
-import re
-import subprocess
+from pathlib import Path
+import urllib.parse
 
-from check import ROOT, check, properties
-from version_policy import authorize_release, next_release
+from apk_verify import build_tools, certificate, inspect_apk
+from artifact_io import GitHub
+from candidate import CANDIDATE_FILES, fetch_candidate, import_snapshot, release_history
+from ci_common import (ROOT, OWNER, OWNER_EMAIL, REPOSITORY, expected_identity, git,
+                       no_signing_secrets, properties, require, sha256, trusted_context, write_json)
+from release_evidence import (candidate_identity, report_file, validate_approval,
+                              validate_approval_history, verify_protections)
+from version_policy import validate_frozen_version
 
 
-def git(*args):
-    return subprocess.run(['git', *args], cwd=ROOT, check=True, text=True, capture_output=True).stdout.strip()
+def validate_release_target(manifest, history, tags):
+    version = manifest['version']['versionName']
+    tag = 'v' + version
+    if tag in tags:
+        require(tags[tag] == manifest['snapshot_sha'], 'Existing tag points to different objects; never overwrite it')
+        history = [(name, code) for name, code in history if name != version]
+    validate_frozen_version(manifest['version'], history)
+    return tag not in tags
 
 
-def prepare():
-    authorize_release()
-    check(require_android=True)
-    readiness = json.loads((ROOT / '.ci/release-readiness.json').read_text(encoding='utf-8'))
-    required = {'P0_device_and_login', 'P1_playback_foundation', 'P2_online_features', 'P3_round_watch_mvp',
-                'watch_x2_background_audio', 'privacy_and_source_licenses', 'install_and_known_limitations_docs',
-                'branch_and_tag_protections', 'signing_backup_verified'}
-    if readiness.get('owner_approved') is not True or set(readiness.get('gates', {})) != required or not all(value is True for value in readiness['gates'].values()):
-        raise SystemExit('First-release gates are incomplete; no release is created')
-    report = (ROOT / readiness['device_report']).resolve()
-    if not report.is_relative_to(ROOT / 'docs') or not report.is_file():
-        raise SystemExit('A committed local device validation report is required')
-    requested = os.environ['RELEASE_VERSION']
-    if requested == '0.1.0' and os.environ.get('PRERELEASE') != 'true':
-        raise SystemExit('The first 0.1.0 release must be a prerelease')
-    git('fetch', 'origin', 'main', 'contribution', '--tags')
-    if git('rev-parse', 'HEAD') != git('rev-parse', 'origin/main'):
-        raise SystemExit('main advanced after dispatch; rerun against its current head')
-    if git('rev-parse', '--is-shallow-repository') != 'false':
-        raise SystemExit('Release versionCode requires complete Git history, never a shallow clone')
-    history = []
-    for tag in git('tag', '--list', 'v*').splitlines():
-        if not re.fullmatch(r'v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', tag):
+def verify_existing_assets(client, release_id, files):
+    existing = client.pages(f'/releases/{release_id}/assets')
+    require(len({asset['name'] for asset in existing}) == len(existing), 'Duplicate release asset names')
+    require({asset['name'] for asset in existing} <= set(files), 'Unexpected existing asset; owner recovery review required')
+    for asset in existing:
+        content = client.download(f'/repos/{REPOSITORY}/releases/assets/{asset["id"]}')
+        require(hashlib.sha256(content).hexdigest() == sha256(files[asset['name']]),
+                'Existing asset has different bytes; never overwrite it')
+    return {asset['name'] for asset in existing}
+
+
+def publish_assets(client, tag, snapshot, files, prerelease):
+    releases = [entry for entry in client.pages('/releases') if entry['tag_name'] == tag]
+    require(len(releases) <= 1, 'Multiple releases refer to this tag')
+    if releases:
+        release = releases[0]
+        require(release['prerelease'] is prerelease, 'Existing release prerelease state differs')
+    else:
+        release = client.request('POST', f'/repos/{REPOSITORY}/releases',
+            {'tag_name': tag, 'target_commitish': snapshot, 'name': 'MeloX Watch ' + tag,
+             'draft': True, 'prerelease': prerelease,
+             'body': 'Accepted candidate bytes. Provenance and acceptance are recorded in publication-record.json.'})
+    present = verify_existing_assets(client, release['id'], files)
+    for name, path in files.items():
+        if name in present:
             continue
-        text = git('show', tag + ':version.properties')
-        values = dict(line.split('=', 1) for line in text.splitlines() if line and not line.startswith('#'))
-        if values.get('versionName') != tag[1:]:
-            raise SystemExit('Release tag metadata mismatch: ' + tag)
-        history.append((values['versionName'], int(values['versionCode'])))
-    current = properties(ROOT / 'version.properties')
-    main_commit_count = int(git('rev-list', '--count', 'HEAD'))
-    code = next_release(requested, history, main_commit_count, current)
-    if git('tag', '--list', 'v' + requested):
-        raise SystemExit('Release tag already exists; recover its existing artifacts, never overwrite it')
-    git('config', 'user.name', 'OnlineMo')
-    git('config', 'user.email', '143324986+OnlineMo@users.noreply.github.com')
-    git('switch', '--detach')
-    (ROOT / 'version.properties').write_text('# Release snapshot only; never merge this commit into development branches.\n'
-                                            f'versionName={requested}\nversionCode={code}\n', encoding='utf-8')
-    git('add', 'version.properties')
-    git('commit', '-m', f'chore(release): v{requested}')
-    if int(git('rev-list', '--count', 'HEAD')) != main_commit_count + 1:
-        raise SystemExit('Unexpected release commit history count')
-    with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
-        stream.write(f'version={requested}\nrelease-sha={git("rev-parse", "HEAD")}\n')
+        encoded_name = urllib.parse.quote(name, safe='')
+        client.request('POST', f'/repos/{REPOSITORY}/releases/{release["id"]}/assets?name={encoded_name}',
+                       Path(path).read_bytes(), binary=True, upload=True)
+    require(verify_existing_assets(client, release['id'], files) == set(files), 'Release assets are incomplete')
+    if release['draft']:
+        client.request('PATCH', f'/repos/{REPOSITORY}/releases/{release["id"]}', {'draft': False})
+    return release['id']
 
 
-def publish():
-    authorize_release()
-    version = properties(ROOT / 'version.properties')['versionName']
-    release_sha = git('rev-parse', 'HEAD')
-    source_sha = git('rev-parse', 'HEAD^')
-    if source_sha != os.environ['GITHUB_SHA']:
-        raise SystemExit('Release must be a single snapshot commit on the dispatched main commit')
-    if git('diff', '--name-only', source_sha, release_sha) != 'version.properties':
-        raise SystemExit('The release snapshot may change only version.properties')
-    manifest = json.loads((ROOT / 'artifacts/build-manifest.json').read_text(encoding='utf-8'))
-    if manifest['build_sha'] != release_sha or manifest['source_sha'] != source_sha or manifest['mode'] != 'release':
-        raise SystemExit('Release artifact does not match its source/snapshot commits')
-    if git('ls-remote', '--tags', 'origin', 'refs/tags/v' + version):
-        raise SystemExit('Tag already exists; do not overwrite it')
-    git('tag', '-a', 'v' + version, release_sha, '-m', 'MeloX Watch v' + version)
-    # Explicit single refspec: never push HEAD, main, contribution, --all, or --mirror.
-    git('push', 'origin', 'refs/tags/v' + version + ':refs/tags/v' + version)
+def push_new_tag(tag, snapshot, client):
+    require(git('remote', 'get-url', 'origin') in (f'https://github.com/{REPOSITORY}', f'https://github.com/{REPOSITORY}.git'),
+            'Unexpected publication remote')
+    environment = dict(os.environ, GIT_COMMITTER_NAME=OWNER, GIT_COMMITTER_EMAIL=OWNER_EMAIL)
+    git('-c', 'tag.gpgsign=false', 'tag', '-a', tag, snapshot, '-m', 'MeloX Watch ' + tag, env=environment)
+    # GITHUB_TOKEN 只在发布 job 内短期有效，不写入 .git/config 或命令参数。
+    authentication = base64.b64encode(('x-access-token:' + client.token).encode()).decode()
+    environment.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.https://github.com/.extraheader',
+                       GIT_CONFIG_VALUE_0='AUTHORIZATION: basic ' + authentication)
+    git('push', 'origin', f'refs/tags/{tag}:refs/tags/{tag}', env=environment)
+
+
+def publish(run_id, attempt, artifact_id, approval):
+    trusted_context('Owner release')
+    no_signing_secrets()
+    require(os.environ.get('CANDIDATE_OPERATION') == 'publish-candidate', 'Explicit publish-candidate operation required')
+    require(approval == os.environ['GITHUB_SHA'] == git('rev-parse', 'HEAD'), 'Publication must use the selected approval main SHA')
+    client = GitHub()
+    require(client.get('/git/ref/heads/main')['object']['sha'] == approval, 'main advanced after dispatch')
+    directory = ROOT / 'accepted-candidate'
+    manifest, provenance = fetch_candidate(client, run_id, attempt, artifact_id, directory)
+    import_snapshot(directory, manifest)
+    version = manifest['version']['versionName']
+    identity = candidate_identity(manifest, provenance)
+    validate_approval_history(manifest['source_sha'], approval, version)
+    readiness = json.loads((ROOT / '.ci/release-readiness.json').read_text(encoding='utf-8'))
+    report_path = report_file(ROOT, readiness.get('device_report', ''), version, approval)
+    report = json.loads(report_path.read_text(encoding='utf-8'))
+    evidence = validate_approval(readiness, report, identity, approval)
+    confirmation = f'{run_id}/{attempt}/{artifact_id}:{identity["apk_sha256"]}'
+    require(os.environ.get('CANDIDATE_CONFIRMATION') == confirmation, 'Owner must confirm the exact accepted candidate and APK hash')
+    tools = build_tools(properties(ROOT / '.ci/toolchain.properties'))
+    apk = directory / 'watch-release.apk'
+    require(sha256(apk) == identity['apk_sha256'], 'Accepted APK hash mismatch')
+    inspect_apk(apk, tools, expected_identity('release', manifest['version']))
+    pin = json.loads((ROOT / '.ci/signing-certificates.json').read_text(encoding='utf-8'))['release']
+    require(certificate(apk, tools, pin) == identity['certificate_sha256'], 'Accepted certificate mismatch')
+    require(version != '0.1.0' or manifest['prerelease'] is True, '0.1.0 must remain a prerelease')
+    tag = 'v' + version
+    protection = verify_protections(client, approval, tag)
+    history, tags = release_history(client)
+    create_tag = validate_release_target(manifest, history, tags)
+    require(client.get('/git/ref/heads/main')['object']['sha'] == approval, 'main changed during publication verification')
+    if create_tag:
+        push_new_tag(tag, manifest['snapshot_sha'], client)
+    # 此记录在重试时保持确定字节；原候选 manifest/校验表完全不改写。
+    publication = {'schema_version': 1, 'candidate': identity, 'approval_sha': approval,
+                   'device_report': readiness['device_report'], 'device_report_sha256': sha256(report_path),
+                   'evidence': evidence, 'approved_at': report['publication_approval']['approved_at'],
+                   'protection': protection, 'tag': tag, 'prerelease': manifest['prerelease']}
+    publication_path = ROOT / 'publication-record.json'
+    write_json(publication_path, publication)
+    files = {name: directory / name for name in sorted(CANDIDATE_FILES)}
+    files['publication-record.json'] = publication_path
+    release_id = publish_assets(client, tag, manifest['snapshot_sha'], files, manifest['prerelease'])
+    _, after_tags = release_history(client)
+    require(after_tags.get(tag) == manifest['snapshot_sha'], 'Published tag identity changed')
+    verify_protections(client, approval, tag)
+    with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+        summary.write(f'Published original candidate `{run_id}/{attempt}/{artifact_id}` as `{tag}` (Release {release_id}). '
+                      f'APK SHA-256: `{identity["apk_sha256"]}`. No compilation or signing was performed.\n')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=['prepare', 'publish'])
+    parser.add_argument('--run-id', required=True, type=int)
+    parser.add_argument('--attempt', required=True, type=int)
+    parser.add_argument('--artifact-id', required=True, type=int)
+    parser.add_argument('--approval-sha', required=True)
     args = parser.parse_args()
-    prepare() if args.operation == 'prepare' else publish()
+    publish(args.run_id, args.attempt, args.artifact_id, args.approval_sha)

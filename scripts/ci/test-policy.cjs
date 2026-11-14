@@ -28,3 +28,54 @@ assert.throws(()=>validateVersionAdvance(version('0.2.0','2'),version('0.2.0','1
 assert.throws(()=>validateVersionAdvance(version('0.3.0','2'),version('0.2.0','2')));
 assert.throws(()=>validateVersionAdvance(version('0.1.0','3'),version('0.2.0','2')));
 console.log('Version format, precedence, monotonicity and limits passed.');
+const {countReachable, validateVersionCeiling, isOwnerSync} = require('./pr-policy.cjs');
+const graph = [
+  {sha: 'root', parents: []}, {sha: 'topic', parents: [{sha: 'root'}]},
+  {sha: 'base', parents: [{sha: 'root'}]}, {sha: 'merge', parents: [{sha: 'base'}, {sha: 'topic'}]},
+];
+assert.equal(countReachable(graph, 'merge'), 4);
+assert.throws(() => countReachable(graph.slice(1), 'merge'));
+assert.throws(() => countReachable([...graph, {sha: 'orphan', parents: []}], 'merge'));
+assert.throws(() => countReachable([...graph, graph[0]], 'merge'));
+validateVersionCeiling(version('0.1.0', '5'), 4, []);
+validateVersionCeiling(version('0.2.0', '11'), 4, [version('0.1.0', '10')]);
+assert.throws(() => validateVersionCeiling(version('0.1.0', '6'), 4, []));
+assert.throws(() => validateVersionCeiling(version('0.2.0', '12'), 4, [version('0.1.0', '10')]));
+assert.throws(() => validateVersionCeiling(version('0.1.0', '1'), 2100000000, []));
+const repository = 'OnlineMo/MeloX-Watch';
+const sync = {user: {login: 'OnlineMo'}, head: {ref: 'main', repo: {full_name: repository}},
+  base: {ref: 'contribution', repo: {full_name: repository}}};
+assert.equal(isOwnerSync(sync, repository), true);
+assert.equal(isOwnerSync({...sync, head: {...sync.head, ref: 'topic'}}, repository), false);
+assert.equal(isOwnerSync({...sync, user: {login: 'other'}}, repository), false);
+assert.equal(isOwnerSync({...sync, head: {...sync.head, repo: {full_name: 'other/MeloX-Watch'}}}, repository), false);
+console.log('Complete-history ceiling and owner synchronization boundaries passed.');
+
+async function testReviewedSync() {
+  const {validateReviewedSync} = require('./pr-policy.cjs');
+  const reviewed = {...sync, head: {...sync.head, sha: 'current-main'}};
+  const promotion = {merged_at: '2026-11-11T00:00:00Z', user: {login: 'OnlineMo'},
+    head: {ref: 'contribution', repo: {full_name: repository}}, merge_commit_sha: 'reviewed-merge'};
+  function client(overrides = {}) {
+    return {
+      rest: {
+        git: {getRef: async () => ({data: {object: {sha: overrides.main || 'current-main'}}})},
+        repos: {
+          getContent: async ({ref}) => ({data: {type: 'file', sha: ref === 'current-main' ? 'version-blob' : overrides.blob || 'version-blob'}}),
+          compareCommitsWithBasehead: async () => ({data: {status: overrides.status || 'ahead'}}),
+          getCommit: async () => ({data: {parents: overrides.parents || [{sha: 'base'}, {sha: 'contribution'}]}}),
+        },
+        pulls: {list: 'list'},
+      },
+      paginate: {iterator: async function* () { yield {data: overrides.promotions || [promotion]}; }},
+    };
+  }
+  await validateReviewedSync(client(), {}, reviewed);
+  for (const changes of [{main: 'new-main'}, {blob: 'unreviewed-version'}, {status: 'diverged'},
+                         {parents: [{sha: 'squashed'}]}, {promotions: []},
+                         {promotions: [{...promotion, user: {login: 'other'}}]}]) {
+    await assert.rejects(() => validateReviewedSync(client(changes), {}, reviewed));
+  }
+  console.log('Exact reviewed sync bytes, current main and merge ancestry passed.');
+}
+testReviewedSync().catch(error => { console.error(error.message); process.exitCode = 1; });
