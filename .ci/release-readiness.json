@@ -1,12 +1,14 @@
 {
+  "schema_version": 2,
+  "candidate": null,
   "device_report": "",
   "owner_approved": false,
   "gates": {
     "P0_device_and_login": false,
     "P1_playback_foundation": false,
     "P2_online_features": false,
-    "P3_round_watch_mvp": false,
-    "watch_x2_background_audio": false,
+    "P3_watch_mvp": false,
+    "reference_device_background_audio": false,
     "privacy_and_source_licenses": false,
     "install_and_known_limitations_docs": false,
     "branch_and_tag_protections": false,

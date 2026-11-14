@@ -1,99 +1,90 @@
-"""Compile only on GitHub; package signed APKs with provenance for local testing."""
+"""云端无秘密编译；稳定证书只由另一台 runner 的 sign.py 使用。"""
 import argparse
-import base64
-import hashlib
 import json
 import os
-from pathlib import Path
-import re
 import shutil
 import subprocess
-import tempfile
 
-from check import ROOT, check, properties
-
-
-def cloud_only():
-    if os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('CI') != 'true':
-        raise SystemExit('Android compilation is cloud-only. Push code and run Cloud build.')
-
-
-def run(command, **kwargs):
-    return subprocess.run(command, check=True, text=True, **kwargs)
+from apk_verify import build_tools, certificate, inspect_apk, require_unsigned
+from check import check
+from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secrets,
+                       properties, require, run_tool, sha256, write_checksums, write_json)
 
 
 def build(mode):
     cloud_only()
-    check(require_android=True, release_snapshot=mode == 'release')
+    no_signing_secrets()
+    check(require_android=True, release_snapshot=mode != 'debug')
     lock = properties(ROOT / '.ci/toolchain.properties')
-    version = properties(ROOT / 'version.properties')  # Snapshot before Gradle executes.
-    build_sha = run(['git', 'rev-parse', 'HEAD'], capture_output=True).stdout.strip()
-    tasks = [f':app:testWatchAndroid{mode.title()}UnitTest', f':app:lintWatchAndroid{mode.title()}',
-             f':app:assembleWatchAndroid{mode.title()}']
-    key = os.environ.get('SIGNING_KEY_B64', '')
-    pins = json.loads((ROOT / '.ci/signing-certificates.json').read_text(encoding='utf-8'))
-    if mode == 'release' and not key:
-        raise SystemExit('Release signing key is required')
-    if os.environ.get('GITHUB_EVENT_NAME') != 'pull_request' and not key:
-        raise SystemExit('Trusted branch builds require the stable signing certificate; no silent fallback')
-    run(['bash', './gradlew', '--no-daemon', '--stacktrace', '--console=plain',
-         '--init-script', '../scripts/ci/enforce.gradle', *tasks], cwd=ROOT / 'android')
-    # Do not trust version files rewritten by a build script.
-    if properties(ROOT / 'version.properties') != version:
-        raise SystemExit('Build modified version metadata')
-    sdk = Path(os.environ.get('ANDROID_HOME') or os.environ['ANDROID_SDK_ROOT'])
-    tools = sdk / 'build-tools' / lock['android.buildTools']
+    version = properties(ROOT / 'version.properties')
+    build_sha = git('rev-parse', 'HEAD')
+    is_pr = os.environ['GITHUB_EVENT_NAME'] == 'pull_request'
+    require(not is_pr or mode == 'debug', 'PR builds only temporary Debug APKs')
+    if mode != 'debug':
+        require(os.environ.get('CANDIDATE_OPERATION') == 'prepare-candidate', 'Use candidate preparation for optimized builds')
+    variant = mode.title()
+    tasks = [f':app:testWatchAndroid{variant}UnitTest', f':app:lintWatchAndroid{variant}',
+             f':app:assembleWatchAndroid{variant}']
+    has_instrumentation = mode == 'diagnostic' and (ROOT / 'android/app/src/androidTest').is_dir()
+    if has_instrumentation:
+        tasks.append(':app:assembleWatchAndroidDiagnosticAndroidTest')
+    environment = dict(os.environ, CI_UNSIGNED_APK='false' if is_pr else 'true')
+    # 不在 Gradle 子进程携带 API token；checkout 也必须 persist-credentials=false。
+    for key in ('GH_TOKEN', 'GITHUB_TOKEN'):
+        environment.pop(key, None)
+    subprocess.run(['bash', './gradlew', '--no-daemon', '--stacktrace', '--console=plain',
+                    '--dependency-verification=strict', '--init-script', '../scripts/ci/enforce.gradle', *tasks],
+                   cwd=ROOT / 'android', env=environment, check=True)
+    require(properties(ROOT / 'version.properties') == version, 'Build modified version metadata')
+    tools = build_tools(lock)
     output = ROOT / 'artifacts'
+    require(not output.exists() or not any(output.iterdir()), 'Build artifact directory must be empty')
     output.mkdir(exist_ok=True)
-    apks = sorted((ROOT / f'android/app/build/outputs/apk/watchAndroid/{mode}').glob('*.apk'))
-    if not apks:
-        raise SystemExit('Expected watchAndroid APK missing')
-    entries = []
-    with tempfile.TemporaryDirectory(prefix='melox-sign-', dir=os.environ.get('RUNNER_TEMP')) as tmp:
-        keystore = Path(tmp) / 'signing.p12'
-        if key:
-            keystore.write_bytes(base64.b64decode(key, validate=True))
-            keystore.chmod(0o600)
-        for apk in apks:
-            badging = run([str(tools / 'aapt'), 'dump', 'badging', str(apk)], capture_output=True).stdout
-            info = re.search(r"package: name='([^']+)' versionCode='([^']+)' versionName='([^']+)'", badging)
-            if not info or info.group(2) != version['versionCode'] or info.group(3) != version['versionName']:
-                raise SystemExit('APK version differs from owner-controlled version.properties')
-            if (mode == 'debug') != info.group(1).endswith('.dev'):
-                raise SystemExit('Debug must use .dev applicationId; release must not')
-            destination = output / apk.name.replace('-unsigned', '')
-            if key:
-                run([str(tools / 'apksigner'), 'sign', '--ks', str(keystore), '--ks-type', 'PKCS12',
-                     '--ks-key-alias', os.environ['SIGNING_ALIAS'], '--ks-pass', 'env:SIGNING_PASSWORD',
-                     '--key-pass', 'env:SIGNING_PASSWORD', '--out', str(destination), str(apk)])
-            else:
-                shutil.copyfile(apk, destination)
-            verified = run([str(tools / 'apksigner'), 'verify', '--verbose', '--print-certs', str(destination)], capture_output=True).stdout
-            fingerprint = re.search(r'certificate SHA-256 digest: ([0-9a-fA-F]+)', verified)
-            if not fingerprint:
-                raise SystemExit('APK signature verification did not return a certificate digest')
-            if key and fingerprint.group(1).lower() != pins.get(mode):
-                raise SystemExit('APK certificate differs from the pinned ' + mode + ' certificate')
-            entries.append({'file': destination.name, 'sha256': hashlib.sha256(destination.read_bytes()).hexdigest(),
-                            'package': info.group(1), 'certificate_sha256': fingerprint.group(1),
-                            'signing': 'stable' if key else 'ephemeral-debug'})
-    manifest = {'source_sha': os.environ.get('SOURCE_SHA') or build_sha, 'build_sha': build_sha,
-                'run_id': os.environ['GITHUB_RUN_ID'], 'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
-                'repository': os.environ['GITHUB_REPOSITORY'], 'mode': mode, 'version': version,
-                'toolchain': lock, 'tasks': tasks, 'artifacts': entries,
-                'device_validation': 'NOT RUN; install these cloud artifacts on the target watch'}
-    if mode == 'release':
-        manifest['main_commit_count'] = int(run(['git', 'rev-list', '--count', 'HEAD^'], capture_output=True).stdout.strip())
-        manifest['release_commit_count'] = int(run(['git', 'rev-list', '--count', 'HEAD'], capture_output=True).stdout.strip())
-        manifest['version_code_policy'] = 'max(main full-history count + release commit, highest previous release code + 1)'
-    (output / 'build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n', encoding='utf-8')
-    files = [output / entry['file'] for entry in entries] + [output / 'build-manifest.json']
-    (output / 'SHA256SUMS').write_text(''.join(hashlib.sha256(file.read_bytes()).hexdigest() + '  ' + file.name + '\n' for file in files), encoding='utf-8')
+    apks = list((ROOT / f'android/app/build/outputs/apk/watchAndroid/{mode}').glob('*.apk'))
+    require(len(apks) == 1, 'Expected exactly one universal watchAndroid APK')
+    apk = apks[0]
+    identity = inspect_apk(apk, tools, expected_identity(mode, version))
+    entry = {'file': f'watch-{mode}.apk', **identity, 'sha256': sha256(apk)}
+    if is_pr:
+        digest = certificate(apk, tools)
+        pins = json.loads((ROOT / '.ci/signing-certificates.json').read_text(encoding='utf-8'))
+        require(digest not in pins.values(), 'PR APK must not use a stable certificate')
+        entry.update(signing='ephemeral-debug', certificate_sha256=digest)
+    else:
+        require_unsigned(apk, tools)
+        entry['signing'] = 'unsigned'
+    shutil.copyfile(apk, output / entry['file'])
+    entries = [entry]
+    if has_instrumentation:
+        test_apks = list((ROOT / 'android/app/build/outputs/apk/androidTest/watchAndroid/diagnostic').glob('*.apk'))
+        require(len(test_apks) == 1, 'Expected one diagnostic instrumentation APK')
+        test_apk = test_apks[0]
+        require_unsigned(test_apk, tools)
+        test_name = 'watch-diagnostic-test.apk'
+        shutil.copyfile(test_apk, output / test_name)
+        entries.append({'file': test_name, 'sha256': sha256(test_apk), 'signing': 'unsigned', 'role': 'instrumentation'})
+    manifest = {
+        'schema_version': 1, 'source_sha': os.environ.get('SOURCE_SHA', build_sha), 'build_sha': build_sha,
+        'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+        'repository': os.environ['GITHUB_REPOSITORY'], 'event': os.environ['GITHUB_EVENT_NAME'],
+        'ref': os.environ['GITHUB_REF'], 'mode': mode, 'version': version, 'toolchain': lock,
+        'tasks': tasks, 'artifacts': entries,
+        'actual_tools': {'java': run_tool(['java', '--version']),
+                         'build_tools': properties(tools / 'source.properties'),
+                         'runner_image': os.environ.get('ImageVersion', 'unknown')},
+        'instrumentation': 'compiled' if has_instrumentation else 'not-present',
+        'device_validation': 'NOT RUN',
+    }
+    write_json(output / 'build-manifest.json', manifest)
+    write_checksums(output)
+    with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output_stream:
+        output_stream.write('has-instrumentation=' + str(has_instrumentation).lower() + '\n')
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
-        summary.write(f'\n## Cloud APK\nBuild SHA: `{build_sha}`\n\nGradle tests, lint and assembly passed. Signatures and checksums verified. Device validation has NOT run.\n')
+        summary.write(f'\nCloud tests/lint/assembly completed for `{build_sha}`. '
+                      f'Signing: `{entry["signing"]}`. Device validation: **NOT RUN**.\n')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', choices=['debug', 'release'])
+    parser.add_argument('mode', choices=['debug', 'release', 'diagnostic'])
     build(parser.parse_args().mode)

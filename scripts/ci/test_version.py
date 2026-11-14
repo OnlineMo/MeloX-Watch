@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch
-from version_policy import authorize_release, next_release
+from version_policy import authorize_release, next_release, validate_frozen_version
 
 
 class VersionPolicyTests(unittest.TestCase):
@@ -8,7 +8,8 @@ class VersionPolicyTests(unittest.TestCase):
         self.assertEqual(next_release('0.1.0', [], 10), 11)
         self.assertEqual(next_release('0.3.0', [('0.2.0', 40), ('0.1.0', 1)], 10), 41)
         self.assertEqual(next_release('0.3.0', [('0.2.0', 4)], 10, {'versionName':'0.3.0','versionCode':'5'}),11)
-        self.assertEqual(next_release('0.4.0', [('0.2.0', 4)], 10, {'versionName':'0.3.0','versionCode':'50'}),11)
+        with self.assertRaises(ValueError):
+            next_release('0.4.0', [('0.2.0', 4)], 10, {'versionName':'0.3.0','versionCode':'50'})
         with self.assertRaises(ValueError):
             next_release('0.3.0', [('0.2.0', 4)], 10, {'versionName':'0.4.0','versionCode':'5'})
         for version in ['0.2.0', '0.1.0', 'v0.3.0', '0.3.0-beta', '00.3.0']:
@@ -21,6 +22,16 @@ class VersionPolicyTests(unittest.TestCase):
         for count in [0, -1, True, 2100000000]:
             with self.assertRaises(ValueError):
                 next_release('0.1.0', [], count)
+
+    def test_frozen_candidate_is_not_recounted_and_rejects_newer_release(self):
+        candidate = {'versionName': '0.2.0', 'versionCode': '20'}
+        validate_frozen_version(candidate, [('0.1.0', 19)])
+        for history in [[('0.1.1', 20)], [('0.2.0', 19)], [('0.3.0', 21)]]:
+            with self.subTest(history=history), self.assertRaises(ValueError):
+                validate_frozen_version(candidate, history)
+        for history in [[('bad', 1)], [('0.1.0', True)], [('0.1.0', 2), ('0.2.0', 1)]]:
+            with self.subTest(history=history), self.assertRaises(ValueError):
+                next_release('1.0.0', history, 10)
 
     def test_release_needs_owner_main_dispatch_and_cloud(self):
         valid = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
