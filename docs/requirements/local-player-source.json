@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "kind": "user-provided-anonymous-functional-specification",
+  "file": "local-player-F001-F128.md",
+  "sha256": "2f1e8217436375a7c27cbddd59e7dbe838365ec4a67c48c56f26b544fde9f167",
+  "feature_count": 128,
+  "normal_acceptance_count": 128,
+  "error_acceptance_count": 128,
+  "policy": "Do not silently replace this snapshot. Owner requires all 128; interpretation and current decisions are in ../21-本地播放器全量需求整合.md."
+}
