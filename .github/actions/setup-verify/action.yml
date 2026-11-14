@@ -1,5 +1,5 @@
 name: Isolated APK verification tools
-description: Install only pinned JDK and APK inspection/signing tools; no Gradle or build cache.
+description: Install only pinned JDK and APK inspection/signing tools; no Gradle or build cache. Policy validation only.
 runs:
   using: composite
   steps:
