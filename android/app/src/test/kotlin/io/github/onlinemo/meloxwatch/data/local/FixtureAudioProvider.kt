@@ -51,7 +51,10 @@ class FixtureAudioProvider : ContentProvider() {
         signal?.throwIfCanceled()
         if (denied) throw SecurityException("Controlled fixture denial")
         // Ordinary resolver reads use */*; only the explicit image request selects the thumbnail.
-        if (mimeTypeFilter != "image/*") return super.openTypedAssetFile(uri, mimeTypeFilter, opts, signal)
+        if (mimeTypeFilter != "image/*") {
+            return super.openTypedAssetFile(uri, mimeTypeFilter, opts, signal)
+                ?: throw FileNotFoundException("Fixture unavailable")
+        }
         beforeThumbnail?.invoke()
         thumbnailReads++
         thumbnailSize = opts?.getParcelable(android.content.ContentResolver.EXTRA_SIZE)

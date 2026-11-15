@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最新云端实际执行Debug214项，173通过、41失败；Release/Diagnostic及设备AC尚未通过。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最近实际执行的Debug214项为173通过、41失败；随后的修复快照在测试编译失败，尚未重跑成功。Release/Diagnostic及设备AC尚未通过。
 
 ## 数据身份、迁移与完整列表
 
@@ -63,6 +63,10 @@ artifact `14175737555`为59632字节、ZIP SHA-256 `f26bf4b752f9dc7bc748d7330e91
 artifact `14176716511`为178294字节，原ZIP SHA-256 `a9ebb34857dc00f65d5ed13fd476114c61cbc8e318fb69bab07f73331a65e1b4`，日志SHA-256 `cb6500b88504676fad76c49c11e749363ad66ba1218d77bc646e944be7806151`。phase证据SHA-256 `e152c72054fa5249717ecf70d31c32f286db87ddea6e3bb3505b0609985fac24`，unit证据SHA-256 `fc626f89fa7742d0ec5df1d608192db09949ca01668b7402d25bd32a36e6b3c0`，匿名失败分类SHA-256 `d47891a86590e5cb35f5b5f276238a3ba8797261fe869cf81640c98308df32a9`。仅verification尝试，7条bounded图记录、metadata XML及schema2是失败诊断；缺完整锁/schema1，不导入基线。原始日志与JUnit内容只在ignored本地留存。
 
 本轮小修复只涉及四个文件，原214个测试定义保持：FixtureAudioProvider仅 `image/*`选择缩略图，其余typed读取委托平台音频路径；统计测试的35字符UUID改为合法36字符，不放松生产轮次身份校验。规则/来源变化已经阻断扫描写入时，取消仍停止自己持有的job并等待物理IO释放，只容忍STOPPING写入的SOURCE_CHANGED，其他存储失败仍传播。provider内容在提取期间变化保留旧metadata但标访问UNAVAILABLE；修正对应测试断言，普通METADATA_UNREADABLE仍可保持AVAILABLE。现有实际provider/扫描/聆听测试将云端重跑，修复未先行记为通过，LP-04/05并行代码仍不在这一快照。
+
+[run `43752940907`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43752940907)/attempt1绑定上述四文件修复source `f57fc7e6f81d5e45123f28a9aa883fee172fe131`、实际checkout `05a5f3065560c9cfe51e277148fec30623e2a952`、compile job `132930754524`。verification在Debug/Diagnostic测试Kotlin编译失败，5分19秒、50任务（46执行/4缓存）；`FixtureAudioProvider.kt:54:49`委托的`ContentProvider.openTypedAssetFile`返回可空`AssetFileDescriptor?`，覆写声明非空类型。补充Elvis分支将平台空结果映射为`FileNotFoundException("Fixture unavailable")`；不使用非空断言、不改生产校验、不再拦截普通音频读取。该次未执行JUnit任务、normal或三个STRICT阶段，无lint XML/APK/签名；原214定义保持，等待精确新快照重跑。
+
+artifact `14177146391`为59631字节，ZIP SHA-256 `183db3bf93c12f515832534e19921abdb990e5268c4f831a0bdc8b185f039fea`，日志SHA-256 `d918dea09f6565145b2dfd1fc5750a03998a8cb7b7e0f22d6d99ceb1b01f7127`，匿名编译错误摘要SHA-256 `9a95f43ffba995e7035e89c7047d1a61b067be56d895aaa26c6e5d9252b7ba11`。归档仅失败诊断，缺完整锁/schema1，schema2仍为上述hash；不导入基线。此小修复仍不包含LP-04/05并行WIP，256原AC/readiness未通过。
 
 合并P1已云验修正与P0被动图诊断后，本地49项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
 
