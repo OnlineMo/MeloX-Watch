@@ -12,12 +12,25 @@
     <string name="probe_input">Input check</string>
     <string name="probe_device">Device information</string>
     <string name="probe_media_title">System audio sample</string>
-    <string name="probe_media_scope">Up to %1$d audio entries are shown. Select one to check that it opens. This sample is not a full music library.</string>
+    <plurals name="probe_media_scope">
+        <item quantity="one">Up to %1$d audio entry is shown. Select it to check that it opens. This sample is not a full music library.</item>
+        <item quantity="other">Up to %1$d audio entries are shown. Select one to check that it opens. This sample is not a full music library.</item>
+    </plurals>
     <string name="probe_refresh">Refresh sample</string>
     <string name="probe_empty_media">No audio entries were returned for this sample. You can choose a file instead.</string>
     <string name="probe_tree_title">Folder check</string>
-    <string name="probe_tree_scope">Check up to %1$d direct children of the selected folder. Subfolders are not scanned.</string>
-    <string name="probe_tree_result">Checked %1$d entries; found %2$d audio candidates.</string>
+    <plurals name="probe_tree_scope">
+        <item quantity="one">Check up to %1$d direct child of the selected folder. Subfolders are not scanned.</item>
+        <item quantity="other">Check up to %1$d direct children of the selected folder. Subfolders are not scanned.</item>
+    </plurals>
+    <plurals name="probe_tree_checked">
+        <item quantity="one">Checked %1$d entry.</item>
+        <item quantity="other">Checked %1$d entries.</item>
+    </plurals>
+    <plurals name="probe_tree_candidates">
+        <item quantity="one">Found %1$d audio candidate.</item>
+        <item quantity="other">Found %1$d audio candidates.</item>
+    </plurals>
     <string name="probe_tree_more">This folder contains more entries beyond the sample.</string>
     <string name="probe_empty_tree">No audio candidates were found in these direct children.</string>
     <string name="probe_keep_tree_access">Keep folder read access</string>

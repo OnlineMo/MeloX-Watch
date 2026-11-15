@@ -66,6 +66,7 @@ android {
         getByName("test").java.srcDir("src/test/kotlin")
     }
     lint {
+        lintConfig = file("lint.xml")
         abortOnError = true
         warningsAsErrors = true
         checkDependencies = true

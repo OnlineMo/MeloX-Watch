@@ -3,7 +3,6 @@ package io.github.onlinemo.meloxwatch.ui
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -53,6 +52,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -63,6 +64,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.Player
@@ -74,6 +76,7 @@ import io.github.onlinemo.meloxwatch.data.ProbeFiles
 import java.net.URI
 import java.net.URISyntaxException
 import java.util.Locale
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private lateinit var probeViewModel: ProbeViewModel
@@ -204,7 +207,7 @@ private fun ProbeApp(viewModel: ProbeViewModel, activity: MainActivity) {
         if (viewModel.hasAudioPermission()) viewModel.readMediaSample() else audioPermission.launch(viewModel.audioPermission)
     }
     val openSettings = {
-        val request = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${activity.packageName}"))
+        val request = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${activity.packageName}".toUri())
         try {
             activity.startActivity(request)
         } catch (_: ActivityNotFoundException) {
@@ -244,7 +247,7 @@ private fun ProbePageContent(page: ProbePage, content: LazyListScope.() -> Unit)
     ) {
         val isRound = configuration.isScreenRound
         val contentWidth = if (isRound) maxWidth * 0.78f else maxWidth - 24.dp
-        val roundInset = configuration.screenHeightDp.dp * 0.22f
+        val roundInset = maxHeight * 0.22f
         val verticalInset = if (isRound && !(page == ProbePage.INPUT && hasKeyboard)) roundInset else 12.dp
         LazyColumn(
             modifier = Modifier.width(contentWidth.coerceAtLeast(48.dp)).align(Alignment.Center),
@@ -283,7 +286,9 @@ private fun LazyListScope.mediaContent(
     openMedia: () -> Unit,
     openSettings: () -> Unit,
 ) {
-    item { BodyText(stringResource(R.string.probe_media_scope, ProbeFiles.MEDIA_SAMPLE_LIMIT)) }
+    item {
+        BodyText(pluralStringResource(R.plurals.probe_media_scope, ProbeFiles.MEDIA_SAMPLE_LIMIT, ProbeFiles.MEDIA_SAMPLE_LIMIT))
+    }
     item { ProbeButton(stringResource(R.string.probe_refresh), enabled = !state.isReading, onClick = openMedia) }
     if (state.needsPermissionSettings) item { ProbeButton(stringResource(R.string.probe_permission_settings), onClick = openSettings) }
     if (state.mediaSample.isEmpty() && !state.isReading && state.fileIssue == null) {
@@ -295,11 +300,16 @@ private fun LazyListScope.mediaContent(
 }
 
 private fun LazyListScope.treeContent(state: ProbeUiState, viewModel: ProbeViewModel, openTree: () -> Unit) {
-    item { BodyText(stringResource(R.string.probe_tree_scope, ProbeFiles.TREE_CHILD_LIMIT)) }
+    item {
+        BodyText(pluralStringResource(R.plurals.probe_tree_scope, ProbeFiles.TREE_CHILD_LIMIT, ProbeFiles.TREE_CHILD_LIMIT))
+    }
     item { ProbeButton(stringResource(R.string.probe_choose_tree), enabled = !state.isReading, onClick = openTree) }
     val sample = state.treeSample
     if (sample != null) {
-        item { BodyText(stringResource(R.string.probe_tree_result, sample.inspectedChildren, sample.audio.size)) }
+        item {
+            BodyText(pluralStringResource(R.plurals.probe_tree_checked, sample.inspectedChildren, sample.inspectedChildren))
+        }
+        item { BodyText(pluralStringResource(R.plurals.probe_tree_candidates, sample.audio.size, sample.audio.size)) }
         item { BodyText(stringResource(accessText(sample.access))) }
         if (sample.reachedLimit) item { BodyText(stringResource(R.string.probe_tree_more)) }
         if (sample.access != ProbeAccess.PERSISTED) {
@@ -456,12 +466,16 @@ private fun InputCheck() {
 @Composable
 private fun DeviceDetails() {
     val configuration = LocalConfiguration.current
+    val windowSize = LocalWindowInfo.current.containerSize
+    val density = LocalDensity.current
+    val widthDp = with(density) { windowSize.width.toDp().value.roundToInt() }
+    val heightDp = with(density) { windowSize.height.toDp().value.roundToInt() }
     val shape = stringResource(if (configuration.isScreenRound) R.string.probe_shape_round else R.string.probe_shape_rectangle)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         BodyText(stringResource(R.string.probe_device_api, android.os.Build.VERSION.SDK_INT))
         BodyText(stringResource(R.string.probe_device_abi, android.os.Build.SUPPORTED_ABIS.joinToString(", ")))
         BodyText(stringResource(R.string.probe_device_shape, shape))
-        BodyText(stringResource(R.string.probe_device_window, configuration.screenWidthDp, configuration.screenHeightDp))
+        BodyText(stringResource(R.string.probe_device_window, widthDp, heightDp))
         BodyText(stringResource(R.string.probe_device_font, configuration.fontScale.toString()))
         BodyText(stringResource(R.string.probe_device_scope))
     }
