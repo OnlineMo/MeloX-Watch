@@ -493,50 +493,94 @@ class RoomLocalLibraryRepositoryTest {
     fun productionLibraryProducerKeeps10000And10001RowsAndNeverPublishesAnExpiredReplacement() = runBlocking {
         val source = source("full")
         val queue = RoomQueueStore(database)
-        queue.initialize()
+        measureFullLibraryStage("initialize-queue", 0L) { queue.initialize() }
         val initial = (0 until 10000).map { audio(source, "item-$it", "Track${it.toString().padStart(5, '0')}.mp3") }
-        append(source, initial)
+        measureFullLibraryStage("seed-library", 10000L) { append(source, initial) }
         var lastSnapshot = queue.snapshot()
         for (count in listOf(10000L, 10001L)) {
-            if (count == 10001L) append(source, listOf(audio(source, "item-10000", "Track10000.mp3")))
-            val view = library.openView(sort = LibrarySort(LibrarySortField.FILENAME_NATURAL))
-            val producer = library.openQueueView(view.viewId)
-            library.closeView(view.viewId)
+            if (count == 10001L) measureFullLibraryStage("seed-extra-row", 1L) {
+                append(source, listOf(audio(source, "item-10000", "Track10000.mp3")))
+            }
+            val producer = measureFullLibraryStage("freeze-library-view", count) {
+                val view = library.openView(sort = LibrarySort(LibrarySortField.FILENAME_NATURAL))
+                val producer = library.openQueueView(view.viewId)
+                library.closeView(view.viewId)
+                producer
+            }
             val request = QueueReplacementRequest("library-$count", lastSnapshot?.generationId, lastSnapshot?.queueRevision ?: 0L,
                 FrozenQueueView(producer.viewId, producer.revision, producer.totalCount))
             val produced = library.queueSource(producer)
             var largestPage = 0
-            val result = queue.replace(request, QueuePageSource { offset, limit ->
-                produced.read(offset, limit).also { largestPage = maxOf(largestPage, it.entries.size) }
-            }).snapshot
-            assertEquals(count, result.entryCount)
-            assertEquals(100, largestPage)
-            val end = queue.page(result.generationId, count - 1L).single()
-            assertEquals(count - 1L, end.originalOrder)
-            assertEquals(count - 1L, end.playbackOrder)
-            assertEquals("Track${(count - 1L).toString().padStart(5, '0')}.mp3", end.displayName)
-            assertEquals(3, queue.window(result.generationId, queue.page(result.generationId, 5000L, 1).single().queueEntryId).entries.size)
+            var sourcePageAttempts = 0L
+            var sourcePageNanos = 0L
+            val result = try {
+                measureFullLibraryStage("replace-queue", count) {
+                    queue.replace(request, QueuePageSource { offset, limit ->
+                        val started = System.nanoTime()
+                        try {
+                            produced.read(offset, limit).also { largestPage = maxOf(largestPage, it.entries.size) }
+                        } finally {
+                            sourcePageAttempts += 1L
+                            sourcePageNanos += System.nanoTime() - started
+                        }
+                    })
+                }.snapshot
+            } finally {
+                println("LIBRARY_FULL_LIST_STAGE stage=source-pages state=summary count=$sourcePageAttempts elapsedMs=${sourcePageNanos / 1_000_000L}")
+            }
+            measureFullLibraryStage("verify-complete-queue", count) {
+                assertEquals(count, result.entryCount)
+                assertEquals(100, largestPage)
+                val end = queue.page(result.generationId, count - 1L).single()
+                assertEquals(count - 1L, end.originalOrder)
+                assertEquals(count - 1L, end.playbackOrder)
+                assertEquals("Track${(count - 1L).toString().padStart(5, '0')}.mp3", end.displayName)
+                assertEquals(3, queue.window(result.generationId, queue.page(result.generationId, 5000L, 1).single().queueEntryId).entries.size)
+            }
             lastSnapshot = result
-            library.closeView(producer.viewId)
+            measureFullLibraryStage("close-producer-view", count) { library.closeView(producer.viewId) }
         }
-        val view = library.openView()
-        val producer = library.openQueueView(view.viewId)
-        library.closeView(view.viewId)
+        val producer = measureFullLibraryStage("freeze-expiring-view", 10001L) {
+            val view = library.openView()
+            val producer = library.openQueueView(view.viewId)
+            library.closeView(view.viewId)
+            producer
+        }
         val sourcePages = library.queueSource(producer)
         val old = lastSnapshot ?: throw AssertionError("complete queue")
+        measureFullLibraryStage("expired-replacement", 10001L) {
+            try {
+                queue.replace(QueueReplacementRequest("expired-library", old.generationId, old.queueRevision,
+                    FrozenQueueView(producer.viewId, producer.revision, producer.totalCount)), QueuePageSource { offset, limit ->
+                    if (offset > 0L) elapsed += LibraryLimits.VIEW_LEASE_MS + 1L
+                    sourcePages.read(offset, limit)
+                })
+                throw AssertionError("expired source must abort")
+            } catch (error: QueueStoreException) { assertEquals(QueueStoreIssue.SOURCE_CHANGED, error.issue) }
+        }
+        measureFullLibraryStage("verify-original-queue", 10001L) {
+            assertEquals(old, queue.snapshot())
+            assertEquals(10001L, database.queueDao().orderStats(old.generationId).entryCount)
+        }
+        measureFullLibraryStage("close-expired-view", 10001L) { library.closeView(producer.viewId) }
+        measureFullLibraryStage("reopen-original-queue", 10001L) {
+            reopen()
+            assertEquals(old, RoomQueueStore(database).initialize())
+        }
+    }
+
+    /** Monotonic fixture phases separate scanning, queue reads and reclamation without source data. */
+    private suspend fun <T> measureFullLibraryStage(stage: String, count: Long, action: suspend () -> T): T {
+        val started = System.nanoTime()
+        var completed = false
+        println("LIBRARY_FULL_LIST_STAGE stage=$stage state=started count=$count")
         try {
-            queue.replace(QueueReplacementRequest("expired-library", old.generationId, old.queueRevision,
-                FrozenQueueView(producer.viewId, producer.revision, producer.totalCount)), QueuePageSource { offset, limit ->
-                if (offset > 0L) elapsed += LibraryLimits.VIEW_LEASE_MS + 1L
-                sourcePages.read(offset, limit)
-            })
-            throw AssertionError("expired source must abort")
-        } catch (error: QueueStoreException) { assertEquals(QueueStoreIssue.SOURCE_CHANGED, error.issue) }
-        assertEquals(old, queue.snapshot())
-        assertEquals(10001L, database.queueDao().orderStats(old.generationId).entryCount)
-        library.closeView(producer.viewId)
-        reopen()
-        assertEquals(old, RoomQueueStore(database).initialize())
+            return action().also { completed = true }
+        } finally {
+            val state = if (completed) "completed" else "failed"
+            val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+            println("LIBRARY_FULL_LIST_STAGE stage=$stage state=$state count=$count elapsedMs=$elapsedMs")
+        }
     }
 
     private fun open(): MeloXDatabase = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
