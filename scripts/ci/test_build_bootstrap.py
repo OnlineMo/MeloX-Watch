@@ -252,7 +252,31 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         manifest = self.manifest()
         self.assertIn(schema, manifest['missing_inputs_at_start'])
         self.assertIn(schema, manifest['files'])
+        self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
+        self.assertTrue(manifest['report_matches_strict_inputs'])
         self.assertEqual(manifest['missing_outputs'], [])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_bootstrap_rejects_room_schema_drift_during_independent_strict_validation(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        schema = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
+
+        def generated(command, **kwargs):
+            if '--write-locks' in command:
+                self.write_inputs((*build.DEPENDENCY_REPORT_FILES, schema))
+            else:
+                (self.android / schema).write_text('different generated schema\n', encoding='utf-8')
+
+        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'changed dependency input bytes'):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertFalse(manifest['report_matches_strict_inputs'])
         self.assertFalse(manifest['accepted'])
         self.assertFalse((self.root / 'artifacts').exists())
 

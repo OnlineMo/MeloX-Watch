@@ -78,6 +78,7 @@ def generated_input_hashes():
         source = android / relative
         if source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(android):
             files[relative] = sha256(source)
+    files.update(room_schema_hashes())
     return files
 
 
@@ -101,7 +102,7 @@ def bootstrap_dependencies(build_sha, missing):
             subprocess.run(phase['command'], cwd=android, env=gradle_environment(unsigned=True), check=True)
             if phase['name'] == 'normal-lock-collection':
                 strict_input_hashes = generated_input_hashes()
-                require(all(name in strict_input_hashes for name in DEPENDENCY_INPUTS),
+                require(all(name in strict_input_hashes for name in required_build_inputs()),
                         'Dependency collection did not produce all required inputs')
             elif phase['name'].startswith('strict-'):
                 require(generated_input_hashes() == strict_input_hashes,
