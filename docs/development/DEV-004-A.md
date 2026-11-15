@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 源码：单`:app`工程正在建设，包含运行时圆/方屏布局、真实输入检查、文件/目录授权能力探测、MediaStore少量样本及单会话本地播放。
-- 云端：第五轮资料采集的三变体编译、lint和assemble已成功，应用单测均NO-SOURCE；bootstrap按合同拒绝导出APK。完整校验XML与app锁已审阅并按原字节导入，严格构建与签名仍待验证。精确证据见下文。
+- 云端：第五轮资料采集的三变体编译、lint和assemble已成功，应用单测均NO-SOURCE；bootstrap按合同拒绝导出APK。原字节导入后的严格构建因锁与正常解析不一致失败；已保留校验XML、撤回app锁，改为五阶段重新收集。严格构建与签名仍待验证。精确证据见下文。
 - 设备：2026-11-15T10:38:11Z只读`adb devices -l`返回空清单。DEV-001的API/ABI/窗口、DEV-002安装/耳机/30分钟后台、DEV-005用户文件及输入、DEV-004-B性能基线均未测；minSdk26仍为候选，不能由云端成功推断设备可用。
 - 完整功能：LP-00～15、网易云及Meting业务尚未验收，256个原AC无通过证据。readiness全部false、candidate=null；无公开、tag、Release或发布批准。
 
@@ -42,5 +42,7 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 完整报告artifact`14161820850`为54927字节、12个成员，归档SHA-256`2c0ebbe0a20e67af4e100450008a1423d54a283ea6f299b41938bc93ec4674a1`与GitHub digest一致。manifest为`generated-unreviewed`、`missing_outputs=[]`、`accepted=false`、`apk_exported=false`。校验XML为211835字节、SHA-256`651c09fe2f027be20bb85ae35f2394217caeb3c916b60bde44bd1a5a603af204`；app锁为101673字节、SHA-256`59e819943f974ff13698d0bf601db920acb87ce835280c2ac3eda0ccdfb57bf7`。审阅确认459个组件/809个制品、256锁行/186配置与三变体实际任务绑定；809项官方哈希全部匹配，51项文件名映射依据已校验的官方Gradle Module Metadata，零未解决项、零哈希冲突。
 
 在用户委托的中间审阅范围内，已批准只导入上述两个云端原始文件并读回相同哈希；审查缓存、工具和研究材料未入库。许可分类和审阅摘要见[依赖记录](DEV-004-A-dependencies.md#5-完整资料审阅与原字节导入)。这次导入不是严格构建、签名或设备验收，后续须按提交后的精确源码重新运行正常云端检查。
+
+随后严格 [run `43715744440`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43715744440) / attempt `1` 绑定 source `fed57fe45ddce8abe3f0a539af00d4ee537ad7e3`、merge build `7ce14e92c5c7db792147be0835a091f6b9106e5c`，编译 job `132816825049`。`checkWatchAndroidDebugAarMetadata` 因锁中的 `org.jetbrains.kotlin:kotlin-stdlib-common:2.2.21` 未解析而失败；Gradle `BUILD FAILED in 1m 25s`，两项任务执行。命令没有生成参数，本次未编译源码、lint、assemble、上传 artifact 或签名。原锁从当前输入撤回，以五阶段采集及独立严格验证替代一次性生成；原始归档和历史字节保留，原因调查和本地边界检查见[依赖记录第 6 节](DEV-004-A-dependencies.md#6-严格构建失败与重新收集)。新策略尚待实际云端验证。
 
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。
