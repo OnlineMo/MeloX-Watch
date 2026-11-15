@@ -38,7 +38,6 @@
     <string name="probe_access_persisted">系统已保存读取权；重新打开时仍会检查文件是否可用。</string>
     <string name="probe_access_media">使用当前系统音频权限；撤销权限后将无法重新打开。</string>
     <string name="probe_access_rejected">提供方未保存长期读取权，本次会话可能仍可读取。</string>
-    <string name="probe_play_selected">播放所选音频</string>
     <string name="probe_play">播放</string>
     <string name="probe_pause">暂停</string>
     <string name="probe_choose_another">选择其他文件</string>

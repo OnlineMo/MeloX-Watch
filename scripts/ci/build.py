@@ -13,6 +13,26 @@ from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secr
 
 DEPENDENCY_INPUTS = ('gradle/verification-metadata.xml', 'app/gradle.lockfile')
 DEPENDENCY_REPORT_FILES = (*DEPENDENCY_INPUTS, 'gradle.lockfile')
+ROOM_DATABASE_SOURCE = 'app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/database/MeloXDatabase.kt'
+ROOM_SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase'
+
+
+def required_build_inputs():
+    # 初始 schema 是后续迁移基线；无 Room 的 P0 不要求虚构此文件。
+    schemas = (ROOM_SCHEMA_DIRECTORY + '/1.json',) if (ROOT / 'android' / ROOM_DATABASE_SOURCE).is_file() else ()
+    return (*DEPENDENCY_INPUTS, *schemas)
+
+
+def room_schema_hashes():
+    android = (ROOT / 'android').resolve()
+    directory = android / ROOM_SCHEMA_DIRECTORY
+    files = {}
+    for source in sorted(directory.glob('*.json')):
+        require(source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(android),
+                'Room schema must be a regular file within the Android project')
+        require(source.stem.isdecimal() and int(source.stem) > 0, 'Room schema version must be positive')
+        files[source.relative_to(android).as_posix()] = sha256(source)
+    return files
 
 
 def gradle_tasks(mode):
@@ -39,7 +59,7 @@ def gradle_command(tasks):
 
 def missing_dependency_inputs():
     missing = []
-    for relative in DEPENDENCY_INPUTS:
+    for relative in required_build_inputs():
         path = ROOT / 'android' / relative
         if not path.is_file() or path.is_symlink():
             missing.append(relative)
@@ -65,7 +85,7 @@ def bootstrap_dependencies(build_sha, missing):
         report = android / 'app/build/reports/dependency-bootstrap'
         report.mkdir(parents=True, exist_ok=True)
         files = {}
-        for relative in DEPENDENCY_REPORT_FILES:
+        for relative in (*DEPENDENCY_REPORT_FILES, *room_schema_hashes()):
             source = android / relative
             if source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(android.resolve()):
                 target = report / relative
@@ -78,11 +98,12 @@ def bootstrap_dependencies(build_sha, missing):
             'event': os.environ['GITHUB_EVENT_NAME'], 'ref': os.environ['GITHUB_REF'], 'tasks': tasks,
             'status': 'generated-unreviewed' if completed else 'failed-partial',
             'missing_inputs_at_start': missing,
-            'missing_outputs': [name for name in DEPENDENCY_INPUTS if name not in files],
+            'missing_outputs': [name for name in required_build_inputs() if name not in files],
             'files': files, 'accepted': False, 'apk_exported': False,
         })
     require(False, 'Dependency bootstrap is not an accepted build. Review and commit the generated '
-            'verification metadata and lockfile from dependency-bootstrap reports, then rebuild strictly.')
+            'verification metadata, lockfile and generated Room schemas from dependency-bootstrap reports, '
+            'then rebuild strictly.')
 
 
 def build(mode):
@@ -104,10 +125,13 @@ def build(mode):
                 'Committed strict dependency inputs are missing: ' + ', '.join(missing) + '. '
                 'Only a temporary Debug PR may bootstrap dependency reports; trusted builds cannot.')
         bootstrap_dependencies(build_sha, missing)
+    schemas_before = room_schema_hashes()
     environment = gradle_environment(unsigned=not is_pr)
     subprocess.run(gradle_command(tasks),
                    cwd=ROOT / 'android', env=environment, check=True)
     require(properties(ROOT / 'version.properties') == version, 'Build modified version metadata')
+    require(room_schema_hashes() == schemas_before,
+            'Build changed the reviewed Room schema. Collect and review schema changes in a PR bootstrap.')
     tools = build_tools(lock)
     output = ROOT / 'artifacts'
     require(not output.exists() or not any(output.iterdir()), 'Build artifact directory must be empty')

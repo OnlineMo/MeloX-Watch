@@ -42,7 +42,6 @@
     <string name="probe_access_persisted">The system saved read access. Reopening will still check that the file is available.</string>
     <string name="probe_access_media">Uses the current system audio permission. Revoking that permission prevents reopening.</string>
     <string name="probe_access_rejected">The provider did not save permanent access. This session may still read the file.</string>
-    <string name="probe_play_selected">Play selected audio</string>
     <string name="probe_play">Play</string>
     <string name="probe_pause">Pause</string>
     <string name="probe_choose_another">Choose another file</string>
