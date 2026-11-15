@@ -136,6 +136,29 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['strict_input_hashes']['app/gradle.lockfile'], build.sha256(copied))
         self.assertFalse(manifest['accepted'])
 
+    def test_explicit_graph_failure_never_accepts_complete_writer_inputs(self):
+        def generated(command, **kwargs):
+            if build.LOCK_COLLECTION_TASK in command:
+                raise subprocess.CalledProcessError(1, command)
+            self.write_inputs(build.DEPENDENCY_REPORT_FILES)
+
+        with patch.object(build.subprocess, 'run', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaises(subprocess.CalledProcessError):
+                build.build('debug')
+            self.assertEqual(process.call_count, 2)
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['missing_outputs'], [])
+        self.assertEqual(manifest['files'].keys(), set(build.DEPENDENCY_REPORT_FILES))
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertEqual([phase.get('status') for phase in manifest['phases']],
+                         ['completed', 'started', None, None, None])
+        self.assertIsNone(manifest['strict_input_hashes'])
+        self.assertIsNone(manifest['report_matches_strict_inputs'])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse(manifest['apk_exported'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
     def test_independent_strict_failure_does_not_complete_collection_or_export(self):
         def generated(command, **kwargs):
             if '--write-locks' in command:

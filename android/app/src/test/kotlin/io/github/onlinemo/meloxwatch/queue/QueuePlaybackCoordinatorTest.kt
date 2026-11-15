@@ -2,7 +2,7 @@ package io.github.onlinemo.meloxwatch.queue
 
 import android.os.Looper
 import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
+import androidx.media3.exoplayer.ExoPlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -428,7 +428,7 @@ class QueuePlaybackCoordinatorTest {
         override fun getShuffleModeEnabled(): Boolean = live { delegate.shuffleModeEnabled }
         override fun getPlayWhenReady(): Boolean = live { delegate.playWhenReady }
         override fun getPlaybackState(): Int = live { delegate.playbackState }
-        override fun getPlayerError(): PlaybackException? = live { delegate.playerError }
+        override fun getPlayerError(): ExoPlaybackException? = live { delegate.playerError }
         override fun getCurrentMediaItem(): MediaItem? = live { delegate.currentMediaItem }
         override fun getCurrentMediaItemIndex(): Int = live { delegate.currentMediaItemIndex }
         override fun getMediaItemCount(): Int = live { delegate.mediaItemCount }

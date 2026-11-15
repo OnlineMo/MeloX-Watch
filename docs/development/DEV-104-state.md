@@ -34,6 +34,8 @@
 
 报告artifact `14165955171` 为 `failed-partial`；KSP曾生成三张队列表的schema1，但缺少app锁及完整严格阶段，因此未导入任何失败资料或把它当迁移验收基线。下一轮已沿用P0显式配置解析收集修正，仍须真实云端58项测试、严格锁/schema和APK证据。
 
+第二轮 [run `43726829869`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43726829869) / attempt `1` 绑定 source `24ba3c10847c7b79eceab3adc4ea703a8fdb986a`、merge build `7b6e82797ab2b4ca6b3ca7d8c8e9bc803ebf2b5f`、job `132850534757`。资料第一阶段推进到单元测试源码编译，`ReleaseGuard.getPlayerError()` 返回类型与固定 ExoPlayer 接口不符，尚未执行58项测试；按官方1.8.0公开接口修正为 `ExoPlaybackException?`。日志SHA-256 `506818623460cd720f61367f3f3901b7d2f460cae84566610be493ccdb40c3e5`，报告artifact `14167380191` 继续仅作失败证据，不导入依赖或schema。本地未编译或执行应用测试。
+
 ## 后续必需实现
 
 本主题只提供完整持久队列与设置基础，探针来源检查仍是少量样本。LP-01/02的完整扫描与授权恢复、LP-03真实曲库/统计、LP-04完整增删重排/点击策略/可配置模式、LP-05双后端，以及歌词/音效/文件写入/备份/主题/传输/手机端和在线业务，均继续按05及21实现。初始化schema、实际迁移与库→队列的完整冻结查询将随对应主题重验。
