@@ -14,6 +14,7 @@
 | --- | --- | --- | --- |
 | `androidx.activity:activity-compose:1.11.0` | Apache-2.0 | Activity 的 Compose 容器与系统选择/权限结果入口 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/activity/activity-compose/1.11.0/activity-compose-1.11.0.pom) |
 | `androidx.core:core-ktx:1.17.0` | Apache-2.0 | AndroidX 基础兼容与 Kotlin 扩展 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/core/core-ktx/1.17.0/core-ktx-1.17.0.pom) |
+| `androidx.compose.runtime:runtime:1.9.3` | Apache-2.0 | 页面直接使用的 Composable、remember、mutableStateOf 和状态委托 API | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/runtime/runtime/1.9.3/runtime-1.9.3.pom) |
 | `androidx.compose.ui:ui:1.9.3` | Apache-2.0 | 按实际窗口/形状布局、文字与可访问语义 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/ui/ui/1.9.3/ui-1.9.3.pom) |
 | `androidx.compose.foundation:foundation:1.9.3` | Apache-2.0 | 有界列表、滚动和触控基础 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/foundation/foundation/1.9.3/foundation-1.9.3.pom) |
 | `androidx.compose.material3:material3:1.4.0` | Apache-2.0 | 共用按钮、状态和输入控件 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/1.4.0/material3-1.4.0.pom) |
@@ -126,3 +127,17 @@ artifact `14172965073` 原始ZIP55233字节、SHA-256 `322e8a51c8d5a12c1b7ff4a17
 公开 `runtime`、`runtime-android`、`kotlin-stdlib`、`kotlin-stdlib-common` 的四份module元数据已与本轮云端verification SHA逐一匹配。runtime-android的runtime变体原本声明stdlib/common无版本dependencies和2.0.21 constraints；common2.2.21仅依赖stdlib2.2.21且无文件载荷。尚未观察到normal/strict实际选择的Compose变体，不能把变体变化或KGP排除写成根因。
 
 下一轮被动记录schema2新增 `compose_runtime_components` 固定数组，仅含 `androidx.compose.runtime:{runtime,runtime-android}` 的实际组件和selected variants/attributes/external variants。从同一次已缓存allComponents读取，最多8个目标组件、每组件16个变体，沿用属性allowlist、外部变体深度及128KiB记录上限，超界明确unavailable。既有stdlib字段、首次图/collector快照、五阶段和严格失败拒绝保持；不新增解析、文件选择、依赖声明、metadata规则或属性修改。schema2及真实Compose变体比较仍须下一轮云端结果；当前没有导入失败锁/schema或通过虚假runtime依赖绕过。
+
+## 11. Compose最终变体相同，首次遍历仍未观测
+
+schema2观察 [run `43743698860`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43743698860) / attempt `1` 绑定source `37fa31c306af08cb74c32d547cacd61f24c7feab`、实际checkout `625e522b2a4cf59d6508915ccfdd4e90c4518a1c`、job `132902280553`。artifact `14172714307` 的ZIP SHA-256为 `de63a738231c0d248cbf05cd4ceb3f30c6f2814fde872f9b74e8bf81ece23b82`，日志SHA-256为 `d78b0d627e8ac1875cc9bf048c764416ce3995f0a13175490672cccbdd30f1f1`。normal Debug仍是101组件/560边/0未解析，STRICT仍是100组件/655边/1未解析；真实 `runtime-android→kotlin-stdlib-common` 无版本非constraint边仅在normal存在。最终选中的Compose组件、变体、属性和external variant链相同，不能再以最终变体变化解释差异。XML/锁字节未变，报告仍为failed-partial，不接受或导出APK。
+
+固定Gradle8.13源码的 [NodeState依赖缓存](https://github.com/gradle/gradle/blob/073314332697ba45c16c0a0ce1891fa6794179ff/platforms/software/dependency-management/src/main/java/org/gradle/api/internal/artifacts/ivyservice/resolveengine/graph/builder/NodeState.java#L456)显示：available-at变体首次没有transitive入边时，转发依赖可以被包装为非transitive并缓存；后来增加transitive入边并不在同一路径直接清除缓存。这是待验证的遍历顺序线索，公开最终图没有记录该次首次遍历。锁失败在构图后追加的公开constraint使用普通required selector，也不能据它的空strict字段推断原锁没有严格生效。没有证明完整根因，不升级工具链或修改元数据来猜测修复。
+
+## 12. 实际使用的Compose runtime直依赖候选
+
+MainActivity直接import并使用 `Composable`、`remember`、`mutableStateOf`、`getValue`、`setValue`，模块此前只从ui/foundation/material3间接获得这些API。现显式声明 `implementation(libs.compose.runtime)`，catalog使用既有compose `1.9.3`版本；不增加stdlib-common依赖、force、exclude或锁例外。runtime及runtime-android已经在之前实际解析/校验集合中，此改动修正应用自身使用的API依赖关系；是否也消除normal/STRICT差异须由新的云端结果判断。
+
+官方runtime POM SHA-256为 `69328184c18942c76de6bca124ca12199521cc15e25c59ada4ba634fb24ec79f`，声明Apache-2.0。实际Gradle module SHA-256为 `2aadf5f7259810646799e6972b9ff582173576cae03819b5c07622ba6fdd7b10`，与既有校验XML一致；XML没有该POM行，未将不存在的校验记成匹配。本地来源审阅摘要SHA-256为 `93de70823b53adb93f4810708744ce328a93b0dab9eba969bfd745d639fa57e5`，原材料仅保留ignored区，未执行本地Android构建。
+
+候选仍须五阶段实际完成，normal/STRICT都选common2.2.21的 `stdlibCommonElements`，真实runtime-android→common无版本非constraint边及common→stdlib边保持一致，STRICT root锁约束成功解析，三个独立STRICT阶段不改XML/锁字节，首次图与collector快照逐一匹配。完整报告再独立审阅和导入，后续严格PR构建才可能导出可验收APK；目前没有修复成功、签名或设备通过声明。
