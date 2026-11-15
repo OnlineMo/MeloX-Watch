@@ -22,6 +22,7 @@ def diagnosticConfigurations = (['implementationDependenciesMetadata'] +
     }) as Set
 def diagnosticModules = ['kotlin-stdlib', 'kotlin-stdlib-common', 'kotlin-stdlib-jdk7',
                          'kotlin-stdlib-jdk8'] as Set
+def diagnosticComposeModules = ['runtime', 'runtime-android'] as Set
 def diagnosticAttributeNames = [
     'artifactType', 'com.android.build.api.attributes.AgpVersionAttr',
     'com.android.build.api.attributes.BuildTypeAttr',
@@ -33,6 +34,7 @@ def diagnosticAttributeNames = [
 ] as Set
 def diagnosticUnavailableCodes = [
     'graph-component-bound', 'graph-edge-bound', 'stdlib-component-bound', 'stdlib-edge-bound',
+    'compose-component-bound',
     'variant-bound', 'external-variant-bound', 'attribute-bound', 'unresolved-class-bound',
     'unsafe-text', 'record-byte-bound',
     'unsupported-component-identifier', 'unsupported-dependency-result',
@@ -83,7 +85,7 @@ diagnosticVariant = { variant, depth ->
 }
 def dependencyCollectorActive = false
 def emitDependencyDiagnostic = { project, configuration, origin, cachedResult ->
-    def base = [schema_version: 1, phase: dependencyDiagnosticPhase, project: project.path,
+    def base = [schema_version: 2, phase: dependencyDiagnosticPhase, project: project.path,
                 configuration: configuration.name, origin: origin]
     def record
     try {
@@ -103,6 +105,12 @@ def emitDependencyDiagnostic = { project, configuration, origin, cachedResult ->
         }
         diagnosticBound(stdlibComponents.size() <= 32, 'stdlib-component-bound')
         diagnosticBound(stdlibEdges.size() <= 512, 'stdlib-edge-bound')
+        // 直接观察真实依赖发起方的选中变体；即使它的stdlib边消失，也不靠边反推变体。
+        def composeComponents = components.findAll { component ->
+            component.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                component.id.group == 'androidx.compose.runtime' && diagnosticComposeModules.contains(component.id.module)
+        }
+        diagnosticBound(composeComponents.size() <= 8, 'compose-component-bound')
         def unresolvedClasses = [:]
         dependencies.findAll {
             it instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult
@@ -112,6 +120,13 @@ def emitDependencyDiagnostic = { project, configuration, origin, cachedResult ->
             diagnosticBound(unresolvedClasses.size() <= 64, 'unresolved-class-bound')
         }
         def selectedComponents = stdlibComponents.collect { component ->
+            diagnosticBound(component.variants.size() <= 16, 'variant-bound')
+            [component: diagnosticComponent(component.id),
+             selected_variants: component.variants.collect { diagnosticVariant(it, 0) }.sort {
+                 groovy.json.JsonOutput.toJson(it)
+             }]
+        }.sort { groovy.json.JsonOutput.toJson(it.component) }
+        def selectedComposeComponents = composeComponents.collect { component ->
             diagnosticBound(component.variants.size() <= 16, 'variant-bound')
             [component: diagnosticComponent(component.id),
              selected_variants: component.variants.collect { diagnosticVariant(it, 0) }.sort {
@@ -143,7 +158,8 @@ def emitDependencyDiagnostic = { project, configuration, origin, cachedResult ->
                          graph: [component_count: components.size(), dependency_count: dependencies.size(),
                                  unresolved_dependency_count: unresolvedClasses.values().sum(0),
                                  unresolved_failure_classes: unresolvedClasses.sort()],
-                         stdlib_components: selectedComponents, stdlib_edges: requestedEdges]
+                         stdlib_components: selectedComponents, stdlib_edges: requestedEdges,
+                         compose_runtime_components: selectedComposeComponents]
         diagnosticBound(groovy.json.JsonOutput.toJson(record).getBytes('UTF-8').length <= 128 * 1024,
                         'record-byte-bound')
     } catch (Exception failure) {
