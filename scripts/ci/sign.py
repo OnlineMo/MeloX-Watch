@@ -100,12 +100,16 @@ def sign(mode):
             target = output / entry['file']
             run_tool([str(tools / 'apksigner'), 'sign', '--ks', str(keystore), '--ks-type', 'PKCS12',
                       '--ks-key-alias', 'melox-' + signing_kind, '--ks-pass', 'env:SIGNING_PASSWORD',
-                      '--key-pass', 'env:SIGNING_PASSWORD', '--out', str(target), str(directory / entry['file'])])
+                      '--key-pass', 'env:SIGNING_PASSWORD', '--v4-signing-enabled', 'false',
+                      '--out', str(target), str(directory / entry['file'])])
             digest = certificate(target, tools, pins[signing_kind])
             inspect_apk(target, tools, entry.pop('identity'))
             entry.update(unsigned_sha256=entry['sha256'], sha256=sha256(target),
                          signing='stable', certificate_sha256=digest)
     manifest['input_artifact'] = verified['input_artifact']
+    # 默认v4会额外写.idsig旁文件；归档契约只包含声明APK、manifest及校验和。
+    require({path.name for path in output.iterdir()} == {entry['file'] for entry in manifest['artifacts']},
+            'Signing produced unexpected files; no signed archive may be uploaded')
     write_json(output / 'build-manifest.json', manifest)
     write_checksums(output)
 
