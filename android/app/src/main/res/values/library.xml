@@ -26,7 +26,10 @@
     <string name="library_more_exclusions">More exclusions</string>
     <string name="library_overview">Visible: %1$d · Library total: %2$d</string>
     <string name="library_page_range">%1$d–%2$d of %3$d</string>
-    <string name="library_group_count">%1$s · %2$d songs</string>
+    <plurals name="library_group_count">
+        <item quantity="one">%1$s · %2$d song</item>
+        <item quantity="other">%1$s · %2$d songs</item>
+    </plurals>
     <string name="library_empty">No songs in this view. Add a source or change the search and filters.</string>
     <string name="library_detail_missing">This song is no longer in the current view. Refresh the library to locate it.</string>
     <string name="library_parent_folder">Parent folder</string>
@@ -66,7 +69,10 @@
     <string name="library_artwork_value">Artwork source: %1$s</string>
     <string name="library_artwork">Artwork for %1$s</string>
     <string name="library_refresh_visible_artwork">Refresh visible artwork (%1$d)</string>
-    <string name="library_artwork_refresh_confirmation">Refresh artwork for these %1$d visible items? The confirmed scope stays fixed, with up to 32 items.</string>
+    <plurals name="library_artwork_refresh_confirmation">
+        <item quantity="one">Refresh artwork for %1$d visible item? The confirmed scope stays fixed, with up to 32 items.</item>
+        <item quantity="other">Refresh artwork for %1$d visible items? The confirmed scope stays fixed, with up to 32 items.</item>
+    </plurals>
     <string name="library_artwork_refresh_confirm">Confirm artwork refresh</string>
     <string name="library_artwork_refresh_running">Refreshing artwork…</string>
     <string name="library_artwork_refresh_completed">Artwork refresh finished.</string>
@@ -175,7 +181,10 @@
     <string name="library_recovery_required">Saved data needs recovery. Keep the app data and try again.</string>
     <string name="library_listening_rules">Only actual playback progress adds listening time. Each play round counts once after the shorter of 30 seconds or half the known duration.</string>
     <string name="library_listening_totals">Total play count: %1$d · Listened: %2$s</string>
-    <string name="library_today_listening">Today: %1$d plays · Listened: %2$s</string>
+    <plurals name="library_today_listening">
+        <item quantity="one">Today: %1$d play · Listened: %2$s</item>
+        <item quantity="other">Today: %1$d plays · Listened: %2$s</item>
+    </plurals>
     <string name="library_today_scope">%1$s · Current zone: %2$s\nGrouped by the dates recorded during playback.</string>
     <string name="library_history_scope">History entries: %1$d · The latest 1,000 entries are kept.</string>
     <string name="library_history_empty">No listening history yet. History starts after audio actually advances.</string>

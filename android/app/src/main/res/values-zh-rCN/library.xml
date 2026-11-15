@@ -26,7 +26,9 @@
     <string name="library_more_exclusions">更多排除项</string>
     <string name="library_overview">显示 %1$d 首 · 库内共 %2$d 首</string>
     <string name="library_page_range">第 %1$d–%2$d 首，共 %3$d 首</string>
-    <string name="library_group_count">%1$s · %2$d 首</string>
+    <plurals name="library_group_count">
+        <item quantity="other">%1$s · %2$d 首</item>
+    </plurals>
     <string name="library_empty">此列表没有歌曲。请添加来源，或调整搜索和过滤条件。</string>
     <string name="library_detail_missing">当前列表中找不到这首歌曲，请刷新音乐库后定位。</string>
     <string name="library_parent_folder">上级文件夹</string>
@@ -66,7 +68,9 @@
     <string name="library_artwork_value">封面来源：%1$s</string>
     <string name="library_artwork">%1$s 的封面</string>
     <string name="library_refresh_visible_artwork">刷新可见封面（%1$d 项）</string>
-    <string name="library_artwork_refresh_confirmation">刷新这 %1$d 个可见项的封面？确认后范围固定，最多 32 项。</string>
+    <plurals name="library_artwork_refresh_confirmation">
+        <item quantity="other">刷新这 %1$d 个可见项的封面？确认后范围固定，最多 32 项。</item>
+    </plurals>
     <string name="library_artwork_refresh_confirm">确认刷新封面</string>
     <string name="library_artwork_refresh_running">正在刷新封面…</string>
     <string name="library_artwork_refresh_completed">封面刷新已结束。</string>
@@ -175,7 +179,9 @@
     <string name="library_recovery_required">已保存的数据需要恢复，请保留应用数据并重试。</string>
     <string name="library_listening_rules">仅实际播放推进计入聆听时长。每轮达到 30 秒或已知时长的一半（取较短者）记一次播放。</string>
     <string name="library_listening_totals">总播放 %1$d 次 · 总聆听 %2$s</string>
-    <string name="library_today_listening">今日播放 %1$d 次 · 聆听 %2$s</string>
+    <plurals name="library_today_listening">
+        <item quantity="other">今日播放 %1$d 次 · 聆听 %2$s</item>
+    </plurals>
     <string name="library_today_scope">%1$s · 当前时区：%2$s\n按播放时记录的日期汇总。</string>
     <string name="library_history_scope">历史记录 %1$d 条 · 保留最近 1000 条。</string>
     <string name="library_history_empty">尚无播放历史，音频实际推进后才会记录。</string>

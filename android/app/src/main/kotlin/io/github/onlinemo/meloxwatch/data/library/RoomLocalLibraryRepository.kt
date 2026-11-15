@@ -3,8 +3,8 @@ package io.github.onlinemo.meloxwatch.data.library
 import android.database.sqlite.SQLiteConstraintException
 import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
-import android.net.Uri
 import android.os.SystemClock
+import androidx.core.net.toUri
 import androidx.sqlite.db.SimpleSQLiteQuery
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
@@ -658,7 +658,7 @@ class RoomLocalLibraryRepository(
     private fun grantRecord(id: String, spec: LocalSourceSpec, value: LocalGrantObservation) = LibraryGrantEntity(id, spec.sourceId, spec.uri, LibraryCodec.grant(value), value.read.name, value.acceptedPersistedFlags, value.appOwned)
     private fun sourceState(grant: LocalGrantObservation) = if (grant.read == ObservedCapability.AVAILABLE) LibrarySourceState.ACTIVE else if (grant.read == ObservedCapability.UNAVAILABLE) LibrarySourceState.NEEDS_AUTHORIZATION else LibrarySourceState.UNAVAILABLE
     private fun validateSource(spec: LocalSourceSpec, grant: LocalGrantObservation) {
-        val uri = Uri.parse(spec.uri)
+        val uri = spec.uri.toUri()
         if (uri.scheme != "content" || uri.authority.isNullOrBlank() || (spec.authority != null && uri.authority != spec.authority) ||
             (spec.kind == LocalSourceKind.APP_OWNED) != grant.appOwned) fail(LibraryIssue.INVALID_INPUT)
     }
@@ -904,7 +904,7 @@ class RoomLocalLibraryRepository(
     private fun pageLimit(size: Int) { if (size !in 1..LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT) }
     private fun batch(size: Int) { if (size !in 1..LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT) }
     private fun validateCandidate(sourceId: String, candidate: ObservedCandidate) {
-        val uri = Uri.parse(candidate.uri)
+        val uri = candidate.uri.toUri()
         if (candidate.sourceId != sourceId || candidate.displayName.length > 512 || uri.scheme != "content" || uri.authority.isNullOrBlank()) fail(LibraryIssue.INVALID_INPUT)
     }
     private fun terminal(phase: String) = phase in setOf(ScanPhase.COMPLETED.name, ScanPhase.CANCELLED.name, ScanPhase.FAILED.name, ScanPhase.INTERRUPTED.name, ScanPhase.PAUSED_BACKGROUND.name)

@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import io.github.onlinemo.meloxwatch.R
@@ -60,7 +61,8 @@ internal fun LazyListScope.listeningContent(
     } else {
         state.today?.let { today -> item(key = "listening:today") {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                LibraryText(stringResource(R.string.library_today_listening, today.playCount, formatDuration(today.listeningMs)), primary = true)
+                LibraryText(pluralStringResource(R.plurals.library_today_listening, libraryPluralQuantity(today.playCount),
+                    today.playCount, formatDuration(today.listeningMs)), primary = true)
                 LibraryText(stringResource(R.string.library_today_scope, today.localDate, today.currentZoneId))
             }
         } }

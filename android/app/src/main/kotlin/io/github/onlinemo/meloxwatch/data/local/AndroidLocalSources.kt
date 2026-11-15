@@ -14,6 +14,7 @@ import android.os.CancellationSignal
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import androidx.core.net.toUri
 import io.github.onlinemo.meloxwatch.data.imports.OwnedAudioProvider
 import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
@@ -550,7 +551,7 @@ class AndroidLocalSources(
 
         fun contentUri(value: String): Uri {
             if (value.length > LocalInputLimits.URI_CHARACTERS) throw SourceReadException(SourceReadIssue.INVALID_SOURCE)
-            val uri = Uri.parse(value)
+            val uri = value.toUri()
             if (uri.scheme != ContentResolver.SCHEME_CONTENT || uri.authority.isNullOrBlank()) {
                 throw SourceReadException(SourceReadIssue.INVALID_SOURCE)
             }

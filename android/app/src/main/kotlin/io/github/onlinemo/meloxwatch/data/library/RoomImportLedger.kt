@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import android.net.Uri
+import androidx.core.net.toUri
 import io.github.onlinemo.meloxwatch.BuildConfig
 import io.github.onlinemo.meloxwatch.data.imports.ImportException
 import io.github.onlinemo.meloxwatch.data.imports.ImportIntent
@@ -155,7 +156,7 @@ class RoomImportLedger(
             candidate.entityProof != "owned:$ownedAuthority:$token") fail(ImportIssue.INTEGRITY_FAILED)
     }
 
-    private fun contentUri(value: String): Boolean = Uri.parse(value).let { it.scheme == "content" && !it.authority.isNullOrBlank() }
+    private fun contentUri(value: String): Boolean = value.toUri().let { it.scheme == "content" && !it.authority.isNullOrBlank() }
     private fun validateId(value: String) {
         val valid = try { value.length == 36 && UUID.fromString(value).toString() == value } catch (_: IllegalArgumentException) { false }
         if (!valid) fail(ImportIssue.INVALID_INPUT)

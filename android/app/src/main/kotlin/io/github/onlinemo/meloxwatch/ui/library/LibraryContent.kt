@@ -37,6 +37,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -124,7 +125,8 @@ fun LazyListScope.libraryContent(
         val kind = if (state.screen == LibraryScreen.ALBUMS) LibraryGroupKind.ALBUM else LibraryGroupKind.ARTIST
         items(state.groupPage?.groups.orEmpty(), key = { "group:${it.key}" }) { group ->
             LibraryButton(
-                stringResource(R.string.library_group_count, group.title ?: stringResource(R.string.library_unknown), group.trackCount),
+                pluralStringResource(R.plurals.library_group_count, libraryPluralQuantity(group.trackCount),
+                    group.title ?: stringResource(R.string.library_unknown), group.trackCount),
                 !state.loading && !state.showingPreviousData,
             ) { model.openGroup(group, kind) }
             group.subtitle?.let { LibraryText(it) }
@@ -226,7 +228,8 @@ private fun Sections(state: LibraryUiState, model: LibraryViewModel) {
     var expanded by rememberSaveable(state.page?.view?.viewId) { mutableStateOf(false) }
     LibraryButton(stringResource(R.string.library_index), state.canPlay) { expanded = !expanded }
     if (expanded) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (section in state.sections) LibraryButton(stringResource(R.string.library_group_count, section.key, section.count), state.canPlay) {
+        for (section in state.sections) LibraryButton(pluralStringResource(R.plurals.library_group_count,
+            libraryPluralQuantity(section.count), section.key, section.count), state.canPlay) {
             expanded = false
             model.jumpSection(section)
         }
@@ -342,7 +345,8 @@ private fun ArtworkRefreshControls(state: LibraryUiState, model: LibraryViewMode
         if (state.artworkPreparing) LibraryText(stringResource(R.string.library_reading))
         state.artworkSourceIssue?.let { LibraryText(stringResource(sourceIssueText(it)), error = true) }
         state.artworkRefreshPreview?.let { preview ->
-            LibraryText(stringResource(R.string.library_artwork_refresh_confirmation, preview.targets.size))
+            LibraryText(pluralStringResource(R.plurals.library_artwork_refresh_confirmation,
+                preview.targets.size, preview.targets.size))
             LibraryButton(stringResource(R.string.library_artwork_refresh_confirm), true, model::confirmArtworkRefresh)
             LibraryButton(stringResource(R.string.probe_cancel), true, model::cancelArtworkPreview)
         }
@@ -369,6 +373,9 @@ internal fun LibraryText(text: String, primary: Boolean = false, error: Boolean 
         style = if (primary) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium,
         color = if (error) MaterialTheme.colorScheme.error else if (primary) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
 }
+
+// Android selects plurals with Int. Saturation preserves en/zh categories; formatting keeps the full Long.
+internal fun libraryPluralQuantity(count: Long): Int = count.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
 
 @Composable
 internal fun LibraryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {

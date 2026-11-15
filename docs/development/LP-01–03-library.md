@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最近实际执行的Debug214项为173通过、41失败；随后的修复快照在测试编译失败，尚未重跑成功。Release/Diagnostic及设备AC尚未通过。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最新实际Debug214项全部通过，随后lint的7项错误阻断verification。Release/Diagnostic、完整严格构建及设备AC尚未通过。
 
 ## 数据身份、迁移与完整列表
 
@@ -67,6 +67,12 @@ artifact `14176716511`为178294字节，原ZIP SHA-256 `a9ebb34857dc00f65d5ed13f
 [run `43752940907`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43752940907)/attempt1绑定上述四文件修复source `f57fc7e6f81d5e45123f28a9aa883fee172fe131`、实际checkout `05a5f3065560c9cfe51e277148fec30623e2a952`、compile job `132930754524`。verification在Debug/Diagnostic测试Kotlin编译失败，5分19秒、50任务（46执行/4缓存）；`FixtureAudioProvider.kt:54:49`委托的`ContentProvider.openTypedAssetFile`返回可空`AssetFileDescriptor?`，覆写声明非空类型。补充Elvis分支将平台空结果映射为`FileNotFoundException("Fixture unavailable")`；不使用非空断言、不改生产校验、不再拦截普通音频读取。该次未执行JUnit任务、normal或三个STRICT阶段，无lint XML/APK/签名；原214定义保持，等待精确新快照重跑。
 
 artifact `14177146391`为59631字节，ZIP SHA-256 `183db3bf93c12f515832534e19921abdb990e5268c4f831a0bdc8b185f039fea`，日志SHA-256 `d918dea09f6565145b2dfd1fc5750a03998a8cb7b7e0f22d6d99ceb1b01f7127`，匿名编译错误摘要SHA-256 `9a95f43ffba995e7035e89c7047d1a61b067be56d895aaa26c6e5d9252b7ba11`。归档仅失败诊断，缺完整锁/schema1，schema2仍为上述hash；不导入基线。此小修复仍不包含LP-04/05并行WIP，256原AC/readiness未通过。
+
+[run `43754414573`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43754414573)/attempt1绑定source `27251af74dc6398c293d23f91570dacb4391d012`、实际checkout `b918071170b865ee092f37d2ab088fd7394555bc`、compile job `132935312198`。24份Debug JUnit XML确认214项真实执行、214通过/0failure/0error/0skip，定义inventory SHA-256仍为`ecd2dda7fb8be48018a4a1b0afdd1d0fd82b5635d27017e7334b226cee9f7fb1`；上一轮41个失败已清除。verification在13分55秒因`lintWatchAndroidDebug`失败：3项PluralsCandidate及4项UseKtx；另有2项独立Robolectric SDK版本Hint。Release/Diagnostic尚无测试XML，normal及三个STRICT阶段未尝试，没有APK或签名。
+
+artifact `14178550202`为173830字节，ZIP SHA-256 `ca49a83e7af8c48ede0d4e8cdcf849c1e7008ee2df61b396363032e3030508c2`，日志SHA-256 `002ef436a185e8a465d332346323cf4c600f5a9608ef8734a206316ea0d95027`。匿名build证据SHA-256 `86b08bc525cecd3d3eaae5e5106c6cf567914ac1e665c22e36caa3397cac1833`，phase证据`9bdc0ef3b68cfbaa40c8c4d1ea591a92ffc19875142f765a74a2eddc76bcc1d8`，unit证据`eb17878c33cb3e12b8ef9ade5ffaab7622689c156b5078d3436aa475523b95b6`，lint证据`a79245f280fcbcdc152b24c56443b33eba983216385f3a529a49f670300ae945`，原lint XML `e319bb852feef3c68babd8ea6e159a73169062d85a526b5b5516bf91c7bf7534`。schema2与XML仍是失败诊断字节，缺完整app lock/schema1，不导入基线。
+
+此次修正把组内曲数、封面确认项数和今日播放次数改为真实plurals，中英文资源和所有调用同步；Android分类使用饱和Int，仍以原Long格式化曲数/播放次数，不限制完整库。4处URI解析使用现有core-ktx的`String.toUri`，范围与授权校验保持。未suppress lint、未新增依赖或测试定义；原214定义和LP-04/05并行WIP边界保持，等待精确新快照云验。全部256原AC/readiness仍未通过。
 
 合并P1已云验修正与P0被动图诊断后，本地49项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
 
