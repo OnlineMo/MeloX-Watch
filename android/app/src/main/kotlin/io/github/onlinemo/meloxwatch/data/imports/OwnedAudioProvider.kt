@@ -41,10 +41,15 @@ class OwnedAudioProvider : ContentProvider() {
         requireInternalCaller()
         val file = completedFile(uri)
         val columns = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
+        val values: List<Any?> = columns.map { column ->
+            when (column) {
+                OpenableColumns.DISPLAY_NAME -> file.name
+                OpenableColumns.SIZE -> file.length()
+                else -> null
+            }
+        }
         return MatrixCursor(columns, 1).apply {
-            addRow(columns.map {
-                when (it) { OpenableColumns.DISPLAY_NAME -> file.name; OpenableColumns.SIZE -> file.length(); else -> null }
-            }.toTypedArray())
+            addRow(values)
         }
     }
 

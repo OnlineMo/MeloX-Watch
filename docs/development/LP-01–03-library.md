@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，首轮云端编译失败，尚无本主题应用测试或设备AC通过证据。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，云端在应用测试开始前编译失败，尚无本主题应用测试或设备AC通过证据。
 
 ## 数据身份、迁移与完整列表
 
@@ -48,7 +48,11 @@ Library、Sources、Listening页面和中英资源已接入。列表/网格偏�
 
 PR #29的[run `43743042161`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43743042161)/attempt1绑定source `162c24d9ccf23ea2796608821ed1bfc4ee018011`、实际checkout `0b7c00d9f06ca832180fc346652935676236c2d5`、compile job `132900247397`。verification阶段3分02秒失败，39项任务中36执行/3缓存；Debug/Diagnostic均报告`LocalImportManager`引用非公共`OsConstants.O_DIRECTORY`及`LibraryRecords`缺少`ScanMode`导入。修正使用公共`O_RDONLY | O_NOFOLLOW`，打开后以`S_ISDIR(Os.fstat(fd).st_mode)`核验同一descriptor再fsync/close，保持防止目录符号链接替换的要求；并补齐类型导入。公共API26声明已按AOSP固定提交`97e5130234bcdc1c4a705be4e548302934499bd4`独立核对，签名文件SHA-256 `f37327b7713d170a7c59d8c1d2ac7ed6ad2b90f5cb4ca92ec6362a2fa0d31c5b`。修正没有本地编译，下一轮云结果才可确认。
 
-该轮artifact `14173720904`为59635字节，原ZIP SHA-256 `98f485bd62b3ccb46269c068674baef50a906e360e60da57c9e115644a8bbe2d`，日志SHA-256 `d7b32f22aecbb50891661b6a4a4a68d504d89ffd0f20470850d8ae3bc007efde`。生成schema2为91327字节/30张表，SHA-256 `bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf`；没有完整锁/schema1，仍属`failed-partial`且不导入基线。后续LP-04/05并行代码不在本次两处编译修复快照中，其测试定义也不混入214项已冻结数量。
+该轮artifact `14173720904`为59635字节，原ZIP SHA-256 `98f485bd62b3ccb46269c068674baef50a906e360e60da57c9e115644a8bbe2d`，日志SHA-256 `d7b32f22aecbb50891661b6a4a4a68d504d89ffd0f20470850d8ae3bc007efde`。生成schema2为91327字节/30张表，SHA-256 `bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf`；没有完整锁/schema1，仍属`failed-partial`且不导入基线。
+
+下一轮[run `43745865130`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43745865130)/attempt1绑定source `ef7ffc56b6e36c533a51e8a3bb0d65aab06494ab`、实际checkout `e25c1991861ea175ddac23066b50fcfd6f85a9f5`、compile job `132908948059`。verification阶段3分24秒失败，44项任务中39执行/5缓存；前两处错误已越过，`OwnedAudioProvider`第47行的String/Long/null `.map(...).toTypedArray()`被Kotlin判为reified交集类型推断警告，`-Werror`拒绝编译。修正显式声明`List<Any?>`，直接使用`MatrixCursor.addRow(Iterable)`；不关闭警告、不改变provider列语义。该修正仅静审，尚待云端确认。
+
+artifact `14174073206`为59631字节，ZIP SHA-256 `a219f26863a903ad3819055494ff24435fb2008b0112e8f9f6cf6c5fe8b844c7`；日志SHA-256 `d3d69c45bafcbd3b7f34e7b2b46e3aae1e0ecbe8d509905bc37a19964bfec785`。normal及三个STRICT阶段全未执行，日志无UnitTest task、归档无JUnit XML/lint XML/APK；三变体预期各214项不能计为执行或通过。7条graph records为观测，导出仅metadata XML与同hash的schema2，没有完整lock或genuine schema1，仍为`failed-partial`诊断资料。匿名精确绑定汇总SHA-256 `c785eb80051de3733658e196c1defcad3e913cace89f4e862a727591c6e66286`，phase evidence SHA-256 `5f92305c89f32b514da4502ac765532ed1f612bfaa2a68729dfa9cdbd34fe2a5`，unit evidence SHA-256 `452760ee304d52605918d23afafa85f38dbe2b0f20d77ef4af732f24f4f9fe68`。后续LP-04/05并行代码不在这两轮编译修复快照中，其测试定义不混入214项已冻结数量。
 
 合并P1已云验修正与P0被动图诊断后，本地49项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
 
