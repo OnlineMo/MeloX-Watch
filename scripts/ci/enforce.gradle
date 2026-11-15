@@ -49,7 +49,16 @@ gradle.projectsEvaluated {
             }
             gradle.rootProject.allprojects.sort { it.path }.each { project ->
                 project.configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
-                    configuration.resolve()
+                    // 锁来自完整依赖图；无需选择AGP测试配置的secondary artifact。
+                    def unresolved = configuration.incoming.resolutionResult.allDependencies.findAll {
+                        it instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult
+                    }
+                    if (!unresolved.isEmpty()) {
+                        throw new GradleException(
+                            "Dependency graph resolution failed for ${project.path}:${configuration.name}",
+                            unresolved.first().failure
+                        )
+                    }
                     project.logger.lifecycle("Resolved lock input ${project.path}:${configuration.name}")
                 }
             }
