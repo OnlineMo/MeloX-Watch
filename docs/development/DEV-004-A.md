@@ -45,4 +45,6 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 
 随后严格 [run `43715744440`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43715744440) / attempt `1` 绑定 source `fed57fe45ddce8abe3f0a539af00d4ee537ad7e3`、merge build `7ce14e92c5c7db792147be0835a091f6b9106e5c`，编译 job `132816825049`。`checkWatchAndroidDebugAarMetadata` 因锁中的 `org.jetbrains.kotlin:kotlin-stdlib-common:2.2.21` 未解析而失败；Gradle `BUILD FAILED in 1m 25s`，两项任务执行。命令没有生成参数，本次未编译源码、lint、assemble、上传 artifact 或签名。原锁从当前输入撤回，以五阶段采集及独立严格验证替代一次性生成；原始归档和历史字节保留，原因调查和本地边界检查见[依赖记录第 6 节](DEV-004-A-dependencies.md#6-严格构建失败与重新收集)。新策略尚待实际云端验证。
 
+五阶段首轮 [run `43722431450`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43722431450) / attempt `1` 的前两阶段成功，但新旧锁完全相同，严格 Debug 再次失败；其余独立严格变体未执行。当前在正常锁阶段增加逐配置显式解析，失败不跳过；精确 source/build、原始 artifact 哈希、阶段与官方依据见[依赖记录第 7 节](DEV-004-A-dependencies.md#7-分轮结果与显式配置解析)。没有新资料导入、可验收 APK 或签名。
+
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。

@@ -39,6 +39,22 @@ gradle.beforeProject { project ->
     }
 }
 gradle.projectsEvaluated {
+    // Gradle保留本轮未解析的旧锁配置；up-to-date任务不能替代显式解析证据。
+    // 此任务只供无秘密PR采集正常图，三轮独立strict仍决定资料是否完整。
+    gradle.rootProject.tasks.register('ciResolveAndLockAll') { task ->
+        task.notCompatibleWithConfigurationCache('Dependency lock collection resolves project configurations')
+        task.doLast {
+            if (!gradle.startParameter.writeDependencyLocks) {
+                throw new GradleException('Lock collection requires --write-locks')
+            }
+            gradle.rootProject.allprojects.sort { it.path }.each { project ->
+                project.configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
+                    configuration.resolve()
+                    project.logger.lifecycle("Resolved lock input ${project.path}:${configuration.name}")
+                }
+            }
+        }
+    }
     gradle.rootProject.allprojects { project ->
         def android = project.extensions.findByName('android')
         if (android != null) {

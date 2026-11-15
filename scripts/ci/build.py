@@ -13,6 +13,7 @@ from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secr
 
 DEPENDENCY_INPUTS = ('gradle/verification-metadata.xml', 'app/gradle.lockfile')
 DEPENDENCY_REPORT_FILES = (*DEPENDENCY_INPUTS, 'gradle.lockfile')
+LOCK_COLLECTION_TASK = ':ciResolveAndLockAll'
 
 
 def gradle_tasks(mode):
@@ -68,7 +69,7 @@ def bootstrap_dependencies(build_sha, missing):
     phases = [
         {'name': 'verification-collection', 'command': gradle_command(tasks) +
          ['--write-verification-metadata', 'sha256', '--write-locks']},
-        {'name': 'normal-lock-collection', 'command': gradle_command(tasks) + ['--write-locks']},
+        {'name': 'normal-lock-collection', 'command': gradle_command([LOCK_COLLECTION_TASK, *tasks]) + ['--write-locks']},
         *({'name': 'strict-' + mode, 'command': gradle_command(gradle_tasks(mode))}
           for mode in ('debug', 'release', 'diagnostic')),
     ]
