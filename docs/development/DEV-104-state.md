@@ -24,11 +24,11 @@
 
 ## 验证状态
 
-已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第四轮云端实际执行Debug全部58项，57项通过、1项失败；Release/Diagnostic尚未执行。它们不代替音频出声或设备AC；本地均未执行。
+已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第五轮云端实际执行Debug全部58项，57项通过、1项失败；Release/Diagnostic尚未执行。它们不代替音频出声或设备AC；本地均未执行。
 
-本地44个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
+本地45个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
 
-当前设备未连接，API/ABI、安装、耳机、30分钟后台及14性能预算均未测。所有readiness为false、candidate=null、256个原AC未通过；没有公开、tag、Release或发布批准。
+本主题尚无与云端APK绑定的设备安装、耳机、30分钟后台或14性能预算证据。所有readiness为false、candidate=null、256个原AC未通过；没有公开、tag、Release或发布批准。
 
 首轮云端 [run `43722837976`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43722837976) / attempt `1` 绑定 source `4f6ed75205ed7e3b5e7251d8dd70d7c500a345c2`、merge build `be210a19c46f3b69e8d46b9f3a412ff67c30f72c`、job `132838389943`。preflight通过；资料阶段在Kotlin编译的 `FlagSet` 引用处失败，应用测试/lint/assemble未完成，签名跳过。官方固定Media3 1.8.0 source JAR核对确认其公开类型为 `androidx.media3.common.FlagSet`，已据此修正导入，未换依赖版本。该官方source JAR SHA-256为 `800866952af08b1f1c39b2a56f906a46f3a0e7ca4ae5e92310ea5388beef7a38`，只作API审阅，没有运行或复制实现。
 
@@ -47,6 +47,14 @@
 报告artifact `14168691523` 原始ZIP为82079字节，SHA-256 `8939a9f6328a9ad7199dd1f8ecf3f336b07aaa99a59d150bed4e5a44355c8afa`；job日志SHA-256 `097fcf82d9ce6770e4af3c73da856b18bc66a6bdf1be2e53ffdca5b61fb40fe3`。实际RoomQueueStore JUnit XML SHA-256 `9601dc6a70acb73322187daf30b11d806fab4d0730c3a945c616e7855cda827e`；KSP schema1仍为11896字节、SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`，缺少app锁，继续只作 `failed-partial` 证据。
 
 该JUnit没有导出底层cause，system-out/system-err也为空，尚不能确认导致 `STORAGE_UNAVAILABLE` 的实际SQLite异常。`expectIssue`现保持原分类断言，并在断言失败时把原 `QueueStoreException` 附为 `AssertionError` cause，保留其cause/suppressed链供下一轮云端诊断；没有改为接受 `STORAGE_UNAVAILABLE` 或据猜测修改生产分类。完整严格锁/schema、三变体及低空间恢复验收继续未完成。
+
+第五轮 [run `43735143902`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43735143902) / attempt `1` 绑定 source `5ea06616e1d88313aae7199619de02030bbe2022`、实际 checkout/build `a420a10c8af6be1ed944744f96821af868b52492`、job `132876024547`。第一资料阶段在3分33秒失败，71个Gradle任务中61个实际执行、10个来自缓存；实际Debug仍为58项、57通过、1失败、0跳过、0错误。Release/Diagnostic与第二至第五阶段未执行，没有导出APK或签名。
+
+报告artifact `14170197855` 原始ZIP为83786字节，SHA-256 `51b579018f6d42a762401199aa7097a68d04899542e86eed8728e74e02f5b246`；job日志SHA-256 `cc0c661bed065000562cf3779f18c1a2b810b3b46e043e0d4176de174c5700cf`。实际RoomQueueStore JUnit XML SHA-256 `c5767118e910dac5d522cc21b28c69e7287efa8b705c884cbb9670c3fa6bde12`，本轮保留的cause为 `android.database.sqlite.SQLiteException: cannot rollback - no transaction is active (code 1 SQLITE_ERROR)`。栈从API26 `SQLiteSession.endTransactionUnchecked` 第439行，经 `FrameworkSQLiteDatabase.endTransaction` 和 `RoomDatabase.internalEndTransaction`，到 `RoomDatabase.withTransaction` 的finally第2049行。XML没有事务内最先失败的SQL异常，也没有suppressed；已经观测到退出异常，仍未观测到原始 `SQLiteFullException`。
+
+官方Room 2.8.5 Android source JAR SHA-256 `bab25e3479739fbb6fa855a165ed4e71211fc259b859a05ff90ce52e080f57f2` 的 `RoomDatabase.android.kt` 第2041～2050行确认外层finally不单独保留block异常；API26官方源码固定提交 `97e5130234bcdc1c4a705be4e548302934499bd4` 的 [SQLiteSession.java](https://android.googlesource.com/platform/frameworks/base/+/97e5130234bcdc1c4a705be4e548302934499bd4/core/java/android/database/sqlite/SQLiteSession.java) 第404～449行确认退出先移除事务栈、再执行COMMIT/ROLLBACK。此源码机制与本轮实际退出栈一致；它不等于已经证明事务内原错的类型。
+
+据此新增独立 `withPreservedTransaction` 包装，并让QueueStore全部12处事务使用它，没有复制Room实现、改变SQL/fixture或按错误消息重分类。包装只保存block抛出的原 `Throwable`：退出另抛时将退出异常加为suppressed、继续抛原异常；原取消仍作为 `CancellationException` 传播。begin、成功标记或退出单独失败时没有block原错，保留该原异常。现有真实FULL cause、旧队列、重开/显式重试及取消测试将核验修复；修复后云端尚未执行。KSP schema1仍为11896字节、SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`，缺少app锁，仍只作 `failed-partial`，未导入或宣布迁移基线通过。
 
 ## 后续必需实现
 
