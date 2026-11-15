@@ -24,9 +24,11 @@
 
 ## 验证状态
 
-已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第七轮云端资料阶段实际执行Debug、Release、Diagnostic各58项，全部通过且三变体lint零issue；独立严格Debug仍因依赖锁失败，严格Release/Diagnostic未执行。它们不代替音频出声或设备AC；本地均未执行。
+本轮补齐页面实际使用的同版本Android runtime实体直依赖，保留原58项测试和全部STRICT规则。本主题自身run43760127225五阶段均实际成功：Debug/Release/Diagnostic各5套58项、失败/错误/跳过0、lint0。570组件1009制品官方hash独立审查完成，仅导入原XML、app锁及genuine schema1，不使用P0锁或失败Library schema2。完整source/checkout/run/artifact/输入hash见[依赖记录](DEV-104-dependencies.md)。资料审查不替代正常APK或设备验收。
 
-合并P0被动图诊断后，本地49个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
+原58个应用测试包括Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个，覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。完整五阶段的三变体已通过这些实际测试；此前六轮失败及修复证据保留在下文，不再作为当前结论。整合最新contribution时追加P0已云验的5项读通道回归，保留页面导航恢复和离页取消检查；新整合共6套63个定义须新严格云验，本地均未执行。
+
+合并后的本地49项Python CI边界测试及Node治理场景通过；XML/UTF-8/资源引用/中英资源键和diff文本检查分开记录，这些不是Android测试。资料采集时Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变字节；合并保留P0只在无秘密PR采集阶段启用的诊断标记与回归、P1所有schema漂移拒绝合同及签名归档修正。正常STRICT APK、fresh signing、稳定证书与设备测量仍未完成，不能将资料成功套用于新整合源码。
 
 本主题尚无与云端APK绑定的设备安装、耳机、30分钟后台或14性能预算证据。所有readiness为false、candidate=null、256个原AC未通过；没有公开、tag、Release或发布批准。
 
@@ -67,6 +69,10 @@
 同一真实FULL case三变体分别0.130/0.175/0.228秒通过。冻结测试源码SHA-256 `b70584b621514564ef9070f502e4188891635ed2e5719455c73ec2a31fd0bbff` 断言直接 `SQLiteFullException`、独立且不是FULL的suppressed `SQLiteException`、旧队列、重开、独立连接完整性/3条和205条显式重试。成功JUnit不输出原生异常堆栈；这里将通过的确切case绑定冻结断言，不声称成功XML打印了底层栈。
 
 artifact `14171827542` 原始ZIP142163字节、SHA-256 `632ba8a7881a4ba01def485ce0402ab73ac442adfce9794fd63f5229145e5253`；job日志SHA-256 `0163cdd77d1e1bb6f9ab30098abe8a573b6d849d90e240b75085e2b3a9265a03`。完整FULL/阶段诊断摘要SHA-256 `ebdcc6673a97c1b3bf565533ce338a3a8cffe81fe5610e18eb6050106b453992`。schema1仍11896字节/原hash；资料状态 `failed-partial`，不得导入锁/schema或验收APK。Library后续214项的定义与独立状态见LP-01～03记录，这一轮58项成功不覆盖它们。
+
+## 接受的P1严格整合基线
+
+上述待验证状态是整合前记录。新run43767150224/attempt1已执行6套63项Debug测试，失败/错误/跳过0、lint0；source64f34a93257079851c0d020b1104bf20ad466328、真实checkout2e2226fcbcac9a2f196dee245a8a9d7445471631。原始PR APK核验通过后，PR #28正常合入5c883d877913f63e5928269eabfa0a52210ceb67。当前Library基线保留新增P0读通道回归，并进入独立schema2采集；不沿用P1成功替代Library云验。可信run43768826854的原稳定Debug签名归档、固定证书及APK核验通过，原APK已在VM安装启动；稳定覆盖升级、VM音频/布局、真表和256原AC仍待验，readiness保持false。原始设备证据仅留本地，精确产物绑定见docs/13。
 
 ## 后续必需实现
 

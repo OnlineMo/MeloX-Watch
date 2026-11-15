@@ -16,7 +16,8 @@ import zipfile
 from apk_verify import parse_badging, require_no_signature_blocks
 from artifact_io import GitHub, MAX_ARCHIVE_BYTES, NoRedirect, fetch_artifact, unpack_data, validate_run
 import build
-from ci_common import expected_identity, no_signing_secrets, trusted_context
+from ci_common import expected_identity, no_signing_secrets, trusted_context, write_checksums
+import sign
 from sign import validate_manifest
 
 SOURCE = 'a' * 40
@@ -201,6 +202,71 @@ class ArtifactBoundaryTests(unittest.TestCase):
         self.assertNotEqual(parse_badging(release, profile), expected_identity('release', VERSION))
         self.assertEqual(parse_badging(release.replace('meloxwatch', 'meloxwatch.diagnostic'), profile),
                          expected_identity('diagnostic', VERSION))
+
+
+class SigningOutputTests(unittest.TestCase):
+    def sign_fixture(self, root, unexpected_sidecar=False):
+        input_directory = root / 'signing-input'
+        input_directory.mkdir()
+        (input_directory / 'watch-debug.apk').write_bytes(b'unsigned fixture bytes')
+        manifest = {'mode': 'debug', 'artifacts': [{
+            'file': 'watch-debug.apk', 'signing': 'unsigned',
+            'sha256': hashlib.sha256(b'unsigned fixture bytes').hexdigest(),
+            'identity': expected_identity('debug', VERSION),
+        }]}
+        (input_directory / 'build-manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+        write_checksums(input_directory)
+        (root / 'verified-signing-input.json').write_text(json.dumps({
+            'manifest': manifest, 'input_artifact': {'id': 456},
+        }), encoding='utf-8')
+        (root / '.ci').mkdir()
+        (root / '.ci/signing-certificates.json').write_text(json.dumps({'debug': 'a' * 64}), encoding='utf-8')
+        (root / 'temporary').mkdir()
+
+        def signer_tool(arguments):
+            if Path(arguments[0]).name == 'zipalign':
+                Path(arguments[-1]).write_bytes(Path(arguments[-2]).read_bytes())
+            else:
+                target = Path(arguments[arguments.index('--out') + 1])
+                target.write_bytes(b'signed fixture bytes')
+                # 模拟真实默认行为及工具意外输出；不执行APK或任何Android工具。
+                v4_disabled = '--v4-signing-enabled' in arguments and arguments[arguments.index('--v4-signing-enabled') + 1] == 'false'
+                if unexpected_sidecar or not v4_disabled:
+                    target.with_name(target.name + '.idsig').write_bytes(b'sidecar fixture')
+
+        fixture_environment = ENV | {
+            'SIGNING_KEY_B64': 'Zml4dHVyZS1ub3QtYS1yZWFsLWtleQ==',
+            'SIGNING_PASSWORD': 'fixture-not-a-real-password', 'RUNNER_TEMP': str(root / 'temporary'),
+        }
+        with patch.dict(os.environ, fixture_environment, clear=True), patch.object(sign, 'ROOT', root), \
+                patch.object(sign, 'properties', return_value={}), patch.object(sign, 'build_tools', return_value=root / 'tools'), \
+                patch.object(sign, 'run_tool', side_effect=signer_tool), patch.object(sign, 'certificate', return_value='a' * 64), \
+                patch.object(sign, 'inspect_apk'):
+            sign.sign('debug')
+
+    def test_signed_output_roundtrips_through_the_original_archive_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.sign_fixture(root)
+            output = root / 'signed-artifacts'
+            files = {path.name: path.read_bytes() for path in output.iterdir()}
+            expected_files = {'watch-debug.apk', 'build-manifest.json', 'SHA256SUMS'}
+            self.assertEqual(set(files), expected_files)
+            unpack_data(archive_bytes(files), root / 'downloaded-original', expected_files)
+            manifest = json.loads(files['build-manifest.json'])
+            entry = manifest['artifacts'][0]
+            self.assertEqual(entry['signing'], 'stable')
+            self.assertEqual(entry['unsigned_sha256'], hashlib.sha256(b'unsigned fixture bytes').hexdigest())
+            self.assertEqual(entry['sha256'], hashlib.sha256(files['watch-debug.apk']).hexdigest())
+            self.assertEqual(manifest['input_artifact'], {'id': 456})
+
+    def test_unexpected_signer_file_stops_before_manifest_or_checksum_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'Signing produced unexpected files'):
+                self.sign_fixture(root, unexpected_sidecar=True)
+            self.assertFalse((root / 'signed-artifacts/build-manifest.json').exists())
+            self.assertFalse((root / 'signed-artifacts/SHA256SUMS').exists())
 
 
 if __name__ == '__main__':
