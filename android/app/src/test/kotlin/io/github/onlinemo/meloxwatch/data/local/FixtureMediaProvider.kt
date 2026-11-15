@@ -40,20 +40,23 @@ class FixtureMediaProvider : ContentProvider() {
     ): Cursor {
         val columns = projection ?: arrayOf(MediaStore.Audio.Media._ID)
         return MatrixCursor(columns, 1).apply {
-            if (audio.isFile) addRow(columns.map {
-                when (it) {
-                    MediaStore.Audio.Media._ID -> identifier
-                    MediaStore.Audio.Media.DISPLAY_NAME -> audio.name
-                    MediaStore.Audio.Media.MIME_TYPE -> "audio/mpeg"
-                    MediaStore.Audio.Media.SIZE -> audio.length()
-                    MediaStore.Audio.Media.DATE_MODIFIED -> 1L
-                    MediaStore.Audio.Media.DATE_ADDED -> 1L
-                    MediaStore.MediaColumns.VOLUME_NAME -> MediaStore.VOLUME_EXTERNAL_PRIMARY
-                    MediaStore.MediaColumns.GENERATION_ADDED -> generationAdded
-                    MediaStore.MediaColumns.GENERATION_MODIFIED -> generationModified
-                    else -> null
+            if (audio.isFile) {
+                val row: List<Any?> = columns.map { column ->
+                    when (column) {
+                        MediaStore.Audio.Media._ID -> identifier
+                        MediaStore.Audio.Media.DISPLAY_NAME -> audio.name
+                        MediaStore.Audio.Media.MIME_TYPE -> "audio/mpeg"
+                        MediaStore.Audio.Media.SIZE -> audio.length()
+                        MediaStore.Audio.Media.DATE_MODIFIED -> 1L
+                        MediaStore.Audio.Media.DATE_ADDED -> 1L
+                        MediaStore.MediaColumns.VOLUME_NAME -> MediaStore.VOLUME_EXTERNAL_PRIMARY
+                        MediaStore.MediaColumns.GENERATION_ADDED -> generationAdded
+                        MediaStore.MediaColumns.GENERATION_MODIFIED -> generationModified
+                        else -> null
+                    }
                 }
-            }.toTypedArray())
+                addRow(row)
+            }
         }
     }
 

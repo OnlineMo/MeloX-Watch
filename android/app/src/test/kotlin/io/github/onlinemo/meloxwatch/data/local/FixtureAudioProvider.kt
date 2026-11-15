@@ -64,9 +64,16 @@ class FixtureAudioProvider : ContentProvider() {
         if (denied) throw SecurityException("Controlled fixture denial")
         val columns = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         return MatrixCursor(columns, 1).apply {
-            if (audio.isFile) addRow(columns.map {
-                when (it) { OpenableColumns.DISPLAY_NAME -> audio.name; OpenableColumns.SIZE -> audio.length(); else -> null }
-            }.toTypedArray())
+            if (audio.isFile) {
+                val row: List<Any?> = columns.map { column ->
+                    when (column) {
+                        OpenableColumns.DISPLAY_NAME -> audio.name
+                        OpenableColumns.SIZE -> audio.length()
+                        else -> null
+                    }
+                }
+                addRow(row)
+            }
         }
     }
     override fun insert(uri: Uri, values: ContentValues?): Uri = throw UnsupportedOperationException()
