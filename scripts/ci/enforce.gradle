@@ -10,6 +10,151 @@ new File(repositoryRoot, 'version.properties').withInputStream { releaseVersion.
 if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
     throw new GradleException('Gradle version differs from the cloud toolchain lock')
 }
+// 仅缺锁的无秘密PR五阶段开启；普通构建不安装监听器，也不额外解析图。
+def dependencyDiagnosticPhase = System.getenv('CI_DEPENDENCY_DIAGNOSTIC_PHASE')
+def dependencyDiagnosticEnabled = System.getenv('GITHUB_EVENT_NAME') == 'pull_request' &&
+    ['verification-collection', 'normal-lock-collection', 'strict-debug', 'strict-release',
+     'strict-diagnostic'].contains(dependencyDiagnosticPhase)
+def diagnosticConfigurations = (['implementationDependenciesMetadata'] +
+    ['Debug', 'Release', 'Diagnostic'].collectMany { variant ->
+        ["watchAndroid${variant}RuntimeClasspath".toString(),
+         "watchAndroid${variant}UnitTestRuntimeClasspath".toString()]
+    }) as Set
+def diagnosticModules = ['kotlin-stdlib', 'kotlin-stdlib-common', 'kotlin-stdlib-jdk7',
+                         'kotlin-stdlib-jdk8'] as Set
+def diagnosticAttributeNames = [
+    'artifactType', 'com.android.build.api.attributes.AgpVersionAttr',
+    'com.android.build.api.attributes.BuildTypeAttr',
+    'com.android.build.api.attributes.ProductFlavor:platform',
+    'com.android.build.api.attributes.VariantAttr', 'org.gradle.category',
+    'org.gradle.dependency.bundling', 'org.gradle.jvm.environment', 'org.gradle.jvm.version',
+    'org.gradle.libraryelements', 'org.gradle.status', 'org.gradle.usage',
+    'org.jetbrains.kotlin.platform.type',
+] as Set
+def diagnosticUnavailableCodes = [
+    'graph-component-bound', 'graph-edge-bound', 'stdlib-component-bound', 'stdlib-edge-bound',
+    'variant-bound', 'external-variant-bound', 'attribute-bound', 'unresolved-class-bound',
+    'unsafe-text', 'record-byte-bound',
+    'unsupported-component-identifier', 'unsupported-dependency-result',
+] as Set
+def diagnosticBound = { condition, code ->
+    if (!condition) {
+        throw new IllegalArgumentException(code)
+    }
+}
+def diagnosticText = { value, maximum ->
+    def text = value == null ? null : value.toString()
+    // 公开API的坐标/属性/变体名称允许版本范围，拒绝路径、URL与控制字符。
+    diagnosticBound(text != null && text.length() <= maximum &&
+        text ==~ /[A-Za-z0-9_.:+,\[\]() ='{}\-]*/, 'unsafe-text')
+    text
+}
+def diagnosticType = { failure ->
+    def name = failure.getClass().name
+    diagnosticBound(name ==~ /[A-Za-z0-9_.$]{1,200}/, 'unsafe-text')
+    name
+}
+def diagnosticAttributes = { attributes ->
+    def keys = attributes.keySet()
+    diagnosticBound(keys.size() <= 64, 'attribute-bound')
+    def selected = keys.findAll { diagnosticAttributeNames.contains(it.name) }.sort { it.name }
+    [values: selected.collectEntries { key ->
+        [(key.name): diagnosticText(attributes.getAttribute(key), 160)]
+    }, excluded_count: keys.size() - selected.size()]
+}
+def diagnosticComponent = { identifier ->
+    if (identifier instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier) {
+        return [kind: 'module', group: diagnosticText(identifier.group, 120),
+                module: diagnosticText(identifier.module, 120), version: diagnosticText(identifier.version, 120)]
+    }
+    if (identifier instanceof org.gradle.api.artifacts.component.ProjectComponentIdentifier) {
+        return [kind: 'project', project_path: diagnosticText(identifier.projectPath, 120),
+                build_tree_path: diagnosticText(identifier.buildTreePath, 120)]
+    }
+    throw new IllegalArgumentException('unsupported-component-identifier')
+}
+def diagnosticVariant
+diagnosticVariant = { variant, depth ->
+    diagnosticBound(depth <= 4, 'external-variant-bound')
+    def external = variant.externalVariant
+    [name: diagnosticText(variant.displayName, 200), owner: diagnosticComponent(variant.owner),
+     attributes: diagnosticAttributes(variant.attributes),
+     external_variant: external.isPresent() ? diagnosticVariant(external.get(), depth + 1) : null]
+}
+def dependencyCollectorActive = false
+def emitDependencyDiagnostic = { project, configuration, origin, cachedResult ->
+    def base = [schema_version: 1, phase: dependencyDiagnosticPhase, project: project.path,
+                configuration: configuration.name, origin: origin]
+    def record
+    try {
+        // afterResolve时图已缓存；collector传入它刚读取的同一个Result，不请求文件或另一次解析。
+        def result = cachedResult == null ? configuration.incoming.resolutionResult : cachedResult
+        def components = result.allComponents
+        def dependencies = result.allDependencies
+        diagnosticBound(components.size() <= 20000, 'graph-component-bound')
+        diagnosticBound(dependencies.size() <= 60000, 'graph-edge-bound')
+        def stdlibComponents = components.findAll { component ->
+            component.id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier &&
+                component.id.group == 'org.jetbrains.kotlin' && diagnosticModules.contains(component.id.module)
+        }
+        def stdlibEdges = dependencies.findAll { edge ->
+            edge.requested instanceof org.gradle.api.artifacts.component.ModuleComponentSelector &&
+                edge.requested.group == 'org.jetbrains.kotlin' && diagnosticModules.contains(edge.requested.module)
+        }
+        diagnosticBound(stdlibComponents.size() <= 32, 'stdlib-component-bound')
+        diagnosticBound(stdlibEdges.size() <= 512, 'stdlib-edge-bound')
+        def unresolvedClasses = [:]
+        dependencies.findAll {
+            it instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult
+        }.each { edge ->
+            def type = diagnosticType(edge.failure)
+            unresolvedClasses[type] = (unresolvedClasses[type] ?: 0) + 1
+            diagnosticBound(unresolvedClasses.size() <= 64, 'unresolved-class-bound')
+        }
+        def selectedComponents = stdlibComponents.collect { component ->
+            diagnosticBound(component.variants.size() <= 16, 'variant-bound')
+            [component: diagnosticComponent(component.id),
+             selected_variants: component.variants.collect { diagnosticVariant(it, 0) }.sort {
+                 groovy.json.JsonOutput.toJson(it)
+             }]
+        }.sort { groovy.json.JsonOutput.toJson(it.component) }
+        def requestedEdges = stdlibEdges.collect { edge ->
+            def selector = edge.requested
+            def constraint = selector.versionConstraint
+            def entry = [from: diagnosticComponent(edge.from.id), is_constraint: edge.isConstraint(),
+                         requested: [group: selector.group, module: selector.module,
+                                     version: diagnosticText(selector.version, 120),
+                                     version_constraint: [required: diagnosticText(constraint.requiredVersion, 120),
+                                                          strict: diagnosticText(constraint.strictVersion, 120),
+                                                          preferred: diagnosticText(constraint.preferredVersion, 120)]]]
+            if (edge instanceof org.gradle.api.artifacts.result.ResolvedDependencyResult) {
+                entry += [status: 'resolved', selected: diagnosticComponent(edge.selected.id),
+                          resolved_variant: diagnosticVariant(edge.resolvedVariant, 0)]
+            } else if (edge instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult) {
+                entry += [status: 'unresolved', failure_class: diagnosticType(edge.failure)]
+            } else {
+                throw new IllegalArgumentException('unsupported-dependency-result')
+            }
+            entry
+        }.sort { groovy.json.JsonOutput.toJson(it) }
+        record = base + [status: 'observed',
+                         configuration_requested_attributes: diagnosticAttributes(configuration.attributes),
+                         result_requested_attributes: diagnosticAttributes(result.requestedAttributes),
+                         graph: [component_count: components.size(), dependency_count: dependencies.size(),
+                                 unresolved_dependency_count: unresolvedClasses.values().sum(0),
+                                 unresolved_failure_classes: unresolvedClasses.sort()],
+                         stdlib_components: selectedComponents, stdlib_edges: requestedEdges]
+        diagnosticBound(groovy.json.JsonOutput.toJson(record).getBytes('UTF-8').length <= 128 * 1024,
+                        'record-byte-bound')
+    } catch (Exception failure) {
+        // 观察失败与原图的拒绝独立；不打印任意异常message、路径或凭据，也不伪称截断资料完整。
+        def code = diagnosticUnavailableCodes.contains(failure.message) ? failure.message : 'observation-api-failed'
+        def failureClass = failure.getClass().name
+        record = base + [status: 'unavailable', reason: code,
+                         failure_class: failureClass ==~ /[A-Za-z0-9_.$]{1,200}/ ? failureClass : 'unavailable']
+    }
+    project.logger.lifecycle('CI_DEPENDENCY_GRAPH ' + groovy.json.JsonOutput.toJson(record))
+}
 // 稳定证书永远不进入 Gradle。最终 DSL 清除 AGP 默认 Debug 签名，交给新 runner 签名。
 def clearApkSigning = { target ->
     // AGP 8.11.1 有多种 signingConfig setter；Groovy 的 null 需明确选 APK DSL 接口。
@@ -28,6 +173,22 @@ def clearApkSigning = { target ->
 }
 gradle.beforeProject { project ->
     project.plugins.withId('com.android.application') {
+        if (dependencyDiagnosticEnabled && project.path == ':app') {
+            project.configurations.configureEach { configuration ->
+                if (diagnosticConfigurations.contains(configuration.name)) {
+                    def firstGraphRecorded = false
+                    configuration.incoming.afterResolve {
+                        if (!firstGraphRecorded) {
+                            firstGraphRecorded = true
+                            // 标记采集器内/外的首次解析，不声称观察到具体触发任务。
+                            emitDependencyDiagnostic(project, configuration,
+                                dependencyCollectorActive ? 'after-resolve-inside-collector' :
+                                    'after-resolve-outside-collector', null)
+                        }
+                    }
+                }
+            }
+        }
         def components = project.extensions.getByName('androidComponents')
         components.finalizeDsl({ android ->
             if (System.getenv('CI_UNSIGNED_APK') == 'true') {
@@ -43,24 +204,42 @@ gradle.projectsEvaluated {
     // 此任务只供无秘密PR采集正常图，三轮独立strict仍决定资料是否完整。
     gradle.rootProject.tasks.register('ciResolveAndLockAll') { task ->
         task.notCompatibleWithConfigurationCache('Dependency lock collection resolves project configurations')
+        // 显式调度保证真实消费者先运行；CLI排列不能替代多项目/并行的顺序约束。
+        task.mustRunAfter(['Debug', 'Release', 'Diagnostic'].collectMany { variant ->
+            [":app:testWatchAndroid${variant}UnitTest", ":app:lintWatchAndroid${variant}",
+             ":app:assembleWatchAndroid${variant}"]
+        })
+        if (gradle.startParameter.taskNames.contains(':app:assembleWatchAndroidDiagnosticAndroidTest')) {
+            task.mustRunAfter(':app:assembleWatchAndroidDiagnosticAndroidTest')
+        }
         task.doLast {
             if (!gradle.startParameter.writeDependencyLocks) {
                 throw new GradleException('Lock collection requires --write-locks')
             }
-            gradle.rootProject.allprojects.sort { it.path }.each { project ->
-                project.configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
-                    // 锁来自完整依赖图；无需选择AGP测试配置的secondary artifact。
-                    def unresolved = configuration.incoming.resolutionResult.allDependencies.findAll {
-                        it instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult
+            dependencyCollectorActive = true
+            try {
+                gradle.rootProject.allprojects.sort { it.path }.each { project ->
+                    project.configurations.findAll { it.canBeResolved }.sort { it.name }.each { configuration ->
+                        // 锁来自完整依赖图；无需选择AGP测试配置的secondary artifact。
+                        def result = configuration.incoming.resolutionResult
+                        if (dependencyDiagnosticEnabled && project.path == ':app' &&
+                            diagnosticConfigurations.contains(configuration.name)) {
+                            emitDependencyDiagnostic(project, configuration, 'collector-snapshot', result)
+                        }
+                        def unresolved = result.allDependencies.findAll {
+                            it instanceof org.gradle.api.artifacts.result.UnresolvedDependencyResult
+                        }
+                        if (!unresolved.isEmpty()) {
+                            throw new GradleException(
+                                "Dependency graph resolution failed for ${project.path}:${configuration.name}",
+                                unresolved.first().failure
+                            )
+                        }
+                        project.logger.lifecycle("Resolved lock input ${project.path}:${configuration.name}")
                     }
-                    if (!unresolved.isEmpty()) {
-                        throw new GradleException(
-                            "Dependency graph resolution failed for ${project.path}:${configuration.name}",
-                            unresolved.first().failure
-                        )
-                    }
-                    project.logger.lifecycle("Resolved lock input ${project.path}:${configuration.name}")
                 }
+            } finally {
+                dependencyCollectorActive = false
             }
         }
     }
