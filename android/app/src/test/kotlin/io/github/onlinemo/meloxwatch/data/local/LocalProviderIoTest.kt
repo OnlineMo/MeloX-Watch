@@ -119,8 +119,15 @@ class LocalProviderIoTest {
         }
         io.retireCursor(receipt) { throw failure }
         dispatcher.runNext()
-        try { receipt.await(); throw AssertionError("Expected cursor close failure") }
-        catch (error: IOException) { assertSame(failure, error) }
+        try {
+            receipt.await()
+            throw AssertionError("Expected cursor close failure")
+        } catch (error: IOException) {
+            // await 可以恢复协程栈并复制异常；物理关闭的原始原因必须保留。
+            assertEquals(failure.javaClass, error.javaClass)
+            assertEquals(failure.message, error.message)
+            assertTrue(error === failure || error.cause === failure)
+        }
         assertFalse(checkNotNull(next).isCompleted)
         dispatcher.runNext()
         assertEquals("retry", checkNotNull(next).await())
@@ -131,6 +138,9 @@ class LocalProviderIoTest {
         private val work = ArrayDeque<Runnable>()
         val empty: Boolean get() = work.isEmpty()
         override fun dispatch(context: CoroutineContext, block: Runnable) { work.addLast(block) }
-        fun runNext() { check(work.isNotEmpty()); work.removeFirst().run() }
+        fun runNext() {
+            check(work.isNotEmpty())
+            work.removeFirst().run()
+        }
     }
 }
