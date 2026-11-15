@@ -10,9 +10,9 @@
 
 ## Infrastructure baseline and parallel work
 
-- CI-01–04 scripts are under implementation; workflow changes remain proposed until owner Issue review and maintenance. Consult docs/13 and docs/ci/CI-01–04建设记录.md for actual evidence. The legacy deployed workflows are unsafe for trusted application signing/release; never use them by setting gates true.
+- CI-01–04 scripts are merged and the reviewed workflows are deployed through owner Issue #15 maintenance. Consult docs/13 and docs/ci/CI-01–04建设记录.md for exact evidence. Cloud policy checks and the no-Android preparation rejection passed; real APK compilation, signing, candidates and recovery remain untested. Never fabricate readiness or restore the legacy single-stage release.
 - Before trusted Android builds, implement CI-01: compile/test/lint with no signing secrets or write token; sign on a fresh runner without running application build scripts; grant ephemeral contents-write only to publication. PR event names alone do not ensure secret isolation.
-- CI-02/03 must provide nonpublishing candidates and publication/recovery of the exact accepted APK. CI-04 must align owner version proposals, auto versionCode and branch resynchronization. Workflow changes follow the owner's Issue maintenance route. Policy tests and skipped Android jobs do not complete APK/device acceptance.
+- CI-02/03 now have separate preparation and publication/recovery wiring for the exact accepted APK; real artifact validation remains pending. CI-04 owner version ceilings and sync checks are merged; live version proposal/path tests are recorded separately from synthetic sync tests. Future workflow changes still follow the owner's Issue maintenance route. Policy tests and skipped Android jobs do not complete APK/device acceptance.
 
 ## Development loop
 
@@ -34,6 +34,7 @@
 ## Identity, PRs and protection
 
 - Use the authorized developer identity and GitHub noreply email. No real user email, AI author/committer, Co-authored-by or generated-by-AI signatures. Never copy credentials, private signing material, local prompt or reference clones into the app repository, issues, logs or artifacts. Preserve necessary upstream license notices after source review.
+- Before every push, inspect git status in all worktrees, audit all reachable commit authors/committers, and verify the actual GitHub account is OnlineMo/id143324986. In the current owner-only repository, developer identities must be OnlineMo with the authorized noreply email; GitHub's automated merge committer is platform metadata, not another developer. Stop on unexpected identity or refs; never relabel another developer's work or rewrite shared history to hide it. Prefer command-scoped credential.username=OnlineMo and never log credentials.
 - Ordinary contributors cannot change version.properties. OnlineMo may propose a valid increasing version; the target auto-code/sync rules are in10 and require CI-04 before relying on them. Current 0.0.0/0 is an unstarted sentinel, not a permanent byte lock.
 - **All PRs, including owner PRs, must not change `.github/workflows/` or `.github/actions/`, including add/delete/rename.** Request changes via Actions Issue; owner reviews and maintains outside PRs. Other governance/CI script changes require owner PRs. Trusted policy reads base-controlled policy, never executes PR source.
 - Main takes owner contribution→main promotion PRs. After protected merges, owner main→contribution sync PRs keep ancestry current; pure sync must not invent a new version. CI-04 adds this tested handling. Do not use direct pushes to bypass effective protection.
@@ -42,7 +43,7 @@
 
 ## Candidate and release contract
 
-- Only OnlineMo may prepare/publish from main, including reruns. Target web workflow has prepare-candidate and publish-candidate (not available yet). Candidate preparation is not publication approval and does not require final device report or public visibility.
+- Only OnlineMo may prepare/publish from main, including reruns. The deployed web workflow exposes prepare-candidate and publish-candidate; without an Android project, preparation must reject before creating a snapshot or compiling/signing. Candidate preparation is not publication approval and does not require final device report or public visibility.
 - Candidate source SHA is frozen main. Full reachable count N plus the release commit and historical max R produce code=max(N+1,R+1), within2100000000. Canonical x.y.z must increase over releases. Snapshot changes only version.properties; preserve its Git objects and the signed APK. No release branch or development-branch writeback.
 - Device reports bind exact candidate/run/attempt/artifact/source/snapshot/APK/certificate. Later approval-only commits may change only agreed docs/releases/<version>/ reports, docs/13 status and readiness (never application build inputs). They do not rebase/rebuild the candidate or recalculate code. Other input changes invalidate it.
 - First-release candidates include watch and Android companion APKs from the same snapshot. Apply identity, version, hash and certificate checks to each package; bind interoperability evidence to both APKs and protocol schema. LP-14 must extend cloud build/sign/publish handling through the existing Actions Issue route; documentation does not imply this is implemented.
