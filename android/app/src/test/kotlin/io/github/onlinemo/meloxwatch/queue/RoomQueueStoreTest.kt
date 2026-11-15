@@ -534,7 +534,12 @@ class RoomQueueStoreTest {
         try {
             action()
         } catch (error: QueueStoreException) {
-            assertEquals(expected, error.issue)
+            try {
+                assertEquals(expected, error.issue)
+            } catch (failure: AssertionError) {
+                failure.initCause(error)
+                throw failure
+            }
             return error
         }
         throw AssertionError("expected $expected")

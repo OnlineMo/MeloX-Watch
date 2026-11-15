@@ -24,7 +24,7 @@
 
 ## 验证状态
 
-已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第三轮云端实际执行Debug全部58项，57项通过、1项失败；Release/Diagnostic尚未执行。它们不代替音频出声或设备AC；本地均未执行。
+已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第四轮云端实际执行Debug全部58项，57项通过、1项失败；Release/Diagnostic尚未执行。它们不代替音频出声或设备AC；本地均未执行。
 
 本地44个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
 
@@ -40,7 +40,13 @@
 
 报告artifact `14167980777` 原始ZIP为81904字节，SHA-256 `ab07370b772e56c0c84fa5ee2d0a3c0e71ae4a178aa14e458e5f39d165c759b3`；job日志SHA-256 `f55537c0712d7fa4b6a6febca125c1467420d0985c30c7d4354b1f58f95a0ff9`。实际RoomQueueStore JUnit XML SHA-256 `4b24d6b5a8a6747cb0d7b86a0482ce10bbc91dc8d4963698e559d27870014b45`，KSP schema1 SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`。这些字节均只保留作 `failed-partial` 诊断证据，未导入为严格锁或迁移schema基线。
 
-低空间测试原来通过事务外查询设置 `PRAGMA max_page_count`；WAL连接池可以把查询分配给reader，该连接的页上限没有约束Room writer。修正为短Room事务内读取原上限并设置writer页上限，实际 `store.replace` 保持自身暂存/提交事务；另一个短事务恢复原上限。测试新增真实 `SQLiteFullException` cause断言，继续检查旧队列、重开后完整性和205条显式重试。独立Python SQLite连接实验复现reader上限不约束writer、writer触发code13并回滚；这只证明fixture方向，修正后的Android云端测试仍待运行。
+低空间测试原来通过事务外查询设置 `PRAGMA max_page_count`；WAL连接池可以把查询分配给reader，该连接的页上限没有约束Room writer。修正为短Room事务内读取原上限并设置writer页上限，实际 `store.replace` 保持自身暂存/提交事务；另一个短事务恢复原上限。测试新增真实 `SQLiteFullException` cause断言，继续检查旧队列、重开后完整性和205条显式重试。独立Python SQLite连接实验复现reader上限不约束writer、writer触发code13并回滚；这只证明fixture方向，第四轮Android云端分类断言仍失败。
+
+第四轮 [run `43731373776`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43731373776) / attempt `1` 绑定 source `18562dc1e3a7db2e0a4f0d1c247e7c4518723b31`、实际 checkout/build `fbdcd64639399b2544f623ee00d121f675d0bf2b`、job `132864370046`。第一资料阶段在3分52秒失败，实际Debug JUnit仍为58项、57通过、1失败、0跳过、0错误；同一低空间测试的原始异常为 `java.lang.AssertionError: expected:<STORAGE_FULL> but was:<STORAGE_UNAVAILABLE>`，栈指向 `expectIssue` 第537行和测试第412行。Release/Diagnostic与第二至第五阶段未执行，没有导出APK或签名。
+
+报告artifact `14168691523` 原始ZIP为82079字节，SHA-256 `8939a9f6328a9ad7199dd1f8ecf3f336b07aaa99a59d150bed4e5a44355c8afa`；job日志SHA-256 `097fcf82d9ce6770e4af3c73da856b18bc66a6bdf1be2e53ffdca5b61fb40fe3`。实际RoomQueueStore JUnit XML SHA-256 `9601dc6a70acb73322187daf30b11d806fab4d0730c3a945c616e7855cda827e`；KSP schema1仍为11896字节、SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`，缺少app锁，继续只作 `failed-partial` 证据。
+
+该JUnit没有导出底层cause，system-out/system-err也为空，尚不能确认导致 `STORAGE_UNAVAILABLE` 的实际SQLite异常。`expectIssue`现保持原分类断言，并在断言失败时把原 `QueueStoreException` 附为 `AssertionError` cause，保留其cause/suppressed链供下一轮云端诊断；没有改为接受 `STORAGE_UNAVAILABLE` 或据猜测修改生产分类。完整严格锁/schema、三变体及低空间恢复验收继续未完成。
 
 ## 后续必需实现
 
