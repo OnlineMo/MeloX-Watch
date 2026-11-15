@@ -14,6 +14,8 @@ from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secr
 DEPENDENCY_INPUTS = ('gradle/verification-metadata.xml', 'app/gradle.lockfile')
 DEPENDENCY_REPORT_FILES = (*DEPENDENCY_INPUTS, 'gradle.lockfile')
 LOCK_COLLECTION_TASK = ':ciResolveAndLockAll'
+DEPENDENCY_DIAGNOSTIC_PHASES = ('verification-collection', 'normal-lock-collection',
+                               'strict-debug', 'strict-release', 'strict-diagnostic')
 
 
 def gradle_tasks(mode):
@@ -25,11 +27,18 @@ def gradle_tasks(mode):
     return tasks
 
 
-def gradle_environment(unsigned):
+def gradle_environment(unsigned, diagnostic_phase=None):
     environment = dict(os.environ, CI_UNSIGNED_APK=str(unsigned).lower())
     # 编译不需要仓库/产物 API 或 OIDC token；它们不能进入应用构建脚本。
     for key in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'):
         environment.pop(key, None)
+    # 普通构建不安装图观察器；外层runner继承的诊断标记不能改变此边界。
+    environment.pop('CI_DEPENDENCY_DIAGNOSTIC_PHASE', None)
+    if diagnostic_phase is not None:
+        require(unsigned and os.environ.get('GITHUB_EVENT_NAME') == 'pull_request' and
+                diagnostic_phase in DEPENDENCY_DIAGNOSTIC_PHASES,
+                'Dependency diagnostics require an unsigned PR bootstrap phase')
+        environment['CI_DEPENDENCY_DIAGNOSTIC_PHASE'] = diagnostic_phase
     return environment
 
 
@@ -80,7 +89,8 @@ def bootstrap_dependencies(build_sha, missing):
         for phase in phases:
             phase['status'] = 'started'
             # verification writer 会额外解析全配置；最终锁须来自独立的正常任务解析。
-            subprocess.run(phase['command'], cwd=android, env=gradle_environment(unsigned=True), check=True)
+            subprocess.run(phase['command'], cwd=android,
+                           env=gradle_environment(unsigned=True, diagnostic_phase=phase['name']), check=True)
             if phase['name'] == 'normal-lock-collection':
                 strict_input_hashes = generated_input_hashes()
                 require(all(name in strict_input_hashes for name in DEPENDENCY_INPUTS),

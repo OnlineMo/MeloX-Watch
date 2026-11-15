@@ -92,12 +92,16 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 self.assertIn(f':app:lintWatchAndroid{variant}', command)
                 self.assertIn(f':app:assembleWatchAndroid{variant}', command)
             self.assertEqual(kwargs['env']['CI_UNSIGNED_APK'], 'true')
+            self.assertEqual(kwargs['env']['CI_DEPENDENCY_DIAGNOSTIC_PHASE'],
+                             build.DEPENDENCY_DIAGNOSTIC_PHASES[phase])
             for token in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'):
                 self.assertNotIn(token, kwargs['env'])
             self.assertEqual(kwargs['cwd'], self.android)
             self.write_inputs(build.DEPENDENCY_REPORT_FILES)
 
-        with patch.dict(os.environ, {name: 'unlogged-test-marker' for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN')}), \
+        with patch.dict(os.environ, {name: 'unlogged-test-marker' for name in
+                                   ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN',
+                                    'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'CI_DEPENDENCY_DIAGNOSTIC_PHASE')}), \
                 patch.object(build.subprocess, 'run', side_effect=generated) as process, \
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
@@ -115,6 +119,31 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
         self.assertTrue(manifest['report_matches_strict_inputs'])
         self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_inherited_diagnostics_are_removed_from_ordinary_gradle_environments(self):
+        for event in ('pull_request', 'push', 'workflow_dispatch'):
+            for unsigned in (True, False):
+                with self.subTest(event=event, unsigned=unsigned), patch.dict(os.environ, {
+                    'GITHUB_EVENT_NAME': event, 'CI_DEPENDENCY_DIAGNOSTIC_PHASE': 'strict-debug',
+                    'GH_TOKEN': 'unlogged-test-marker', 'GITHUB_TOKEN': 'unlogged-test-marker',
+                    'ACTIONS_RUNTIME_TOKEN': 'unlogged-test-marker',
+                    'ACTIONS_ID_TOKEN_REQUEST_TOKEN': 'unlogged-test-marker',
+                }):
+                    environment = build.gradle_environment(unsigned)
+                    self.assertEqual(environment['CI_UNSIGNED_APK'], str(unsigned).lower())
+                    for name in ('CI_DEPENDENCY_DIAGNOSTIC_PHASE', 'GH_TOKEN', 'GITHUB_TOKEN',
+                                 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'):
+                        self.assertNotIn(name, environment)
+
+    def test_diagnostics_cannot_be_requested_outside_unsigned_pr_bootstrap(self):
+        for event, unsigned, phase in (('pull_request', True, 'ordinary-debug'),
+                                      ('pull_request', False, 'strict-debug'),
+                                      ('push', True, 'normal-lock-collection'),
+                                      ('workflow_dispatch', True, 'verification-collection')):
+            with self.subTest(event=event, unsigned=unsigned, phase=phase), \
+                    patch.dict(os.environ, {'GITHUB_EVENT_NAME': event}):
+                with self.assertRaisesRegex(ValueError, 'unsigned PR bootstrap phase'):
+                    build.gradle_environment(unsigned, diagnostic_phase=phase)
 
     def test_normal_resolution_lock_replaces_writer_graph_before_independent_verification(self):
         calls = []
@@ -251,7 +280,8 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
 
     def test_complete_committed_inputs_use_strict_build_without_generation(self):
         self.write_inputs()
-        with patch.object(build.subprocess, 'run', side_effect=RuntimeError('mock stops before APK validation')) as process:
+        with patch.dict(os.environ, {'CI_DEPENDENCY_DIAGNOSTIC_PHASE': 'strict-debug'}), \
+                patch.object(build.subprocess, 'run', side_effect=RuntimeError('mock stops before APK validation')) as process:
             with self.assertRaisesRegex(RuntimeError, 'mock stops'):
                 build.build('debug')
         command = process.call_args.args[0]
@@ -259,6 +289,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertNotIn('--write-verification-metadata', command)
         self.assertNotIn('--write-locks', command)
         self.assertEqual(process.call_args.kwargs['env']['CI_UNSIGNED_APK'], 'false')
+        self.assertNotIn('CI_DEPENDENCY_DIAGNOSTIC_PHASE', process.call_args.kwargs['env'])
         self.assertFalse((self.android / 'app/build/reports/dependency-bootstrap').exists())
 
     def test_diagnostic_android_test_dependencies_are_included_when_present(self):
