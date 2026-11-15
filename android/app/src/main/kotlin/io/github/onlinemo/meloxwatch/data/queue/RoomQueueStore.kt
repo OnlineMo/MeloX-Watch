@@ -3,8 +3,8 @@ package io.github.onlinemo.meloxwatch.data.queue
 import android.database.sqlite.SQLiteConstraintException
 import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
-import androidx.room.withTransaction
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueLimits
@@ -36,7 +36,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
     }
 
     override suspend fun snapshot(): QueueSnapshot? = databaseAccess {
-        database.withTransaction {
+        database.withPreservedTransaction {
             readSnapshot()?.also { active ->
                 if (!initialized) validateOrders(dao.orderStats(active.generationId), active.entryCount, QueueStoreIssue.RECOVERY_REQUIRED)
             }
@@ -94,7 +94,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
                 withContext(NonCancellable) {
                     try {
                         databaseAccess { dao.abort(generationId) }
-                        databaseAccess { database.withTransaction { dao.deleteAbandonedBatch(generationId, QueueLimits.PAGE_SIZE) } }
+                        databaseAccess { database.withPreservedTransaction { dao.deleteAbandonedBatch(generationId, QueueLimits.PAGE_SIZE) } }
                     } catch (_: QueueStoreException) {
                         // 只回收一个预算批，剩余非活动行留给下次恢复；旧完整队列不受影响。
                     }
@@ -115,7 +115,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
     override suspend fun page(generationId: String, firstPlaybackOrder: Long, limit: Int): List<QueueEntry> {
         if (firstPlaybackOrder < 0L || limit !in 1..QueueLimits.PAGE_SIZE) throw QueueStoreException(QueueStoreIssue.INVALID_INPUT)
         return databaseAccess {
-            database.withTransaction {
+            database.withPreservedTransaction {
                 requireActive(generationId)
                 dao.page(generationId, firstPlaybackOrder, limit).map { it.model() }
             }
@@ -123,7 +123,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
     }
 
     override suspend fun window(generationId: String, currentEntryId: String): QueueWindow = databaseAccess {
-        database.withTransaction {
+        database.withPreservedTransaction {
             val active = requireActive(generationId)
             val current = dao.entry(generationId, currentEntryId) ?: throw QueueStoreException(QueueStoreIssue.CONFLICT)
             val first = maxOf(0L, current.playbackOrder - 1L)
@@ -145,7 +145,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
             throw QueueStoreException(QueueStoreIssue.INVALID_INPUT)
         }
         return databaseAccess {
-            database.withTransaction {
+            database.withPreservedTransaction {
                 val active = requireActive(generationId)
                 if (active.checkpointRevision != expectedCheckpointRevision) throw QueueStoreException(QueueStoreIssue.CONFLICT)
                 val current = checkpoint.queueEntryId?.let { dao.entry(generationId, it) }
@@ -171,7 +171,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
 
     private suspend fun initializeLocked() {
         databaseAccess {
-            database.withTransaction {
+            database.withPreservedTransaction {
                 dao.insertHead(QueueHeadEntity())
                 readSnapshot()?.let { active ->
                     validateOrders(dao.orderStats(active.generationId), active.entryCount, QueueStoreIssue.RECOVERY_REQUIRED)
@@ -184,7 +184,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
     }
 
     private suspend fun begin(request: QueueReplacementRequest, generationId: String, restart: Boolean) = databaseAccess {
-        database.withTransaction {
+        database.withPreservedTransaction {
             val head = dao.head() ?: recoveryRequired()
             if (head.activeGenerationId != request.expectedGenerationId || head.queueRevision != request.expectedQueueRevision) {
                 throw QueueStoreException(QueueStoreIssue.CONFLICT)
@@ -223,7 +223,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
             }
             currentCoroutineContext().ensureActive()
             databaseAccess(inputRows = true) {
-                database.withTransaction {
+                database.withPreservedTransaction {
                     dao.insertEntries(entries.map { it.record(generationId) })
                     if (dao.advanceStaging(generationId, offset, offset + entries.size) != 1) recoveryRequired()
                 }
@@ -235,7 +235,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
     private data class SealedQueue(val current: QueueEntryEntity?, val window: QueueWindow?)
 
     private suspend fun seal(request: QueueReplacementRequest, generationId: String): SealedQueue = databaseAccess {
-        database.withTransaction {
+        database.withPreservedTransaction {
             val generation = dao.generation(generationId) ?: recoveryRequired()
             val stats = dao.orderStats(generationId)
             val total = request.view.totalCount
@@ -262,7 +262,7 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
         generationId: String,
         current: QueueEntryEntity?,
     ): QueueSnapshot = databaseAccess {
-        database.withTransaction {
+        database.withPreservedTransaction {
             val position = current?.durationMs?.let { request.initialPositionMs.coerceAtMost(it) } ?: request.initialPositionMs
             val nextRevision = request.expectedQueueRevision + 1L
             if (dao.publish(generationId, request.expectedGenerationId, request.expectedQueueRevision, nextRevision, current?.queueEntryId, position) != 1) {
@@ -305,14 +305,14 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
 
     private suspend fun cleanupInactive() {
         do {
-            val deleted = databaseAccess { database.withTransaction { dao.deleteInactiveBatch(QueueLimits.PAGE_SIZE) } }
+            val deleted = databaseAccess { database.withPreservedTransaction { dao.deleteInactiveBatch(QueueLimits.PAGE_SIZE) } }
             if (deleted > 0) yield()
         } while (deleted > 0)
     }
 
     private suspend fun cleanupAbandoned(generationId: String) {
         do {
-            val deleted = databaseAccess { database.withTransaction { dao.deleteAbandonedBatch(generationId, QueueLimits.PAGE_SIZE) } }
+            val deleted = databaseAccess { database.withPreservedTransaction { dao.deleteAbandonedBatch(generationId, QueueLimits.PAGE_SIZE) } }
             if (deleted > 0) yield()
         } while (deleted > 0)
     }

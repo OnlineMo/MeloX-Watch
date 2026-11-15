@@ -2,6 +2,8 @@ package io.github.onlinemo.meloxwatch.queue
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
+import android.database.sqlite.SQLiteFullException
 import androidx.room.Room
 import androidx.room.withTransaction
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
@@ -650,18 +652,25 @@ class RoomQueueStoreTest {
     fun realSqliteFullPreservesTheOldQueueAndAllowsExplicitRetry() = runBlocking {
         val oldRequest = request("old", 3L)
         val old = store.replace(oldRequest, source(oldRequest.view)).snapshot
-        val pageCount = pragmaLong("page_count")
-        val cap = pageCount + 8L
-        assertEquals(cap, pragmaLong("max_page_count = $cap"))
+        // WAL 查询可走reader；连接级页上限必须在Room持有writer时设置和恢复。
+        val previousMaximum = database.withTransaction {
+            val previous = writerPragmaLong("max_page_count")
+            val cap = writerPragmaLong("page_count") + 8L
+            assertEquals(cap, writerPragmaLong("max_page_count = $cap"))
+            previous
+        }
         val next = request("full-disk", 205L)
         val title = "x".repeat(4096)
         try {
-            expectIssue(QueueStoreIssue.STORAGE_FULL) {
+            val failure = expectIssue(QueueStoreIssue.STORAGE_FULL) {
                 store.replace(next, source(next.view, title = title))
             }
+            assertTrue(failure.cause is SQLiteFullException)
+            assertTrue("The full-write error retains its distinct SQLite cleanup failure",
+                requireNotNull(failure.cause).suppressed.any { it is SQLiteException && it !is SQLiteFullException })
             assertEquals(old, store.snapshot())
         } finally {
-            pragmaLong("max_page_count = 1073741823")
+            database.withTransaction { writerPragmaLong("max_page_count = $previousMaximum") }
         }
         reopen()
         assertEquals(old, store.snapshot())
@@ -767,7 +776,12 @@ class RoomQueueStoreTest {
         try {
             action()
         } catch (error: QueueStoreException) {
-            assertEquals(expected, error.issue)
+            try {
+                assertEquals(expected, error.issue)
+            } catch (failure: AssertionError) {
+                failure.initCause(error)
+                throw failure
+            }
             return error
         }
         throw AssertionError("expected $expected")
@@ -791,8 +805,9 @@ class RoomQueueStoreTest {
         assertEquals(active.entryCount, database.queueDao().orderStats(active.generationId).entryCount)
     }
 
-    private suspend fun pragmaLong(pragma: String): Long = withContext(Dispatchers.IO) {
-        database.openHelper.writableDatabase.query("PRAGMA $pragma").use { cursor ->
+    private fun writerPragmaLong(pragma: String): Long {
+        assertTrue(database.inTransaction())
+        return database.openHelper.writableDatabase.query("PRAGMA $pragma").use { cursor ->
             assertTrue(cursor.moveToFirst())
             cursor.getLong(0)
         }

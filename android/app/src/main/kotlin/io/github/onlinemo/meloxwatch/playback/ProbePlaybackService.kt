@@ -198,7 +198,7 @@ class ProbePlaybackService : MediaSessionService() {
                 }
                 future.set(failureResult(issue))
             } catch (_: IllegalArgumentException) {
-                future.set(SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE))
+                future.set(SessionResult(SessionError.ERROR_BAD_VALUE))
             } catch (_: Exception) {
                 future.set(failureResult(coordinator?.state?.value?.failure?.issue?.name ?: "OUTPUT_ERROR"))
             }
@@ -214,7 +214,7 @@ class ProbePlaybackService : MediaSessionService() {
             putString(PlaybackCommands.FAILURE, issue)
             storeIssue?.let { putString(PlaybackCommands.STORE_ISSUE, it) }
         }
-        return SessionResult(SessionResult.RESULT_ERROR_INVALID_STATE, extras)
+        return SessionResult(SessionError.ERROR_INVALID_STATE, extras)
     }
 
     private inner class LocalPlaybackCallback : MediaSession.Callback {
@@ -250,7 +250,7 @@ class ProbePlaybackService : MediaSessionService() {
             args: Bundle,
         ): ListenableFuture<SessionResult> {
             if (controller.uid != Process.myUid()) {
-                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_ERROR_PERMISSION_DENIED))
+                return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
             }
             return when (customCommand.customAction) {
                 PlaybackCommands.replaceLocal.customAction -> commandFuture {

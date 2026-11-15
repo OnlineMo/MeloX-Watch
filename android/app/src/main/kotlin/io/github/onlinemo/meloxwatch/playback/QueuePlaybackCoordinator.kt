@@ -1,6 +1,6 @@
 package io.github.onlinemo.meloxwatch.playback
 
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Looper
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
@@ -669,7 +669,7 @@ class QueuePlaybackCoordinator(
     private fun localFailure(entry: QueueEntry): QueuePlaybackFailure? {
         if (entry.trackKey.providerId != TrackKey.LOCAL_PROVIDER) return QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_UNSUPPORTED, entry.queueEntryId)
         val location = entry.location ?: return QueuePlaybackFailure(QueuePlaybackIssue.LOCATION_MISSING, entry.queueEntryId)
-        val uri = Uri.parse(location.uri)
+        val uri = location.uri.toUri()
         return if (uri.scheme != "content" || uri.authority.isNullOrBlank()) QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_UNAVAILABLE, entry.queueEntryId) else null
     }
 
