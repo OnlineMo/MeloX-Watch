@@ -41,11 +41,11 @@ internal object LibrarySql {
             args += "%$escaped%"
         }
         val (primary, nullRank, section) = sortColumns(view.sort.field)
+        // Keep source/grant/content payload out of access_options; join the same versions after choosing access.
         val sql = """
             WITH alias_rows AS (
-                SELECT av.*, aa.objectId, sv.spec AS sourceSpec, g.uri AS grantUri, g.observation AS grantObservation,
-                    lv.contentRevision AS actualContentRevision, lv.contentToken AS actualContentToken,
-                    lv.verifiedContentToken AS actualVerifiedContentToken, lv.sizeBytes AS actualSizeBytes,
+                SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
+                    lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
                         WHEN sv.state = 'REMOVED' THEN 5
                         WHEN sv.state = 'NEEDS_AUTHORIZATION' OR av.readIssue IN ('PERMISSION_DENIED', 'PERMISSION_REVOKED') THEN 2
@@ -75,12 +75,17 @@ internal object LibrarySql {
                     CASE WHEN t.statisticsEpoch = ${view.statisticsEpoch} THEN t.playCount ELSE 0 END AS effectivePlayCount,
                     CASE WHEN t.statisticsEpoch = ${view.statisticsEpoch} THEN t.listeningMs ELSE 0 END AS effectiveListeningMs,
                     a.aliasId AS selectedAliasId, a.sourceId AS selectedSourceId, a.locationId AS selectedLocationId,
-                    a.nodeId AS selectedNodeId, a.uri AS selectedUri, a.actualContentRevision AS selectedContentRevision,
-                    a.grantUri AS selectedGrantUri, a.grantObservation AS selectedGrantObservation,
-                    a.sourceSpec AS selectedSpec, a.objectId AS selectedObjectId,
-                    a.actualContentToken AS selectedProviderContentToken, a.actualVerifiedContentToken AS selectedVerifiedContentToken,
-                    a.actualSizeBytes AS selectedSizeBytes
+                    a.nodeId AS selectedNodeId, payloadAlias.uri AS selectedUri, payloadLocation.contentRevision AS selectedContentRevision,
+                    payloadGrant.uri AS selectedGrantUri, payloadGrant.observation AS selectedGrantObservation,
+                    payloadSource.spec AS selectedSpec, payloadAccess.objectId AS selectedObjectId,
+                    payloadLocation.contentToken AS selectedProviderContentToken, payloadLocation.verifiedContentToken AS selectedVerifiedContentToken,
+                    payloadLocation.sizeBytes AS selectedSizeBytes
                 FROM local_track_versions t LEFT JOIN best_access a ON a.ownerTrackId = t.trackId
+                LEFT JOIN local_alias_versions payloadAlias ON payloadAlias.versionId = a.aliasVersionId
+                LEFT JOIN local_access_aliases payloadAccess ON payloadAccess.aliasId = a.aliasId
+                LEFT JOIN local_location_versions payloadLocation ON payloadLocation.versionId = a.locationVersionId
+                LEFT JOIN local_source_versions payloadSource ON payloadSource.sourceId = a.sourceId AND payloadSource.validFrom = a.sourceVersionFrom
+                LEFT JOIN local_grants payloadGrant ON payloadGrant.grantId = payloadSource.grantId
                 WHERE ${filters.joinToString(" AND ")}
             ), ordered AS (
                 SELECT base.*, CASE WHEN availabilityRank = 0 THEN 0 ELSE 1 END AS missingRank,
