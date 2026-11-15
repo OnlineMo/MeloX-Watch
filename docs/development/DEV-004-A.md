@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 源码：单`:app`工程正在建设，包含运行时圆/方屏布局、真实输入检查、文件/目录授权能力探测、MediaStore少量样本及单会话本地播放。
-- 云端：第三轮资料采集已执行Debug/Release源码编译及Debug assemble，lint失败，应用单测均NO-SOURCE；未完成三变体锁资料、严格构建或任何签名。精确证据见下文。
+- 云端：第四轮资料采集已执行三变体源码编译，Debug/Release lint通过，Diagnostic因API29的profileable提示失败；应用单测均NO-SOURCE。未完成三变体锁资料、严格构建或任何签名。精确证据见下文。
 - 设备：2026-11-15T10:38:11Z只读`adb devices -l`返回空清单。DEV-001的API/ABI/窗口、DEV-002安装/耳机/30分钟后台、DEV-005用户文件及输入、DEV-004-B性能基线均未测；minSdk26仍为候选，不能由云端成功推断设备可用。
 - 完整功能：LP-00～15、网易云及Meting业务尚未验收，256个原AC无通过证据。readiness全部false、candidate=null；无公开、tag、Release或发布批准。
 
@@ -34,5 +34,7 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 第三轮run`43709825751`、attempt`1`绑定source`401daa9756f4c3cbf3b7db5bbe6660bcc3297bed`与merge build`39ba0603ee61338c215b793b182e2df23506a3d7`，编译job为`132798816688`。Debug及Release的Kotlin源码编译已执行，Debug assemble已运行；两变体单测均为`NO-SOURCE`，不能记作应用单测通过。Debug lint失败18项：11项为固定插件/库的升级建议，7项为实际窗口尺寸、英语数量文案和Core URI扩展问题；Release只见lint分析，Diagnostic未完成。随后修正7项用法，在模块`lint.xml`只对固定wrapper/catalog文件豁免3类升级建议，保留warningsAsErrors与其它检查。新修正待云端验证。
 
 第三轮报告artifact`14159179627`、归档SHA-256`bae9cf287b1e6f8a25532175f05a1428a0854322891f2690ca4b2d9a9393a386`与GitHub digest一致。校验XML为`651c09fe2f027be20bb85ae35f2394217caeb3c916b60bde44bd1a5a603af204`，app锁仍缺失，manifest为`failed-partial`、`accepted=false`、`apk_exported=false`；没有导入这些部分材料，签名跳过、cloud-gate失败。
+
+第四轮run`43711302403`、attempt`1`绑定source`27150bb6d4781fb46800dea7975ccda8e3481ff8`与merge build`950410f88000a3db767f82889ee6830e0bdedb7c`，编译job为`132803274733`。三变体Kotlin源码编译已执行，Debug/Release lint通过，三变体应用单测均为`NO-SOURCE`。Diagnostic lint剩一项`UnusedAttribute`：`profileable`仅在API29及以上有效。随后只给此节点增加`tools:targetApi="29"`，保留候选min26；API26～28的Diagnostic不声称有shell profile能力。报告artifact`14161036807`仍是未接受资料，未导出APK或签名；新修正待云端验证。
 
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。
