@@ -49,7 +49,7 @@ Gradle 发行包的独立 SHA-256 仍为 `20f1b1176237254a6fc204d8434196fa11a4cf
 
 所有项目配置使用 `lockAllConfigurations()` 和 `LockMode.STRICT`；插件版本精确读取既有工具链锁。根 `android/gradle.lockfile` 没有可锁配置时可以不存在；若云端实际生成则一并保存、审阅。
 
-资料缺失时只允许无秘密的 Debug PR 构建收集材料，所有阶段使用 `CI_UNSIGNED_APK=true`。先对 Debug、Release、Diagnostic 的测试/lint/assemble 任务运行 `--write-verification-metadata sha256 --write-locks`，再用独立进程只加 `--write-locks` 收集正常任务解析的锁；最后分别执行三变体的独立严格验证，不带任何生成参数。最终锁与校验文件的哈希必须在这三轮中保持一致。五阶段全部完成也只产生待审资料，随后明确失败，不导出可验收 APK，不进入稳定或正式签名，也不能让 cloud-gate 成功。
+资料缺失时只允许无秘密的 Debug PR 构建收集材料，所有阶段使用 `CI_UNSIGNED_APK=true`。先对 Debug、Release、Diagnostic 的测试/lint/assemble 任务运行 `--write-verification-metadata sha256 --write-locks`，再用独立进程只加 `--write-locks`，执行 CI 初始化脚本提供的 `:ciResolveAndLockAll` 和相同变体任务，显式非宽松解析所有 `canBeResolved` 配置后生成正常图的锁；解析失败不得跳过。最后分别执行三变体的独立严格验证，不带任何生成参数。最终锁与校验文件的哈希必须在这三轮中保持一致。五阶段全部完成也只产生待审资料，随后明确失败，不导出可验收 APK，不进入稳定或正式签名，也不能让 cloud-gate 成功。
 
 已有报告上传步骤收集 `android/app/build/reports/dependency-bootstrap/`。预期包含 `gradle/verification-metadata.xml`、`app/gradle.lockfile`、可选根 `gradle.lockfile`，以及 `bootstrap-manifest.json`。manifest 绑定 source/build SHA、run/attempt、各阶段命令和状态、严格验证前的文件哈希、最终文件 SHA-256、缺失项和 `accepted=false`；任一阶段失败或严格验证改变输入字节都只能标 `failed-partial`，不能直接批准。
 
@@ -80,3 +80,11 @@ Gradle 发行包的独立 SHA-256 仍为 `20f1b1176237254a6fc204d8434196fa11a4cf
 独立读取 Gradle 8.13 的官方固定源码（commit `073314332697ba45c16c0a0ce1891fa6794179ff`）确认 verification writer 在构建末额外解析所有可解析配置；Kotlin 2.2.21 官方 module 将 common 声明为 runtime dependency constraint。调查没有证明额外解析一定是本次不一致的完整原因，也不保证分轮采集必然解决问题。不会添加虚假的 runtime 依赖、手工裁剪锁或降低严格校验。
 
 现撤回该 app 锁作为可接受输入，保留已审校验 XML；原锁字节仍在 Git 提交与已核验云端归档中。下一轮由第 3 节的五阶段重新采集并接受独立审阅，只有全阶段实际通过且报告复制字节与严格输入一致才能导入新资料。调查摘要 SHA-256 为 `8d61dc558ba349d94fbac4cfffc04848bdbb359abaacca90b9a23f26ce71a3b5`；失败日志 SHA-256 为 `0323d8768ab2fa4d81d2ee2ea8c009d4166ab9d076be3edb027bd7d98be18b59`。新增四个 CI 边界测试覆盖正常任务锁替换、独立严格失败、输入字节漂移和最后验证后的报告复制漂移；39 项 Python CI 测试与 Node 政策检查通过，不等于真实 Android 修复已验证。
+
+## 7. 分轮结果与显式配置解析
+
+五阶段首轮 run `43722431450` / attempt `1` 绑定 source `028a05d737192b03c0dfbc5a2d12156b8911d2d6`、build `1dfdd94fc0fbf7ce50cf44dce6aa0975645cdfb2`、job `132837150437`。资料生成阶段 `BUILD SUCCESSFUL in 8m 3s`；正常锁阶段 `BUILD SUCCESSFUL in 17s`，156 项任务中 153 项为 up-to-date，仅三个 lint 包装任务执行。之后严格 Debug 仍因 common 锁状态在 13 秒内失败；新旧锁 SHA-256 完全相同。分轮本身没有解决问题，manifest 是 `failed-partial`，不得导入或接受。
+
+报告 artifact `14165381146` 的 ZIP SHA-256 为 `7dbbd3453abf9d1aadcbb7b75f87235263bc991b446eca96d9b6d4b53cefbb40`；XML 和 app 锁仍为第 5 节的原哈希。完整来源/阶段核验与固定 Gradle 源码调查摘要 SHA-256 为 `48d2027dede0bcbace3306421e307a8fde355fd9b4b6d17a777b379df39dce4c`。
+
+Gradle 8.13 官方文档与固定源码确认只覆写本次实际解析的配置，未触及配置会保留；up-to-date 状态不单独证明哪些配置已解析。第 3 节现增加官方 `resolveAndLockAll` 模式的显式任务，要求 `--write-locks`，禁用此任务的 configuration cache，逐一真正解析可解析配置。它保证下一轮记录配置覆盖，仍须云端严格成功验证效果；没有排除 common、降低 LockMode 或手工更改制品哈希。

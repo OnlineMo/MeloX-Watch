@@ -30,6 +30,10 @@
 
 当前设备未连接，API/ABI、安装、耳机、30分钟后台及14性能预算均未测。所有readiness为false、candidate=null、256个原AC未通过；没有公开、tag、Release或发布批准。
 
+首轮云端 [run `43722837976`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43722837976) / attempt `1` 绑定 source `4f6ed75205ed7e3b5e7251d8dd70d7c500a345c2`、merge build `be210a19c46f3b69e8d46b9f3a412ff67c30f72c`、job `132838389943`。preflight通过；资料阶段在Kotlin编译的 `FlagSet` 引用处失败，应用测试/lint/assemble未完成，签名跳过。官方固定Media3 1.8.0 source JAR核对确认其公开类型为 `androidx.media3.common.FlagSet`，已据此修正导入，未换依赖版本。该官方source JAR SHA-256为 `800866952af08b1f1c39b2a56f906a46f3a0e7ca4ae5e92310ea5388beef7a38`，只作API审阅，没有运行或复制实现。
+
+报告artifact `14165955171` 为 `failed-partial`；KSP曾生成三张队列表的schema1，但缺少app锁及完整严格阶段，因此未导入任何失败资料或把它当迁移验收基线。下一轮已沿用P0显式配置解析收集修正，仍须真实云端58项测试、严格锁/schema和APK证据。
+
 ## 后续必需实现
 
 本主题只提供完整持久队列与设置基础，探针来源检查仍是少量样本。LP-01/02的完整扫描与授权恢复、LP-03真实曲库/统计、LP-04完整增删重排/点击策略/可配置模式、LP-05双后端，以及歌词/音效/文件写入/备份/主题/传输/手机端和在线业务，均继续按05及21实现。初始化schema、实际迁移与库→队列的完整冻结查询将随对应主题重验。

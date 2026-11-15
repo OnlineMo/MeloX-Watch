@@ -3,7 +3,7 @@ package io.github.onlinemo.meloxwatch.playback
 import androidx.media3.common.ForwardingPlayer
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
-import androidx.media3.common.util.FlagSet
+import androidx.media3.common.FlagSet
 import androidx.media3.common.util.UnstableApi
 import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import java.util.IdentityHashMap

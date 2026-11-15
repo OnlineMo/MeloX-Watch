@@ -76,9 +76,11 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             elif phase == 1:
                 self.assertIn('--write-locks', command)
                 self.assertNotIn('--write-verification-metadata', command)
+                self.assertIn(build.LOCK_COLLECTION_TASK, command)
             else:
                 self.assertNotIn('--write-locks', command)
                 self.assertNotIn('--write-verification-metadata', command)
+                self.assertNotIn(build.LOCK_COLLECTION_TASK, command)
             variants = ('Debug', 'Release', 'Diagnostic') if phase < 2 else (('Debug', 'Release', 'Diagnostic')[phase - 2],)
             for variant in variants:
                 self.assertIn(f':app:testWatchAndroid{variant}UnitTest', command)
