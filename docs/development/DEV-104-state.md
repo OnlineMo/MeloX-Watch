@@ -24,7 +24,7 @@
 
 ## 验证状态
 
-已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第五轮云端实际执行Debug全部58项，57项通过、1项失败；Release/Diagnostic尚未执行。它们不代替音频出声或设备AC；本地均未执行。
+已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第六轮云端实际执行Debug全部58项且全部通过；Release/Diagnostic尚未执行，Debug lint失败。它们不代替音频出声或设备AC；本地均未执行。
 
 本地45个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
 
@@ -55,6 +55,12 @@
 官方Room 2.8.5 Android source JAR SHA-256 `bab25e3479739fbb6fa855a165ed4e71211fc259b859a05ff90ce52e080f57f2` 的 `RoomDatabase.android.kt` 第2041～2050行确认外层finally不单独保留block异常；API26官方源码固定提交 `97e5130234bcdc1c4a705be4e548302934499bd4` 的 [SQLiteSession.java](https://android.googlesource.com/platform/frameworks/base/+/97e5130234bcdc1c4a705be4e548302934499bd4/core/java/android/database/sqlite/SQLiteSession.java) 第404～449行确认退出先移除事务栈、再执行COMMIT/ROLLBACK。此源码机制与本轮实际退出栈一致；它不等于已经证明事务内原错的类型。
 
 据此新增独立 `withPreservedTransaction` 包装，并让QueueStore全部12处事务使用它，没有复制Room实现、改变SQL/fixture或按错误消息重分类。包装只保存block抛出的原 `Throwable`：退出另抛时将退出异常加为suppressed、继续抛原异常；原取消仍作为 `CancellationException` 传播。begin、成功标记或退出单独失败时没有block原错，保留该原异常。现有真实FULL cause、旧队列、重开/显式重试及取消测试将核验修复；修复后云端尚未执行。KSP schema1仍为11896字节、SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`，缺少app锁，仍只作 `failed-partial`，未导入或宣布迁移基线通过。
+
+第六轮 [run `43737529727`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43737529727) / attempt `1` 绑定 source `9abf664ae30a28c74bf41c570400f1af337259c8`、实际checkout/build `5ecd517afa7c8e3a5a95385813e3d27579125ae0`、job `132883386122`。Debug实际5份JUnit、58项全部通过，0失败/错误/跳过；真实低空间case在0.274秒通过，冻结测试断言直接 `SQLiteFullException` cause、旧队列、重开后旧队列、独立连接完整性/3条及205条显式重试。成功XML无异常堆栈，原测试未断言suppressed，不能声称已观测退出栈被保留；下一轮在同一真实case增加独立 `SQLiteException` cleanup的suppressed类型断言。
+
+本轮第一资料阶段7分59秒停在Debug lint，91个任务中80实际执行/11缓存；实际lint为3个 `WrongConstant`（ProbePlaybackService.kt 163/179/214）和1个 `UseKtx`（QueuePlaybackCoordinator.kt 602），并非4个常量错误。固定Media3 1.8.0 `SessionResult.Code` 的IntDef列 `SessionError.ERROR_*`，不列数值相同的 `SessionResult.RESULT_ERROR_*` 别名；依官方接口改用原错误码的 `SessionError` 符号，RESULT_SUCCESS保留。URI解析改用已有core-ktx的 `String.toUri`。没有suppress、减少lint门槛或修改测试预期。
+
+报告artifact `14170988432` 原始ZIP104179字节、SHA-256 `42c318ec10c2b2dd954255d9b92ca9102cd412589310eea7fc648b9156b51069`；job日志SHA-256 `400592cbef13828b78934ec9071410def527981699659bfbe240f98b2b862676`；实际Room JUnit XML `ea9674378db62da759c8cf9b9a21b73d335863464a290c655cb5bb2e495725ec`；lint XML `787e0e2d3c6c0d238da59cdea4cb2fae64210902aa8ac87398eaf72b125b1cf8`。缺少app锁、其余变体/阶段，schema1 hash不变；继续仅作 `failed-partial` 诊断，不导入基线或导出APK。上述lint及suppressed修正后尚未云执行。
 
 ## 后续必需实现
 

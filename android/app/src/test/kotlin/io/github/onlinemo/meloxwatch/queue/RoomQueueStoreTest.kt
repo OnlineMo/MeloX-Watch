@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.queue
 
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
 import androidx.room.Room
 import androidx.room.withTransaction
@@ -426,6 +427,8 @@ class RoomQueueStoreTest {
                 store.replace(next, source(next.view, title = title))
             }
             assertTrue(failure.cause is SQLiteFullException)
+            assertTrue("The full-write error retains its distinct SQLite cleanup failure",
+                requireNotNull(failure.cause).suppressed.any { it is SQLiteException && it !is SQLiteFullException })
             assertEquals(old, store.snapshot())
         } finally {
             database.withTransaction { writerPragmaLong("max_page_count = $previousMaximum") }
