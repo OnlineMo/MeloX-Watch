@@ -47,8 +47,10 @@ gradle.projectsEvaluated {
                 throw new GradleException("SDK/build tools drift in ${project.path}")
             }
             def components = project.extensions.findByName('androidComponents')
-            if (components.pluginVersion.toString() != toolchain.getProperty('agp.version')) {
-                throw new GradleException("AGP version drift in ${project.path}")
+            // AndroidPluginVersion.toString() 带说明前缀；version 才是公开 Maven 版本值。
+            def actualAgp = components.pluginVersion.version
+            if (actualAgp != toolchain.getProperty('agp.version')) {
+                throw new GradleException("AGP version drift in ${project.path}: ${actualAgp}")
             }
         }
         if (project.plugins.hasPlugin('com.android.application')) {

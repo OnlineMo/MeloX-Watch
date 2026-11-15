@@ -29,4 +29,6 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 
 首轮PR构建run`43707610394`、attempt`1`绑定source`ec141a0a91f4bf9b9cf061f398a0311f311d274b`与merge build`24c1be4cdf48d2b72f6ce084d7c5a5a83eaba485`。preflight通过，编译配置在AGP的`setSigningConfig(null)`重载歧义处失败，签名跳过、cloud-gate失败。报告artifact`14158961653`的归档SHA-256为`2bb9bf9aabad65593964af16b8ee25c2a480792290f14fe129d8e90d892b691b`，与GitHub digest一致；其中只有绑定上述来源的`failed-partial` manifest，没有锁/校验资料或APK，不能导入或验收。初始化脚本改为按固定AGP的公开APK接口选择setter，所有DSL层仍去签名并读回检查；实际结果待下一轮。下载报告还发现API拒绝`application/octet-stream`，改用GitHub API媒体类型，跨主机下载仍不传Authorization。
 
+第二轮run`43708581683`、attempt`1`绑定source`5f94c753647daf5bb7884dcb5f13fb40889a67c5`与merge build`081abfd34331cc21e5bda962e5e0d5f97d801b67`。配置已越过null歧义，但原初始化脚本将AGP展示字符串与规范版本比较，误报漂移；固定8.11.1官方API的`version`才是Maven版本，随后据此修正。报告artifact`14158809988`、归档SHA-256`ab4aa79e6265d977699fd14e6528d3e0337a3807bb4b9b5ee8bf8d2ff1afafa1`核验一致，仅有校验XML，缺少app锁文件，仍为`failed-partial`、不接受。此次实际下载已验证媒体类型修正；35项本地stdlib CI测试及Node政策检查通过，不代替Android测试。
+
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。
