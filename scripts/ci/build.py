@@ -71,14 +71,42 @@ def missing_dependency_inputs():
     return missing
 
 
+def generated_input_hashes():
+    android = (ROOT / 'android').resolve()
+    files = {}
+    for relative in DEPENDENCY_REPORT_FILES:
+        source = android / relative
+        if source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(android):
+            files[relative] = sha256(source)
+    return files
+
+
 def bootstrap_dependencies(build_sha, missing):
     """PR-only资料采集；无论生成成功与否，都不能导出可验收APK。"""
     android = ROOT / 'android'
     tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in gradle_tasks(mode)]
-    command = gradle_command(tasks) + ['--write-verification-metadata', 'sha256', '--write-locks']
+    phases = [
+        {'name': 'verification-collection', 'command': gradle_command(tasks) +
+         ['--write-verification-metadata', 'sha256', '--write-locks']},
+        {'name': 'normal-lock-collection', 'command': gradle_command(tasks) + ['--write-locks']},
+        *({'name': 'strict-' + mode, 'command': gradle_command(gradle_tasks(mode))}
+          for mode in ('debug', 'release', 'diagnostic')),
+    ]
     completed = False
+    strict_input_hashes = None
     try:
-        subprocess.run(command, cwd=android, env=gradle_environment(unsigned=True), check=True)
+        for phase in phases:
+            phase['status'] = 'started'
+            # verification writer 会额外解析全配置；最终锁须来自独立的正常任务解析。
+            subprocess.run(phase['command'], cwd=android, env=gradle_environment(unsigned=True), check=True)
+            if phase['name'] == 'normal-lock-collection':
+                strict_input_hashes = generated_input_hashes()
+                require(all(name in strict_input_hashes for name in DEPENDENCY_INPUTS),
+                        'Dependency collection did not produce all required inputs')
+            elif phase['name'].startswith('strict-'):
+                require(generated_input_hashes() == strict_input_hashes,
+                        'Independent strict validation changed dependency input bytes')
+            phase['status'] = 'completed'
         completed = True
     finally:
         # Gradle失败也可能写出部分资料；仅作为失败报告留存，不能自动晋升为构建输入。
@@ -92,15 +120,21 @@ def bootstrap_dependencies(build_sha, missing):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, target)
                 files[relative] = sha256(target)
+        report_matches_strict_inputs = files == strict_input_hashes if strict_input_hashes is not None else None
+        if completed and not report_matches_strict_inputs:
+            completed = False
         write_json(report / 'bootstrap-manifest.json', {
             'schema_version': 1, 'source_sha': os.environ.get('SOURCE_SHA', build_sha), 'build_sha': build_sha,
             'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
             'event': os.environ['GITHUB_EVENT_NAME'], 'ref': os.environ['GITHUB_REF'], 'tasks': tasks,
+            'phases': phases, 'strict_input_hashes': strict_input_hashes,
+            'report_matches_strict_inputs': report_matches_strict_inputs,
             'status': 'generated-unreviewed' if completed else 'failed-partial',
             'missing_inputs_at_start': missing,
             'missing_outputs': [name for name in required_build_inputs() if name not in files],
             'files': files, 'accepted': False, 'apk_exported': False,
         })
+    require(completed, 'Dependency collection did not preserve the strict input bytes in reports')
     require(False, 'Dependency bootstrap is not an accepted build. Review and commit the generated '
             'verification metadata, lockfile and generated Room schemas from dependency-bootstrap reports, '
             'then rebuild strictly.')

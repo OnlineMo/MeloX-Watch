@@ -64,11 +64,23 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 process.assert_not_called()
 
     def test_bootstrap_resolves_all_variants_unsigned_without_tokens_and_exports_no_apk(self):
+        phases = []
+
         def generated(command, **kwargs):
+            phase = len(phases)
+            phases.append(command)
             self.assertIn('--dependency-verification=strict', command)
-            self.assertIn('--write-locks', command)
-            self.assertEqual(command[command.index('--write-verification-metadata') + 1], 'sha256')
-            for variant in ('Debug', 'Release', 'Diagnostic'):
+            if phase == 0:
+                self.assertIn('--write-locks', command)
+                self.assertEqual(command[command.index('--write-verification-metadata') + 1], 'sha256')
+            elif phase == 1:
+                self.assertIn('--write-locks', command)
+                self.assertNotIn('--write-verification-metadata', command)
+            else:
+                self.assertNotIn('--write-locks', command)
+                self.assertNotIn('--write-verification-metadata', command)
+            variants = ('Debug', 'Release', 'Diagnostic') if phase < 2 else (('Debug', 'Release', 'Diagnostic')[phase - 2],)
+            for variant in variants:
                 self.assertIn(f':app:testWatchAndroid{variant}UnitTest', command)
                 self.assertIn(f':app:lintWatchAndroid{variant}', command)
                 self.assertIn(f':app:assembleWatchAndroid{variant}', command)
@@ -83,7 +95,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
-            process.assert_called_once()
+            self.assertEqual(process.call_count, 5)
             inspect.assert_not_called()
         manifest = self.manifest()
         self.assertEqual(manifest['status'], 'generated-unreviewed')
@@ -92,7 +104,70 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['source_sha'], SOURCE)
         self.assertFalse(manifest['accepted'])
         self.assertFalse(manifest['apk_exported'])
+        self.assertTrue(all(phase['status'] == 'completed' for phase in manifest['phases']))
+        self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
+        self.assertTrue(manifest['report_matches_strict_inputs'])
         self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_normal_resolution_lock_replaces_writer_graph_before_independent_verification(self):
+        calls = []
+        lock = self.android / 'app/gradle.lockfile'
+
+        def generated(command, **kwargs):
+            calls.append(command)
+            if '--write-verification-metadata' in command:
+                self.write_inputs()
+                lock.write_text('writer metadata graph\n', encoding='utf-8')
+            elif '--write-locks' in command:
+                lock.write_text('normal task graph\n', encoding='utf-8')
+            else:
+                self.assertEqual(lock.read_text(encoding='utf-8'), 'normal task graph\n')
+
+        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(len(calls), 5)
+        copied = self.android / 'app/build/reports/dependency-bootstrap/app/gradle.lockfile'
+        self.assertEqual(copied.read_text(encoding='utf-8'), 'normal task graph\n')
+        self.assertEqual(manifest['strict_input_hashes']['app/gradle.lockfile'], build.sha256(copied))
+        self.assertFalse(manifest['accepted'])
+
+    def test_independent_strict_failure_does_not_complete_collection_or_export(self):
+        def generated(command, **kwargs):
+            if '--write-locks' in command:
+                self.write_inputs()
+            else:
+                raise subprocess.CalledProcessError(1, command)
+
+        with patch.object(build.subprocess, 'run', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaises(subprocess.CalledProcessError):
+                build.build('debug')
+            self.assertEqual(process.call_count, 3)
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertEqual([phase.get('status') for phase in manifest['phases']],
+                         ['completed', 'completed', 'started', None, None])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_independent_strict_input_drift_never_becomes_reviewable_complete_material(self):
+        def generated(command, **kwargs):
+            if '--write-locks' in command:
+                self.write_inputs()
+            else:
+                (self.android / 'app/gradle.lockfile').write_text('unreviewed drift\n', encoding='utf-8')
+
+        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'changed dependency input bytes'):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse(manifest['apk_exported'])
 
     def test_gradle_failure_preserves_partial_reports_and_remains_failed(self):
         def failed(command, **kwargs):
@@ -107,6 +182,28 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['status'], 'failed-partial')
         self.assertEqual(manifest['missing_outputs'], ['app/gradle.lockfile'])
         self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_report_copy_drift_after_last_strict_pass_is_rejected_and_marked_partial(self):
+        original_copy = build.shutil.copyfile
+
+        def copy_with_drift(source, target):
+            if source == self.android / 'app/gradle.lockfile':
+                source.write_text('changed after strict validation\n', encoding='utf-8')
+            return original_copy(source, target)
+
+        with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs: self.write_inputs()), \
+                patch.object(build.shutil, 'copyfile', side_effect=copy_with_drift), \
+                patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'strict input bytes in reports'):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertTrue(all(phase['status'] == 'completed' for phase in manifest['phases']))
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertFalse(manifest['report_matches_strict_inputs'])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse(manifest['apk_exported'])
         self.assertFalse((self.root / 'artifacts').exists())
 
     def test_existing_but_uncommitted_inputs_cannot_unlock_trusted_builds(self):
