@@ -5,8 +5,8 @@
 ## 当前状态
 
 - 源码：单`:app`工程正在建设，包含运行时圆/方屏布局、真实输入检查、文件/目录授权能力探测、MediaStore少量样本及单会话本地播放。
-- 云端：run43755199209的五阶段编译/lint/assemble全部成功，三次独立STRICT输入哈希一致；应用单测均NO-SOURCE。独立审阅811项官方制品后，已重新导入两份原始XML/锁；bootstrap仍按合同拒绝导出APK。提交后的正式严格构建、稳定签名及设备验收待验证，精确证据见依赖记录第14节。
-- 设备：2026-11-15T10:38:11Z只读`adb devices -l`返回空清单。DEV-001的API/ABI/窗口、DEV-002安装/耳机/30分钟后台、DEV-005用户文件及输入、DEV-004-B性能基线均未测；minSdk26仍为候选，不能由云端成功推断设备可用。
+- 云端：run43755199209的五阶段编译/lint/assemble全部成功，三次独立STRICT输入哈希一致；该快照应用单测均NO-SOURCE。独立审阅811项官方制品后导入两份原始XML/锁，bootstrap按合同拒绝导出APK。提交d56cc07的正常严格run43759431432已成功，临时PR签名APK及lint报告核验通过；随后静审修复两处竞态并加入5项通道回归，最新源码的云验、稳定签名及设备验收仍待完成。精确绑定见下文及依赖记录第14节。
+- 设备：初次只读ADB清单为空；用户随后授权的测试VM只读观测API32、主ABI x86_64、466×466/density310，系统报告矩形。原始设备证据SHA-256为`3845c34c1fb39bf91d5bc321dcebb3aa7f5ef8026c1f3126f917fe71ac4fcdad`，仅保留本地。尚未安装APK、改变显示设置或测实际音频/输入/持久权/后台能力，DEV-002/005/004-B及Watch X2验收未通过；minSdk26仍为候选。
 - 完整功能：LP-00～15、网易云及Meting业务尚未验收，256个原AC无通过证据。readiness全部false、candidate=null；无公开、tag、Release或发布批准。
 
 ## 构建与来源
@@ -47,6 +47,18 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 
 五阶段首轮 [run `43722431450`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43722431450) / attempt `1` 的前两阶段成功，但新旧锁完全相同，严格 Debug 再次失败；其余独立严格变体未执行。当前在正常锁阶段增加逐配置显式解析，失败不跳过；精确 source/build、原始 artifact 哈希、阶段与官方依据见[依赖记录第 7 节](DEV-004-A-dependencies.md#7-分轮结果与显式配置解析)。没有新资料导入、可验收 APK 或签名。
 
-后续schema2图已核验normal/STRICT最终Compose变体相同；聚合runtime直依赖候选的run43752466574仍在STRICT失败，新增根依赖边没有恢复common。现将该直依赖替换为实际消费的同版本Android实体runtime-android，依据固定源码避开此根边的available-at转发，保留STRICT及同一五阶段/图/字节验证。精确观察、来源与候选判据见[依赖记录第11～13节](DEV-004-A-dependencies.md#13-直接消费android-runtime实体的候选)。后续run43755199209五阶段成功并完成独立依赖审阅；原文件已重新导入，见依赖记录第14节。首次遍历仍未直接观测，缓存假说未经证明；正式APK或签名仍无通过证据。
+后续schema2图已核验normal/STRICT最终Compose变体相同；聚合runtime直依赖候选的run43752466574仍在STRICT失败，新增根依赖边没有恢复common。现将该直依赖替换为实际消费的同版本Android实体runtime-android，依据固定源码避开此根边的available-at转发，保留STRICT及同一五阶段/图/字节验证。精确观察、来源与候选判据见[依赖记录第11～13节](DEV-004-A-dependencies.md#13-直接消费android-runtime实体的候选)。后续run43755199209五阶段成功并完成独立依赖审阅；原文件已重新导入，见依赖记录第14节。首次遍历仍未直接观测，缓存假说未经证明；正常严格PR APK的新结果见下文，稳定Debug及正式候选签名仍待验证。
+
+## 正常严格PR产物与合并前修复
+
+[run `43759431432`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43759431432)/attempt1绑定source `d56cc07fd6e69d00b1e18e0c9b8e133d5ad38a11`、checkout日志确认的实际build `24d534df88bcaccec76a6d7c3df4c33bfc39b1ea`，compile job `132950719202`及cloud-gate `132952414830`均成功。正常严格Gradle5分16秒，50任务（48执行/2缓存）；Debug单测NO-SOURCE，lint XML为0项。PR按设计跳过稳定sign-debug，不能记为隔离稳定证书覆盖升级通过。
+
+APK artifact `14179159242` ZIP SHA-256为`6a937f66ec5409c08f73dc6bcbc5aa24e14a9051126f4ed7bc9515b6f6561924`，APK为13754776字节、SHA-256 `c436fac51faaa2955e7563b1659a991ff2697e6f37888284b79237ddfb5ed7cd`；包`io.github.onlinemo.meloxwatch.dev`、版本`0.0.1 / 1`、debuggable=true、profileable=false。只读aapt/apksigner/zipalign及独立归档/manifest/hash核验通过；临时PR证书SHA-256为`db94b67fbeff6ace6b6efd987fb060c35a7abf7901e4fa390361d7451f6f4a2b`，不是固定稳定Debug证书。独立核验摘要SHA-256 `0551262758fef56045c45fac11b3f38f1c33d6f15c820fafefe6c60d86cb21c7`，日志SHA-256 `15e9ba28860d69e9f129e3c0d421470c2ecf8346f8b0832fe994f31b2b9a5ef7`。报告artifact `14179587228`为2720字节，ZIP SHA-256 `d776a72cd4f0e81d50474a53d567e1c1ea46dda914be1aa460a2e5287458ab19`，lint XML SHA-256 `ec3908dd3b2afc027400bb62e53ac64e0c076fd545a93e094383263982dc65dc`。归档/APK/原始日志只留本地；APK尚未安装。
+
+合并前静审发现读取通道在释放物理占用前恢复调用方，顺序内联重试可能误报SOURCE_BUSY。现将结果交付移到finally释放之后；取消仍触发真实CancellationSignal且保留尚未结束的物理占用，后续请求不排队。5项纯JUnit/协程回归覆盖成功顺序读取、失败重试、取消后的占用、派发拒绝和native分配错误；它们没有本地运行，下一轮云端必须执行，不能沿用旧快照的NO-SOURCE结果。
+
+另修复页面返回竞态：实际离页时先取消读取并使fileGeneration失效，再提交页面；迟到音频检查不能覆盖用户返回的HOME。旧选择和样本仍保留，取消不自动播放。已经执行的持久授权API不能被取消回滚，不自动撤销用户此前明确保存的授权；下次读取重查真实权限。该导航行为静审通过，实际VM/真表仍待验。修复改变应用输入，旧APK不验证最新源码；PR保持draft直到新严格构建和审阅完成。
+
+圆屏优先：用户允许临时调整VM分辨率/density，原size/density/override须本地记录并在测试后恢复；再补方屏。VM矩形报告不冒充真圆屏，交付前仍需Watch X2真实圆屏、音频及性能验收。本地IP、adb端点、设备标识、个人路径、凭据和原始设备记录禁止上传Git、Issue/PR、云日志或artifact；只有核验脱敏后的结论可入库。
 
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。

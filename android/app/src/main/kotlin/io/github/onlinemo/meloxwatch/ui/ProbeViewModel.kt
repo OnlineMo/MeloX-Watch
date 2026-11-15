@@ -181,6 +181,11 @@ class ProbeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showPage(page: ProbePage) {
+        val currentState = _uiState.value
+        if (currentState.page != page && currentState.isReading) {
+            // 离页使检查代次失效；不合作的provider晚到结果不能导航回播放页。
+            cancelFileRead()
+        }
         _uiState.update { state -> state.copy(page = page) }
         updateProgressSampling()
     }
