@@ -27,4 +27,6 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 
 ## 后续证据
 
+首轮PR构建run`43707610394`、attempt`1`绑定source`ec141a0a91f4bf9b9cf061f398a0311f311d274b`与merge build`24c1be4cdf48d2b72f6ce084d7c5a5a83eaba485`。preflight通过，编译配置在AGP的`setSigningConfig(null)`重载歧义处失败，签名跳过、cloud-gate失败。报告artifact`14158961653`的归档SHA-256为`2bb9bf9aabad65593964af16b8ee25c2a480792290f14fe129d8e90d892b691b`，与GitHub digest一致；其中只有绑定上述来源的`failed-partial` manifest，没有锁/校验资料或APK，不能导入或验收。初始化脚本改为按固定AGP的公开APK接口选择setter，所有DSL层仍去签名并读回检查；实际结果待下一轮。下载报告还发现API拒绝`application/octet-stream`，改用GitHub API媒体类型，跨主机下载仍不传Authorization。
+
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。

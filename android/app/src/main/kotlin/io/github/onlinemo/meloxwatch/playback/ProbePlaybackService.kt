@@ -17,7 +17,6 @@ import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionError
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import io.github.onlinemo.meloxwatch.ui.MainActivity
 
 /**
  * DEV-004-A 的本地音频所有者；Activity 只持有连接，不创建第二个播放器。
@@ -52,18 +51,20 @@ class ProbePlaybackService : MediaSessionService() {
         player.setHandleAudioBecomingNoisy(true)
         player.setWakeMode(C.WAKE_MODE_LOCAL)
 
-        val activityIntent = Intent(this, MainActivity::class.java)
-            .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        val sessionActivity = PendingIntent.getActivity(
-            this,
-            0,
-            activityIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        mediaSession = MediaSession.Builder(this, player)
-            .setSessionActivity(sessionActivity)
+        val builder = MediaSession.Builder(this, player)
             .setCallback(LocalProbeCallback())
-            .build()
+        val activityIntent = packageManager.getLaunchIntentForPackage(packageName)
+        if (activityIntent != null) {
+            activityIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            val sessionActivity = PendingIntent.getActivity(
+                this,
+                0,
+                activityIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.setSessionActivity(sessionActivity)
+        }
+        mediaSession = builder.build()
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession

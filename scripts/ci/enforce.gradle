@@ -11,14 +11,29 @@ if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
     throw new GradleException('Gradle version differs from the cloud toolchain lock')
 }
 // 稳定证书永远不进入 Gradle。最终 DSL 清除 AGP 默认 Debug 签名，交给新 runner 签名。
+def clearApkSigning = { target ->
+    // AGP 8.11.1 有多种 signingConfig setter；Groovy 的 null 需明确选 APK DSL 接口。
+    // init script 先于 AGP 载入，只在回调内按公开签名选择方法，不引用应用脚本。
+    def setter = target.getClass().methods.find { method ->
+        method.name == 'setSigningConfig' && method.parameterTypes.length == 1 &&
+            method.parameterTypes[0].name == 'com.android.build.api.dsl.ApkSigningConfig'
+    }
+    if (setter == null) {
+        throw new GradleException('AGP APK signing setter differs from the locked toolchain')
+    }
+    setter.invoke(target, [null] as Object[])
+    if (target.signingConfig != null) {
+        throw new GradleException('AGP did not clear the APK signing configuration')
+    }
+}
 gradle.beforeProject { project ->
     project.plugins.withId('com.android.application') {
         def components = project.extensions.getByName('androidComponents')
         components.finalizeDsl({ android ->
             if (System.getenv('CI_UNSIGNED_APK') == 'true') {
-                android.buildTypes.configureEach { buildType -> buildType.signingConfig = null }
-                android.productFlavors.configureEach { flavor -> flavor.signingConfig = null }
-                android.defaultConfig.signingConfig = null
+                android.buildTypes.each { buildType -> clearApkSigning(buildType) }
+                android.productFlavors.each { flavor -> clearApkSigning(flavor) }
+                clearApkSigning(android.defaultConfig)
             }
         } as org.gradle.api.Action)
     }
