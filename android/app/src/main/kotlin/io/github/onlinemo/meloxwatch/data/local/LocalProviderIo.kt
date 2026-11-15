@@ -6,6 +6,7 @@ import java.io.FileNotFoundException
 import java.io.IOException
 import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -21,7 +22,7 @@ class LocalProviderIo(
 ) {
     private val lock = Any()
     private var occupied = false
-    private var deferredClose: (() -> Unit)? = null
+    private var deferredClose: CursorRetirement? = null
     private val busy = MutableStateFlow(false)
 
     suspend fun awaitIdle() { busy.first { !it } }
@@ -74,11 +75,12 @@ class LocalProviderIo(
     }
 
     /** Only the single live enumeration cursor may use this bounded retirement slot. */
-    internal fun retireCursor(close: () -> Unit) {
+    internal fun retireCursor(completed: CompletableDeferred<Unit>, close: () -> Unit) {
+        val retirement = CursorRetirement(completed, close)
         val dispatch = synchronized(lock) {
             if (occupied) {
                 check(deferredClose == null) { "Only one enumeration cursor may be live" }
-                deferredClose = close
+                deferredClose = retirement
                 false
             } else {
                 occupied = true
@@ -87,7 +89,7 @@ class LocalProviderIo(
             }
         }
         if (dispatch) {
-            val worker = Runnable { try { close() } finally { drainAndRelease() } }
+            val worker = Runnable { drainAndRelease(retirement) }
             try {
                 dispatcher.dispatch(kotlin.coroutines.EmptyCoroutineContext, worker)
             } catch (_: RuntimeException) {
@@ -97,18 +99,31 @@ class LocalProviderIo(
         }
     }
 
-    private fun drainAndRelease() {
+    private data class CursorRetirement(val completed: CompletableDeferred<Unit>, val close: () -> Unit)
+
+    private fun drainAndRelease(initial: CursorRetirement? = null) {
+        var retirement = initial
+        var completed: CompletableDeferred<Unit>? = null
+        var outcome: Result<Unit>? = null
         while (true) {
-            val close = synchronized(lock) {
+            retirement?.let { pending ->
+                // The single enumeration cursor owns the sole bounded retirement/ack slot.
+                check(completed == null) { "Only one enumeration cursor may be retired" }
+                completed = pending.completed
+                outcome = try { pending.close(); Result.success(Unit) }
+                catch (error: Exception) { Result.failure(error) }
+                catch (error: OutOfMemoryError) { Result.failure(error) }
+            }
+            retirement = synchronized(lock) {
                 val pending = deferredClose
                 deferredClose = null
                 if (pending == null) { occupied = false; busy.value = false }
                 pending
-            } ?: return
-            try { close() }
-            catch (_: Exception) { /* Closing cannot turn cancelled work into success. */ }
-            catch (_: OutOfMemoryError) { /* Release ownership even when native cleanup ran out of memory. */ }
+            }
+            if (retirement == null) break
         }
+        // CompletableDeferred may resume an unconfined sequential reader inline. Release first.
+        completed?.let { receipt -> checkNotNull(outcome).fold(receipt::complete, receipt::completeExceptionally) }
     }
 
     private fun map(error: Exception): Exception = when (error) {

@@ -517,10 +517,10 @@ class AndroidLocalSources(
         override fun close() {
             if (!closed.compareAndSet(false, true)) return
             signal.cancel()
-            io.retireCursor {
-                try { cursor.close(); closedResult.complete(Unit) }
-                catch (error: Exception) { closedResult.completeExceptionally(SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE, error)) }
-                catch (error: OutOfMemoryError) { closedResult.completeExceptionally(SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE, error)) }
+            io.retireCursor(closedResult) {
+                try { cursor.close() }
+                catch (error: Exception) { throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE, error) }
+                catch (error: OutOfMemoryError) { throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE, error) }
                 finally { cursorLive.set(false) }
             }
         }
@@ -529,17 +529,20 @@ class AndroidLocalSources(
     }
 
     private inner class SingleCursor(private val node: ObservedCandidate) : LocalCandidateCursor {
-        private var closed = false
+        private val closed = AtomicBoolean(false)
         override var exhausted: Boolean = false
             private set
         override suspend fun nextBatch(limit: Int): List<ObservedCandidate> {
             require(limit in 1..LocalInputLimits.BATCH_SIZE)
-            check(!closed)
+            check(!closed.get())
             if (exhausted) return emptyList()
             exhausted = true
             return listOf(node)
         }
-        override fun close() { closed = true; cursorLive.set(false) }
+        override fun close() {
+            // A repeated close of an old cursor must not release its successor's guard.
+            if (closed.compareAndSet(false, true)) cursorLive.set(false)
+        }
     }
 
     companion object {

@@ -211,6 +211,36 @@ class AndroidLocalSourcesTest {
         expect(SourceReadIssue.SOURCE_CHANGED) { sources.verifyMetadataCandidate(source, candidate) }
     }
 
+    @Test
+    @Config(sdk = [30])
+    fun repeatedCloseOfAnOldDocumentCursorCannotReleaseALiveMediaCursor() = runBlocking {
+        val audio = File(temporary.root, "audio.mp3").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        fixtureAudioProvider("cursor-lifecycle", audio)
+        fixtureMediaProvider(audio)
+        val application: Application = RuntimeEnvironment.getApplication()
+        shadowOf(application).grantPermissions(Manifest.permission.READ_EXTERNAL_STORAGE)
+        val sources = AndroidLocalSources(context(), LocalProviderIo())
+        val old = sources.open(LocalSourceSpec("document", LocalSourceKind.DOCUMENT,
+            "content://cursor-lifecycle/audio"))
+        assertEquals(1, old.nextBatch().size)
+        old.close()
+        val media = LocalSourceSpec("media", LocalSourceKind.MEDIA_STORE,
+            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY).toString(),
+            mediaVolume = MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val current = sources.open(media)
+        try {
+            repeat(3) {
+                old.close()
+                old.closeAndAwait()
+                expect(SourceReadIssue.BUSY) { sources.open(media).closeAndAwait() }
+            }
+            assertEquals(1, current.nextBatch().size)
+        } finally { current.closeAndAwait() }
+        val next = sources.open(media)
+        try { assertEquals(1, next.nextBatch().size) }
+        finally { next.closeAndAwait() }
+    }
+
     private suspend fun mediaCandidate(sources: AndroidLocalSources): Pair<LocalSourceSpec, ObservedCandidate> {
         val application: Application = RuntimeEnvironment.getApplication()
         shadowOf(application).grantPermissions(Manifest.permission.READ_EXTERNAL_STORAGE)

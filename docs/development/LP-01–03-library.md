@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最新实际Debug214项全部通过，随后lint的7项错误阻断verification。Release/Diagnostic、完整严格构建及设备AC尚未通过。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最新实际Debug214项执行、213通过，游标关闭ACK竞态产生1项BUSY失败。修复及4项受控回归待精确新快照云验。Release/Diagnostic、完整严格构建及设备AC尚未通过。
 
 ## 数据身份、迁移与完整列表
 
@@ -44,7 +44,7 @@ Library、Sources、Listening页面和中英资源已接入。列表/网格偏�
 
 ## 验证与未完成证据
 
-当前24个测试文件定义214个应用`@Test`：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。这是测试定义数量；首轮云编译在这些测试执行前失败，没有JUnit/lint/APK通过证据，本地没有运行Gradle、Kotlin/Java编译或Android测试。文本审查及同伴审阅不算AC通过。
+当前24个测试文件定义218个应用`@Test`（原214项保留，新增4项游标生命周期回归）：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。这是测试定义数量；首轮云编译在这些测试执行前失败，没有JUnit/lint/APK通过证据，本地没有运行Gradle、Kotlin/Java编译或Android测试。文本审查及同伴审阅不算AC通过。
 
 PR #29的[run `43743042161`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43743042161)/attempt1绑定source `162c24d9ccf23ea2796608821ed1bfc4ee018011`、实际checkout `0b7c00d9f06ca832180fc346652935676236c2d5`、compile job `132900247397`。verification阶段3分02秒失败，39项任务中36执行/3缓存；Debug/Diagnostic均报告`LocalImportManager`引用非公共`OsConstants.O_DIRECTORY`及`LibraryRecords`缺少`ScanMode`导入。修正使用公共`O_RDONLY | O_NOFOLLOW`，打开后以`S_ISDIR(Os.fstat(fd).st_mode)`核验同一descriptor再fsync/close，保持防止目录符号链接替换的要求；并补齐类型导入。公共API26声明已按AOSP固定提交`97e5130234bcdc1c4a705be4e548302934499bd4`独立核对，签名文件SHA-256 `f37327b7713d170a7c59d8c1d2ac7ed6ad2b90f5cb4ca92ec6362a2fa0d31c5b`。修正没有本地编译，下一轮云结果才可确认。
 
@@ -78,10 +78,20 @@ artifact `14178550202`为173830字节，ZIP SHA-256 `ca49a83e7af8c48ede0d4e8cdcf
 
 新增API30 provider版本/generation测试使用固定`org.robolectric:android-all-instrumented:11-robolectric-6757853-i7`，沿用API26 runtime。两个SDK独立非传递配置解析并由Gradle锁/SHA校验后复制到同一offline目录，避免同一配置的版本冲突只留下一个SDK；`enabledSdks`明确包含26和30，不能跳过API30用例当通过。官方Robolectric4.16.1 source JAR SHA-256 `b354b256648453c5e83eb4ec19d80f23a6d8775e7684c93d5e3c0f327ba8d289` 的 `DefaultSdkProvider.java` 固定API30映射11/6757853、预插桩7及所需Java9；当前Temurin17符合该门槛。官方Maven Central [POM](https://repo.maven.apache.org/maven2/org/robolectric/android-all-instrumented/11-robolectric-6757853-i7/android-all-instrumented-11-robolectric-6757853-i7.pom) 为1390字节、SHA-256 `579070875a6a33dd57d2937929fa443789e28826cb12e8e716197c222e199682`，声明Apache-2.0；实际SDK JAR和传递制品仍须完整云端资料审阅，本地未运行SDK。
 
-P0严格依赖锁仍有实际consumer graph差异；P1的保留原事务错误修正已使真实SQLiteFullException和旧队列/重开/重试测试通过，源码与云证据见DEV-104。Library中央事务入口已使用同一包装，后续集成最新队列修正；仍需完整五阶段XML/锁/schema1，再验证云端schema2、真实1→2迁移和三变体构建/测试/lint。失败资料不导入基线，不以NO-SOURCE或阶段未执行填通过。
+P0实体runtime-android候选五阶段已经成功，正式严格APK待验证；本主题补齐同一实际直依赖并等待自己的完整资料；P1的保留原事务错误修正已使真实SQLiteFullException和旧队列/重开/重试测试通过，源码与云证据见DEV-104。Library中央事务入口已使用同一包装，后续集成最新队列修正；仍需完整五阶段XML/锁/schema1，再验证云端schema2、真实1→2迁移和三变体构建/测试/lint。失败资料不导入基线，不以NO-SOURCE或阶段未执行填通过。
 
 用户新授权的adb测试虚拟机已只读观测：API32，主ABI x86_64，物理466×466、density310，系统报告矩形；root可用于测试控制，不替代普通应用权限或设备支持。只读证据SHA-256为`3845c34c1fb39bf91d5bc321dcebb3aa7f5ef8026c1f3126f917fe71ac4fcdad`，实际音频、输入、持久权和后台能力未测。待有合格云端APK后按source/build/run/attempt/artifact/APK hash绑定安装与测试；不使用本地替代APK、不卸载擦除已有数据。交付前再使用Watch X2真表完成对应14/15/06及全部AC，虚拟机结果不作为真表性能或音频支持结论。
 
 圆屏优先，先验圆边的热区/首尾内容/长文/最大字，再补方屏。用户允许临时调整测试VM分辨率；记录原size/density/override并测试后恢复。原始设备信息、IP、adb端点、个人路径及其他隐私只留ignored本地或不留，禁止进入Git、Issue/PR、云日志或artifact；共享结果必须实际脱敏，不因仓库私有而上传。
 
 LP-04完整增删重排/点击策略、LP-05双后端与解码、LP-06音效、LP-07/08歌词和输入、LP-09歌单/交换、LP-10真实文件写入、LP-11备份、LP-12其余主题/字体、LP-13/14传输和手机端、LP-15帮助/更新及网易云/Meting仍继续建设。手机APK构建/签名/候选集合须通过Actions Issue维护，当前没有把文档要求算成已实现。所有readiness仍false，candidate=null，256个原AC未通过，未申请最终公开/发布批准。
+
+## 游标关闭竞态与新快照
+
+[run `43756864869`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43756864869)/attempt1绑定source `fd4d926a01cd3b7dc01113c1c1abead7b42d2fdf`、实际checkout `fb7cc17d7a302f863153d2e56754de6c7b080bf3`、compile job `132942860190`。Debug214项真实执行、213通过/1failure/0error/0skip；失败为`AndroidLocalSourcesTest.nativeMediaTokenChangesAndLossAreObservedThroughTheAndroidProviderApi`，实际`SourceReadException: BUSY`来自closeAndAwait后立即执行的`verifyObservedCandidate`。verification在5分46秒失败（71任务，61执行/10缓存）；lint、Release/Diagnostic及后四阶段未执行，无APK或签名，不将上一轮214全通过当作本轮结论。
+
+artifact `14178678082` ZIP SHA-256为`fa18eeb5b6cd2405bd4f205e25956d6b1a4ac3712a400d6011322904326b5f19`，日志SHA-256为`12dc19bea5c9b9c83b960d43c439ba02e73e4059267e12f5b5d37684e8023fb8`。实际失败JUnit XML SHA-256为`416bdcb21cc5b2f9a7db6ef1c63989d61b9c9e51fb4f9e945d44a38a22bbef3e`，精简失败来源证据为`c5e2fb73cefbabb953e0f73b487eff2caed67d65164a1784e2e004288389e12b`；unit/phase摘要分别为`a0dbb883e5253e880dc338e1090dfe71d9a11a071c5f9be901cbfb7c7cd81d71`和`a13361e6bf23c6cb8ccd89cdeb699501577b0643db906fdb47fc93559d073659`。失败schema2仍是诊断字节，缺完整lock/schema1，不导入基线；原始材料只留ignored本地。
+
+游标原来在物理关闭内部完成ACK，随后才清`cursorLive`并释放IO占用；可内联恢复的顺序调用会提前遇到BUSY。现把物理关闭结果交给唯一有界退役槽，在物理关闭、guard及IO占用全部释放后确认ACK，保留关闭异常的原始cause。取消不会提前释放不合作的provider worker。另修正SingleCursor关闭幂等性，旧游标重复close/closeAndAwait不再清新游标的guard。4项新增回归以受控调度器/Unconfined和真实API30 provider覆盖立即顺序读取、活动读取中的延迟关闭、关闭失败后重试和旧游标重复关闭；原214项及原断言保留，当前24套218个定义尚未执行。
+
+P0同版本`androidx.compose.runtime:runtime-android:1.9.3`实际直依赖在run43755199209五阶段全部成功，common真实边及7个配置保留，811项官方哈希独立核验。此主题补齐同一真实API直依赖，保持工具链版本和全部STRICT规则；不复制P0的app锁或不相符的schema。该主题自身五阶段、完整依赖及迁移仍待验证，不能凭P0结果填通过。来源AAR SHA-256为`dc7a8a161d6dfff96801a2d89b1f5d4adb61c0dfa16cb5970215e70aa1d83407`，官方module为`9492b2ecb5da90bb3f6304e26fe06faff20c573e473a7da6351f0df52180f05a`，POM声明Apache-2.0。LP-04/05、CUE、LP-09及exchange并行WIP不进入这一小修复快照，所有256原AC/readiness仍未通过。

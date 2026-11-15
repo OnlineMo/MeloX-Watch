@@ -134,6 +134,8 @@ kotlin {
 dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)
+    // Consume the Android runtime API directly without available-at forwarding.
+    implementation(libs.compose.runtime)
     implementation(libs.compose.ui)
     implementation(libs.compose.foundation)
     implementation(libs.compose.material3)
