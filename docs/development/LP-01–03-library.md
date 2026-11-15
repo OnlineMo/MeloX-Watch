@@ -46,7 +46,7 @@ Library、Sources、Listening页面和中英资源已接入。列表/网格偏�
 
 当前24个测试文件定义214个应用`@Test`：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。这是测试定义数量；本主题应用测试、lint与APK均尚未在云端执行，本地没有运行Gradle、Kotlin/Java编译或Android测试。文本审查及同伴审阅不算AC通过。
 
-本地47项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
+合并P1已云验修正与P0被动图诊断后，本地49项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
 
 新增API30 provider版本/generation测试使用固定`org.robolectric:android-all-instrumented:11-robolectric-6757853-i7`，沿用API26 runtime。两个SDK独立非传递配置解析并由Gradle锁/SHA校验后复制到同一offline目录，避免同一配置的版本冲突只留下一个SDK；`enabledSdks`明确包含26和30，不能跳过API30用例当通过。官方Robolectric4.16.1 source JAR SHA-256 `b354b256648453c5e83eb4ec19d80f23a6d8775e7684c93d5e3c0f327ba8d289` 的 `DefaultSdkProvider.java` 固定API30映射11/6757853、预插桩7及所需Java9；当前Temurin17符合该门槛。官方Maven Central [POM](https://repo.maven.apache.org/maven2/org/robolectric/android-all-instrumented/11-robolectric-6757853-i7/android-all-instrumented-11-robolectric-6757853-i7.pom) 为1390字节、SHA-256 `579070875a6a33dd57d2937929fa443789e28826cb12e8e716197c222e199682`，声明Apache-2.0；实际SDK JAR和传递制品仍须完整云端资料审阅，本地未运行SDK。
 

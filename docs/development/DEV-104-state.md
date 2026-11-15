@@ -24,9 +24,9 @@
 
 ## 验证状态
 
-已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第六轮云端实际执行Debug全部58项且全部通过；Release/Diagnostic尚未执行，Debug lint失败。它们不代替音频出声或设备AC；本地均未执行。
+已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第七轮云端资料阶段实际执行Debug、Release、Diagnostic各58项，全部通过且三变体lint零issue；独立严格Debug仍因依赖锁失败，严格Release/Diagnostic未执行。它们不代替音频出声或设备AC；本地均未执行。
 
-本地45个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
+合并P0被动图诊断后，本地49个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
 
 本主题尚无与云端APK绑定的设备安装、耳机、30分钟后台或14性能预算证据。所有readiness为false、candidate=null、256个原AC未通过；没有公开、tag、Release或发布批准。
 
@@ -61,6 +61,12 @@
 本轮第一资料阶段7分59秒停在Debug lint，91个任务中80实际执行/11缓存；实际lint为3个 `WrongConstant`（ProbePlaybackService.kt 163/179/214）和1个 `UseKtx`（QueuePlaybackCoordinator.kt 602），并非4个常量错误。固定Media3 1.8.0 `SessionResult.Code` 的IntDef列 `SessionError.ERROR_*`，不列数值相同的 `SessionResult.RESULT_ERROR_*` 别名；依官方接口改用原错误码的 `SessionError` 符号，RESULT_SUCCESS保留。URI解析改用已有core-ktx的 `String.toUri`。没有suppress、减少lint门槛或修改测试预期。
 
 报告artifact `14170988432` 原始ZIP104179字节、SHA-256 `42c318ec10c2b2dd954255d9b92ca9102cd412589310eea7fc648b9156b51069`；job日志SHA-256 `400592cbef13828b78934ec9071410def527981699659bfbe240f98b2b862676`；实际Room JUnit XML `ea9674378db62da759c8cf9b9a21b73d335863464a290c655cb5bb2e495725ec`；lint XML `787e0e2d3c6c0d238da59cdea4cb2fae64210902aa8ac87398eaf72b125b1cf8`。缺少app锁、其余变体/阶段，schema1 hash不变；继续仅作 `failed-partial` 诊断，不导入基线或导出APK。上述lint及suppressed修正后尚未云执行。
+
+第七轮 [run `43739171033`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43739171033) / attempt `1` 绑定 source `938e5a0215a5c75beef0ff8e10404aa2c7dda22e`、实际checkout/build `d6240d6024d3f3d5ebd5c760b156933e393b9501`、job `132888378859`。verification12分07秒及normal39秒成功，正常阶段显式解析203个配置；严格Debug13秒因已锁但未解析的 `kotlin-stdlib-common:2.2.21` 失败，后两严格阶段未尝试。Debug/Release/Diagnostic各58项、0失败/错误/跳过，测试清单一致；三个lint XML均零issue。
+
+同一真实FULL case三变体分别0.130/0.175/0.228秒通过。冻结测试源码SHA-256 `b70584b621514564ef9070f502e4188891635ed2e5719455c73ec2a31fd0bbff` 断言直接 `SQLiteFullException`、独立且不是FULL的suppressed `SQLiteException`、旧队列、重开、独立连接完整性/3条和205条显式重试。成功JUnit不输出原生异常堆栈；这里将通过的确切case绑定冻结断言，不声称成功XML打印了底层栈。
+
+artifact `14171827542` 原始ZIP142163字节、SHA-256 `632ba8a7881a4ba01def485ce0402ab73ac442adfce9794fd63f5229145e5253`；job日志SHA-256 `0163cdd77d1e1bb6f9ab30098abe8a573b6d849d90e240b75085e2b3a9265a03`。完整FULL/阶段诊断摘要SHA-256 `ebdcc6673a97c1b3bf565533ce338a3a8cffe81fe5610e18eb6050106b453992`。schema1仍11896字节/原hash；资料状态 `failed-partial`，不得导入锁/schema或验收APK。Library后续214项的定义与独立状态见LP-01～03记录，这一轮58项成功不覆盖它们。
 
 ## 后续必需实现
 
