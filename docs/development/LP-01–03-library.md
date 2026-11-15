@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，尚无本主题云端编译或设备AC通过证据。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，首轮云端编译失败，尚无本主题应用测试或设备AC通过证据。
 
 ## 数据身份、迁移与完整列表
 
@@ -44,7 +44,11 @@ Library、Sources、Listening页面和中英资源已接入。列表/网格偏�
 
 ## 验证与未完成证据
 
-当前24个测试文件定义214个应用`@Test`：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。这是测试定义数量；本主题应用测试、lint与APK均尚未在云端执行，本地没有运行Gradle、Kotlin/Java编译或Android测试。文本审查及同伴审阅不算AC通过。
+当前24个测试文件定义214个应用`@Test`：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。这是测试定义数量；首轮云编译在这些测试执行前失败，没有JUnit/lint/APK通过证据，本地没有运行Gradle、Kotlin/Java编译或Android测试。文本审查及同伴审阅不算AC通过。
+
+PR #29的[run `43743042161`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43743042161)/attempt1绑定source `162c24d9ccf23ea2796608821ed1bfc4ee018011`、实际checkout `0b7c00d9f06ca832180fc346652935676236c2d5`、compile job `132900247397`。verification阶段3分02秒失败，39项任务中36执行/3缓存；Debug/Diagnostic均报告`LocalImportManager`引用非公共`OsConstants.O_DIRECTORY`及`LibraryRecords`缺少`ScanMode`导入。修正使用公共`O_RDONLY | O_NOFOLLOW`，打开后以`S_ISDIR(Os.fstat(fd).st_mode)`核验同一descriptor再fsync/close，保持防止目录符号链接替换的要求；并补齐类型导入。公共API26声明已按AOSP固定提交`97e5130234bcdc1c4a705be4e548302934499bd4`独立核对，签名文件SHA-256 `f37327b7713d170a7c59d8c1d2ac7ed6ad2b90f5cb4ca92ec6362a2fa0d31c5b`。修正没有本地编译，下一轮云结果才可确认。
+
+该轮artifact `14173720904`为59635字节，原ZIP SHA-256 `98f485bd62b3ccb46269c068674baef50a906e360e60da57c9e115644a8bbe2d`，日志SHA-256 `d7b32f22aecbb50891661b6a4a4a68d504d89ffd0f20470850d8ae3bc007efde`。生成schema2为91327字节/30张表，SHA-256 `bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf`；没有完整锁/schema1，仍属`failed-partial`且不导入基线。后续LP-04/05并行代码不在本次两处编译修复快照中，其测试定义也不混入214项已冻结数量。
 
 合并P1已云验修正与P0被动图诊断后，本地49项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
 

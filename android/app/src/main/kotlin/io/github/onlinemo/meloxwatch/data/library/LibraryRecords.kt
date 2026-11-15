@@ -10,6 +10,7 @@ import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.scan.ScanCounters
 import io.github.onlinemo.meloxwatch.data.scan.ScanCoverage
+import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.MetadataOutcome
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.data.scan.ScanState

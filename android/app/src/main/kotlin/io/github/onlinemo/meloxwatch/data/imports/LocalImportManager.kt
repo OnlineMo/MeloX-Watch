@@ -403,8 +403,13 @@ internal object ImportSpacePolicy {
 private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
 private fun syncImportDirectory(directory: File) {
-    val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_DIRECTORY, 0)
-    try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+    val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
+    try {
+        // O_DIRECTORY is absent from the public Android API. Check the opened descriptor itself
+        // before syncing; the no-follow open must not accept a substituted directory symlink.
+        if (!OsConstants.S_ISDIR(Os.fstat(descriptor).st_mode)) throw ImportException(ImportIssue.RECOVERY_REQUIRED)
+        Os.fsync(descriptor)
+    } finally { Os.close(descriptor) }
 }
 
 private fun importIssue(error: Exception): ImportIssue = when (error) {
