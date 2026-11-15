@@ -18,11 +18,9 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
@@ -40,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -67,12 +66,19 @@ import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.media3.common.Player
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.ProbeAccess
 import io.github.onlinemo.meloxwatch.data.ProbeDocument
 import io.github.onlinemo.meloxwatch.data.ProbeFileIssue
 import io.github.onlinemo.meloxwatch.data.ProbeFiles
+import io.github.onlinemo.meloxwatch.model.ScreenShape
+import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
+import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesControls
+import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesViewModel
+import io.github.onlinemo.meloxwatch.ui.queue.QueueViewModel
+import io.github.onlinemo.meloxwatch.ui.queue.queueContent
 import java.net.URI
 import java.net.URISyntaxException
 import java.util.Locale
@@ -80,14 +86,18 @@ import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private lateinit var probeViewModel: ProbeViewModel
+    private lateinit var preferencesViewModel: PreferencesViewModel
+    private lateinit var queueViewModel: QueueViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         probeViewModel = ViewModelProvider(this)[ProbeViewModel::class.java]
+        preferencesViewModel = ViewModelProvider(this)[PreferencesViewModel::class.java]
+        queueViewModel = ViewModelProvider(this)[QueueViewModel::class.java]
         if (savedInstanceState == null) acceptExternalAudio(intent)
         setContent {
             ProbeTheme {
-                ProbeApp(probeViewModel, this)
+                ProbeApp(probeViewModel, preferencesViewModel, queueViewModel, this)
             }
         }
     }
@@ -147,8 +157,28 @@ private fun ProbeTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun ProbeApp(viewModel: ProbeViewModel, activity: MainActivity) {
+private fun ProbeApp(
+    viewModel: ProbeViewModel,
+    preferencesViewModel: PreferencesViewModel,
+    queueViewModel: QueueViewModel,
+    activity: MainActivity,
+) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val preferences by preferencesViewModel.uiState.collectAsStateWithLifecycle()
+    val queue by queueViewModel.uiState.collectAsStateWithLifecycle()
+    val screenShape = if (state.page == ProbePage.SETTINGS) {
+        preferences.previewScreenShape ?: preferences.effective.screenShape
+    } else {
+        preferences.effective.screenShape
+    }
+    LaunchedEffect(state.page) {
+        if (state.page == ProbePage.SETTINGS) preferencesViewModel.enterEditor()
+        else if (preferences.isEditing) preferencesViewModel.clearDraft()
+    }
+    LifecycleStartEffect(state.page) {
+        if (state.page == ProbePage.QUEUE) queueViewModel.onVisible()
+        onStopOrDispose { queueViewModel.onHidden() }
+    }
     val savedPages = rememberSaveableStateHolder()
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val data = result.data
@@ -172,7 +202,9 @@ private fun ProbeApp(viewModel: ProbeViewModel, activity: MainActivity) {
         if (granted) {
             viewModel.readMediaSample()
         } else {
-            viewModel.permissionDenied(permanently = !activity.shouldShowRequestPermissionRationale(viewModel.audioPermission))
+            viewModel.permissionDenied(
+                permanently = !activity.shouldShowRequestPermissionRationale(viewModel.audioPermission),
+            )
         }
     }
     val openDocument = {
@@ -204,7 +236,8 @@ private fun ProbeApp(viewModel: ProbeViewModel, activity: MainActivity) {
         }
     }
     val openMedia = {
-        if (viewModel.hasAudioPermission()) viewModel.readMediaSample() else audioPermission.launch(viewModel.audioPermission)
+        if (viewModel.hasAudioPermission()) viewModel.readMediaSample()
+        else audioPermission.launch(viewModel.audioPermission)
     }
     val openSettings = {
         val request = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:${activity.packageName}".toUri())
@@ -214,16 +247,25 @@ private fun ProbeApp(viewModel: ProbeViewModel, activity: MainActivity) {
             viewModel.permissionDenied(permanently = true)
         }
     }
-    BackHandler(enabled = state.page != ProbePage.HOME) {
+    val returnHome = {
+        if (state.page == ProbePage.SETTINGS) preferencesViewModel.clearDraft()
         viewModel.showPage(ProbePage.HOME)
     }
+    BackHandler(enabled = state.page != ProbePage.HOME, onBack = returnHome)
     savedPages.SaveableStateProvider(state.page.name) {
-        ProbePageContent(state.page) {
+        val resetScroll = if (state.page == ProbePage.QUEUE) queue.snapshot?.generationId to queue.pageStart else null
+        ProbePageContent(screenShape, resetScroll) {
             item { PageTitle(stringResource(pageTitle(state.page))) }
             if (state.page != ProbePage.HOME) {
-                item { ProbeButton(stringResource(R.string.probe_back), onClick = { viewModel.showPage(ProbePage.HOME) }) }
+                item { ProbeButton(stringResource(R.string.probe_back), onClick = returnHome) }
             }
-            item { OperationStatus(state, onCancel = viewModel::cancelFileRead) }
+            item {
+                OperationStatus(
+                    state,
+                    onCancel = viewModel::cancelFileRead,
+                    onRetryQueue = viewModel::retryQueueRestore,
+                )
+            }
             when (state.page) {
                 ProbePage.HOME -> homeContent(state, viewModel, openDocument, openTree, openMedia, openSettings)
                 ProbePage.MEDIA -> mediaContent(state, viewModel, openMedia, openSettings)
@@ -231,26 +273,55 @@ private fun ProbeApp(viewModel: ProbeViewModel, activity: MainActivity) {
                 ProbePage.INPUT -> item { InputCheck() }
                 ProbePage.PLAYBACK -> playbackContent(state, viewModel, openDocument)
                 ProbePage.DEVICE -> item { DeviceDetails() }
+                ProbePage.SETTINGS -> item {
+                    PreferencesControls(preferencesViewModel, onCancel = { viewModel.showPage(ProbePage.HOME) })
+                }
+                ProbePage.QUEUE -> queueContent(
+                    queue,
+                    state.playback.mediaId,
+                    state.playbackCommandPending || !state.playback.isConnected,
+                    viewModel::selectQueueEntry,
+                    queueViewModel::previousPage,
+                    queueViewModel::nextPage,
+                    queueViewModel::retry,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun ProbePageContent(page: ProbePage, content: LazyListScope.() -> Unit) {
+private fun ProbePageContent(
+    screenShape: ScreenShape,
+    resetScroll: Pair<String?, Long>?,
+    content: LazyListScope.() -> Unit,
+) {
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
-    val hasKeyboard = WindowInsets.ime.getBottom(density) > 0
+    val fullWindowSize = LocalWindowInfo.current.containerSize
+    val fullWindowHeight = with(density) { fullWindowSize.height.toDp() }
     val listState = rememberLazyListState()
+    LaunchedEffect(resetScroll) {
+        if (resetScroll != null) listState.scrollToItem(0)
+    }
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(Background).safeDrawingPadding().imePadding(),
     ) {
-        val isRound = configuration.isScreenRound
-        val contentWidth = if (isRound) maxWidth * 0.78f else maxWidth - 24.dp
-        val roundInset = maxHeight * 0.22f
-        val verticalInset = if (isRound && !(page == ProbePage.INPUT && hasKeyboard)) roundInset else 12.dp
+        val isRound = when (screenShape) {
+            ScreenShape.AUTO -> configuration.isScreenRound
+            ScreenShape.ROUND -> true
+            ScreenShape.RECTANGULAR -> false
+        }
+        // 手动矩形布局不能关闭真实圆屏的边界避让。
+        val protectsRoundBounds = isRound || configuration.isScreenRound
+        val requestedWidth = if (protectsRoundBounds) maxWidth * 0.78f else maxWidth - 24.dp
+        val minimumWidth = minOf(48.dp, maxWidth)
+        val contentWidth = requestedWidth.coerceIn(minimumWidth, maxWidth)
+        // 键盘只收缩可见滚动区域；顶部圆边避让仍以完整窗口计算。
+        val roundInset = maxOf(fullWindowHeight, maxHeight) * 0.22f
+        val verticalInset = if (protectsRoundBounds) roundInset else 12.dp
         LazyColumn(
-            modifier = Modifier.width(contentWidth.coerceAtLeast(48.dp)).align(Alignment.Center),
+            modifier = Modifier.width(contentWidth).align(Alignment.Center),
             state = listState,
             contentPadding = PaddingValues(top = verticalInset, bottom = verticalInset + 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -268,14 +339,27 @@ private fun LazyListScope.homeContent(
     openSettings: () -> Unit,
 ) {
     item { BodyText(stringResource(R.string.probe_intro)) }
-    item { ProbeButton(stringResource(R.string.probe_open_audio), enabled = !state.isReading, primary = true, onClick = openDocument) }
+    item {
+        ProbeButton(
+            stringResource(R.string.probe_open_audio),
+            enabled = !state.isReading,
+            primary = true,
+            onClick = openDocument,
+        )
+    }
     if (!state.hasDocumentPicker) item { BodyText(stringResource(R.string.probe_no_document_picker)) }
     item { ProbeButton(stringResource(R.string.probe_open_media), enabled = !state.isReading, onClick = openMedia) }
     item { BodyText(stringResource(R.string.probe_media_permission_explanation)) }
-    if (state.needsPermissionSettings) item { ProbeButton(stringResource(R.string.probe_permission_settings), onClick = openSettings) }
+    if (state.needsPermissionSettings) {
+        item { ProbeButton(stringResource(R.string.probe_permission_settings), onClick = openSettings) }
+    }
     item { ProbeButton(stringResource(R.string.probe_open_tree), enabled = !state.isReading, onClick = openTree) }
     if (!state.hasTreePicker) item { BodyText(stringResource(R.string.probe_no_tree_picker)) }
     item { ProbeButton(stringResource(R.string.probe_playback), onClick = { viewModel.showPage(ProbePage.PLAYBACK) }) }
+    item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
+    item {
+        ProbeButton(stringResource(R.string.playback_settings), onClick = { viewModel.showPage(ProbePage.SETTINGS) })
+    }
     item { ProbeButton(stringResource(R.string.probe_input), onClick = { viewModel.showPage(ProbePage.INPUT) }) }
     item { ProbeButton(stringResource(R.string.probe_device), onClick = { viewModel.showPage(ProbePage.DEVICE) }) }
 }
@@ -287,10 +371,14 @@ private fun LazyListScope.mediaContent(
     openSettings: () -> Unit,
 ) {
     item {
-        BodyText(pluralStringResource(R.plurals.probe_media_scope, ProbeFiles.MEDIA_SAMPLE_LIMIT, ProbeFiles.MEDIA_SAMPLE_LIMIT))
+        BodyText(
+            pluralStringResource(R.plurals.probe_media_scope, ProbeFiles.MEDIA_SAMPLE_LIMIT, ProbeFiles.MEDIA_SAMPLE_LIMIT),
+        )
     }
     item { ProbeButton(stringResource(R.string.probe_refresh), enabled = !state.isReading, onClick = openMedia) }
-    if (state.needsPermissionSettings) item { ProbeButton(stringResource(R.string.probe_permission_settings), onClick = openSettings) }
+    if (state.needsPermissionSettings) {
+        item { ProbeButton(stringResource(R.string.probe_permission_settings), onClick = openSettings) }
+    }
     if (state.mediaSample.isEmpty() && !state.isReading && state.fileIssue == null) {
         item { BodyText(stringResource(R.string.probe_empty_media)) }
     }
@@ -301,13 +389,17 @@ private fun LazyListScope.mediaContent(
 
 private fun LazyListScope.treeContent(state: ProbeUiState, viewModel: ProbeViewModel, openTree: () -> Unit) {
     item {
-        BodyText(pluralStringResource(R.plurals.probe_tree_scope, ProbeFiles.TREE_CHILD_LIMIT, ProbeFiles.TREE_CHILD_LIMIT))
+        BodyText(
+            pluralStringResource(R.plurals.probe_tree_scope, ProbeFiles.TREE_CHILD_LIMIT, ProbeFiles.TREE_CHILD_LIMIT),
+        )
     }
     item { ProbeButton(stringResource(R.string.probe_choose_tree), enabled = !state.isReading, onClick = openTree) }
     val sample = state.treeSample
     if (sample != null) {
         item {
-            BodyText(pluralStringResource(R.plurals.probe_tree_checked, sample.inspectedChildren, sample.inspectedChildren))
+            BodyText(
+                pluralStringResource(R.plurals.probe_tree_checked, sample.inspectedChildren, sample.inspectedChildren),
+            )
         }
         item { BodyText(pluralStringResource(R.plurals.probe_tree_candidates, sample.audio.size, sample.audio.size)) }
         item { BodyText(stringResource(accessText(sample.access))) }
@@ -333,33 +425,78 @@ private fun LazyListScope.playbackContent(state: ProbeUiState, viewModel: ProbeV
     val playback = state.playback
     if (selected != null) {
         item { BodyText(stringResource(R.string.probe_selected_audio)) }
-        item { BodyText(selected.displayName.ifBlank { stringResource(R.string.probe_unnamed_audio) }, isPrimary = true) }
+        item {
+            BodyText(selected.displayName.ifBlank { stringResource(R.string.probe_unnamed_audio) }, isPrimary = true)
+        }
         item { BodyText(stringResource(accessText(selected.access))) }
         if (selected.access != ProbeAccess.MEDIA_PERMISSION && selected.access != ProbeAccess.PERSISTED) {
-            item { ProbeButton(stringResource(R.string.probe_keep_access), enabled = !state.isReading, onClick = viewModel::persistSelectedAccess) }
+            item {
+                ProbeButton(
+                    stringResource(R.string.probe_keep_access),
+                    enabled = !state.isReading,
+                    onClick = viewModel::persistSelectedAccess,
+                )
+            }
         }
     }
     if (playback.hasMedia) {
         item { BodyText(stringResource(R.string.probe_current_audio)) }
-        item { BodyText(playback.title.orEmpty().ifBlank { stringResource(R.string.probe_unnamed_audio) }, isPrimary = true) }
+        item {
+            BodyText(playback.title.orEmpty().ifBlank { stringResource(R.string.probe_unnamed_audio) }, isPrimary = true)
+        }
     }
     item { BodyText(stringResource(playbackText(playback))) }
     if (!playback.isConnected) {
-        item { ProbeButton(stringResource(R.string.probe_reconnect), enabled = !state.isReading, onClick = viewModel::reconnectPlayback) }
+        item {
+            ProbeButton(
+                stringResource(R.string.probe_reconnect),
+                enabled = !state.isReading,
+                onClick = viewModel::reconnectPlayback,
+            )
+        }
     }
     if (playback.hasError) item { BodyText(stringResource(R.string.probe_playback_error), isError = true) }
     item {
-        val label = if (selected != null && selected.mediaId != playback.mediaId) R.string.probe_play_selected else R.string.probe_play
+        val replacesQueue = selected != null && state.selectedQueueEntry?.queueEntryId != playback.mediaId
+        val label = if (replacesQueue) R.string.playback_replace_with_selection else R.string.probe_play
         ProbeButton(
             stringResource(label),
-            enabled = playback.isConnected && (selected != null || playback.hasMedia) && !state.isReading,
+            enabled = playback.isConnected && (selected != null || playback.hasMedia) &&
+                !state.isReading && !state.playbackCommandPending,
             primary = true,
             onClick = viewModel::playSelection,
         )
     }
-    item { ProbeButton(stringResource(R.string.probe_pause), enabled = playback.isConnected && playback.hasMedia, onClick = viewModel::pause) }
+    item {
+        ProbeButton(
+            stringResource(R.string.probe_pause),
+            enabled = playback.isConnected && playback.hasMedia,
+            onClick = viewModel::pause,
+        )
+    }
+    if (state.playbackCommandPending) {
+        item { BodyText(stringResource(R.string.playback_preparing_queue)) }
+        item { ProbeButton(stringResource(R.string.playback_cancel_prepare), onClick = viewModel::pause) }
+    }
+    item {
+        ProbeButton(
+            stringResource(R.string.playback_previous),
+            enabled = playback.isConnected && playback.hasPrevious && !state.playbackCommandPending,
+            onClick = viewModel::previous,
+        )
+    }
+    item {
+        ProbeButton(
+            stringResource(R.string.playback_next),
+            enabled = playback.isConnected && playback.hasNext && !state.playbackCommandPending,
+            onClick = viewModel::next,
+        )
+    }
+    item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
     item { SeekControls(playback, viewModel) }
-    item { ProbeButton(stringResource(R.string.probe_choose_another), enabled = !state.isReading, onClick = openDocument) }
+    item {
+        ProbeButton(stringResource(R.string.probe_choose_another), enabled = !state.isReading, onClick = openDocument)
+    }
 }
 
 @Composable
@@ -384,7 +521,9 @@ private fun SeekControls(playback: ProbePlaybackState, viewModel: ProbeViewModel
         val seekLabel = stringResource(R.string.probe_seek_label)
         Slider(
             value = (targetMs.toDouble() / durationMs.toDouble()).toFloat().coerceIn(0f, 1f),
-            onValueChange = { fraction -> previewMs = (fraction.toDouble() * durationMs).toLong().coerceIn(0L, durationMs) },
+            onValueChange = { fraction ->
+                previewMs = (fraction.toDouble() * durationMs).toLong().coerceIn(0L, durationMs)
+            },
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = seekLabel },
         )
         if (previewMs != null) {
@@ -449,10 +588,17 @@ private fun InputCheck() {
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
             keyboardActions = KeyboardActions(onDone = { submit() }),
         )
-        ProbeButton(stringResource(R.string.probe_input_submit), enabled = titleDraft.isNotBlank(), primary = true, onClick = submit)
+        ProbeButton(
+            stringResource(R.string.probe_input_submit),
+            enabled = titleDraft.isNotBlank(),
+            primary = true,
+            onClick = submit,
+        )
         if (hasSubmitted) {
             BodyText(stringResource(R.string.probe_input_echo, titleDraft))
-            BodyText(stringResource(if (isAddressValid) R.string.probe_input_address_valid else R.string.probe_input_address_invalid))
+            val addressStatus = if (isAddressValid) R.string.probe_input_address_valid
+            else R.string.probe_input_address_invalid
+            BodyText(stringResource(addressStatus))
         }
         ProbeButton(stringResource(R.string.probe_input_clear)) {
             titleDraft = ""
@@ -470,7 +616,8 @@ private fun DeviceDetails() {
     val density = LocalDensity.current
     val widthDp = with(density) { windowSize.width.toDp().value.roundToInt() }
     val heightDp = with(density) { windowSize.height.toDp().value.roundToInt() }
-    val shape = stringResource(if (configuration.isScreenRound) R.string.probe_shape_round else R.string.probe_shape_rectangle)
+    val shapeLabel = if (configuration.isScreenRound) R.string.probe_shape_round else R.string.probe_shape_rectangle
+    val shape = stringResource(shapeLabel)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         BodyText(stringResource(R.string.probe_device_api, android.os.Build.VERSION.SDK_INT))
         BodyText(stringResource(R.string.probe_device_abi, android.os.Build.SUPPORTED_ABIS.joinToString(", ")))
@@ -482,12 +629,25 @@ private fun DeviceDetails() {
 }
 
 @Composable
-private fun OperationStatus(state: ProbeUiState, onCancel: () -> Unit) {
+private fun OperationStatus(state: ProbeUiState, onCancel: () -> Unit, onRetryQueue: () -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         val notice = state.notice
-        if (notice != null) BodyText(stringResource(noticeText(notice)), isError = notice == ProbeNotice.TIMEOUT || notice == ProbeNotice.CONNECTION_FAILED)
+        if (notice != null) {
+            BodyText(
+                stringResource(noticeText(notice)),
+                isError = notice == ProbeNotice.TIMEOUT || notice == ProbeNotice.CONNECTION_FAILED,
+            )
+        }
         val issue = state.fileIssue
         if (issue != null) BodyText(stringResource(fileIssueText(issue)), isError = true)
+        state.queueIssue?.let { queueIssue ->
+            BodyText(stringResource(queueIssueText(queueIssue)), isError = true)
+            ProbeButton(
+                stringResource(R.string.playback_reload_queue),
+                enabled = state.playback.isConnected && !state.playbackCommandPending,
+                onClick = onRetryQueue,
+            )
+        }
         if (state.isReading) ProbeButton(stringResource(R.string.probe_cancel), onClick = onCancel)
     }
 }
@@ -515,7 +675,11 @@ private fun BodyText(text: String, isPrimary: Boolean = false, isError: Boolean 
 
 @Composable
 private fun DocumentButton(document: ProbeDocument, enabled: Boolean, onClick: () -> Unit) {
-    ProbeButton(document.displayName.ifBlank { stringResource(R.string.probe_unnamed_audio) }, enabled = enabled, onClick = onClick)
+    ProbeButton(
+        document.displayName.ifBlank { stringResource(R.string.probe_unnamed_audio) },
+        enabled = enabled,
+        onClick = onClick,
+    )
 }
 
 @Composable
@@ -548,6 +712,25 @@ private fun pageTitle(page: ProbePage): Int = when (page) {
     ProbePage.INPUT -> R.string.probe_input
     ProbePage.PLAYBACK -> R.string.probe_playback
     ProbePage.DEVICE -> R.string.probe_device
+    ProbePage.SETTINGS -> R.string.playback_settings
+    ProbePage.QUEUE -> R.string.playback_queue
+}
+
+private fun queueIssueText(issue: QueuePlaybackIssue): Int = when (issue) {
+    QueuePlaybackIssue.BUSY -> R.string.playback_queue_busy
+    QueuePlaybackIssue.CONFLICT -> R.string.playback_queue_conflict
+    QueuePlaybackIssue.NOT_READY -> R.string.playback_queue_not_ready
+    QueuePlaybackIssue.CLOSED -> R.string.playback_queue_closed
+    QueuePlaybackIssue.STORAGE_FULL -> R.string.playback_storage_full
+    QueuePlaybackIssue.STORAGE_UNAVAILABLE -> R.string.playback_storage_unavailable
+    QueuePlaybackIssue.RECOVERY_REQUIRED -> R.string.playback_recovery_required
+    QueuePlaybackIssue.SOURCE_UNSUPPORTED -> R.string.playback_source_unsupported
+    QueuePlaybackIssue.LOCATION_MISSING -> R.string.playback_location_missing
+    QueuePlaybackIssue.PERMISSION_DENIED -> R.string.playback_permission_denied
+    QueuePlaybackIssue.FILE_MISSING -> R.string.playback_file_missing
+    QueuePlaybackIssue.SOURCE_DAMAGED -> R.string.playback_source_damaged
+    QueuePlaybackIssue.SOURCE_UNAVAILABLE -> R.string.playback_source_unavailable
+    QueuePlaybackIssue.OUTPUT_ERROR -> R.string.playback_output_error
 }
 
 private fun accessText(access: ProbeAccess): Int = when (access) {

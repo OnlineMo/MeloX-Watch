@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="queue_loading">Loading queue…</string>
+    <string name="queue_previous_data">Previously loaded page</string>
+    <string name="queue_reload">Reload queue</string>
+    <string name="queue_page_range">Entries %1$d–%2$d of %3$d</string>
+    <string name="queue_saved_position">Saved current entry: %1$d of %2$d</string>
+    <string name="queue_saved_modes">Saved playback modes</string>
+    <string name="queue_order">Order: %1$s</string>
+    <string name="queue_order_shuffle">Shuffled</string>
+    <string name="queue_order_sequence">Sequential</string>
+    <string name="queue_repeat">Repeat: %1$s</string>
+    <string name="queue_repeat_off">Off</string>
+    <string name="queue_repeat_list">Whole queue</string>
+    <string name="queue_repeat_single">Current entry</string>
+    <string name="queue_repeat_limit_off">Saved repeat limit: off</string>
+    <string name="queue_empty">The queue is empty. Choose an audio file or a song to start.</string>
+    <string name="queue_selection_hint">Choose an entry to play it from the beginning.</string>
+    <string name="queue_command_pending">Waiting for the playback command…</string>
+    <string name="queue_previous_page">Previous page</string>
+    <string name="queue_next_page">Next page</string>
+    <string name="queue_unnamed_entry">Untitled audio</string>
+    <string name="queue_instance_order">Queue entry %1$d</string>
+    <string name="queue_current_entry">Current entry</string>
+    <string name="queue_saved_current_entry">Saved current entry</string>
+    <string name="queue_duration">Duration: %1$s</string>
+    <string name="queue_missing_location">No saved file location. This entry cannot be played yet.</string>
+    <string name="queue_source_placeholder">This source is not ready for playback here. Its queue entry is kept.</string>
+    <string name="queue_access_temporary">Temporary file access. Permission may be needed again later.</string>
+    <string name="queue_access_persisted">Saved file access; availability is checked when you play.</string>
+    <string name="queue_access_media_permission">Requires the device’s audio permission.</string>
+    <string name="queue_access_not_persisted">The file provider did not keep access. Current permission is checked when you play.</string>
+    <string name="queue_failure_conflict">The queue changed while this page was loading. Reload to choose from the current queue.</string>
+    <string name="queue_failure_storage_full">Storage is full. Free some space, then reload the queue.</string>
+    <string name="queue_failure_storage_unavailable">The queue is temporarily unreadable. Check device storage, then reload.</string>
+    <string name="queue_failure_recovery">The saved queue could not be verified. Reload to try again; the queue has been kept.</string>
+    <string name="queue_failure_read">Could not load this queue page. Reload to try again.</string>
+    <plurals name="queue_entry_count">
+        <item quantity="one">%1$d queue entry</item>
+        <item quantity="other">%1$d queue entries</item>
+    </plurals>
+    <plurals name="queue_repeat_limit">
+        <item quantity="one">Saved limit: %1$d completed play per entry</item>
+        <item quantity="other">Saved limit: %1$d completed plays per entry</item>
+    </plurals>
+    <plurals name="queue_completed_cycles">
+        <item quantity="one">Current entry: %1$d completed play recorded</item>
+        <item quantity="other">Current entry: %1$d completed plays recorded</item>
+    </plurals>
+</resources>

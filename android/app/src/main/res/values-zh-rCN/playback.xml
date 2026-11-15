@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playback_queue">播放队列</string>
+    <string name="playback_settings">设置</string>
+    <string name="playback_replace_with_selection">用此文件替换队列并播放</string>
+    <string name="playback_preparing_queue">正在准备完整队列。准备成功前保留当前播放。</string>
+    <string name="playback_cancel_prepare">取消准备并暂停</string>
+    <string name="playback_previous">上一首</string>
+    <string name="playback_next">下一首</string>
+    <string name="playback_reload_queue">重新加载已保存队列，保持暂停</string>
+    <string name="playback_queue_busy">另一项队列更改仍在进行，完成后可重试。</string>
+    <string name="playback_queue_conflict">此操作完成前队列已变化，请重新加载后选择。</string>
+    <string name="playback_queue_not_ready">正在加载已保存队列，就绪后才能播放。</string>
+    <string name="playback_queue_closed">播放服务已停止，请先重新连接再重试。</string>
+    <string name="playback_storage_full">空间不足，无法保存此更改。保留之前的完整队列。</string>
+    <string name="playback_storage_unavailable">队列存储不可用。保留最后确认的队列，本次更改尚未确认保存。</string>
+    <string name="playback_recovery_required">已保存队列需要恢复或兼容的应用版本，现有存储已保留。</string>
+    <string name="playback_source_unsupported">此队列项所需的播放来源当前尚不可用，条目已保留。</string>
+    <string name="playback_location_missing">此条目没有可读的文件位置。请重新选择文件，队列已保留。</string>
+    <string name="playback_permission_denied">文件读取权被拒绝或撤回，请重新授权后再试。</string>
+    <string name="playback_file_missing">未找到文件。请重新选择，队列已保留。</string>
+    <string name="playback_source_damaged">音频损坏或无法解码。队列已保留，可选择其他曲目或重试。</string>
+    <string name="playback_source_unavailable">音频来源当前不可用。队列已保留，可选择其他曲目或重试。</string>
+    <string name="playback_output_error">音频输出失败，请检查当前输出设备后重试。</string>
+</resources>

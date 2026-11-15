@@ -1,0 +1,357 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "b7264fee4b8a13461a12aed516b5dcaf",
+    "entities": [
+      {
+        "tableName": "queue_generations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generationId` TEXT NOT NULL, `operationId` TEXT NOT NULL, `expectedGenerationId` TEXT, `expectedQueueRevision` INTEGER NOT NULL, `viewId` TEXT NOT NULL, `viewRevision` INTEGER NOT NULL, `totalCount` INTEGER NOT NULL, `shuffle` INTEGER NOT NULL, `repeatMode` TEXT NOT NULL, `cycleLimit` INTEGER, `startOriginalOrder` INTEGER NOT NULL, `initialPositionMs` INTEGER NOT NULL, `allowEmpty` INTEGER NOT NULL, `phase` INTEGER NOT NULL, `writtenCount` INTEGER NOT NULL, `committedQueueRevision` INTEGER, PRIMARY KEY(`generationId`))",
+        "fields": [
+          {
+            "fieldPath": "generationId",
+            "columnName": "generationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedGenerationId",
+            "columnName": "expectedGenerationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expectedQueueRevision",
+            "columnName": "expectedQueueRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "viewId",
+            "columnName": "viewId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "viewRevision",
+            "columnName": "viewRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCount",
+            "columnName": "totalCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "shuffle",
+            "columnName": "shuffle",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "repeatMode",
+            "columnName": "repeatMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cycleLimit",
+            "columnName": "cycleLimit",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "startOriginalOrder",
+            "columnName": "startOriginalOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "initialPositionMs",
+            "columnName": "initialPositionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "allowEmpty",
+            "columnName": "allowEmpty",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "writtenCount",
+            "columnName": "writtenCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "committedQueueRevision",
+            "columnName": "committedQueueRevision",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queue_generations_operationId",
+            "unique": true,
+            "columnNames": [
+              "operationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queue_generations_operationId` ON `${TABLE_NAME}` (`operationId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "queue_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generationId` TEXT NOT NULL, `queueEntryId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `originalOrder` INTEGER NOT NULL, `playbackOrder` INTEGER NOT NULL, `displayName` TEXT, `durationMs` INTEGER, `accountId` TEXT, `locationId` TEXT, `locationUri` TEXT, `grantUri` TEXT, `grantFlags` INTEGER, `access` TEXT, `contentRevision` INTEGER, PRIMARY KEY(`generationId`, `queueEntryId`), FOREIGN KEY(`generationId`) REFERENCES `queue_generations`(`generationId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "generationId",
+            "columnName": "generationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "queueEntryId",
+            "columnName": "queueEntryId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalOrder",
+            "columnName": "originalOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playbackOrder",
+            "columnName": "playbackOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationUri",
+            "columnName": "locationUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "grantUri",
+            "columnName": "grantUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "grantFlags",
+            "columnName": "grantFlags",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "access",
+            "columnName": "access",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "contentRevision",
+            "columnName": "contentRevision",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generationId",
+            "queueEntryId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queue_entries_generationId_originalOrder",
+            "unique": true,
+            "columnNames": [
+              "generationId",
+              "originalOrder"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queue_entries_generationId_originalOrder` ON `${TABLE_NAME}` (`generationId`, `originalOrder`)"
+          },
+          {
+            "name": "index_queue_entries_generationId_playbackOrder",
+            "unique": true,
+            "columnNames": [
+              "generationId",
+              "playbackOrder"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queue_entries_generationId_playbackOrder` ON `${TABLE_NAME}` (`generationId`, `playbackOrder`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "queue_generations",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "generationId"
+            ],
+            "referencedColumns": [
+              "generationId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "queue_head",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `activeGenerationId` TEXT, `queueRevision` INTEGER NOT NULL, `checkpointRevision` INTEGER NOT NULL, `currentEntryId` TEXT, `positionMs` INTEGER NOT NULL, `completedCycles` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`activeGenerationId`) REFERENCES `queue_generations`(`generationId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`activeGenerationId`, `currentEntryId`) REFERENCES `queue_entries`(`generationId`, `queueEntryId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeGenerationId",
+            "columnName": "activeGenerationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "queueRevision",
+            "columnName": "queueRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "checkpointRevision",
+            "columnName": "checkpointRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentEntryId",
+            "columnName": "currentEntryId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "positionMs",
+            "columnName": "positionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedCycles",
+            "columnName": "completedCycles",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queue_head_activeGenerationId",
+            "unique": false,
+            "columnNames": [
+              "activeGenerationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queue_head_activeGenerationId` ON `${TABLE_NAME}` (`activeGenerationId`)"
+          },
+          {
+            "name": "index_queue_head_activeGenerationId_currentEntryId",
+            "unique": false,
+            "columnNames": [
+              "activeGenerationId",
+              "currentEntryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queue_head_activeGenerationId_currentEntryId` ON `${TABLE_NAME}` (`activeGenerationId`, `currentEntryId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "queue_generations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "activeGenerationId"
+            ],
+            "referencedColumns": [
+              "generationId"
+            ]
+          },
+          {
+            "table": "queue_entries",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "activeGenerationId",
+              "currentEntryId"
+            ],
+            "referencedColumns": [
+              "generationId",
+              "queueEntryId"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b7264fee4b8a13461a12aed516b5dcaf')"
+    ]
+  }
+}

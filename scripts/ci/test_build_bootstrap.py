@@ -296,7 +296,6 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         (self.android / 'app/src/androidTest').mkdir(parents=True)
         self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('diagnostic'))
         self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('debug'))
-
         with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs: self.write_inputs()) as process:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
@@ -308,6 +307,90 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', commands[phase])
         for phase in (2, 3):
             self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', commands[phase])
+
+    def test_room_schema_bootstrap_preserves_generated_version_and_still_exports_no_apk(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        schema = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
+
+        def generated(command, **kwargs):
+            self.write_inputs((*build.DEPENDENCY_REPORT_FILES, schema))
+
+        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertIn(schema, manifest['missing_inputs_at_start'])
+        self.assertIn(schema, manifest['files'])
+        self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
+        self.assertTrue(manifest['report_matches_strict_inputs'])
+        self.assertEqual(manifest['missing_outputs'], [])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_bootstrap_rejects_room_schema_drift_during_independent_strict_validation(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        schema = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
+
+        def generated(command, **kwargs):
+            if '--write-locks' in command:
+                self.write_inputs((*build.DEPENDENCY_REPORT_FILES, schema))
+            else:
+                (self.android / schema).write_text('different generated schema\n', encoding='utf-8')
+
+        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'changed dependency input bytes'):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertFalse(manifest['report_matches_strict_inputs'])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_trusted_room_build_rejects_missing_committed_initial_schema(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        self.write_inputs()
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build.subprocess, 'run') as process:
+            with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
+                build.build('debug')
+            process.assert_not_called()
+
+    def test_strict_build_cannot_export_an_apk_after_changing_reviewed_schema_bytes(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        schema = self.android / build.ROOM_SCHEMA_DIRECTORY / '1.json'
+        self.write_inputs((*build.DEPENDENCY_INPUTS, schema.relative_to(self.android).as_posix()))
+
+        def changed(command, **kwargs):
+            schema.write_text('changed schema fixture\n', encoding='utf-8')
+
+        with patch.object(build.subprocess, 'run', side_effect=changed), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'changed the reviewed Room schema'):
+                build.build('debug')
+            inspect.assert_not_called()
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_strict_build_cannot_export_an_apk_after_generating_an_unreviewed_schema_version(self):
+        self.write_inputs()
+        schema = self.android / build.ROOM_SCHEMA_DIRECTORY / '2.json'
+
+        def generated(command, **kwargs):
+            schema.parent.mkdir(parents=True)
+            schema.write_text('new schema fixture\n', encoding='utf-8')
+
+        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'changed the reviewed Room schema'):
+                build.build('debug')
+            inspect.assert_not_called()
+        self.assertFalse((self.root / 'artifacts').exists())
 
 
 if __name__ == '__main__':

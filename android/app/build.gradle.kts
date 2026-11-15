@@ -1,10 +1,14 @@
 import java.util.Properties
+import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.testing.Test
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    alias(libs.plugins.room)
+    alias(libs.plugins.ksp)
 }
 
 val toolchain = Properties()
@@ -73,7 +77,32 @@ android {
     }
     testOptions {
         unitTests.isReturnDefaultValues = false
+        unitTests.isIncludeAndroidResources = true
     }
+}
+
+room {
+    schemaDirectory(layout.projectDirectory.dir("schemas"))
+}
+
+// Robolectric 不自行下载运行时 SDK；同一精确制品先经 Gradle 锁和 SHA-256 校验。
+val robolectricSdk by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+val robolectricSdkDirectory = layout.buildDirectory.dir("robolectric-sdk")
+val prepareRobolectricSdk by tasks.registering(Sync::class) {
+    from(robolectricSdk)
+    into(robolectricSdkDirectory)
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(prepareRobolectricSdk)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.usePreinstrumentedJars", "true")
+    systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
+    systemProperty("robolectric.enabledSdks", "26")
+    maxParallelForks = 1
 }
 
 // 稳定证书只在独立 runner 使用；不让 AGP 默认 Debug 配置进入可信分支产物。
@@ -106,9 +135,15 @@ dependencies {
     implementation(libs.lifecycle.runtime.ktx)
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.lifecycle.viewmodel.ktx)
+    implementation(libs.lifecycle.viewmodel.savedstate)
+    implementation(libs.room.runtime)
+    implementation(libs.datastore.preferences)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
     implementation(libs.coroutines.android)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric.test)
+    ksp(libs.room.compiler)
+    add(robolectricSdk.name, libs.robolectric.sdk)
 }
