@@ -7,12 +7,14 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import traceback
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+import urllib.error
 import zipfile
 
 from apk_verify import parse_badging, require_no_signature_blocks
-from artifact_io import fetch_artifact, unpack_data, validate_run
+from artifact_io import GitHub, MAX_ARCHIVE_BYTES, NoRedirect, fetch_artifact, unpack_data, validate_run
 import build
 from ci_common import expected_identity, no_signing_secrets, trusted_context
 from sign import validate_manifest
@@ -34,6 +36,60 @@ def archive_bytes(files):
         for name, value in files.items():
             archive.writestr(name, value)
     return buffer.getvalue()
+
+
+class ArtifactDownloadTests(unittest.TestCase):
+    def test_api_media_type_and_redirect_do_not_forward_authorization(self):
+        path = '/repos/OnlineMo/MeloX-Watch/actions/artifacts/456/zip'
+        signed_url = 'https://artifact.example.invalid/archive.zip?signature=fixture'
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'artifact fixture'
+        redirect = urllib.error.HTTPError('https://api.github.com' + path, 302, 'Found',
+                                          {'Location': signed_url}, None)
+        with patch('artifact_io.urllib.request.build_opener') as make_opener, \
+                patch('artifact_io.urllib.request.urlopen', return_value=response) as signed_open:
+            make_opener.return_value.open.side_effect = redirect
+            self.assertEqual(GitHub(token='fixture-token').download(path), b'artifact fixture')
+            make_opener.assert_called_once_with(NoRedirect)
+            request = make_opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, 'https://api.github.com' + path)
+            self.assertEqual(request.get_header('Accept'), 'application/vnd.github+json')
+            self.assertEqual(request.get_header('X-github-api-version'), '2022-11-28')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer fixture-token')
+            # URL 字符串发起独立请求，不复制已认证 API 的请求头。
+            signed_open.assert_called_once_with(signed_url, timeout=60)
+            response.read.assert_called_once_with(MAX_ARCHIVE_BYTES + 1)
+
+    def test_http_or_missing_redirect_is_rejected_before_external_request(self):
+        path = '/repos/OnlineMo/MeloX-Watch/actions/artifacts/456/zip'
+        for location in ('http://artifact.example.invalid/archive.zip', 'ftp://artifact.example.invalid/archive.zip', ''):
+            error = urllib.error.HTTPError('https://api.github.com' + path, 302, 'Found',
+                                           {'Location': location}, None)
+            with self.subTest(location=location), patch('artifact_io.urllib.request.build_opener') as make_opener, \
+                    patch('artifact_io.urllib.request.urlopen') as signed_open:
+                make_opener.return_value.open.side_effect = error
+                with self.assertRaisesRegex(ValueError, 'redirect must use HTTPS'):
+                    GitHub(token='fixture-token').download(path)
+                signed_open.assert_not_called()
+
+    def test_non302_api_error_does_not_expose_error_reason_or_url_in_traceback(self):
+        path = '/repos/OnlineMo/MeloX-Watch/actions/artifacts/456/zip'
+        secret_marker = 'fixture-sensitive-marker'
+        for code in (301, 307, 403, 415, 500):
+            error = urllib.error.HTTPError('https://api.github.com' + path + '?token=' + secret_marker,
+                                           code, secret_marker, {'Location': 'https://artifact.example.invalid/' + secret_marker}, None)
+            with self.subTest(code=code), patch('artifact_io.urllib.request.build_opener') as make_opener, \
+                    patch('artifact_io.urllib.request.urlopen') as signed_open:
+                make_opener.return_value.open.side_effect = error
+                try:
+                    GitHub(token='fixture-token').download(path)
+                except ValueError as caught:
+                    self.assertEqual(str(caught), f'Artifact download failed: HTTP {code}')
+                    self.assertNotIn(secret_marker, ''.join(traceback.format_exception(caught)))
+                else:
+                    self.fail('Non302 response was accepted')
+                signed_open.assert_not_called()
 
 
 class ArtifactBoundaryTests(unittest.TestCase):

@@ -75,14 +75,17 @@ class GitHub:
     def download(self, path):
         require(path.startswith('/repos/' + REPOSITORY + '/'), 'Unexpected download repository')
         request = urllib.request.Request('https://api.github.com' + path,
-            headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/octet-stream'})
+            headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
+                     'X-GitHub-Api-Version': '2022-11-28'})
         try:
             with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
                 data = response.read(MAX_ARCHIVE_BYTES + 1)
         except urllib.error.HTTPError as error:
-            require(error.code == 302, f'Artifact download failed: HTTP {error.code}')
+            if error.code != 302:
+                raise ValueError(f'Artifact download failed: HTTP {error.code}') from None
             location = error.headers.get('Location', '')
-            require(urllib.parse.urlsplit(location).scheme == 'https', 'Artifact redirect must use HTTPS')
+            if urllib.parse.urlsplit(location).scheme != 'https':
+                raise ValueError('Artifact redirect must use HTTPS') from None
             # 跨主机的临时下载地址不携带 GitHub Authorization。
             with urllib.request.urlopen(location, timeout=60) as response:
                 data = response.read(MAX_ARCHIVE_BYTES + 1)
