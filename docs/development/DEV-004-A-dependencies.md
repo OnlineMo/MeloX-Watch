@@ -14,7 +14,7 @@
 | --- | --- | --- | --- |
 | `androidx.activity:activity-compose:1.11.0` | Apache-2.0 | Activity 的 Compose 容器与系统选择/权限结果入口 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/activity/activity-compose/1.11.0/activity-compose-1.11.0.pom) |
 | `androidx.core:core-ktx:1.17.0` | Apache-2.0 | AndroidX 基础兼容与 Kotlin 扩展 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/core/core-ktx/1.17.0/core-ktx-1.17.0.pom) |
-| `androidx.compose.runtime:runtime:1.9.3` | Apache-2.0 | 页面直接使用的 Composable、remember、mutableStateOf 和状态委托 API | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/runtime/runtime/1.9.3/runtime-1.9.3.pom) |
+| `androidx.compose.runtime:runtime-android:1.9.3` | Apache-2.0 | 页面直接使用的 Android Composable、remember、mutableStateOf 和状态委托 API；实体坐标候选见第13节 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/runtime/runtime-android/1.9.3/runtime-android-1.9.3.pom) |
 | `androidx.compose.ui:ui:1.9.3` | Apache-2.0 | 按实际窗口/形状布局、文字与可访问语义 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/ui/ui/1.9.3/ui-1.9.3.pom) |
 | `androidx.compose.foundation:foundation:1.9.3` | Apache-2.0 | 有界列表、滚动和触控基础 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/foundation/foundation/1.9.3/foundation-1.9.3.pom) |
 | `androidx.compose.material3:material3:1.4.0` | Apache-2.0 | 共用按钮、状态和输入控件 | [Google Maven POM](https://dl.google.com/dl/android/maven2/androidx/compose/material3/material3/1.4.0/material3-1.4.0.pom) |
@@ -141,3 +141,15 @@ MainActivity直接import并使用 `Composable`、`remember`、`mutableStateOf`�
 官方runtime POM SHA-256为 `69328184c18942c76de6bca124ca12199521cc15e25c59ada4ba634fb24ec79f`，声明Apache-2.0。实际Gradle module SHA-256为 `2aadf5f7259810646799e6972b9ff582173576cae03819b5c07622ba6fdd7b10`，与既有校验XML一致；XML没有该POM行，未将不存在的校验记成匹配。本地来源审阅摘要SHA-256为 `93de70823b53adb93f4810708744ce328a93b0dab9eba969bfd745d639fa57e5`，原材料仅保留ignored区，未执行本地Android构建。
 
 候选仍须五阶段实际完成，normal/STRICT都选common2.2.21的 `stdlibCommonElements`，真实runtime-android→common无版本非constraint边及common→stdlib边保持一致，STRICT root锁约束成功解析，三个独立STRICT阶段不改XML/锁字节，首次图与collector快照逐一匹配。完整报告再独立审阅和导入，后续严格PR构建才可能导出可验收APK；目前没有修复成功、签名或设备通过声明。
+
+该聚合坐标候选的[run `43752466574`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43752466574)/attempt1绑定source `1ba169217092d9cf92014a202e0df73a90c9cc70`、实际checkout `bec945600d66599cf2f07f66b5834980356e5cae`、job `132929295052`。verification8分33秒（156任务，141执行/15缓存）及normal20秒（157任务，4执行/153 up-to-date）成功；STRICT Debug14秒在AAR metadata检查再次因common未解析失败，后两STRICT未执行。三变体应用测试任务明确NO-SOURCE，不能计执行或通过。artifact `14177241070`为55329字节，ZIP SHA-256 `8af7b9297f38b7032a9ca1f9c41331bf57aa555bba9681b4305bfa28cdfd3ee6`，日志SHA-256 `3939bd0a5cf9512e06f405652b19b83f3438f548cc3bf16c9b3214e7fb1f01be`，仍为failed-partial；无APK导出或签名。
+
+与前次schema2图相比，normal Debug从101组件/560边/0未解析变为101/561/0，STRICT从100/655/1变为100/656/1；新增的仅是应用直依赖边，common相关组件/边及最终Compose变体/属性/外部链完全相同。22条记录均可用，normal七组first/collector相同。图比较摘要SHA-256 `38f738c1662748dac552e3fbb676295488200a2d0761912a8a92562bd91634a7`。app锁仍为 `59e819943f974ff13698d0bf601db920acb87ce835280c2ac3eda0ccdfb57bf7`；XML变为 `2d27d22397f04bc6e8fb75aac5ae69217c8668826a70de75dd95014bc78c08c6`，仅新增coroutines-bom1.8.1 POM及coroutines-core1.8.1 module校验条目，原条目未改。失败材料不导入；聚合直依赖没有修复STRICT。
+
+## 13. 直接消费Android runtime实体的候选
+
+本app只构建Android，现将实际使用的runtime直依赖**替换**为同版本 `androidx.compose.runtime:runtime-android:1.9.3`；既有ui等依赖仍按原元数据解析，不增加common、force、exclude、metadata规则或锁例外。该AAR已经是之前实际选中的Android实现，包含页面实际使用的API；只改变根依赖发起坐标，不更换Compose或工具链版本。
+
+官方module SHA-256 `9492b2ecb5da90bb3f6304e26fe06faff20c573e473a7da6351f0df52180f05a`与既有XML相同；AAR2456086字节、SHA-256 `dc7a8a161d6dfff96801a2d89b1f5d4adb61c0dfa16cb5970215e70aa1d83407`，与module及XML中runtime.aar映射一致。官方POM SHA-256 `fc721c9301a90febbcdc75c7a58c97e9b766aa8c13c3c80c8eadffaa629c2202`声明Apache-2.0，XML没有该POM行，未虚称匹配。只读来源审阅摘要SHA-256 `2d459152533600f4f2d4108d2aafbbfdab2f07ecf25c9f073ff80a64b125fdae`；材料仅留ignored本地，未执行下载的源码或Android编译。
+
+固定8.13源码中，真实根依赖在同轮attach后才遍历下一个节点；实体runtime-android没有available-at，零transitive入边时会返回且不初始化第11节的转发依赖缓存。因此显式实体边具备具体静态依据，仍不能把未观测的首次visit写成故障根因或承诺修复。候选须完成第12节的同一五阶段及全部图/字节判据，完整报告经独立审阅再导入；失败继续拒绝，没有预先接受APK、签名或设备结果。
