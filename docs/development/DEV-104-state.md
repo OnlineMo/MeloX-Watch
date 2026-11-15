@@ -24,11 +24,11 @@
 
 ## 验证状态
 
-本轮补齐页面实际使用的同版本Android runtime实体直依赖，依据P0五阶段成功及独立官方来源审阅，详见依赖记录。保留原58项测试和全部STRICT规则，不复制P0锁或失败schema；本主题自身五阶段、genuine schema1、正式APK/签名仍等待新快照云验。P0成功不替代P1或设备验收。
+本轮补齐页面实际使用的同版本Android runtime实体直依赖，保留原58项测试和全部STRICT规则。本主题自身run43760127225五阶段均实际成功：Debug/Release/Diagnostic各5套58项、失败/错误/跳过0、lint0。570组件1009制品官方hash独立审查完成，仅导入原XML、app锁及genuine schema1，不使用P0锁或失败Library schema2。完整source/checkout/run/artifact/输入hash见[依赖记录](DEV-104-dependencies.md)。资料审查不替代正常APK或设备验收。
 
-已新增58个应用测试：Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个。覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。第六轮云端实际执行Debug全部58项且全部通过；Release/Diagnostic尚未执行，Debug lint失败。它们不代替音频出声或设备AC；本地均未执行。
+原58个应用测试包括Room/实际SQLite18个、真实DataStore17个、队列导航5个、主Looper实际ExoPlayer协调器9个、真实Bundle协议9个，覆盖数据库关闭重开、10000/10001条、CAS冲突、取消/恢复、低空间/回滚、未知schema、暂停与晚回调、释放后零播放器访问、权限/来源字段及稳定身份。完整五阶段的三变体已通过这些实际测试；此前六轮失败及修复证据保留在下文，不再作为当前结论。整合最新contribution时追加P0已云验的5项读通道回归，保留页面导航恢复和离页取消检查；新整合共6套63个定义须新严格云验，本地均未执行。
 
-本地45个Python CI边界测试及Node治理用例通过，XML/UTF-8/资源引用/中英资源键和diff文本检查通过，同伴互审未留源级阻断。直接依赖与官方API审阅见[依赖记录](DEV-104-dependencies.md)。已接入P0五阶段资料采集，Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变其字节；新增schema漂移拒绝测试。完整云端依赖/锁/schema采集、三变体严格58项测试/lint/APK构建、稳定签名和设备测量仍未完成；P0严格锁文件差异仍在处理，不能沿用资料采集成功代替本主题验证。
+合并后的本地49项Python CI边界测试及Node治理场景通过；XML/UTF-8/资源引用/中英资源键和diff文本检查分开记录，这些不是Android测试。资料采集时Room生成schema与锁/XML一起冻结，三变体独立严格验证和报告复制均不得改变字节；合并保留P0只在无秘密PR采集阶段启用的诊断标记与回归、P1所有schema漂移拒绝合同及签名归档修正。正常STRICT APK、fresh signing、稳定证书与设备测量仍未完成，不能将资料成功套用于新整合源码。
 
 本主题尚无与云端APK绑定的设备安装、耳机、30分钟后台或14性能预算证据。所有readiness为false、candidate=null、256个原AC未通过；没有公开、tag、Release或发布批准。
 

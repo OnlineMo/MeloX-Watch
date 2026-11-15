@@ -9,7 +9,6 @@ import android.icu.text.BreakIterator
 import android.net.Uri
 import android.os.Bundle
 import android.os.CancellationSignal
-import android.os.OperationCanceledException
 import android.os.Process
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -17,13 +16,9 @@ import android.provider.OpenableColumns
 import java.io.FileNotFoundException
 import java.io.IOException
 import java.security.MessageDigest
-import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.suspendCancellableCoroutine
 
 enum class ProbeFileIssue {
     PERMISSION_DENIED,
@@ -78,10 +73,10 @@ data class ProbeTreeSample(
  */
 class ProbeFiles(
     private val context: Context,
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
+    dispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
 ) {
     private val resolver = context.contentResolver
-    private val workerInFlight = AtomicBoolean(false)
+    private val readChannel = ProbeReadChannel(dispatcher)
 
     suspend fun inspectAudio(
         uri: Uri,
@@ -267,37 +262,13 @@ class ProbeFiles(
         }
     }
 
-    private suspend fun <T> readBlocking(action: (CancellationSignal) -> T): T = suspendCancellableCoroutine { continuation ->
+    private suspend fun <T> readBlocking(action: (CancellationSignal) -> T): T {
         val signal = CancellationSignal()
-        // 提供方若忽略取消，仍只留一个阻塞操作，不把后续点击排进无界队列。
-        if (!workerInFlight.compareAndSet(false, true)) {
-            continuation.resumeWithException(ProbeReadBusyException())
-            return@suspendCancellableCoroutine
-        }
-        continuation.invokeOnCancellation { signal.cancel() }
-        val operation = Runnable {
-            try {
-                signal.throwIfCanceled()
-                val result = action(signal)
-                if (continuation.isActive) continuation.resume(result)
-            } catch (error: OperationCanceledException) {
-                if (continuation.isActive) continuation.resumeWithException(error)
-            } catch (error: Exception) {
-                if (continuation.isActive) continuation.resumeWithException(error)
-            } finally {
-                workerInFlight.set(false)
-            }
-        }
-        try {
-            dispatcher.dispatch(continuation.context, operation)
-        } catch (error: RuntimeException) {
-            // 派发失败时没有 worker 执行 finally，必须在此释放通道才能再次尝试。
-            workerInFlight.set(false)
-            if (continuation.isActive) continuation.resumeWithException(error)
+        return readChannel.read(onCancellation = signal::cancel) {
+            signal.throwIfCanceled()
+            action(signal)
         }
     }
-
-    private class ProbeReadBusyException : IllegalStateException()
 
     companion object {
         const val MEDIA_SAMPLE_LIMIT = 20
