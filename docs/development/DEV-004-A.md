@@ -5,7 +5,7 @@
 ## 当前状态
 
 - 源码：单`:app`工程正在建设，包含运行时圆/方屏布局、真实输入检查、文件/目录授权能力探测、MediaStore少量样本及单会话本地播放。
-- 云端：第五轮资料采集的三变体编译、lint和assemble已成功，应用单测均NO-SOURCE；bootstrap按合同拒绝导出APK。原字节导入后的严格构建因锁与正常解析不一致失败；已保留校验XML、撤回app锁，改为五阶段重新收集。严格构建与签名仍待验证。精确证据见下文。
+- 云端：run43755199209的五阶段编译/lint/assemble全部成功，三次独立STRICT输入哈希一致；应用单测均NO-SOURCE。独立审阅811项官方制品后，已重新导入两份原始XML/锁；bootstrap仍按合同拒绝导出APK。提交后的正式严格构建、稳定签名及设备验收待验证，精确证据见依赖记录第14节。
 - 设备：2026-11-15T10:38:11Z只读`adb devices -l`返回空清单。DEV-001的API/ABI/窗口、DEV-002安装/耳机/30分钟后台、DEV-005用户文件及输入、DEV-004-B性能基线均未测；minSdk26仍为候选，不能由云端成功推断设备可用。
 - 完整功能：LP-00～15、网易云及Meting业务尚未验收，256个原AC无通过证据。readiness全部false、candidate=null；无公开、tag、Release或发布批准。
 
@@ -47,6 +47,6 @@ wrapper来自原云端run`42766330725`、attempt`1`、artifact`13740290230`，�
 
 五阶段首轮 [run `43722431450`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43722431450) / attempt `1` 的前两阶段成功，但新旧锁完全相同，严格 Debug 再次失败；其余独立严格变体未执行。当前在正常锁阶段增加逐配置显式解析，失败不跳过；精确 source/build、原始 artifact 哈希、阶段与官方依据见[依赖记录第 7 节](DEV-004-A-dependencies.md#7-分轮结果与显式配置解析)。没有新资料导入、可验收 APK 或签名。
 
-后续schema2图已核验normal/STRICT最终Compose变体相同；聚合runtime直依赖候选的run43752466574仍在STRICT失败，新增根依赖边没有恢复common。现将该直依赖替换为实际消费的同版本Android实体runtime-android，依据固定源码避开此根边的available-at转发，保留STRICT及同一五阶段/图/字节验证。精确观察、来源与候选判据见[依赖记录第11～13节](DEV-004-A-dependencies.md#13-直接消费android-runtime实体的候选)。首次遍历仍未直接观测，尚无修复成功、APK或签名通过证据。
+后续schema2图已核验normal/STRICT最终Compose变体相同；聚合runtime直依赖候选的run43752466574仍在STRICT失败，新增根依赖边没有恢复common。现将该直依赖替换为实际消费的同版本Android实体runtime-android，依据固定源码避开此根边的available-at转发，保留STRICT及同一五阶段/图/字节验证。精确观察、来源与候选判据见[依赖记录第11～13节](DEV-004-A-dependencies.md#13-直接消费android-runtime实体的候选)。后续run43755199209五阶段成功并完成独立依赖审阅；原文件已重新导入，见依赖记录第14节。首次遍历仍未直接观测，缓存假说未经证明；正式APK或签名仍无通过证据。
 
 严格PR产物记录source SHA、实际merge build SHA、run/attempt/artifact、归档和APK哈希、版本与临时证书；可信分支记录隔离签名与固定Debug指纹。下载与安装必须使用该云端原包。连接已授权的手表后补DEV-001，再分别执行DEV-002/005及基线；共享停止条件未验证前不能宣称P0退出或P1集成验收通过。

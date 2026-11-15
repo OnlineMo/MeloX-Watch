@@ -153,3 +153,32 @@ MainActivity直接import并使用 `Composable`、`remember`、`mutableStateOf`�
 官方module SHA-256 `9492b2ecb5da90bb3f6304e26fe06faff20c573e473a7da6351f0df52180f05a`与既有XML相同；AAR2456086字节、SHA-256 `dc7a8a161d6dfff96801a2d89b1f5d4adb61c0dfa16cb5970215e70aa1d83407`，与module及XML中runtime.aar映射一致。官方POM SHA-256 `fc721c9301a90febbcdc75c7a58c97e9b766aa8c13c3c80c8eadffaa629c2202`声明Apache-2.0，XML没有该POM行，未虚称匹配。只读来源审阅摘要SHA-256 `2d459152533600f4f2d4108d2aafbbfdab2f07ecf25c9f073ff80a64b125fdae`；材料仅留ignored本地，未执行下载的源码或Android编译。
 
 固定8.13源码中，真实根依赖在同轮attach后才遍历下一个节点；实体runtime-android没有available-at，零transitive入边时会返回且不初始化第11节的转发依赖缓存。因此显式实体边具备具体静态依据，仍不能把未观测的首次visit写成故障根因或承诺修复。候选须完成第12节的同一五阶段及全部图/字节判据，完整报告经独立审阅再导入；失败继续拒绝，没有预先接受APK、签名或设备结果。
+
+## 14. 五阶段成功与重新导入
+
+P0 Android runtime 直依赖候选的五阶段采集已成功，经委托范围内的独立审阅后已导入两份原始依赖输入，等待正式 STRICT 构建。运行保留 bootstrap 的预期拒绝，不导出或接受 APK。
+
+候选 source 为 `4232fe961f13a454fa6b707bef4e8e63f1799862`；[run 43755199209](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43755199209)，attempt 1，compile job `132937707946`，实际 checkout `140f072d6bc59aee4dc8f6f695ab90d6241e018c` 已核验。制品 `14178523402`，55333 bytes，原始 ZIP SHA256 为 `da517c93f45743fb069944ae76f532c1cb5800de24789eb6b5323c946351e7a4`；云日志 SHA256 为 `eac6bd7c0fc20ace3d9ad3bca8891433c286f9a76d3ffed39ec69915339d8eeb`。
+
+| 实际 Gradle 阶段 | 结果 | 日志耗时 |
+| --- | --- | --- |
+| verification collection | 成功 | 12m 46s |
+| normal lock collection | 成功 | 27s |
+| STRICT Debug | 成功 | 1m 28s |
+| STRICT Release | 成功 | 4m 33s |
+| STRICT Diagnostic | 成功 | 4m 24s |
+
+该候选仅把已有实际 Compose API 使用的同版本 runtime 直依赖替换为 `androidx.compose.runtime:runtime-android:1.9.3`。Gradle 保持 8.13；build.py/enforce.gradle 未变，仍执行完整五阶段及 STRICT 校验。没有新加人工 common 依赖或强制版本规则。
+
+独立审阅覆盖 461 个组件、811 个制品，官方 SHA256 全部匹配，0 未核验、0 来源冲突。809 项已有来源证据仅在坐标、文件名和哈希完全一致时复用，并重新绑定本次源码和制品；378 份官方下载缓存、共 170160255 bytes 已重新计算 SHA256，51 个别名重新通过当前完整 module metadata 验证。新增的 `kotlinx-coroutines-bom:1.8.1` POM 和 `kotlinx-coroutines-core:1.8.1` module 均独立通过官方 SHA256 sidecar 核验。`runtime.aar` 的真实官方下载文件名为 `runtime-android-1.9.3.aar`，映射及字节均已核验。
+
+锁文件保留 256 行、186 个配置。相对上轮采集，唯一变化为 runtime-android 行增加 `implementationDependenciesMetadata`。common 的原坐标及 7 个配置全部保留。27 份实际观察图全部可用、0 unresolved；7 个 normal 首图与 terminal collector 快照逐字段一致。所有观察图保留真实 versionless common 依赖、Compose requires 2.0.21 约束及最终 selected 2.2.21；三次 STRICT 还观察到由锁文件产生的严格约束。首个 NodeState 访问顺序仍未观察，缓存假说未经证明。
+
+| 原始导入目标 | bytes | SHA256 |
+| --- | ---: | --- |
+| android/gradle/verification-metadata.xml | 212476 | `2d27d22397f04bc6e8fb75aac5ae69217c8668826a70de75dd95014bc78c08c6` |
+| android/app/gradle.lockfile | 101708 | `2f1c4553aba8bfb1d6c4321d907730a0e370101faa2a508f7511e6b0151e4e8a` |
+
+三次 STRICT 的实际输入哈希与上述复制出的原字节一致。三份实际 lint XML 均为 0 issues；单测全部为 NO-SOURCE，没有执行应用用例。完整许可复核覆盖 461 个组件：457 个记录到官方声明，100 个运行时候选全部为 Apache-2.0、0 运行时人工项。52 个既有构建/测试许可人工项及其中 4 个无声明父 POM未发生变化，仍须在最终包装/公开审阅时核对相应义务。
+
+独立官方审阅摘要 SHA256：`389611203b36e824abc9887cd5187ca877c2e89f3591d3bf556e745c0521bec1`。独立 common/STRICT 图复核 SHA256：`2e80a93592264c5d8cd529bb0bd26354c5fa3523ce3466f24b227ee057cd6d62`。本次没有完成正式构建接受、APK 校验、签名、实机或发布验收。
