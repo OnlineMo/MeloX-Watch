@@ -43,6 +43,14 @@ gradle.projectsEvaluated {
     // 此任务只供无秘密PR采集正常图，三轮独立strict仍决定资料是否完整。
     gradle.rootProject.tasks.register('ciResolveAndLockAll') { task ->
         task.notCompatibleWithConfigurationCache('Dependency lock collection resolves project configurations')
+        // 显式调度保证真实消费者先运行；CLI排列不能替代多项目/并行的顺序约束。
+        task.mustRunAfter(['Debug', 'Release', 'Diagnostic'].collectMany { variant ->
+            [":app:testWatchAndroid${variant}UnitTest", ":app:lintWatchAndroid${variant}",
+             ":app:assembleWatchAndroid${variant}"]
+        })
+        if (gradle.startParameter.taskNames.contains(':app:assembleWatchAndroidDiagnosticAndroidTest')) {
+            task.mustRunAfter(':app:assembleWatchAndroidDiagnosticAndroidTest')
+        }
         task.doLast {
             if (!gradle.startParameter.writeDependencyLocks) {
                 throw new GradleException('Lock collection requires --write-locks')

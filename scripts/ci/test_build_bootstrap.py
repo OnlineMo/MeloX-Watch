@@ -73,10 +73,15 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             if phase == 0:
                 self.assertIn('--write-locks', command)
                 self.assertEqual(command[command.index('--write-verification-metadata') + 1], 'sha256')
+                self.assertNotIn(build.LOCK_COLLECTION_TASK, command)
             elif phase == 1:
                 self.assertIn('--write-locks', command)
                 self.assertNotIn('--write-verification-metadata', command)
-                self.assertIn(build.LOCK_COLLECTION_TASK, command)
+                expected_consumers = [f':app:{task}WatchAndroid{variant}{suffix}'
+                                      for variant in ('Debug', 'Release', 'Diagnostic')
+                                      for task, suffix in (('test', 'UnitTest'), ('lint', ''), ('assemble', ''))]
+                self.assertEqual([argument for argument in command if argument.startswith(':')],
+                                 [*expected_consumers, build.LOCK_COLLECTION_TASK])
             else:
                 self.assertNotIn('--write-locks', command)
                 self.assertNotIn('--write-verification-metadata', command)
@@ -260,6 +265,18 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         (self.android / 'app/src/androidTest').mkdir(parents=True)
         self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('diagnostic'))
         self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('debug'))
+
+        with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs: self.write_inputs()) as process:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.build('debug')
+        commands = [call.args[0] for call in process.call_args_list]
+        normal_tasks = [argument for argument in commands[1] if argument.startswith(':')]
+        self.assertEqual(normal_tasks[-2:],
+                         [':app:assembleWatchAndroidDiagnosticAndroidTest', build.LOCK_COLLECTION_TASK])
+        for phase in (0, 4):
+            self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', commands[phase])
+        for phase in (2, 3):
+            self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', commands[phase])
 
 
 if __name__ == '__main__':
