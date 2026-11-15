@@ -47,7 +47,11 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
         .map { snapshot() }
         .distinctUntilChanged()
 
-    override suspend fun replace(request: QueueReplacementRequest, source: QueuePageSource): QueueCommit = preparing {
+    override suspend fun replace(
+        request: QueueReplacementRequest,
+        source: QueuePageSource,
+        beforePublish: suspend (QueueWindow?) -> Unit,
+    ): QueueCommit = preparing {
         if (!initialized) initializeLocked()
         if ((request.view.totalCount == 0L && !request.allowEmpty) || request.expectedQueueRevision == Long.MAX_VALUE) {
             throw QueueStoreException(QueueStoreIssue.INVALID_INPUT)
@@ -64,27 +68,25 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
             }
             if (previousOperation.phase != QueuePhase.ABORTED) recoveryRequired()
         }
+        // Hand off a committed queue without another full-generation IO pass. Reclaim the previous
+        // inactive rows before staging this one, keeping one constructor and bounded generations.
+        cleanupInactive()
         val generationId = previousOperation?.generationId ?: UUID.randomUUID().toString()
         var published = false
         try {
             if (previousOperation != null) cleanupAbandoned(generationId)
             begin(request, generationId, previousOperation != null)
             stage(request, source, generationId)
-            val current = seal(request, generationId)
+            val sealed = seal(request, generationId)
+            // The producer is a forward-only cursor. Validate the selected staged rows after sealing,
+            // outside any SQLite transaction; a rejected resource must not replace the active pointer.
+            beforePublish(sealed.window)
             currentCoroutineContext().ensureActive()
             // 提交点开始后完成短事务，避免“已换指针但被当作未提交取消”的歧义。
             val committed = withContext(NonCancellable) {
-                val committed = publish(request, generationId, current)
+                val committed = publish(request, generationId, sealed.current)
                 published = true
                 QueueCommit(committed, generationId, false)
-            }
-            try {
-                // 可取消的分页清理不属于原子提交；关闭不必等非活动大队列逐条回收。
-                cleanupInactive()
-            } catch (_: CancellationException) {
-                // 已提交结果保持完整，下次 initialize/replace 再回收剩余行。
-            } catch (_: QueueStoreException) {
-                // 完整新队列已经提交；清理故障不能报提交失败。
             }
             committed
         } finally {
@@ -230,7 +232,9 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
         }
     }
 
-    private suspend fun seal(request: QueueReplacementRequest, generationId: String): QueueEntryEntity? = databaseAccess {
+    private data class SealedQueue(val current: QueueEntryEntity?, val window: QueueWindow?)
+
+    private suspend fun seal(request: QueueReplacementRequest, generationId: String): SealedQueue = databaseAccess {
         database.withTransaction {
             val generation = dao.generation(generationId) ?: recoveryRequired()
             val stats = dao.orderStats(generationId)
@@ -240,7 +244,16 @@ class RoomQueueStore(private val database: MeloXDatabase) : QueueStore {
             validateOrders(stats, total, QueueStoreIssue.INVALID_INPUT)
             val current = if (total == 0L) null else dao.entryAtOriginalOrder(generationId, request.startOriginalOrder) ?: recoveryRequired()
             if (dao.seal(generationId) != 1) recoveryRequired()
-            current
+            val window = current?.let {
+                val first = maxOf(0L, it.playbackOrder - 1L)
+                val last = minOf(total - 1L, it.playbackOrder + 1L)
+                val entries = dao.window(generationId, first, last).map { row -> row.model() }
+                if (entries.size.toLong() != last - first + 1L) recoveryRequired()
+                val currentIndex = entries.indexOfFirst { row -> row.queueEntryId == it.queueEntryId }
+                if (currentIndex < 0) recoveryRequired()
+                QueueWindow(generationId, request.expectedQueueRevision + 1L, total, entries, currentIndex)
+            }
+            SealedQueue(current, window)
         }
     }
 

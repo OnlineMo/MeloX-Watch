@@ -91,9 +91,16 @@ val robolectricSdk by configurations.creating {
     isCanBeResolved = true
     isTransitive = false
 }
+// 同一模块的两个 SDK 版本须独立解析，避免冲突选择只留下其中一份。
+val robolectricSdk30 by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
 val robolectricSdkDirectory = layout.buildDirectory.dir("robolectric-sdk")
 val prepareRobolectricSdk by tasks.registering(Sync::class) {
     from(robolectricSdk)
+    from(robolectricSdk30)
     into(robolectricSdkDirectory)
 }
 tasks.withType<Test>().configureEach {
@@ -101,7 +108,7 @@ tasks.withType<Test>().configureEach {
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.usePreinstrumentedJars", "true")
     systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
-    systemProperty("robolectric.enabledSdks", "26")
+    systemProperty("robolectric.enabledSdks", "26,30")
     maxParallelForks = 1
 }
 
@@ -144,4 +151,5 @@ dependencies {
     testImplementation(libs.robolectric.test)
     ksp(libs.room.compiler)
     add(robolectricSdk.name, libs.robolectric.sdk)
+    add(robolectricSdk30.name, libs.robolectric.sdk30)
 }

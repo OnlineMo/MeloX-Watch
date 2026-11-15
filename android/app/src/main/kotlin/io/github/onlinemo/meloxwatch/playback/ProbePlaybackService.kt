@@ -1,7 +1,6 @@
 package io.github.onlinemo.meloxwatch.playback
 
 import android.app.PendingIntent
-import android.content.Intent
 import android.os.Bundle
 import android.os.Process
 import androidx.media3.common.AudioAttributes
@@ -21,7 +20,11 @@ import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.library.LibraryException
+import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
+import io.github.onlinemo.meloxwatch.data.queue.QueueReplacementRequest
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
+import io.github.onlinemo.meloxwatch.model.FrozenQueueView
 import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -30,7 +33,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -44,6 +50,7 @@ class ProbePlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private var backend: ExoPlayer? = null
     private var coordinator: QueuePlaybackCoordinator? = null
+    private var listening: ServiceListeningObserver? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeCommand: Job? = null
     private var destroyed = false
@@ -72,11 +79,17 @@ class ProbePlaybackService : MediaSessionService() {
         player.setWakeMode(C.WAKE_MODE_LOCAL)
         backend = player
         val application = application as MeloXApplication
+        val statistics = ServiceListeningObserver(player, application.listening, serviceScope) { issue ->
+            mediaSession?.sendError(SessionError(SessionError.ERROR_INVALID_STATE, "LISTENING_${issue.name}"))
+        }
+        listening = statistics
         val queues = QueuePlaybackCoordinator(
             player,
             application.queues,
             application.preferences,
             serviceScope,
+            resolveEntry = LocalPlaybackResolver(application)::resolve,
+            onRoundChanged = statistics::beginRound,
         ) { failure ->
             mediaSession?.sendError(SessionError(SessionError.ERROR_INVALID_STATE, "QUEUE_${failure.issue.name}"))
         }
@@ -84,17 +97,13 @@ class ProbePlaybackService : MediaSessionService() {
 
         val builder = MediaSession.Builder(this, queues.sessionPlayer)
             .setCallback(LocalPlaybackCallback())
-        val activityIntent = packageManager.getLaunchIntentForPackage(packageName)
-        if (activityIntent != null) {
-            activityIntent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            val sessionActivity = PendingIntent.getActivity(
-                this,
-                0,
-                activityIntent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-            builder.setSessionActivity(sessionActivity)
-        }
+        val sessionActivity = PendingIntent.getActivity(
+            this,
+            0,
+            PlaybackCommands.playbackActivityIntent(this),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        builder.setSessionActivity(sessionActivity)
         mediaSession = builder.build()
         serviceScope.launch {
             try {
@@ -119,17 +128,33 @@ class ProbePlaybackService : MediaSessionService() {
         val session = mediaSession
         val player = backend
         val queues = coordinator
+        val statistics = listening
         mediaSession = null
         coordinator = null
         backend = null
-        session?.release()
+        listening = null
         player?.pause()
+        statistics?.detach()
         queues?.detach()
+        session?.release()
         player?.release()
         // 主要保存路径是5秒及暂停/seek/切歌；销毁只补一次已捕获状态，不阻塞主线程。
         serviceScope.launch {
             try {
-                withTimeoutOrNull(1500L) { queues?.close() }
+                supervisorScope {
+                    listOf(
+                        async {
+                            try { withTimeoutOrNull(1500L) { queues?.close() } }
+                            catch (error: CancellationException) { throw error }
+                            catch (_: Exception) { null }
+                        },
+                        async {
+                            try { withTimeoutOrNull(1500L) { statistics?.close() } }
+                            catch (error: CancellationException) { throw error }
+                            catch (_: Exception) { null }
+                        },
+                    ).awaitAll()
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -159,6 +184,19 @@ class ProbePlaybackService : MediaSessionService() {
             } catch (error: QueueStoreException) {
                 val issue = coordinator?.state?.value?.failure?.issue ?: QueuePlaybackIssue.SOURCE_UNAVAILABLE
                 future.set(failureResult(issue.name, error.issue.name))
+            } catch (error: LibraryException) {
+                val issue = when (error.issue) {
+                    LibraryIssue.BUSY -> "BUSY"
+                    LibraryIssue.CONFLICT -> "CONFLICT"
+                    LibraryIssue.VIEW_EXPIRED -> "VIEW_EXPIRED"
+                    LibraryIssue.SOURCE_CHANGED -> "SOURCE_CHANGED"
+                    LibraryIssue.PERMISSION_REVOKED -> "PERMISSION_DENIED"
+                    LibraryIssue.FILE_MISSING -> "FILE_MISSING"
+                    LibraryIssue.STORAGE_FULL -> "STORAGE_FULL"
+                    LibraryIssue.RECOVERY_REQUIRED -> "RECOVERY_REQUIRED"
+                    else -> "SOURCE_UNAVAILABLE"
+                }
+                future.set(failureResult(issue))
             } catch (_: IllegalArgumentException) {
                 future.set(SessionResult(SessionResult.RESULT_ERROR_BAD_VALUE))
             } catch (_: Exception) {
@@ -197,6 +235,7 @@ class ProbePlaybackService : MediaSessionService() {
             if (controller.uid == Process.myUid()) {
                 result.setAvailableSessionCommands(MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
                     .add(PlaybackCommands.replaceLocal)
+                    .add(PlaybackCommands.replaceLibraryView)
                     .add(PlaybackCommands.selectEntry)
                     .add(PlaybackCommands.retryRestore)
                     .build())
@@ -218,6 +257,31 @@ class ProbePlaybackService : MediaSessionService() {
                     val command = PlaybackCommands.readLocal(args)
                     val queues = checkNotNull(coordinator)
                     queues.replace(command.request, command.source, explicitPlay = true)
+                }
+                PlaybackCommands.replaceLibraryView.customAction -> commandFuture {
+                    val command = PlaybackCommands.readLibrary(args)
+                    val application = application as MeloXApplication
+                    val library = application.library
+                    val view = library.openQueueView(command.viewId)
+                    try {
+                        if (view.totalCount == 0L) throw LibraryException(LibraryIssue.INVALID_INPUT)
+                        val start = command.selected?.let { selected ->
+                            library.locate(view, selected)?.ordinal
+                                ?: throw LibraryException(LibraryIssue.SOURCE_CHANGED)
+                        } ?: 0L
+                        val saved = application.queues.snapshot()
+                        val request = QueueReplacementRequest(
+                            operationId = command.operationId,
+                            expectedGenerationId = command.expectedGenerationId,
+                            expectedQueueRevision = command.expectedQueueRevision,
+                            view = FrozenQueueView(view.viewId, view.revision, view.totalCount),
+                            mode = saved?.mode ?: io.github.onlinemo.meloxwatch.model.QueueMode(),
+                            startOriginalOrder = start,
+                        )
+                        checkNotNull(coordinator).replace(request, library.queueSource(view), explicitPlay = true)
+                    } finally {
+                        library.closeView(view.viewId)
+                    }
                 }
                 PlaybackCommands.selectEntry.customAction -> commandFuture {
                     val command = PlaybackCommands.readSelection(args)

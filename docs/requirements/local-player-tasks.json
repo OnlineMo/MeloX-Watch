@@ -11,7 +11,7 @@
         "DEV-101",
         "DEV-104"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-01",
@@ -33,7 +33,7 @@
         "LP-00",
         "DEV-005"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-02",
@@ -46,7 +46,7 @@
       "depends_on": [
         "LP-01"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-03",
@@ -70,7 +70,7 @@
         "LP-01",
         "LP-04"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-04",
@@ -102,7 +102,7 @@
         "DEV-103",
         "DEV-104"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-05",
@@ -258,7 +258,7 @@
         "LP-03",
         "LP-07"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-13",
@@ -306,7 +306,7 @@
         "LP-01",
         "LP-12"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     }
   ]
 }

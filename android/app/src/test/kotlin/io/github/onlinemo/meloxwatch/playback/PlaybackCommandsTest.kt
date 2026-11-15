@@ -1,7 +1,11 @@
 package io.github.onlinemo.meloxwatch.playback
 
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
+import android.os.BadParcelableException
 import android.os.Bundle
+import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import io.github.onlinemo.meloxwatch.model.FrozenQueueView
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
@@ -10,20 +14,69 @@ import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.ui.MainActivity
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 
 /** 真正的 Android Bundle 协议边界；失败必须拒绝，不能借默认读取变成合法命令。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 class PlaybackCommandsTest {
+    @Test
+    fun notificationIntentExplicitlyTargetsPlaybackAndAllowsActivityReuse() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val intent = PlaybackCommands.playbackActivityIntent(context)
+        assertEquals(context.packageName, intent.component?.packageName)
+        assertEquals(MainActivity::class.java.name, intent.component?.className)
+        assertEquals("io.github.onlinemo.meloxwatch.OPEN_PLAYBACK", intent.action)
+        assertEquals("playback", intent.getStringExtra("destination"))
+        assertEquals(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP,
+            intent.flags)
+        assertTrue(PlaybackCommands.opensPlayback(intent))
+
+        val development = object : ContextWrapper(context) {
+            override fun getPackageName(): String = "io.github.onlinemo.meloxwatch.dev"
+        }
+        val developmentIntent = PlaybackCommands.playbackActivityIntent(development)
+        assertEquals(development.packageName, developmentIntent.component?.packageName)
+        assertEquals(MainActivity::class.java.name, developmentIntent.component?.className)
+        assertTrue(PlaybackCommands.opensPlayback(developmentIntent))
+    }
+
+    @Test
+    fun ordinaryLaunchesAndMalformedDestinationsCannotBecomePlaybackNavigation() {
+        val context: Context = RuntimeEnvironment.getApplication()
+        val valid = PlaybackCommands.playbackActivityIntent(context)
+        val mutations: List<Pair<String, Intent.() -> Unit>> = listOf(
+            "ordinary launch" to { action = Intent.ACTION_MAIN },
+            "external view" to { action = Intent.ACTION_VIEW },
+            "external send" to { action = Intent.ACTION_SEND },
+            "missing action" to { action = null },
+            "missing destination" to { removeExtra("destination") },
+            "another destination" to { putExtra("destination", "library") },
+            "Boolean destination" to { putExtra("destination", false) },
+            "byte array destination" to { putExtra("destination", byteArrayOf(1)) },
+            "null destination" to { putExtra("destination", null as String?) },
+        )
+        for ((label, mutate) in mutations) {
+            assertFalse(label, PlaybackCommands.opensPlayback(Intent(valid).apply(mutate)))
+        }
+        assertFalse(PlaybackCommands.opensPlayback(null))
+        val unreadable = object : Intent(valid) {
+            override fun getExtras(): Bundle? = throw BadParcelableException("Unreadable destination")
+        }
+        assertFalse(PlaybackCommands.opensPlayback(unreadable))
+    }
+
     @Test
     fun wrongPrimitiveTypesCannotTurnIntoValidDefaultValues() {
         val mutations: List<Pair<String, Bundle.() -> Unit>> = listOf(
@@ -81,7 +134,7 @@ class PlaybackCommandsTest {
     }
 
     @Test
-    fun titleLimitsRejectTheWholeCommandInsteadOfTruncatingItsMetadata() = runBlocking {
+    fun rawTitleBeyondTheProtocolBudgetIsRejectedAndTheBoundaryIsAccepted() = runBlocking {
         val oversized = validLocalArguments().apply { putString("title", "曲".repeat(2049)) }
         rejects("title beyond protocol budget") { PlaybackCommands.readLocal(oversized) }
 
@@ -90,6 +143,55 @@ class PlaybackCommandsTest {
         val page = accepted.source.read(0L, 1)
         assertEquals(title, page.entries.single().displayName)
         assertEquals(accepted.request.view, page.view)
+    }
+
+    @Test
+    fun fullMetadataTitleProducesABoundedPlayableSummaryWithoutChangingTheSource() = runBlocking {
+        val title = "曲".repeat(4096)
+        val metadata = LocalAudioMetadata(title = title, durationMs = 180_000L)
+        val input = entry().copy(displayName = metadata.title, durationMs = metadata.durationMs)
+        val arguments = PlaybackCommands.localArguments(input, base(), "operation-long-title")
+        val command = PlaybackCommands.readLocal(arguments)
+        val page = command.source.read(0L, 1)
+        val summary = "曲".repeat(2048)
+
+        assertEquals(title, metadata.title)
+        assertEquals(title, input.displayName)
+        assertEquals(summary, arguments.getString("title"))
+        assertEquals(input.copy(originalOrder = 0L, playbackOrder = 0L, displayName = summary),
+            page.entries.single())
+        assertEquals(command.request.view, page.view)
+    }
+
+    @Test
+    fun titleSummariesKeepWholeSurrogatePairsAndCombiningSequences() = runBlocking {
+        val cases = listOf(
+            "曲".repeat(2047) + "😀尾" to "曲".repeat(2047),
+            "曲".repeat(2046) + "😀尾" to ("曲".repeat(2046) + "😀"),
+            "曲".repeat(2047) + "e\u0301尾" to "曲".repeat(2047),
+            "曲".repeat(2046) + "e\u0301尾" to ("曲".repeat(2046) + "e\u0301"),
+        )
+        for ((title, expected) in cases) {
+            val input = entry().copy(displayName = title)
+            val decoded = PlaybackCommands.readLocal(
+                PlaybackCommands.localArguments(input, base(), "operation-cluster"),
+            ).source.read(0L, 1).entries.single()
+            assertEquals(input.copy(originalOrder = 0L, playbackOrder = 0L, displayName = expected), decoded)
+            assertEquals(title, input.displayName)
+        }
+    }
+
+    @Test
+    fun aSingleOverBudgetCharacterClusterRemainsPlayableWithAnUnknownTitle() = runBlocking {
+        val title = "e" + "\u0301".repeat(2048) + "尾"
+        val metadata = LocalAudioMetadata(title = title)
+        val input = entry().copy(displayName = metadata.title)
+        val arguments = PlaybackCommands.localArguments(input, base(), "operation-unknown-title")
+        val decoded = PlaybackCommands.readLocal(arguments).source.read(0L, 1).entries.single()
+        assertNull(arguments.getString("title"))
+        assertEquals(input.copy(originalOrder = 0L, playbackOrder = 0L, displayName = null), decoded)
+        assertEquals(title, metadata.title)
+        assertEquals(title, input.displayName)
     }
 
     @Test
@@ -194,6 +296,44 @@ class PlaybackCommandsTest {
         assertEquals(QueueSelectionCommand("generation-existing", 42L, "instance-other"), first)
         assertEquals(first, afterProgress)
         assertNotEquals(previous.currentEntryId, first.entryId)
+    }
+
+    @Test
+    fun aLibraryCommandCarriesOnlyAnAdoptableLeaseAndStableSelection() {
+        val selected = TrackKey(TrackKey.LOCAL_PROVIDER, "selected-local")
+        val arguments = PlaybackCommands.libraryArguments("view-library", selected, base(), "play-library")
+        val decoded = PlaybackCommands.readLibrary(arguments)
+        assertEquals(LibraryQueueCommand("view-library", "play-library", base().generationId, 42L, selected), decoded)
+        assertFalse(arguments.containsKey("entries"))
+        assertFalse(arguments.containsKey("uri"))
+        assertFalse(arguments.containsKey("totalCount"))
+        arguments.putString("view", "changed-view")
+        arguments.putString("track", "changed-selection")
+        assertEquals("view-library", decoded.viewId)
+        assertEquals(selected, decoded.selected)
+        val playAll = PlaybackCommands.readLibrary(PlaybackCommands.libraryArguments("all-view", null, null, "new-library"))
+        assertNull(playAll.selected)
+        assertNull(playAll.expectedGenerationId)
+        assertEquals(0L, playAll.expectedQueueRevision)
+    }
+
+    @Test
+    fun malformedLibraryLeasesAndPrimitiveTypesRejectBeforeQueueMutation() {
+        val mutations: List<Bundle.() -> Unit> = listOf(
+            { putInt("revision", 0) }, { putLong("revision", -1L) }, { remove("revision") },
+            { putString("schema", "1") }, { putInt("schema", 2) }, { remove("schema") },
+            { putString("view", "") }, { putString("view", "x".repeat(129)) }, { putByteArray("view", byteArrayOf(1)) },
+            { putBoolean("generation", false) }, { putString("generation", " ") },
+            { putString("track", "") }, { putLong("track", 1L) }, { putString("track", "x".repeat(129)) },
+        )
+        for (mutate in mutations) {
+            val arguments = PlaybackCommands.libraryArguments("library-view", null, base(), "library-operation")
+            arguments.mutate()
+            rejects("invalid library lease/primitive") { PlaybackCommands.readLibrary(arguments) }
+        }
+        rejects("online selection through the local-library command") {
+            PlaybackCommands.libraryArguments("library-view", TrackKey("online", "selected"), base(), "library-operation")
+        }
     }
 
     private fun validLocalArguments(): Bundle = PlaybackCommands.localArguments(entry(), base(), "operation-valid")

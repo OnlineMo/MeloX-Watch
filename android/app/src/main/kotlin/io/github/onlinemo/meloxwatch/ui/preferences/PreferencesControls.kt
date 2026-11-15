@@ -29,6 +29,8 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesFailure
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesField
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesRecoveryReason
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
+import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 
 /** 放入宿主的可滚动 item；宿主负责标题、真实窗口避让与导航 enterEditor/clearDraft。 */
@@ -88,6 +90,26 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
                     }
                 }
             }
+            Text(stringResource(R.string.library_layout), style = MaterialTheme.typography.titleMedium)
+            LibraryLayout.entries.forEach { layout ->
+                PreferenceButton(
+                    stringResource(if (layout == LibraryLayout.LIST) R.string.library_list else R.string.library_grid),
+                    enabled = state.canEdit && draft.libraryLayout != layout,
+                    onClick = { viewModel.setLibraryLayout(layout) },
+                )
+            }
+            Explanation(stringResource(R.string.library_grid_scope))
+            Text(stringResource(R.string.library_artwork_path), style = MaterialTheme.typography.titleMedium)
+            ArtworkReadPath.entries.forEach { path ->
+                PreferenceButton(
+                    stringResource(if (path == ArtworkReadPath.SYSTEM_THUMBNAIL) {
+                        R.string.library_artwork_system
+                    } else R.string.library_artwork_local),
+                    enabled = state.canEdit && draft.artworkReadPath != path,
+                    onClick = { viewModel.setArtworkReadPath(path) },
+                )
+            }
+            Explanation(stringResource(R.string.library_artwork_scope))
             Explanation(stringResource(R.string.prefs_save_scope))
             if (state.confirmReset) {
                 Text(stringResource(R.string.prefs_reset_question), style = MaterialTheme.typography.bodyLarge)
@@ -143,6 +165,14 @@ private fun CurrentPreferences(state: PreferencesEditorState) {
         ),
     )
     Explanation(stringResource(R.string.prefs_screen_shape_value, shapeLabel(state.effective.screenShape)))
+    Explanation(stringResource(R.string.library_layout_value, stringResource(
+        if (state.effective.libraryLayout == LibraryLayout.LIST) R.string.library_list else R.string.library_grid,
+    )))
+    Explanation(stringResource(R.string.library_artwork_value, stringResource(
+        if (state.effective.artworkReadPath == ArtworkReadPath.SYSTEM_THUMBNAIL) {
+            R.string.library_artwork_system
+        } else R.string.library_artwork_local,
+    )))
 }
 
 @Composable
@@ -220,6 +250,9 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
     val history = stringResource(R.string.prefs_field_history)
     val position = stringResource(R.string.prefs_restore_position)
     val shape = stringResource(R.string.prefs_screen_shape)
+    val layout = stringResource(R.string.library_layout)
+    val artwork = stringResource(R.string.library_artwork_path)
+    val sorts = stringResource(R.string.library_sort)
     val separator = stringResource(R.string.prefs_field_separator)
     return PreferencesField.entries.filter { field -> field in fields }.joinToString(separator) { field ->
         when (field) {
@@ -227,6 +260,9 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
             PreferencesField.REVISION -> history
             PreferencesField.RESTORE_POSITION -> position
             PreferencesField.SCREEN_SHAPE -> shape
+            PreferencesField.LIBRARY_LAYOUT -> layout
+            PreferencesField.ARTWORK_READ_PATH -> artwork
+            PreferencesField.LIBRARY_SORTS -> sorts
         }
     }
 }

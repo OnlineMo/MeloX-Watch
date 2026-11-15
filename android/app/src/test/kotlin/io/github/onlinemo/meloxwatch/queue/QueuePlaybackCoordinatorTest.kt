@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.queue
 import android.os.Looper
 import androidx.media3.common.MediaItem
 import androidx.media3.exoplayer.ExoPlaybackException
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
@@ -30,6 +31,7 @@ import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackCoordinator
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackException
+import io.github.onlinemo.meloxwatch.playback.QueuePlaybackFailure
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -39,6 +41,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
@@ -270,7 +274,10 @@ class QueuePlaybackCoordinatorTest {
         coordinator.initialize()
         val request = replacement("missing-current", queues.snapshot())
         val unavailable = entry(1L).copy(location = null)
-        val committed = coordinator.replace(request, source(request, unavailable), explicitPlay = true)
+        // Restoration can encounter a once-valid resource that has disappeared. Seed the durable
+        // snapshot directly; a new coordinator replacement must reject it before publication.
+        val committed = queues.replace(request, source(request, unavailable))
+        coordinator.initialize()
         assertEquals(3L, committed.snapshot.entryCount)
         assertEquals(committed.snapshot.generationId, queues.snapshot().generationId)
         assertEquals(QueuePlaybackIssue.LOCATION_MISSING, coordinator.state.value.failure?.issue)
@@ -288,6 +295,376 @@ class QueuePlaybackCoordinatorTest {
         assertEquals("entry-0", backend.currentMediaItem?.mediaId)
         assertTrue(backend.playWhenReady)
         assertEquals(null, coordinator.state.value.failure)
+    }
+
+    @Test
+    fun resolvedCurrentIsFirstAndAFailedNeighborLeavesPlayableAudioInABoundedWindow() = runBlocking {
+        val resolvedIds = mutableListOf<String>()
+        val rounds = mutableListOf<String>()
+        var revision = 1L
+        coordinator.detach()
+        coordinator.close()
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
+            resolveEntry = { original ->
+                resolvedIds.add(original.queueEntryId)
+                if (original.queueEntryId == "entry-2") throw QueuePlaybackException(
+                    QueuePlaybackFailure(QueuePlaybackIssue.PERMISSION_DENIED, original.queueEntryId),
+                )
+                original.copy(location = requireNotNull(original.location).copy(
+                    uri = "content://verified/" + original.queueEntryId + "/" + revision,
+                    contentRevision = revision,
+                ))
+            },
+            onRoundChanged = { current ->
+                assertFalse("round identity must be ready before playback", backend.playWhenReady)
+                rounds.add(current.queueEntryId)
+            },
+        )
+        coordinator.initialize()
+        assertEquals(listOf("entry-1", "entry-0", "entry-2"), resolvedIds)
+        assertEquals(2, backend.mediaItemCount)
+        assertEquals("entry-1", backend.currentMediaItem?.mediaId)
+        assertEquals("content://verified/entry-1/1", backend.currentMediaItem?.localConfiguration?.uri.toString())
+        coordinator.sessionPlayer.play()
+        coordinator.sessionPlayer.pause()
+        coordinator.sessionPlayer.play()
+        assertEquals(listOf("entry-1"), rounds)
+        assertTrue(backend.playWhenReady)
+        assertEquals(null, coordinator.state.value.failure)
+
+        revision = 2L
+        coordinator.initialize()
+        assertEquals("content://verified/entry-1/2", backend.currentMediaItem?.localConfiguration?.uri.toString())
+        assertEquals(2, backend.mediaItemCount)
+        assertFalse(backend.playWhenReady)
+    }
+
+    @Test
+    fun changedCurrentContentStopsItsOldSourceAndRequiresAnExplicitVerifiedRetry() = runBlocking {
+        val resolvedIds = mutableListOf<String>()
+        val rounds = mutableListOf<String>()
+        var rejectCurrent = false
+        coordinator.detach()
+        coordinator.close()
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
+            resolveEntry = { current ->
+                resolvedIds.add(current.queueEntryId)
+                if (rejectCurrent) throw QueuePlaybackException(
+                    QueuePlaybackFailure(QueuePlaybackIssue.CONTENT_UNKNOWN, current.queueEntryId),
+                )
+                current
+            },
+            onRoundChanged = { rounds.add(it.queueEntryId) },
+        )
+        coordinator.initialize()
+        resolvedIds.clear()
+        rejectCurrent = true
+        val active = queues.snapshot()
+        coordinator.select(active.generationId, active.queueRevision, "entry-2", explicitPlay = true)
+        assertEquals(listOf("entry-2"), resolvedIds)
+        assertEquals(QueuePlaybackIssue.CONTENT_UNKNOWN, coordinator.state.value.failure?.issue)
+        assertEquals(0, backend.mediaItemCount)
+        assertFalse(backend.playWhenReady)
+        assertEquals(3L, queues.snapshot().entryCount)
+        assertEquals("entry-2", queues.snapshot().currentEntryId)
+        assertEquals(listOf("entry-1"), rounds)
+
+        rejectCurrent = false
+        coordinator.sessionPlayer.play()
+        assertEquals("entry-2", backend.currentMediaItem?.mediaId)
+        assertTrue(backend.playWhenReady)
+        assertEquals(listOf("entry-1", "entry-2"), rounds)
+        assertEquals(null, coordinator.state.value.failure)
+    }
+
+    @Test
+    fun pauseDuringAnUncancellableResolverStartsNoNeighborReadsOrLatePlayback() = runBlocking {
+        val resolvedIds = mutableListOf<String>()
+        var readGate: Gate? = null
+        coordinator.detach()
+        coordinator.close()
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
+            resolveEntry = { current ->
+                resolvedIds.add(current.queueEntryId)
+                readGate?.waitForRelease()
+                current
+            },
+        )
+        coordinator.initialize()
+        resolvedIds.clear()
+        val gate = Gate(ignoreCancellation = true)
+        readGate = gate
+        val old = queues.snapshot()
+        val operation = scope.async { coordinator.select(old.generationId, old.queueRevision, "entry-2", true) }
+        assertTrue(gate.entered.isCompleted)
+        coordinator.sessionPlayer.pause()
+        gate.release.complete(Unit)
+        operation.join()
+        assertTrue(operation.isCancelled)
+        assertEquals(listOf("entry-2"), resolvedIds)
+        assertEquals("entry-1", backend.currentMediaItem?.mediaId)
+        assertFalse(backend.playWhenReady)
+        assertEquals(3L, queues.snapshot().entryCount)
+        assertEquals("entry-2", queues.snapshot().currentEntryId)
+    }
+
+    @Test
+    fun detachDuringALateRoundIdentityReadNeverPreparesTheReleasedBackend() = runBlocking {
+        var roundGate: Gate? = null
+        coordinator.detach()
+        coordinator.close()
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
+            onRoundChanged = { roundGate?.waitForRelease() },
+        )
+        coordinator.initialize()
+        val gate = Gate(ignoreCancellation = true)
+        roundGate = gate
+        val old = queues.snapshot()
+        val operation = scope.async { coordinator.select(old.generationId, old.queueRevision, "entry-2", true) }
+        assertTrue(gate.entered.isCompleted)
+        coordinator.detach()
+        backend.release()
+        gate.release.complete(Unit)
+        operation.join()
+        assertTrue(operation.isCancelled)
+        assertEquals(0, backend.lateCalls)
+        assertEquals("entry-2", queues.snapshot().currentEntryId)
+    }
+
+    @Test
+    fun rejectedCurrentPreflightKeepsTheOldCompleteQueueWindowPositionAndPlayIntent() = runBlocking {
+        var rejection: QueuePlaybackIssue? = null
+        val reads = mutableListOf<String>()
+        recreateCoordinator(resolveEntry = { current ->
+            reads.add(current.queueEntryId)
+            rejection?.let { throw QueuePlaybackException(QueuePlaybackFailure(it, current.queueEntryId)) }
+            current
+        })
+        coordinator.initialize()
+        coordinator.sessionPlayer.play()
+        val old = queues.snapshot()
+        val oldRows = queues.page(old.generationId, 0L, 100)
+        val oldItems = (0 until backend.mediaItemCount).map { backend.getMediaItemAt(it) }
+        val oldPosition = backend.currentPosition
+
+        for (issue in listOf(QueuePlaybackIssue.PERMISSION_DENIED, QueuePlaybackIssue.CONTENT_UNKNOWN)) {
+            reads.clear()
+            rejection = issue
+            val next = replacement("rejected-${issue.name}", old)
+            try {
+                coordinator.replace(next, source(next), explicitPlay = true)
+                throw AssertionError("A rejected current resource cannot be published")
+            } catch (error: QueuePlaybackException) {
+                assertEquals(issue, error.failure.issue)
+            }
+            assertEquals(listOf("entry-1"), reads)
+            assertEquals(old, queues.snapshot())
+            assertEquals(old, coordinator.state.value.snapshot)
+            assertEquals(oldRows, queues.page(old.generationId, 0L, 100))
+            assertEquals(oldItems, (0 until backend.mediaItemCount).map { backend.getMediaItemAt(it) })
+            assertEquals(oldPosition, backend.currentPosition)
+            assertTrue(backend.playWhenReady)
+            assertEquals(issue, coordinator.state.value.failure?.issue)
+            assertFalse(coordinator.state.value.preparing)
+        }
+    }
+
+    @Test
+    fun pauseDuringUncancellableReplacementPreflightKeepsTheOldQueueAndStartsNoNeighbors() = runBlocking {
+        val reads = mutableListOf<String>()
+        var readGate: Gate? = null
+        recreateCoordinator(resolveEntry = { current ->
+            reads.add(current.queueEntryId)
+            readGate?.waitForRelease()
+            current
+        })
+        coordinator.initialize()
+        coordinator.sessionPlayer.play()
+        val old = queues.snapshot()
+        val oldItems = (0 until backend.mediaItemCount).map { backend.getMediaItemAt(it) }
+        reads.clear()
+        val gate = Gate(ignoreCancellation = true)
+        readGate = gate
+        val next = replacement("cancelled-preflight", old)
+        val operation = scope.async { coordinator.replace(next, source(next), explicitPlay = true) }
+        assertTrue(gate.entered.isCompleted)
+        assertEquals(old.generationId, queues.snapshot().generationId)
+        assertTrue(backend.playWhenReady)
+        coordinator.sessionPlayer.pause()
+        gate.release.complete(Unit)
+        operation.join()
+
+        assertTrue(operation.isCancelled)
+        assertEquals(listOf("entry-1"), reads)
+        assertEquals(old.generationId, queues.snapshot().generationId)
+        assertEquals(old.queueRevision, queues.snapshot().queueRevision)
+        assertEquals(old.currentEntryId, queues.snapshot().currentEntryId)
+        assertEquals(old.entryCount, queues.snapshot().entryCount)
+        assertEquals(oldItems, (0 until backend.mediaItemCount).map { backend.getMediaItemAt(it) })
+        assertEquals(1234L, backend.currentPosition)
+        assertFalse(backend.playWhenReady)
+        assertFalse(coordinator.state.value.preparing)
+    }
+
+    @Test
+    fun acceptedReplacementReusesPreflightResourcesAndKeepsAFailedNeighborAsADurableRow() = runBlocking {
+        var expectedGeneration: String? = null
+        val reads = mutableListOf<String>()
+        recreateCoordinator(resolveEntry = { current ->
+            expectedGeneration?.let {
+                assertEquals("The resource must be read before publication", it, queues.snapshot().generationId)
+                reads.add(current.queueEntryId)
+                if (current.queueEntryId == "entry-2") throw QueuePlaybackException(
+                    QueuePlaybackFailure(QueuePlaybackIssue.PERMISSION_DENIED, current.queueEntryId),
+                )
+            }
+            current.copy(location = requireNotNull(current.location).copy(uri = "content://verified/${current.queueEntryId}"))
+        })
+        coordinator.initialize()
+        val old = queues.snapshot()
+        expectedGeneration = old.generationId
+        val previousWindowReads = queues.windowReads
+        val next = replacement("preflight-once", old)
+        val commit = coordinator.replace(next, source(next), explicitPlay = true)
+
+        assertFalse(commit.wasReplay)
+        assertEquals(listOf("entry-1", "entry-0", "entry-2"), reads)
+        assertEquals(previousWindowReads, queues.windowReads)
+        assertEquals(3L, commit.snapshot.entryCount)
+        assertEquals(3, queues.page(commit.snapshot.generationId, 0L, 100).size)
+        assertEquals(2, backend.mediaItemCount)
+        assertEquals("entry-1", backend.currentMediaItem?.mediaId)
+        assertEquals("content://verified/entry-1", backend.currentMediaItem?.localConfiguration?.uri.toString())
+        assertTrue(backend.playWhenReady)
+        assertEquals(null, coordinator.state.value.failure)
+    }
+
+    @Test
+    fun historicalReplayAfterALaterQueueDoesNotResolveOrInstallTheHistoricalWindow() = runBlocking {
+        var rejectReads = false
+        recreateCoordinator(resolveEntry = { current ->
+            if (rejectReads) throw AssertionError("A replay cannot read current or historical resources")
+            current
+        })
+        coordinator.initialize()
+        val firstRequest = replacement("historical", queues.snapshot())
+        val first = coordinator.replace(firstRequest, source(firstRequest), explicitPlay = true)
+        val laterRequest = replacement("later", queues.snapshot()).copy(startOriginalOrder = 0L)
+        coordinator.replace(laterRequest, source(laterRequest), explicitPlay = false)
+        val active = queues.snapshot()
+        val items = (0 until backend.mediaItemCount).map { backend.getMediaItemAt(it) }
+        val previousWindowReads = queues.windowReads
+        rejectReads = true
+
+        val replay = coordinator.replace(firstRequest,
+            QueuePageSource { _, _ -> throw AssertionError("A replay cannot reconstruct its producer") },
+            explicitPlay = true,
+        )
+        assertTrue(replay.wasReplay)
+        assertEquals(first.appliedGenerationId, replay.appliedGenerationId)
+        assertEquals(active, replay.snapshot)
+        assertEquals(active, queues.snapshot())
+        assertEquals(active, coordinator.state.value.snapshot)
+        assertEquals(previousWindowReads, queues.windowReads)
+        assertEquals(items, (0 until backend.mediaItemCount).map { backend.getMediaItemAt(it) })
+        assertEquals("entry-0", backend.currentMediaItem?.mediaId)
+        assertFalse(backend.playWhenReady)
+    }
+
+    @Test
+    fun pauseAfterPublicationDuringRoundReadKeepsTheCompleteNewQueuePaused() = runBlocking {
+        var roundGate: Gate? = null
+        recreateCoordinator(onRoundChanged = { roundGate?.waitForRelease() })
+        coordinator.initialize()
+        coordinator.sessionPlayer.play()
+        val old = queues.snapshot()
+        val gate = Gate(ignoreCancellation = true)
+        roundGate = gate
+        val next = replacement("accepted-before-pause", old)
+        val operation = scope.async { coordinator.replace(next, source(next), explicitPlay = true) }
+        assertTrue(gate.entered.isCompleted)
+        assertEquals("generation-accepted-before-pause", queues.snapshot().generationId)
+        assertFalse(backend.playWhenReady)
+        coordinator.sessionPlayer.pause()
+        gate.release.complete(Unit)
+        operation.join()
+
+        assertEquals(3L, queues.snapshot().entryCount)
+        assertEquals(old.queueRevision + 1L, queues.snapshot().queueRevision)
+        assertEquals(queues.snapshot().generationId, coordinator.state.value.snapshot?.generationId)
+        assertEquals(3, queues.page(queues.snapshot().generationId, 0L, 100).size)
+        assertFalse(backend.playWhenReady)
+        assertFalse(coordinator.state.value.preparing)
+    }
+
+    @Test
+    fun asynchronousOutputFailureAfterAcceptanceRetainsTheSameCompleteSnapshotAndReceipt() = runBlocking {
+        coordinator.initialize()
+        val output = CompletableDeferred<Unit>()
+        val outputEvent = scope.async {
+            output.await()
+            backend.emitError(PlaybackException("Controlled output failure", null, PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED))
+        }
+        val next = replacement("accepted-output-error", queues.snapshot())
+        val commit = coordinator.replace(next, source(next), explicitPlay = true)
+        assertTrue(backend.playWhenReady)
+        output.complete(Unit)
+        outputEvent.await()
+
+        assertEquals(commit.appliedGenerationId, queues.snapshot().generationId)
+        assertEquals(commit.snapshot.queueRevision, queues.snapshot().queueRevision)
+        assertEquals(commit.snapshot.currentEntryId, queues.snapshot().currentEntryId)
+        assertEquals(3L, queues.snapshot().entryCount)
+        assertEquals(3, queues.page(commit.appliedGenerationId, 0L, 100).size)
+        assertEquals(QueuePlaybackIssue.OUTPUT_ERROR, coordinator.state.value.failure?.issue)
+        assertFalse(backend.playWhenReady)
+        val replay = coordinator.replace(next,
+            QueuePageSource { _, _ -> throw AssertionError("Runtime failure must not rebuild an accepted queue") }, false)
+        assertTrue(replay.wasReplay)
+        assertEquals(commit.appliedGenerationId, replay.appliedGenerationId)
+        assertEquals(QueuePlaybackIssue.OUTPUT_ERROR, coordinator.state.value.failure?.issue)
+    }
+
+    @Test
+    fun failedBackendWindowInstallationKeepsTheAcceptedQueueAndExplicitRetryCannotReplayTheOldUri() = runBlocking {
+        coordinator.initialize()
+        coordinator.sessionPlayer.play()
+        val oldUri = backend.currentMediaItem?.localConfiguration?.uri.toString()
+        val changed = entry(1L).copy(location = LocalLocationReference("location-1", "content://audio/replaced-1"))
+        val next = replacement("accepted-window-error", queues.snapshot())
+        backend.failNextWindowInstallation = true
+        val commit = coordinator.replace(next, source(next, changed), explicitPlay = true)
+
+        assertFalse(commit.wasReplay)
+        assertEquals(commit.appliedGenerationId, queues.snapshot().generationId)
+        assertEquals(3L, queues.snapshot().entryCount)
+        assertEquals(QueuePlaybackIssue.OUTPUT_ERROR, coordinator.state.value.failure?.issue)
+        assertEquals(0, backend.mediaItemCount)
+        assertFalse(backend.playWhenReady)
+        val replay = coordinator.replace(next,
+            QueuePageSource { _, _ -> throw AssertionError("Accepted output failure cannot reconstruct its producer") }, true)
+        assertTrue(replay.wasReplay)
+        assertEquals(0, backend.mediaItemCount)
+        assertEquals(QueuePlaybackIssue.OUTPUT_ERROR, coordinator.state.value.failure?.issue)
+
+        coordinator.sessionPlayer.play()
+        assertEquals(commit.appliedGenerationId, queues.snapshot().generationId)
+        assertEquals(commit.snapshot.queueRevision, queues.snapshot().queueRevision)
+        assertEquals("entry-1", backend.currentMediaItem?.mediaId)
+        assertEquals("content://audio/replaced-1", backend.currentMediaItem?.localConfiguration?.uri.toString())
+        assertNotEquals(oldUri, backend.currentMediaItem?.localConfiguration?.uri.toString())
+        assertTrue(backend.playWhenReady)
+        assertEquals(null, coordinator.state.value.failure)
+    }
+
+    private suspend fun recreateCoordinator(
+        resolveEntry: suspend (QueueEntry) -> QueueEntry = { it },
+        onRoundChanged: suspend (QueueEntry) -> Unit = {},
+    ) {
+        coordinator.detach()
+        coordinator.close()
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
+            resolveEntry = resolveEntry, onRoundChanged = onRoundChanged)
     }
 
     private fun replacement(operation: String, base: QueueSnapshot) = QueueReplacementRequest(
@@ -347,18 +724,34 @@ class QueuePlaybackCoordinatorTest {
         var windowGate: Gate? = null
         var checkpointGate: Gate? = null
         var completedWrites = 0
+        var windowReads = 0
         private val published = mutableMapOf<String, Pair<QueueReplacementRequest, String>>()
 
         override suspend fun initialize(): QueueSnapshot = snapshot()
         override suspend fun snapshot(): QueueSnapshot = active.value ?: error("Initialized queue required")
         override fun snapshots(): Flow<QueueSnapshot?> = active
 
-        override suspend fun replace(request: QueueReplacementRequest, source: QueuePageSource): QueueCommit {
+        override suspend fun replace(
+            request: QueueReplacementRequest,
+            source: QueuePageSource,
+            beforePublish: suspend (QueueWindow?) -> Unit,
+        ): QueueCommit {
             published[request.operationId]?.let { (original, generation) ->
                 if (request != original) throw QueueStoreException(QueueStoreIssue.INVALID_INPUT)
                 return QueueCommit(snapshot(), generation, true)
             }
-            val staged = source.read(0L, request.view.totalCount.toInt()).entries
+            val staged = if (request.view.totalCount == 0L) emptyList() else source.read(0L, request.view.totalCount.toInt()).entries
+            val stagedCurrent = staged.singleOrNull { it.originalOrder == request.startOriginalOrder }
+            val selected = stagedCurrent?.let { current ->
+                staged.filter { it.playbackOrder in current.playbackOrder - 1L..current.playbackOrder + 1L }
+                    .sortedBy { it.playbackOrder }
+            }
+            val candidate = if (stagedCurrent == null) null else QueueWindow(
+                "generation-${request.operationId}", request.expectedQueueRevision + 1L,
+                request.view.totalCount, requireNotNull(selected), requireNotNull(selected).indexOf(stagedCurrent),
+            )
+            beforePublish(candidate)
+            currentCoroutineContext().ensureActive()
             return withContext(NonCancellable) {
                 commitGate.also { commitGate = null }?.waitForRelease()
                 val old = snapshot()
@@ -366,10 +759,10 @@ class QueuePlaybackCoordinatorTest {
                     throw QueueStoreException(QueueStoreIssue.CONFLICT)
                 }
                 entries = staged
-                val current = entries.single { it.originalOrder == request.startOriginalOrder }
+                val current = stagedCurrent
                 val next = QueueSnapshot("generation-${request.operationId}", old.queueRevision + 1L, 0L,
-                    request.view, request.mode, QueueCheckpoint(current.queueEntryId, request.initialPositionMs),
-                    current.originalOrder, current.playbackOrder)
+                    request.view, request.mode, QueueCheckpoint(current?.queueEntryId, request.initialPositionMs),
+                    current?.originalOrder, current?.playbackOrder)
                 active.value = next
                 published[request.operationId] = request to next.generationId
                 QueueCommit(next, next.generationId, false)
@@ -382,6 +775,7 @@ class QueuePlaybackCoordinatorTest {
         }
 
         override suspend fun window(generationId: String, currentEntryId: String): QueueWindow {
+            windowReads += 1
             val current = entries.single { it.queueEntryId == currentEntryId }
             val selected = entries.filter { it.playbackOrder in current.playbackOrder - 1L..current.playbackOrder + 1L }
             val before = snapshot()
@@ -413,6 +807,13 @@ class QueuePlaybackCoordinatorTest {
             private set
         val addedIds = mutableListOf<String>()
         val removedIds = mutableListOf<String>()
+        var failNextWindowInstallation = false
+        private val listeners = mutableListOf<Player.Listener>()
+
+        fun emitError(error: PlaybackException) = live {
+            check(Looper.myLooper() == Looper.getMainLooper())
+            listeners.toList().forEach { it.onPlayerError(error) }
+        }
 
         private fun <T> live(block: () -> T): T {
             if (released) {
@@ -446,6 +847,10 @@ class QueuePlaybackCoordinatorTest {
         override fun seekTo(positionMs: Long) = live { delegate.seekTo(positionMs) }
         override fun seekTo(mediaItemIndex: Int, positionMs: Long) = live { delegate.seekTo(mediaItemIndex, positionMs) }
         override fun setMediaItems(mediaItems: List<MediaItem>, startIndex: Int, startPositionMs: Long) = live {
+            if (failNextWindowInstallation) {
+                failNextWindowInstallation = false
+                throw IllegalStateException("Controlled backend window failure before mutation")
+            }
             delegate.setMediaItems(mediaItems, startIndex, startPositionMs)
         }
         override fun addMediaItem(index: Int, mediaItem: MediaItem) = live {
@@ -457,8 +862,8 @@ class QueuePlaybackCoordinatorTest {
             delegate.removeMediaItem(index)
         }
         override fun moveMediaItem(currentIndex: Int, newIndex: Int) = live { delegate.moveMediaItem(currentIndex, newIndex) }
-        override fun addListener(listener: Player.Listener) = live { delegate.addListener(listener) }
-        override fun removeListener(listener: Player.Listener) = live { delegate.removeListener(listener) }
+        override fun addListener(listener: Player.Listener) = live { listeners.add(listener); delegate.addListener(listener) }
+        override fun removeListener(listener: Player.Listener) = live { listeners.remove(listener); delegate.removeListener(listener) }
         override fun release() {
             check(!released)
             released = true

@@ -68,7 +68,9 @@ class QueueStoreException(val issue: QueueStoreIssue, cause: Throwable? = null) 
  * 应用范围只有一个 Store 和一个暂存构造者；队列与媒体会话的权威播放状态分开。
  *
  * replace 按 100 条构造待发布代次，校验完整排列后短事务切活动指针。
+ * beforePublish 在已封存的窗口上执行，位于数据库事务外；拒绝/取消保留旧活动队列。
  * 取消或失败发生在提交点之前时保留旧队列；提交点之后结果是完整新队列。
+ * 已提交 receipt 不等待旧大队列回收；下次 initialize/replace 在构造前继续回收。
  * snapshot 不清库、不查询 URI，也不授予访问权；调用者恢复播放器时保持暂停。
  */
 interface QueueStore {
@@ -79,7 +81,11 @@ interface QueueStore {
 
     fun snapshots(): Flow<QueueSnapshot?>
 
-    suspend fun replace(request: QueueReplacementRequest, source: QueuePageSource): QueueCommit
+    suspend fun replace(
+        request: QueueReplacementRequest,
+        source: QueuePageSource,
+        beforePublish: suspend (QueueWindow?) -> Unit = {},
+    ): QueueCommit
 
     /** 以已冻结播放序号作数据库锚点，返回至多 100 条，不以 SQL OFFSET 走过前页。 */
     suspend fun page(

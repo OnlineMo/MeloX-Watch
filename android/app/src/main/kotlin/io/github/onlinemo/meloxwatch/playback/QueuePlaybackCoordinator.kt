@@ -51,6 +51,8 @@ class QueuePlaybackCoordinator(
     private val queueStore: QueueStore,
     private val preferences: UserPreferencesRepository,
     private val serviceScope: CoroutineScope,
+    private val resolveEntry: suspend (QueueEntry) -> QueueEntry = { it },
+    private val onRoundChanged: suspend (QueueEntry) -> Unit = {},
     private val onFailure: (QueuePlaybackFailure) -> Unit = {},
 ) {
     private val _state = MutableStateFlow(QueuePlaybackState())
@@ -158,18 +160,46 @@ class QueuePlaybackCoordinator(
     }
 
     suspend fun replace(request: QueueReplacementRequest, source: QueuePageSource, explicitPlay: Boolean): QueueCommit = action(clearFailure = false) { token ->
-        val commit = queueStore.replace(request, source)
+        var prepared: QueueWindow? = null
+        val commit = queueStore.replace(request, source) { candidate ->
+            prepared = candidate?.let { prepareWindow(it) }
+            currentCoroutineContext().ensureActive()
+            if (isDetached || token != intentRevision) throw CancellationException("Queue preparation intent changed")
+        }
         // 历史 operation 的确认不能重装窗口，也不代表修复了此前的加载失败。
         if (commit.wasReplay) return@action commit
         checkpointEpoch += 1L
         publishSnapshot(commit.snapshot)
         if (!isDetached) {
+            // The pointer is now committed. Pause the old source before any suspension, including
+            // cancellation after commit; loading consumes exactly the preflight window, not new IO.
+            pauseForWindowChange()
             if (commit.snapshot.entryCount == 0L) clearBackend() else {
-                // 活动指针已完整提交；后续窗口 IO 可取消，重读不能把保存变成半个队列。
-                currentCoroutineContext().ensureActive()
-                val window = queueStore.window(commit.snapshot.generationId, commit.snapshot.currentEntryId ?: throw QueueStoreException(QueueStoreIssue.RECOVERY_REQUIRED))
-                currentCoroutineContext().ensureActive()
-                if (!isDetached) applyWindow(commit.snapshot, window, commit.snapshot.positionMs, explicitPlay, token)
+                val window = prepared
+                if (window == null || window.generationId != commit.snapshot.generationId ||
+                    window.queueRevision != commit.snapshot.queueRevision || window.totalCount != commit.snapshot.entryCount ||
+                    window.current.queueEntryId != commit.snapshot.currentEntryId ||
+                    window.current.originalOrder != commit.snapshot.currentOriginalOrder ||
+                    window.current.playbackOrder != commit.snapshot.currentPlaybackOrder) {
+                    clearBackend()
+                    report(QueuePlaybackFailure(QueuePlaybackIssue.RECOVERY_REQUIRED, commit.snapshot.currentEntryId))
+                } else if (!currentCoroutineContext().isActive || token != intentRevision) {
+                    clearBackend()
+                } else {
+                    try {
+                        applyPreparedWindow(commit.snapshot, window, commit.snapshot.positionMs, explicitPlay, token)
+                    } catch (_: CancellationException) {
+                        // The accepted snapshot remains complete. A user pause/detach cannot become
+                        // late playback or a false prepublication failure/rollback.
+                        if (!isDetached) pauseForWindowChange()
+                    } catch (error: Exception) {
+                        // A partial backend mutation can retain the old URI under the same entry
+                        // ID. Clear that window so explicit retry loads the accepted queue again.
+                        if (!isDetached) clearBackend()
+                        report(if (error is QueuePlaybackException) error.failure else
+                            QueuePlaybackFailure(QueuePlaybackIssue.OUTPUT_ERROR, commit.snapshot.currentEntryId))
+                    }
+                }
             }
         }
         commit
@@ -336,18 +366,55 @@ class QueuePlaybackCoordinator(
         return saved
     }
 
-    private fun applyWindow(saved: QueueSnapshot, window: QueueWindow, positionMs: Long, explicitPlay: Boolean, token: Long) {
+    private suspend fun applyWindow(saved: QueueSnapshot, window: QueueWindow, positionMs: Long, explicitPlay: Boolean, token: Long) {
         if (isDetached) return
-        val current = window.current
-        val failure = localFailure(current)
-        if (failure != null) {
+        val prepared = try { prepareWindow(window) }
+        catch (error: QueuePlaybackException) {
             clearBackend()
-            report(failure)
+            report(error.failure)
             return
         }
-        val wanted = window.entries.filter { localFailure(it) == null }
+        applyPreparedWindow(saved, prepared, positionMs, explicitPlay, token)
+    }
+
+    /** A current-resource failure rejects a staged replacement before publication; neighbors remain durable. */
+    private suspend fun prepareWindow(window: QueueWindow): QueueWindow {
+        currentCoroutineContext().ensureActive()
+        if (isDetached) throw CancellationException("Playback owner detached")
+        val current = window.current
+        val failure = localFailure(current)
+        if (failure != null) throw QueuePlaybackException(failure)
+        val resolved = mutableMapOf<String, QueueEntry>()
+        // Current audio gets the channel before adjacent items; a failed neighbour cannot block it.
+        val candidates = listOf(current) + window.entries.filter { it.queueEntryId != current.queueEntryId }
+        for (entry in candidates) {
+            currentCoroutineContext().ensureActive()
+            if (localFailure(entry) != null) continue
+            try {
+                resolved[entry.queueEntryId] = resolveEntry(entry)
+                currentCoroutineContext().ensureActive()
+            } catch (error: CancellationException) { throw error }
+            catch (error: QueuePlaybackException) {
+                currentCoroutineContext().ensureActive()
+                if (entry.queueEntryId == current.queueEntryId) {
+                    throw error
+                }
+            }
+        }
+        currentCoroutineContext().ensureActive()
+        if (isDetached) throw CancellationException("Playback owner detached")
+        val wanted = window.entries.mapNotNull { resolved[it.queueEntryId] }
         val targetIndex = wanted.indexOfFirst { it.queueEntryId == current.queueEntryId }
         check(targetIndex >= 0)
+        return window.copy(entries = wanted, currentIndex = targetIndex)
+    }
+
+    /** No provider/database resource reads after queue acceptance; ownership and play intent still apply. */
+    private suspend fun applyPreparedWindow(saved: QueueSnapshot, window: QueueWindow, positionMs: Long, explicitPlay: Boolean, token: Long) {
+        if (isDetached) return
+        val wanted = window.entries
+        val current = window.current
+        val targetIndex = window.currentIndex
         val previousEntries = loadedWindow?.entries?.associateBy { it.queueEntryId }.orEmpty()
         fun matches(existing: MediaItem, entry: QueueEntry): Boolean {
             val previous = previousEntries[entry.queueEntryId] ?: return false
@@ -362,7 +429,7 @@ class QueuePlaybackCoordinator(
             val existingIndex = (0 until backend.mediaItemCount).firstOrNull { index ->
                 matches(backend.getMediaItemAt(index), current)
             }
-            loadedWindow = window
+            loadedWindow = window.copy(entries = wanted, currentIndex = targetIndex)
             _state.value = _state.value.copy(snapshot = saved, failure = null)
             if (existingIndex == null) {
                 backend.setMediaItems(wanted.map(::mediaItem), targetIndex, positionMs)
@@ -382,6 +449,9 @@ class QueuePlaybackCoordinator(
                 backend.seekTo(targetIndex, positionMs)
             }
             playbackCycle += 1L
+            onRoundChanged(wanted[targetIndex])
+            currentCoroutineContext().ensureActive()
+            if (isDetached) return
             if (backend.playbackState == Player.STATE_IDLE || backend.playbackState == Player.STATE_ENDED) backend.prepare()
             resumeIntent = explicitPlay && token == intentRevision && backend.playerError == null
             if (resumeIntent) backend.play()

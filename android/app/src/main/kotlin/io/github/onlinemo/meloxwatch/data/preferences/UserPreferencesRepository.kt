@@ -9,6 +9,9 @@ enum class PreferencesField {
     REVISION,
     RESTORE_POSITION,
     SCREEN_SHAPE,
+    LIBRARY_LAYOUT,
+    ARTWORK_READ_PATH,
+    LIBRARY_SORTS,
 }
 
 enum class PreferencesRecoveryReason {
