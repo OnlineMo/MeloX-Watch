@@ -1,0 +1,144 @@
+"""Dependency bootstrap trust/failure boundaries; Gradle is never executed by these tests."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import build
+
+SOURCE = 'a' * 40
+ENV = {
+    'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_EVENT_NAME': 'pull_request',
+    'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch', 'GITHUB_REF': 'refs/pull/27/merge',
+    'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2', 'SOURCE_SHA': SOURCE,
+}
+VERSION = {'versionName': '0.0.0', 'versionCode': '0'}
+
+
+class BuildDependencyBootstrapTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.android = self.root / 'android'
+        self.android.mkdir()
+        contexts = [patch.object(build, 'ROOT', self.root), patch.object(build, 'check'),
+                    patch.object(build, 'git', return_value=SOURCE), patch.object(build, 'properties', return_value=VERSION)]
+        for context in contexts:
+            context.start()
+            self.addCleanup(context.stop)
+        context = patch.dict(os.environ, ENV, clear=True)
+        context.start()
+        self.addCleanup(context.stop)
+
+    def write_inputs(self, names=build.DEPENDENCY_INPUTS):
+        for name in names:
+            path = self.android / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('unexecuted test fixture\n', encoding='utf-8')
+
+    def manifest(self):
+        return json.loads((self.android / 'app/build/reports/dependency-bootstrap/bootstrap-manifest.json').read_text(encoding='utf-8'))
+
+    def test_trusted_builds_never_generate_missing_dependency_inputs(self):
+        for event, mode in (('push', 'debug'), ('pull_request_target', 'debug'), ('workflow_dispatch', 'debug'),
+                            ('workflow_dispatch', 'release'), ('workflow_dispatch', 'diagnostic')):
+            with self.subTest(event=event, mode=mode), patch.dict(os.environ, {
+                'GITHUB_EVENT_NAME': event, 'GITHUB_REF': 'refs/heads/main',
+                'CANDIDATE_OPERATION': 'prepare-candidate',
+            }), patch.object(build.subprocess, 'run') as process, patch.object(build, 'inspect_apk') as inspect:
+                with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
+                    build.build(mode)
+                process.assert_not_called()
+                inspect.assert_not_called()
+                self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_optimized_pr_modes_cannot_enter_bootstrap(self):
+        for mode in ('release', 'diagnostic'):
+            with self.subTest(mode=mode), patch.object(build.subprocess, 'run') as process:
+                with self.assertRaisesRegex(ValueError, 'PR builds only temporary Debug'):
+                    build.build(mode)
+                process.assert_not_called()
+
+    def test_bootstrap_resolves_all_variants_unsigned_without_tokens_and_exports_no_apk(self):
+        def generated(command, **kwargs):
+            self.assertIn('--dependency-verification=strict', command)
+            self.assertIn('--write-locks', command)
+            self.assertEqual(command[command.index('--write-verification-metadata') + 1], 'sha256')
+            for variant in ('Debug', 'Release', 'Diagnostic'):
+                self.assertIn(f':app:testWatchAndroid{variant}UnitTest', command)
+                self.assertIn(f':app:lintWatchAndroid{variant}', command)
+                self.assertIn(f':app:assembleWatchAndroid{variant}', command)
+            self.assertEqual(kwargs['env']['CI_UNSIGNED_APK'], 'true')
+            for token in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'):
+                self.assertNotIn(token, kwargs['env'])
+            self.assertEqual(kwargs['cwd'], self.android)
+            self.write_inputs(build.DEPENDENCY_REPORT_FILES)
+
+        with patch.dict(os.environ, {name: 'unlogged-test-marker' for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN')}), \
+                patch.object(build.subprocess, 'run', side_effect=generated) as process, \
+                patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.build('debug')
+            process.assert_called_once()
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'generated-unreviewed')
+        self.assertEqual(manifest['files'].keys(), set(build.DEPENDENCY_REPORT_FILES))
+        self.assertEqual(manifest['missing_outputs'], [])
+        self.assertEqual(manifest['source_sha'], SOURCE)
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse(manifest['apk_exported'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_gradle_failure_preserves_partial_reports_and_remains_failed(self):
+        def failed(command, **kwargs):
+            self.write_inputs(('gradle/verification-metadata.xml',))
+            raise subprocess.CalledProcessError(1, command)
+
+        with patch.object(build.subprocess, 'run', side_effect=failed), patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaises(subprocess.CalledProcessError):
+                build.build('debug')
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertEqual(manifest['missing_outputs'], ['app/gradle.lockfile'])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_existing_but_uncommitted_inputs_cannot_unlock_trusted_builds(self):
+        self.write_inputs()
+        def git_command(*args):
+            if args[0] == 'cat-file':
+                raise ValueError('git failed')
+            return SOURCE
+
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/contribution'}), \
+                patch.object(build, 'git', side_effect=git_command), patch.object(build.subprocess, 'run') as process:
+            with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
+                build.build('debug')
+            process.assert_not_called()
+
+    def test_complete_committed_inputs_use_strict_build_without_generation(self):
+        self.write_inputs()
+        with patch.object(build.subprocess, 'run', side_effect=RuntimeError('mock stops before APK validation')) as process:
+            with self.assertRaisesRegex(RuntimeError, 'mock stops'):
+                build.build('debug')
+        command = process.call_args.args[0]
+        self.assertIn('--dependency-verification=strict', command)
+        self.assertNotIn('--write-verification-metadata', command)
+        self.assertNotIn('--write-locks', command)
+        self.assertEqual(process.call_args.kwargs['env']['CI_UNSIGNED_APK'], 'false')
+        self.assertFalse((self.android / 'app/build/reports/dependency-bootstrap').exists())
+
+    def test_diagnostic_android_test_dependencies_are_included_when_present(self):
+        (self.android / 'app/src/androidTest').mkdir(parents=True)
+        self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('diagnostic'))
+        self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('debug'))
+
+
+if __name__ == '__main__':
+    unittest.main()

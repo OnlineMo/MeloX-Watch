@@ -11,6 +11,80 @@ from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secr
                        properties, require, run_tool, sha256, write_checksums, write_json)
 
 
+DEPENDENCY_INPUTS = ('gradle/verification-metadata.xml', 'app/gradle.lockfile')
+DEPENDENCY_REPORT_FILES = (*DEPENDENCY_INPUTS, 'gradle.lockfile')
+
+
+def gradle_tasks(mode):
+    variant = mode.title()
+    tasks = [f':app:testWatchAndroid{variant}UnitTest', f':app:lintWatchAndroid{variant}',
+             f':app:assembleWatchAndroid{variant}']
+    if mode == 'diagnostic' and (ROOT / 'android/app/src/androidTest').is_dir():
+        tasks.append(':app:assembleWatchAndroidDiagnosticAndroidTest')
+    return tasks
+
+
+def gradle_environment(unsigned):
+    environment = dict(os.environ, CI_UNSIGNED_APK=str(unsigned).lower())
+    # 编译不需要仓库/产物 API 或 OIDC token；它们不能进入应用构建脚本。
+    for key in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'):
+        environment.pop(key, None)
+    return environment
+
+
+def gradle_command(tasks):
+    return ['bash', './gradlew', '--no-daemon', '--stacktrace', '--console=plain',
+            '--dependency-verification=strict', '--init-script', '../scripts/ci/enforce.gradle', *tasks]
+
+
+def missing_dependency_inputs():
+    missing = []
+    for relative in DEPENDENCY_INPUTS:
+        path = ROOT / 'android' / relative
+        if not path.is_file() or path.is_symlink():
+            missing.append(relative)
+            continue
+        try:
+            git('cat-file', '-e', 'HEAD:android/' + relative)
+        except ValueError:
+            missing.append(relative)
+    return missing
+
+
+def bootstrap_dependencies(build_sha, missing):
+    """PR-only资料采集；无论生成成功与否，都不能导出可验收APK。"""
+    android = ROOT / 'android'
+    tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in gradle_tasks(mode)]
+    command = gradle_command(tasks) + ['--write-verification-metadata', 'sha256', '--write-locks']
+    completed = False
+    try:
+        subprocess.run(command, cwd=android, env=gradle_environment(unsigned=True), check=True)
+        completed = True
+    finally:
+        # Gradle失败也可能写出部分资料；仅作为失败报告留存，不能自动晋升为构建输入。
+        report = android / 'app/build/reports/dependency-bootstrap'
+        report.mkdir(parents=True, exist_ok=True)
+        files = {}
+        for relative in DEPENDENCY_REPORT_FILES:
+            source = android / relative
+            if source.is_file() and not source.is_symlink() and source.resolve().is_relative_to(android.resolve()):
+                target = report / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+                files[relative] = sha256(target)
+        write_json(report / 'bootstrap-manifest.json', {
+            'schema_version': 1, 'source_sha': os.environ.get('SOURCE_SHA', build_sha), 'build_sha': build_sha,
+            'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+            'event': os.environ['GITHUB_EVENT_NAME'], 'ref': os.environ['GITHUB_REF'], 'tasks': tasks,
+            'status': 'generated-unreviewed' if completed else 'failed-partial',
+            'missing_inputs_at_start': missing,
+            'missing_outputs': [name for name in DEPENDENCY_INPUTS if name not in files],
+            'files': files, 'accepted': False, 'apk_exported': False,
+        })
+    require(False, 'Dependency bootstrap is not an accepted build. Review and commit the generated '
+            'verification metadata and lockfile from dependency-bootstrap reports, then rebuild strictly.')
+
+
 def build(mode):
     cloud_only()
     no_signing_secrets()
@@ -22,18 +96,16 @@ def build(mode):
     require(not is_pr or mode == 'debug', 'PR builds only temporary Debug APKs')
     if mode != 'debug':
         require(os.environ.get('CANDIDATE_OPERATION') == 'prepare-candidate', 'Use candidate preparation for optimized builds')
-    variant = mode.title()
-    tasks = [f':app:testWatchAndroid{variant}UnitTest', f':app:lintWatchAndroid{variant}',
-             f':app:assembleWatchAndroid{variant}']
+    tasks = gradle_tasks(mode)
     has_instrumentation = mode == 'diagnostic' and (ROOT / 'android/app/src/androidTest').is_dir()
-    if has_instrumentation:
-        tasks.append(':app:assembleWatchAndroidDiagnosticAndroidTest')
-    environment = dict(os.environ, CI_UNSIGNED_APK='false' if is_pr else 'true')
-    # 不在 Gradle 子进程携带 API token；checkout 也必须 persist-credentials=false。
-    for key in ('GH_TOKEN', 'GITHUB_TOKEN'):
-        environment.pop(key, None)
-    subprocess.run(['bash', './gradlew', '--no-daemon', '--stacktrace', '--console=plain',
-                    '--dependency-verification=strict', '--init-script', '../scripts/ci/enforce.gradle', *tasks],
+    missing = missing_dependency_inputs()
+    if missing:
+        require(is_pr and mode == 'debug',
+                'Committed strict dependency inputs are missing: ' + ', '.join(missing) + '. '
+                'Only a temporary Debug PR may bootstrap dependency reports; trusted builds cannot.')
+        bootstrap_dependencies(build_sha, missing)
+    environment = gradle_environment(unsigned=not is_pr)
+    subprocess.run(gradle_command(tasks),
                    cwd=ROOT / 'android', env=environment, check=True)
     require(properties(ROOT / 'version.properties') == version, 'Build modified version metadata')
     tools = build_tools(lock)
