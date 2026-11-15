@@ -209,7 +209,7 @@ class LocalScanEngineTest {
             val track = library.page(view).tracks.single()
             assertEquals("Original title", track.metadata.title)
             assertEquals(SourceReadIssue.SOURCE_CHANGED.name, track.metadataIssue)
-            assertEquals(LibraryAvailability.AVAILABLE, track.availability)
+            assertEquals(LibraryAvailability.UNAVAILABLE, track.availability)
         } finally { library.closeView(view.viewId) }
     }
 

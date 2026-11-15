@@ -122,6 +122,10 @@ class LocalScanEngine(
     private suspend fun stopAccepted(task: Active) {
         publish(task, (mutableState.value ?: ScanState(task.token, ScanPhase.RUNNING)).copy(phase = ScanPhase.STOPPING))
         try { store.setScanState(task.token, ScanPhase.STOPPING) }
+        catch (error: LibraryException) {
+            // A stale rules/source fence blocks writes, but cannot prevent this owned job from stopping.
+            if (error.issue != LibraryIssue.SOURCE_CHANGED) throw error
+        }
         finally { task.job.cancel(CancellationException("Scan stop requested")) }
     }
 

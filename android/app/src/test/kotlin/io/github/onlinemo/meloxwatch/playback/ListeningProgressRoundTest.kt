@@ -10,7 +10,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ListeningProgressRoundTest {
-    private val roundId = "3aeaf752-46f2-46dc-aaca-b1a5f5e8e41"
+    private val roundId = "3aeaf752-46f2-46dc-aaca-0b1a5f5e8e41"
     private val origin = Instant.parse("2026-11-15T12:00:00Z").toEpochMilli()
     private fun round() = ListeningProgressRound(roundId, TrackKey(TrackKey.LOCAL_PROVIDER, "track"),
         "Title", ListeningEpochs(historyEpoch = 2L, statisticsEpoch = 3L), null)

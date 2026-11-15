@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，云端在应用测试开始前编译失败，尚无本主题应用测试或设备AC通过证据。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最新云端实际执行Debug214项，173通过、41失败；Release/Diagnostic及设备AC尚未通过。
 
 ## 数据身份、迁移与完整列表
 
@@ -57,6 +57,12 @@ artifact `14174073206`为59631字节，ZIP SHA-256 `a219f26863a903ad3819055494ff
 [run `43749223127`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43749223127)/attempt1绑定source `7ffb9762f5701e2f14ec4d59d8d0bfc98f6c50c3`、实际checkout `a6aef5b1ef8c94ff91a50049e6401fa6b3eebe51`、compile job `132919270285`。生产Debug/Diagnostic Kotlin编译已越过修正点；verification在Debug/Diagnostic的UnitTestKotlin编译失败，4分19秒、53项任务（48执行/5缓存）。`FixtureAudioProvider.kt:69:15`和`FixtureMediaProvider.kt:56:15`的混合String/Long/null数组触发相同reified交集类型推断警告；夹具已改为显式`List<Any?>`和`MatrixCursor.addRow(Iterable)`，保持列顺序、类型/空值及文件不存在时空cursor，等待云端重验。
 
 artifact `14175737555`为59632字节、ZIP SHA-256 `f26bf4b752f9dc7bc748d7330e913784f12d69afd2814fd49dd1126f1157d6eb`，日志SHA-256 `c784c41ba50beea6b4c1da148fb269d4fbdf43107bdf87e0d7f039369d4f896b`。normal与三个STRICT阶段全未执行，无UnitTest运行/JUnit XML/lint XML/APK；三变体预期各214仍只是定义数量。7条graph records为观测，metadata XML和schema2是诊断资料，schema2仍91327字节及上述hash，缺完整lock/schema1。匿名汇总SHA-256 `978bd6fd3fe3f1fd377446285aac24e494d1db1b4671ba9184dd0ea0a52789ba`，phase SHA-256 `17e0e18c2ef09cb31ce34c926402fd3af5117238ad3d1a7e77ae462058ea50c9`，unit SHA-256 `a7f1457e9f529f8d35939c7228f07dcd95be6e06ee0780409f200d43e432ebfe`。后续LP-04/05并行代码不在这些小修复快照中，未改变冻结214数量。
+
+[run `43750598070`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43750598070)/attempt1绑定source `abfccb282b51406736513ed23724647f54b6ec6c`、实际checkout `878ee8dbc225a3697d4d6909bdec33305fae7494`、compile job `132923523703`。Debug/Diagnostic生产和测试Kotlin编译通过之前的修正点；verification在真实 `testWatchAndroidDebugUnitTest`失败，7分19秒、71项任务（61执行/10缓存）。JUnit XML核验Debug214项实际执行、173通过/41失败/0error/0skip；Release/Diagnostic没有XML，不能记为执行。失败涉及来源/封面/来源页面、统计轮次、扫描和队列，未运行normal及三个STRICT阶段，没有lint XML/APK或签名。
+
+artifact `14176716511`为178294字节，原ZIP SHA-256 `a9ebb34857dc00f65d5ed13fd476114c61cbc8e318fb69bab07f73331a65e1b4`，日志SHA-256 `cb6500b88504676fad76c49c11e749363ad66ba1218d77bc646e944be7806151`。phase证据SHA-256 `e152c72054fa5249717ecf70d31c32f286db87ddea6e3bb3505b0609985fac24`，unit证据SHA-256 `fc626f89fa7742d0ec5df1d608192db09949ca01668b7402d25bd32a36e6b3c0`，匿名失败分类SHA-256 `d47891a86590e5cb35f5b5f276238a3ba8797261fe869cf81640c98308df32a9`。仅verification尝试，7条bounded图记录、metadata XML及schema2是失败诊断；缺完整锁/schema1，不导入基线。原始日志与JUnit内容只在ignored本地留存。
+
+本轮小修复只涉及四个文件，原214个测试定义保持：FixtureAudioProvider仅 `image/*`选择缩略图，其余typed读取委托平台音频路径；统计测试的35字符UUID改为合法36字符，不放松生产轮次身份校验。规则/来源变化已经阻断扫描写入时，取消仍停止自己持有的job并等待物理IO释放，只容忍STOPPING写入的SOURCE_CHANGED，其他存储失败仍传播。provider内容在提取期间变化保留旧metadata但标访问UNAVAILABLE；修正对应测试断言，普通METADATA_UNREADABLE仍可保持AVAILABLE。现有实际provider/扫描/聆听测试将云端重跑，修复未先行记为通过，LP-04/05并行代码仍不在这一快照。
 
 合并P1已云验修正与P0被动图诊断后，本地49项Python CI数据/政策用例、Node政策场景和diff空白检查通过，JSON/catalog/manifest可解析，全部381个中英string key相等无重复，匿名源摘要不变。检查未执行应用或研究快照；214项应用测试仍须云端结果，设备隐私扫描只报告位置/类别，未发现待上传内容包含本地敏感值。
 
