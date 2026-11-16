@@ -414,6 +414,7 @@ class PlaylistMigrationTest {
         private const val ORIGINAL_NAME = "Cafe\u0301.mp3"
         private const val EPOCH_MS = 1_794_787_200_000L
         private val PLAYLIST_TABLES = listOf("playlist_meta", "playlist_heads", "playlist_generations",
-            "playlist_members", "playlist_views", "playlist_receipts")
+            "playlist_members", "playlist_views", "playlist_receipts", "playlist_exchange_previews",
+            "playlist_exchange_rows", "playlist_export_receipts")
     }
 }

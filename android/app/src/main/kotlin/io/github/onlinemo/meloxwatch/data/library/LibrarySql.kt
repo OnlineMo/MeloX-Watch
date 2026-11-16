@@ -68,7 +68,7 @@ internal object LibrarySql {
         }
         if (!view.query.includeHidden) aliases += "NOT ${excluded("av.sourceId", "av.nodeId", revision)}"
         val filters = mutableListOf(valid("t", revision), "t.member = 1")
-        if (!view.query.includeHidden || view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null) filters += "a.ownerTrackId IS NOT NULL"
+        if (!view.query.includeHidden || view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null) filters += "a.aliasVersionId IS NOT NULL"
         if (view.query.readableOnly) filters += "a.availabilityRank = 0"
         if (!view.query.includeHidden) filters += "COALESCE(a.availabilityRank, 3) != 5"
         if (!view.query.includeHidden && view.shortAudioFilter) filters += "(t.durationMs IS NULL OR t.durationMs >= ${LibraryLimits.SHORT_AUDIO_MS})"
@@ -81,11 +81,11 @@ internal object LibrarySql {
             args += "%$escaped%"
         }
         val (primary, nullRank, section) = sortColumns(view.sort.field)
+        // Choose the minimum scoped access through this track's relations, then join its exact version payload.
         val sql = """
             WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""} alias_rows AS (
-                SELECT av.*, aa.objectId, sv.spec AS sourceSpec, g.uri AS grantUri, g.observation AS grantObservation,
-                    lv.contentRevision AS actualContentRevision, lv.contentToken AS actualContentToken,
-                    lv.verifiedContentToken AS actualVerifiedContentToken, lv.sizeBytes AS actualSizeBytes,
+                SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
+                    lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
                         WHEN sv.state = 'REMOVED' THEN 5
                         WHEN sv.state = 'NEEDS_AUTHORIZATION' OR av.readIssue IN ('PERMISSION_DENIED', 'PERMISSION_REVOKED') THEN 2
@@ -100,27 +100,27 @@ internal object LibrarySql {
                 JOIN local_source_versions sv ON sv.sourceId = av.sourceId AND ${valid("sv", revision)}
                 JOIN local_grants g ON g.grantId = sv.grantId
                 WHERE ${aliases.joinToString(" AND ")}
-            ), access_options AS (
-                SELECT relation.trackId AS ownerTrackId, ar.* FROM local_track_locations relation
-                JOIN alias_rows ar ON ar.locationId = relation.locationId WHERE ${valid("relation", revision)}
-            ), best_access AS (
-                SELECT a.* FROM access_options a WHERE NOT EXISTS (
-                    SELECT 1 FROM access_options better WHERE better.ownerTrackId = a.ownerTrackId
-                        AND (better.availabilityRank < a.availabilityRank
-                        OR (better.availabilityRank = a.availabilityRank AND better.locationId < a.locationId)
-                        OR (better.availabilityRank = a.availabilityRank AND better.locationId = a.locationId AND better.aliasId < a.aliasId))
-                )
             ), base AS (
                 SELECT t.*, COALESCE(a.availabilityRank, 3) AS availabilityRank,
                     CASE WHEN t.statisticsEpoch = ${view.statisticsEpoch} THEN t.playCount ELSE 0 END AS effectivePlayCount,
                     CASE WHEN t.statisticsEpoch = ${view.statisticsEpoch} THEN t.listeningMs ELSE 0 END AS effectiveListeningMs,
                     a.aliasId AS selectedAliasId, a.sourceId AS selectedSourceId, a.locationId AS selectedLocationId,
-                    a.nodeId AS selectedNodeId, a.uri AS selectedUri, a.actualContentRevision AS selectedContentRevision,
-                    a.grantUri AS selectedGrantUri, a.grantObservation AS selectedGrantObservation,
-                    a.sourceSpec AS selectedSpec, a.objectId AS selectedObjectId,
-                    a.actualContentToken AS selectedProviderContentToken, a.actualVerifiedContentToken AS selectedVerifiedContentToken,
-                    a.actualSizeBytes AS selectedSizeBytes
-                FROM local_track_versions t LEFT JOIN best_access a ON a.ownerTrackId = t.trackId
+                    a.nodeId AS selectedNodeId, payloadAlias.uri AS selectedUri, payloadLocation.contentRevision AS selectedContentRevision,
+                    payloadGrant.uri AS selectedGrantUri, payloadGrant.observation AS selectedGrantObservation,
+                    payloadSource.spec AS selectedSpec, payloadAccess.objectId AS selectedObjectId,
+                    payloadLocation.contentToken AS selectedProviderContentToken, payloadLocation.verifiedContentToken AS selectedVerifiedContentToken,
+                    payloadLocation.sizeBytes AS selectedSizeBytes
+                FROM local_track_versions t LEFT JOIN alias_rows a ON a.aliasVersionId = (
+                    SELECT ar.aliasVersionId FROM local_track_locations relation
+                    JOIN alias_rows ar ON ar.locationId = relation.locationId
+                    WHERE relation.trackId = t.trackId AND ${valid("relation", revision)}
+                    ORDER BY ar.availabilityRank, ar.locationId, ar.aliasId LIMIT 1
+                )
+                LEFT JOIN local_alias_versions payloadAlias ON payloadAlias.versionId = a.aliasVersionId
+                LEFT JOIN local_access_aliases payloadAccess ON payloadAccess.aliasId = a.aliasId
+                LEFT JOIN local_location_versions payloadLocation ON payloadLocation.versionId = a.locationVersionId
+                LEFT JOIN local_source_versions payloadSource ON payloadSource.sourceId = a.sourceId AND payloadSource.validFrom = a.sourceVersionFrom
+                LEFT JOIN local_grants payloadGrant ON payloadGrant.grantId = payloadSource.grantId
                 WHERE ${filters.joinToString(" AND ")}
             ), ordered AS (
                 SELECT base.*, CASE WHEN availabilityRank = 0 THEN 0 ELSE 1 END AS missingRank,

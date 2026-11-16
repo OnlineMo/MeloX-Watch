@@ -429,7 +429,8 @@ class RoomLocalLibraryRepository(
                 validateCandidate(token.sourceId, candidate)
                 if (dao.seen(token.scanId, candidate.objectId) != null) continue
                 val node = writeNode(candidate, revision)
-                val excluded = excludedUnlocked(token, candidate.objectId, candidate.parentObjectId)
+                // New ancestry belongs to this pending revision, before the batch publishes library_meta.
+                val excluded = excludedUnlocked(token, candidate.objectId, candidate.parentObjectId, revision)
                 val alias = if (candidate.mayContainAudio && !excluded) {
                     val result = writeAudio(spec, candidate, node.nodeId, scan.sequence, revision, current.nextAddedSequence)
                     if (result.second) { added++; current = current.copy(nextAddedSequence = increment(current.nextAddedSequence)) }
@@ -522,7 +523,10 @@ class RoomLocalLibraryRepository(
     }
 
     override suspend fun isExcluded(token: ScanToken, objectId: String, parentObjectId: String?): Boolean = access {
-        database.withPreservedTransaction { checkedScan(token, allowStaging = false); excludedUnlocked(token, objectId, parentObjectId) }
+        database.withPreservedTransaction {
+            checkedScan(token, allowStaging = false)
+            excludedUnlocked(token, objectId, parentObjectId, meta().revision)
+        }
     }
     override suspend fun setCoverage(token: ScanToken, coverage: ScanCoverage): ScanState = access {
         database.withPreservedTransaction {
@@ -790,10 +794,10 @@ class RoomLocalLibraryRepository(
         val current = meta()
         return LibraryRules(current.rulesRevision, current.shortAudioFilter)
     }
-    private suspend fun excludedUnlocked(token: ScanToken, objectId: String, parentObjectId: String?): Boolean {
+    private suspend fun excludedUnlocked(token: ScanToken, objectId: String, parentObjectId: String?, revision: Long): Boolean {
         val node = dao.node(token.sourceId, objectId)
         val parent = parentObjectId?.let { dao.node(token.sourceId, it) }
-        return dao.scalar(LibrarySql.isExcluded(token.sourceId, node?.nodeId, parent?.nodeId, meta().revision)) != 0L
+        return dao.scalar(LibrarySql.isExcluded(token.sourceId, node?.nodeId, parent?.nodeId, revision)) != 0L
     }
     private suspend fun expireViews() {
         dao.expireViews(sessionId, elapsedMs())
@@ -851,12 +855,15 @@ class RoomLocalLibraryRepository(
     }
 
     private suspend fun writeNode(candidate: ObservedCandidate, revision: Long): LibraryNodeEntity {
-        var node = dao.node(candidate.sourceId, candidate.objectId) ?: LibraryNodeEntity(id(), candidate.sourceId, candidate.objectId).also { dao.insertNode(it) }
+        val existingNode = dao.node(candidate.sourceId, candidate.objectId)
+        var node = existingNode ?: LibraryNodeEntity(id(), candidate.sourceId, candidate.objectId,
+            lastKnownName = candidate.displayName.takeIf { it.isNotBlank() }).also { dao.insertNode(it) }
         val parent = candidate.parentObjectId?.let { objectId ->
             if (objectId == candidate.objectId) fail(LibraryIssue.SOURCE_CHANGED)
             dao.node(candidate.sourceId, objectId) ?: LibraryNodeEntity(id(), candidate.sourceId, objectId).also { dao.insertNode(it) }
         }
-        if (parent != null) {
+        // An existing placeholder may already have children; only a newly inserted identity cannot form a cycle.
+        if (parent != null && existingNode != null) {
             val cycle = dao.scalar(SimpleSQLiteQuery("""
                 WITH RECURSIVE parents(nodeId) AS (SELECT ? UNION SELECT n.parentNodeId
                     FROM local_node_versions n JOIN parents p ON n.nodeId = p.nodeId
@@ -865,12 +872,15 @@ class RoomLocalLibraryRepository(
             """.trimIndent(), arrayOf(parent.nodeId, node.nodeId)))
             if (cycle != 0L) fail(LibraryIssue.SOURCE_CHANGED)
         }
-        val old = dao.currentNode(node.nodeId)
+        val old = existingNode?.let { dao.currentNode(it.nodeId) }
         val version = LibraryNodeVersionEntity(if (old?.validFrom == revision) old.versionId else id(), node.nodeId, candidate.sourceId,
             parent?.nodeId, candidate.displayName, candidate.uri, candidate.directory, revision, null,
             pathName = java.text.Normalizer.normalize(candidate.displayName, java.text.Normalizer.Form.NFC))
         if (old?.validFrom == revision) dao.updateNodeVersion(version)
-        else { dao.closeNodeVersion(node.nodeId, revision); dao.insertNodeVersion(version) }
+        else {
+            if (existingNode != null) dao.closeNodeVersion(node.nodeId, revision)
+            dao.insertNodeVersion(version)
+        }
         // Rules must remain identifiable after an unknown-name rescan or old-version cleanup.
         val observedName = candidate.displayName.takeIf { it.isNotBlank() }
         if (observedName != null && observedName != node.lastKnownName) {
@@ -890,6 +900,7 @@ class RoomLocalLibraryRepository(
         val existingAlias = dao.alias(spec.sourceId, candidate.objectId)
         var location = existingAlias?.let { dao.location(it.locationId) ?: fail(LibraryIssue.RECOVERY_REQUIRED) } ?: dao.locationByIdentity(identity)
         if (location != null && location.identityKey != identity) fail(LibraryIssue.SOURCE_CHANGED)
+        val freshLocation = location == null
         if (location == null) location = LibraryLocationEntity(id(), identity, 1L, candidate.providerContentToken, null, null, candidate.sizeBytes,
             candidate.modifiedEpochMs, spec.kind == LocalSourceKind.APP_OWNED)
         else {
@@ -909,9 +920,12 @@ class RoomLocalLibraryRepository(
                 sizeBytes = candidate.sizeBytes, modifiedEpochMs = candidate.modifiedEpochMs)
         }
         dao.putLocation(location)
-        writeLocationVersion(location, revision)
+        if (freshLocation) {
+            dao.insertLocationVersion(LibraryLocationVersionEntity(id(), location.locationId, location.contentRevision,
+                location.contentToken, location.verifiedContentToken, location.sizeBytes, location.modifiedEpochMs, revision, null))
+        } else writeLocationVersion(location, revision)
         var added = false
-        if (!dao.hasLocationRelation(location.locationId)) {
+        if (freshLocation || !dao.hasLocationRelation(location.locationId)) {
             val key = TrackKey.newLocal()
             val track = LibraryTrackEntity(key.trackId, key.providerId, epochMs(), addedSequence)
             dao.insertTrack(track)
@@ -922,8 +936,9 @@ class RoomLocalLibraryRepository(
             dao.insertRelation(LibraryTrackLocationEntity(id(), key.trackId, location.locationId, revision, null))
         }
         val alias = existingAlias ?: LibraryAliasEntity(id(), spec.sourceId, candidate.objectId, location.locationId).also { dao.insertAlias(it) }
-        writeAliasVersion(LibraryAliasVersionEntity(id(), alias.aliasId, spec.sourceId, location.locationId, nodeId, candidate.uri, candidate.displayName,
-            null, sequence, location.contentRevision, candidate.providerContentToken, candidate.sizeBytes, revision, null), revision)
+        val aliasVersion = LibraryAliasVersionEntity(id(), alias.aliasId, spec.sourceId, location.locationId, nodeId, candidate.uri, candidate.displayName,
+            null, sequence, location.contentRevision, candidate.providerContentToken, candidate.sizeBytes, revision, null)
+        if (existingAlias == null) dao.insertAliasVersion(aliasVersion) else writeAliasVersion(aliasVersion, revision)
         return alias to added
     }
 
