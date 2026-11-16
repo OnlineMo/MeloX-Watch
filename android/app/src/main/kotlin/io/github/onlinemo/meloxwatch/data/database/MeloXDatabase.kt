@@ -85,11 +85,11 @@ abstract class MeloXDatabase : RoomDatabase() {
         const val FILE_NAME = "melox.db"
         val MIGRATION_1_2 = LibraryMigrations.V1_TO_V2
         val MIGRATION_2_3 = object : Migration(2, 3) {
-            override fun migrate(database: SupportSQLiteDatabase) {
-                QueueMigrations.applyV2ToV3(database)
-                LibraryPathMigrations.applyV2ToV3(database)
-                PlaylistMigrations.applyV2ToV3(database)
-                PlaylistExchangeMigrations.applyV2ToV3(database)
+            override fun migrate(db: SupportSQLiteDatabase) {
+                QueueMigrations.applyV2ToV3(db)
+                LibraryPathMigrations.applyV2ToV3(db)
+                PlaylistMigrations.applyV2ToV3(db)
+                PlaylistExchangeMigrations.applyV2ToV3(db)
             }
         }
 

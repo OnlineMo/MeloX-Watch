@@ -262,7 +262,7 @@ internal object LibrarySql {
                 AND NOT (sv.absenceScanId IS NOT NULL AND av.lastSeenSequence < sv.absenceScanSequence
                     AND EXISTS (SELECT 1 FROM scan_absence_candidates absent WHERE absent.scanId = sv.absenceScanId AND absent.aliasId = av.aliasId))
             ORDER BY t.providerId, t.trackId LIMIT ?
-        """.trimIndent(), arrayOf(sourceId, path, limit),
+        """.trimIndent(), arrayOf<Any?>(sourceId, path, limit),
     )
     /** Walk only the chosen indexed root and the already validated literal components, at most 16 edges. */
     fun scopedRelativePathMatches(

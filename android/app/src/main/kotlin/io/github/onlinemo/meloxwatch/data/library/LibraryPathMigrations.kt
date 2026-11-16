@@ -23,7 +23,7 @@ internal object LibraryPathMigrations {
                 "SELECT sourceId, validFrom, spec FROM local_source_versions " +
                     "WHERE (? IS NULL OR sourceId > ? OR (sourceId = ? AND validFrom > ?)) " +
                     "ORDER BY sourceId, validFrom LIMIT 100",
-                arrayOf(afterSource, afterSource, afterSource, afterRevision),
+                arrayOf<Any?>(afterSource, afterSource, afterSource, afterRevision),
             )).use { cursor ->
                 buildList {
                     while (cursor.moveToNext()) add(SourceRow(cursor.getString(0), cursor.getLong(1), cursor.getString(2)))
@@ -33,7 +33,7 @@ internal object LibraryPathMigrations {
             rows.forEach { row ->
                 // Only the recorded provider root is authoritative. URI spelling and orphan nodes are not roots.
                 database.execSQL("UPDATE local_source_versions SET rootObjectId = ? WHERE sourceId = ? AND validFrom = ?",
-                    arrayOf(LibraryCodec.source(row.spec).rootObjectId, row.sourceId, row.validFrom))
+                    arrayOf<Any?>(LibraryCodec.source(row.spec).rootObjectId, row.sourceId, row.validFrom))
             }
             afterSource = rows.last().sourceId
             afterRevision = rows.last().validFrom
