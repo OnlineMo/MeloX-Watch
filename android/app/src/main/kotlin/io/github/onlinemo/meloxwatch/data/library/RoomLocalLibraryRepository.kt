@@ -35,11 +35,14 @@ import org.json.JSONException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -265,11 +268,33 @@ class RoomLocalLibraryRepository(
     suspend fun closePlaylistView(viewId: String, timeoutMs: Long) {
         require(timeoutMs > 0L)
         withContext(NonCancellable) {
-            // The deadline must be inside the protected handoff so mutex and queued Room waits
-            // remain cancellable. Retrying a committed metadata deletion is harmless.
-            withTimeout(timeoutMs) {
-                releaseViewMetadata(viewId)
-                access { cleanVersions() }
+            // Room 2.8 retries every TimeoutCancellationException from its connection wait.
+            // Keep the worker outside the await deadline, then join a plain cancellation so
+            // queued metadata cannot delete the retained token after this handoff returns.
+            // Supervision preserves a worker failure for await while the handoff stays active.
+            supervisorScope {
+                val metadata = async {
+                    releaseViewMetadata(viewId)
+                    access { cleanVersions() }
+                }
+                var failure: Throwable? = null
+                try {
+                    withTimeout(timeoutMs) { metadata.await() }
+                } catch (error: Throwable) {
+                    failure = error
+                    try { metadata.cancel(CancellationException("Playlist view close did not complete", error)) }
+                    catch (cleanup: Throwable) {
+                        if (cleanup !== error) error.addSuppressed(cleanup)
+                    }
+                    throw error
+                } finally {
+                    try { metadata.cancelAndJoin() }
+                    catch (cleanup: Throwable) {
+                        val original = failure
+                        if (original == null) throw cleanup
+                        if (cleanup !== original) original.addSuppressed(cleanup)
+                    }
+                }
             }
         }
     }
