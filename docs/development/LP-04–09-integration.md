@@ -1,6 +1,6 @@
 # 播放、歌单与 Apple Music 风格界面整合
 
-本记录区分源码实现、云端验证、设备验收和发布批准。LP-04、LP-05、LP-07～09 的下列代码已进入整合；PR #31第五轮run43868565336的Debug/Diagnostic生产及测试Kotlin编译通过，Debug原JUnit实际109套/1248项、1116通过/132失败/0error/0skip，其中三类为初始化失败。Release/Diagnostic单测、lint、后四阶段、合格APK与设备验收尚未执行，精确source/build/run及原报告见[13](../13-仓库状态.md)。当前正修复schema/Provider夹具、异常身份、checkpoint、真实deferred FK恢复和界面同步/文字完整性；原20005项跨页、lease重试、旧回调隔离、断言、期限与Werror保留，本轮数据库、Provider、checkpoint及几何修复已完成交叉源码审阅，仍待新云验。全部 256 个原验收用例仍为 `not_run`。网易云、默认关闭且用户配置的 Meting、真实 Android 手机伴侣及其余本地功能继续属于首个预发布版。
+本记录区分源码实现、云端验证、设备验收和发布批准。LP-04、LP-05、LP-07～09 的下列代码已进入整合；PR #31第五轮run43868565336的Debug/Diagnostic生产及测试Kotlin编译通过，Debug原JUnit实际109套/1248项、1116通过/132失败/0error/0skip，其中三类为初始化失败。第七轮run43924826977越过第六轮配置错误，Debug/Diagnostic生产Kotlin通过，测试Kotlin仍被PFD shadow的JVM签名冲突阻断；本轮没有单测、lint、后四阶段、合格APK与设备验收结果，精确source/build/run及原报告见[13](../13-仓库状态.md)。第五轮后的数据库、Provider、checkpoint及几何修复已完成交叉源码审阅，原20005项跨页、lease重试、旧回调隔离、断言、期限与Werror保留；本次shadow窄修仍待新云验。全部 256 个原验收用例仍为 `not_run`。网易云、默认关闭且用户配置的 Meting、真实 Android 手机伴侣及其余本地功能继续属于首个预发布版。
 
 ## 当前实现
 
@@ -20,6 +20,8 @@ LP-05 无缝、APE 和 DSD 不以设置项或“不支持”提示算实现完�
 当前数据库迁移使用固定 Room 2.8.5 与 Bundled SQLite 2.6.2 的公开 writer API。真正的 COMMIT 失败由 Room 在归还连接前检查并回滚；不关闭重开数据库，不改用私有反射或较弱的故障触发器。生产 RawQuery、迁移和 Room 测试使用同一驱动，历史平台 schema 及 1→2 检查保留；主机 JNI 只从精确 JVM 制品提取，不重复加载 JVM 数据库类。修复的交叉审阅与下一轮云端编译、单测、lint、依赖/schema 资料验证分别进行，目前没有新的通过结果。
 
 该修复提交 `9e425b20b23f5e00fec8dbcf0d593be17ac92c0d` 的第六轮[run43914527409](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43914527409)/attempt1在Gradle脚本配置编译失败：两处`lowercase(java.util.Locale.ROOT)`无法解析`util`，应用任务与后续阶段未启动。这里只显式导入`Locale`并保留两处`Locale.ROOT`调用，不变更依赖或降低检查；原失败归档和独立诊断保留，精确build、job、artifact/hash见[13](../13-仓库状态.md)。配置修正仍须新云验，不证明数据库迁移或当前界面通过。
+
+Locale修正源码 `b349522f3db0c08a22232139a0b6c546674770dd` 的第七轮[run43924826977](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43924826977)/attempt1在5分47秒、59任务（52执行/7缓存）后因测试Kotlin的两个`Accidental override`诊断失败。完整诊断确认`PlaylistDocumentFixtureParcelShadow`与固定Robolectric 4.16.1基类的`dup(FileDescriptor)`具有相同JVM签名；窄修仅改实现声明名并显式映射`methodName = "dup"`，保留原行为、SDK26/30回归和检查期限。Debug/Diagnostic生产Kotlin通过不构成单测或构建接受。六成员`failed-partial`中schema3新生成、XML新增三个SQLite组件，但normal和strict未启动，不能导入schema/锁/XML；精确build、job、原artifact/hash及独立诊断见[13](../13-仓库状态.md)。
 
 ## 清理与生命周期契约
 

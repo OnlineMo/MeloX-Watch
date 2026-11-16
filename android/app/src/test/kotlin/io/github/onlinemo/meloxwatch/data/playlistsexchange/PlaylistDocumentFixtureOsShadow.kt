@@ -170,7 +170,7 @@ class PlaylistDocumentFixtureOsShadow {
 class PlaylistDocumentFixtureParcelShadow : ShadowParcelFileDescriptor() {
     companion object {
         @JvmStatic
-        @Implementation
-        fun dup(fd: FileDescriptor): ParcelFileDescriptor = PlaylistDocumentFixtureOsShadow.duplicateForCleanup(fd)
+        @Implementation(methodName = "dup")
+        fun dupForCleanup(fd: FileDescriptor): ParcelFileDescriptor = PlaylistDocumentFixtureOsShadow.duplicateForCleanup(fd)
     }
 }
