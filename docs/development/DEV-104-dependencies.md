@@ -52,3 +52,24 @@ P0经PR #27合入contribution为`fe3f711f7c015371f7149fb122332790a2e90e5f`后，
 签名artifact `14181617086` 的原ZIP为`67ff50b8d0be2f60c88490f9e954be189e351c95553bac5046c9d430057c3879`，却含默认v4生成的额外`watch-debug.apk.idsig`；正式数据读取器按三成员契约拒绝，不能把成功job追认为完整签名归档或设备验收。保留原归档，不删除侧文件或重新打包追认。
 
 签名脚本现显式关闭v4侧文件，并在写manifest/校验和前核验输出仅含已声明APK。新增stdlib回归覆盖正常结果经原归档读取器往返、异常侧文件在封存前拒绝；不执行Android工具或真实签名。workflow/action和秘密边界未变，修复须经新PR严格构建与合并后的fresh signing原产物重新验证，旧拒绝归档仍未验收。
+
+## Library完整云资料与SDK30基线导入
+
+PR #29的[run43792499334](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43792499334)/attempt1绑定source `e2971ee4688c1a34626d8fe2cb70ca3f78c15a26`、日志确认的checkout `60f0b36378a53da2400ca3ded82badd5ab349c8b`和compile job `133054022987`；两份Git tree精确一致。五个Gradle阶段全部实际成功，最后按bootstrap合同拒绝；不是accepted application build，没有APK可安装。原reports artifact `14195105198`为413857字节，ZIP SHA-256为`ca860dfb0ec8766d2b4076b95432e56e20c5d76c27a17576ca42240f390d131f`。原云证据独审SHA-256为`b06f235452b78b08dbb79605f492fd9255d8560026318d24bd86a341c59f4362`。
+
+Debug/Release/Diagnostic各26套226个唯一测试，failure/error/skipped均0；每变体lint为2条`Hint / SimilarGradleDependency`，Fatal/Error/Warning为0，不能记lint零项。完整列表10000/10001项、过期、失败保旧队列及重开恢复均在原断言和180000ms单项timeout内通过；16阶段观测完整，不以减少用例或放宽timeout取得成功。
+
+独审逐坐标/文件/哈希核验原570组件、1009制品精确保留，仅增加测试配置`robolectricSdk30`及两份`org.robolectric:android-all-instrumented:11-robolectric-6757853-i7`原JAR/POM，全部571组件/1011制品、348锁行/204配置。新增JAR SHA-256为`7f4accae465a47e75e7591877b98e71fb982a908cffc4ba4b3ca0319cb6a0a10`，POM为`579070875a6a33dd57d2937929fa443789e28826cb12e8e716197c222e199682`，再次直接核对Maven Central官方SHA-256 sidecar及原POM，声明Apache-2.0；不进入三个main RuntimeClasspath。旧版本、common边、STRICT及全部校验配置保持，未引入trust/ignore/多哈希例外。旧完整1009项官方审查有原文档pin；没有用较小的1008项effective清单代替它。
+
+完整官方资格报告SHA-256为`cc63871c7cd2d6f5e512b656877c92cbf799c61d4218a3fd90c53015c65cfeb1`，许可资格报告为`a05bc65ba52c3741cf56240a5ab6f549b6e9cdb1c87a471c5c9f83ad5fa91845`，最终四输入资格报告为`f6649be8b531d735792b43191a52d219ae071e9d220868e4cec59adb78f901c1`。Room独审报告`29ffa05c5693bf36178077abbeb0bf28d2cc4835d8b84c511cbc73393b5bc6e1`核验30实体、292字段、30主键、19外键、49索引及显式1→2 DDL；原3张队列表保持，schema1原字节保持。静态DDL核对不等于真实seeded数据库升级测试。
+
+只导入以下原ZIP字节，与三个STRICT输入快照相同；不得重生成或手修哈希/schema。
+
+| 导入输入 | SHA-256 |
+| --- | --- |
+| verification-metadata.xml | `8423aa796640770d1a7d4cb69bbb599a050afc03748bd9a9afccb69f3f48cc84` |
+| app/gradle.lockfile | `2100eb17daf61415d8d7dcfb3fe40f8f200f86bb75845f3913dcf4d1a0b4aa83` |
+| MeloXDatabase/1.json | `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79` |
+| MeloXDatabase/2.json | `bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf` |
+
+导入后须普通PR严格构建。真实1→2迁移、覆盖升级、声音输出、最终APK许可说明和256原AC仍未通过；readiness全部false、candidate=null。原日志、截图、设备地址和标识只留ignored本地，不上传。
