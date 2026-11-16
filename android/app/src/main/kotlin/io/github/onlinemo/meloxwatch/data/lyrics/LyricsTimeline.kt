@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.lyrics
 
+@ConsistentCopyVisibility
 data class LyricsPosition internal constructor(
     val documentId: String,
     val lyricTimeMs: Long,
@@ -10,6 +11,7 @@ data class LyricsPosition internal constructor(
     fun isActive(index: Int): Boolean = index in firstActiveIndex until activeEndExclusive
 }
 
+@ConsistentCopyVisibility
 data class LyricsWordPosition internal constructor(
     val lineId: LyricsLineId,
     val wordIndex: Int,
@@ -19,6 +21,7 @@ data class LyricsWordPosition internal constructor(
 )
 
 /** This is preview data only; the caller must bind the current session/source and confirm playback. */
+@ConsistentCopyVisibility
 data class LyricsSeekTarget internal constructor(
     val documentId: String,
     val lineId: LyricsLineId,

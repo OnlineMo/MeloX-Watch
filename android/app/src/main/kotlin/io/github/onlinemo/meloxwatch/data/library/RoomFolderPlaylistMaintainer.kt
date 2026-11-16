@@ -149,7 +149,7 @@ class RoomFolderPlaylistMaintainer internal constructor(
             LEFT JOIN playlist_generations g ON g.generationId = h.activeGenerationId
             WHERE h.createdSequence > ? AND h.createdSequence < ?
             ORDER BY h.createdSequence LIMIT ?
-        """.trimIndent(), arrayOf(afterSequence, ceiling, PlaylistLimits.PAGE_SIZE))).use { cursor ->
+        """.trimIndent(), arrayOf<Any?>(afterSequence, ceiling, PlaylistLimits.PAGE_SIZE))).use { cursor ->
             val page = ArrayList<Head>(PlaylistLimits.PAGE_SIZE)
             var previous = afterSequence
             while (cursor.moveToNext()) {

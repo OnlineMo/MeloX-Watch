@@ -64,6 +64,7 @@ data class LyricsLineId(val sourceLineNumber: Int, val timestampOccurrence: Int)
 }
 
 /** Character ranges are UTF-16 boundaries of complete text fragments, never invented per-letter times. */
+@ConsistentCopyVisibility
 data class LyricWordTiming internal constructor(
     val startsAtMs: Long,
     val endsAtMs: Long?,

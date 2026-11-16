@@ -54,7 +54,7 @@ fun SleepTimerControls(state: ProbeUiState, model: ProbeViewModel, onNotificatio
         if (!connected) {
             WatchText(stringResource(R.string.sleep_timer_loading))
             WatchActionRow(stringResource(R.string.probe_reconnect), onClick = model::reconnectPlayback)
-        } else if (timer != null) {
+        } else {
             if (timer.active) {
                 WatchText(if (timer.waitingForTrackEnd) stringResource(R.string.sleep_timer_waiting_for_end)
                     else pluralStringResource(R.plurals.sleep_timer_minutes_remaining,

@@ -17,6 +17,7 @@ import kotlinx.coroutines.withContext
 enum class SleepTimerStoreRecovery { INVALID_FIELDS, UNRECOGNIZED_SCHEMA, NEWER_SCHEMA, CORRUPT_FILE }
 enum class SleepTimerStoreIssue { IO, RETIRED_OWNER, UNSUPPORTED_SCHEMA, REVISION_EXHAUSTED, INPUT_BOUND }
 
+@ConsistentCopyVisibility
 data class StoredSleepTimer internal constructor(
     val revision: Long = 0L,
     val state: SleepTimerState = SleepTimerState(),
