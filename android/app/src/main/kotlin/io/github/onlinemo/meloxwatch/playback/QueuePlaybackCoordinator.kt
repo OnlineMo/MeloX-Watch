@@ -24,6 +24,7 @@ import io.github.onlinemo.meloxwatch.model.QueueSeekRequest
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.QueueWindow
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerTrackBinding
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,6 +37,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -62,6 +64,9 @@ class QueuePlaybackCoordinator(
     private val requestPlay: (() -> Boolean)? = null,
     private val onUserPause: () -> Unit = {},
     private val onUserIntentChanged: () -> Unit = {},
+    private val onManualTrackChange: () -> Unit = {},
+    private val onRetainedTrackBinding: (SleepTimerTrackBinding, SleepTimerTrackBinding) -> Unit = { _, _ -> },
+    private val beforeNaturalAdvance: (SleepTimerTrackBinding) -> Boolean = { false },
 ) {
     private var backend: Player = backend
     private var operations: PlaybackBackendOperations = operations
@@ -71,6 +76,8 @@ class QueuePlaybackCoordinator(
     private var activeBackendSwitch: QueueBackendCheckpoint? = null
     private val _state = MutableStateFlow(QueuePlaybackState())
     val state = _state.asStateFlow()
+    private val _seekState = MutableStateFlow(QueueSeekSessionState())
+    val seekState: StateFlow<QueueSeekSessionState> = _seekState.asStateFlow()
     private val sessionBridge = QueueSessionPlayer(this)
     val sessionPlayer: Player = sessionBridge
     internal var isDetached = false
@@ -94,8 +101,13 @@ class QueuePlaybackCoordinator(
     private val sessionId = UUID.randomUUID().toString()
     private var activeSeekBinding: QueueSeekBinding? = null
     private var seekReceipt: SeekReceipt? = null
+    private var seekOwner: SeekOwner? = null
+    private var seekActionId = UUID.randomUUID().toString()
+    private var seeking = false
     private var pendingCommand: (suspend () -> Unit)? = null
     private var pendingNatural: NaturalCompletion? = null
+    private var settlingNatural: NaturalSettlement? = null
+    private var pendingSwitchSettlement: NaturalSettlement? = null
     private var pendingRecovery: RecoveryRequest? = null
     private var resourceRefreshUsed = false
     private var consecutiveSkipped = 0
@@ -156,7 +168,10 @@ class QueuePlaybackCoordinator(
         }
 
         override fun onEvents(player: Player, events: Player.Events) {
-            if (current()) sessionBridge.logicalStateChanged()
+            if (current()) {
+                refreshSeekState()
+                sessionBridge.logicalStateChanged()
+            }
         }
     }
     private var listener = backendListener(backend, backendGeneration)
@@ -213,6 +228,7 @@ class QueuePlaybackCoordinator(
         }
         // 历史 operation 的确认不能重装窗口，也不代表修复了此前的加载失败。
         if (commit.wasReplay) return@action commit
+        onManualTrackChange()
         checkpointEpoch += 1L
         publishSnapshot(commit.snapshot)
         if (!isDetached) {
@@ -253,7 +269,8 @@ class QueuePlaybackCoordinator(
     suspend fun select(generationId: String, expectedQueueRevision: Long, entryId: String, explicitPlay: Boolean): QueueSnapshot = action { token ->
         onUserIntentChanged()
         resetRecoveryBudget()
-        selectInternal(generationId, expectedQueueRevision, entryId, explicitPlay, completedCycles = 0, token)
+        selectInternal(generationId, expectedQueueRevision, entryId, explicitPlay, completedCycles = 0, token,
+            manualTrackChange = true)
     }
 
     /** 构造代次时旧音频继续；纯编辑只更新有界邻项，当前交接才暂停/准备/seek。 */
@@ -320,6 +337,7 @@ class QueuePlaybackCoordinator(
             }
         }
         if (commit.wasReplay) return@action commit
+        if (!keepsCurrent) onManualTrackChange()
         checkpointEpoch += 1L
         publishSnapshot(commit.snapshot)
         if (!isDetached && backendBound) {
@@ -357,18 +375,27 @@ class QueuePlaybackCoordinator(
     /** 只读取实际播放状态，不写库、访问 provider 或改变音频；替代上一份未确认预览。 */
     fun seekBinding(): QueueSeekBinding? {
         assertMain()
+        refreshSeekState()
         if (!canSeekFromSession()) return null
-        val saved = _state.value.snapshot ?: return null
-        val current = loadedWindow?.current ?: return null
-        if (saved.generationId != loadedWindow?.generationId || saved.currentEntryId != current.queueEntryId ||
-            backend.currentMediaItem?.mediaId != current.queueEntryId) return null
-        return QueueSeekBinding(UUID.randomUUID().toString(), sessionId, backendGeneration,
-            saved.generationId, saved.queueRevision, current.queueEntryId, current.location?.locationId,
-            current.location?.contentRevision ?: 0L, backend.duration).also { activeSeekBinding = it }
+        val owner = seekOwner ?: return null
+        val identity = owner.identity
+        return QueueSeekBinding(UUID.randomUUID().toString(), identity.sessionId, identity.backendGeneration,
+            identity.generationId, identity.queueRevision, identity.queueEntryId, identity.locationId,
+            identity.contentRevision, identity.durationMs, identity.playbackCycle).also {
+            activeSeekBinding = it
+            seekReceipt = null
+            _seekState.value = QueueSeekSessionState(owner.id, it.previewId)
+        }
+    }
+
+    internal fun seekSessionState(): QueueSeekSessionState {
+        assertMain()
+        refreshSeekState()
+        return _seekState.value
     }
 
     /** 确认只提交实际 seek 完成后的时钟；相同确认回读一次有界 receipt。 */
-    suspend fun seek(request: QueueSeekRequest): QueueSnapshot = action(clearFailure = false) { token ->
+    suspend fun seek(request: QueueSeekRequest): QueueSnapshot = action(clearFailure = false, preserveSeekOwner = true) { token ->
         seekReceipt?.takeIf { it.request.binding.previewId == request.binding.previewId }?.let { receipt ->
             if (receipt.request != request) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CONFLICT))
             return@action _state.value.snapshot ?: receipt.snapshot
@@ -450,9 +477,15 @@ class QueuePlaybackCoordinator(
         if (isDetached) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CLOSED))
         if (switchingBackend) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY))
         switchingBackend = true
+        invalidateSeekOwner()
         val running = currentOperation
         val runningCommand = commandJob
         try {
+            // A noncancellable receipt may already name the next item while the ending is still
+            // loaded. Capture before cancellation; a failed platform getter also releases the
+            // switching reservation through this catch, so an explicit retry remains possible.
+            val natural = (settlingNatural ?: pendingSwitchSettlement)?.takeIf(::hasLoadedSettlement)
+            pendingSwitchSettlement = natural
             resumeIntent = false
             pendingCommand = null
             pendingRecovery = null
@@ -463,7 +496,8 @@ class QueuePlaybackCoordinator(
             if (running != null && running !== runningCommand && running !== currentCoroutineContext()[Job]) running.cancelAndJoin()
             actions.withLock {
                 if (backendBound) pauseForWindowChange()
-                settleNaturalBeforeSwitch()
+                settleNaturalBeforeSwitch(natural)
+                pendingSwitchSettlement = null
                 flush()
                 val saved = queueStore.snapshot()
                 publishSnapshot(saved)
@@ -482,6 +516,7 @@ class QueuePlaybackCoordinator(
             catch (cleanup: Exception) { if (cleanup !== error) error.addSuppressed(cleanup) }
             try { if (!isDetached) sessionBridge.logicalStateChanged() }
             catch (cleanup: Exception) { if (cleanup !== error) error.addSuppressed(cleanup) }
+            refreshSeekState()
             throw error
         }
     }
@@ -494,6 +529,7 @@ class QueuePlaybackCoordinator(
         val old = backend
         backendBound = false
         backendGeneration += 1L
+        invalidateSeekOwner()
         ticker?.cancel()
         ticker = null
         loadedWindow = null
@@ -543,6 +579,7 @@ class QueuePlaybackCoordinator(
             pauseForWindowChange()
             switchingBackend = false
             try {
+                refreshSeekState()
                 sessionBridge.logicalStateChanged()
                 currentCoroutineContext().ensureActive()
                 if (isDetached || activeBackendSwitch !== checkpoint) {
@@ -550,6 +587,7 @@ class QueuePlaybackCoordinator(
                 }
             } catch (error: Exception) {
                 switchingBackend = true
+                invalidateSeekOwner()
                 throw error
             }
             // No player getter, listener notification or suspension may throw after consumption.
@@ -573,6 +611,7 @@ class QueuePlaybackCoordinator(
             resumeIntent = false
             activeBackendSwitch = null
             switchingBackend = false
+            refreshSeekState()
             sessionBridge.logicalStateChanged()
         }
     }
@@ -602,39 +641,73 @@ class QueuePlaybackCoordinator(
         }
     }
 
-    private suspend fun settleNaturalBeforeSwitch() {
-        val request = pendingNatural ?: return
+    private suspend fun settleNaturalBeforeSwitch(captured: NaturalSettlement?) {
+        val request = captured?.request ?: pendingNatural ?: return
         if (!backendBound || request.backendGeneration != backendGeneration || request.cycle != playbackCycle ||
-            handledNaturalCycle == request.cycle || manualEndCycle == request.cycle) {
-            pendingNatural = null
+            (captured == null && handledNaturalCycle == request.cycle) || manualEndCycle == request.cycle) {
+            if (pendingNatural === request) pendingNatural = null
             return
         }
+        if (captured != null && !hasLoadedSettlement(captured)) return
         checkpointWrites.withLock {
             val live = activeSnapshot()
-            if (live.currentEntryId != request.entryId || backend.currentMediaItem?.mediaId != request.entryId) {
-                pendingNatural = null
+            if (captured != null && (live.generationId != captured.ending.queueGenerationId ||
+                live.queueRevision != captured.queueRevision ||
+                (live.currentEntryId != captured.ending.queueEntryId && live.checkpoint != captured.submittedCheckpoint))) {
+                throw QueueStoreException(QueueStoreIssue.CONFLICT)
+            }
+            if (captured == null && (live.currentEntryId != request.entryId || backend.currentMediaItem?.mediaId != request.entryId)) {
+                if (pendingNatural === request) pendingNatural = null
                 return@withLock
             }
-            val cycles = if (live.checkpoint.completedCycles == Int.MAX_VALUE) Int.MAX_VALUE else live.checkpoint.completedCycles + 1
-            val position = backend.currentPosition.coerceAtLeast(0L)
+            val ending = captured?.ending ?: sleepTimerTrackBinding() ?: return@withLock
+            beforeNaturalAdvance(ending)
+            val checkpoint = captured?.endingCheckpoint ?: QueueCheckpoint(request.entryId,
+                backend.currentPosition.coerceAtLeast(0L), completedCycleCount(live.checkpoint.completedCycles))
+            currentCoroutineContext().ensureActive()
             withContext(NonCancellable) {
-                queueStore.saveCheckpoint(live.generationId, live.checkpointRevision, QueueCheckpoint(live.currentEntryId, position, cycles)).also {
+                val saved = if (live.checkpoint == checkpoint) live else
+                    queueStore.saveCheckpoint(live.generationId, live.checkpointRevision, checkpoint)
+                saved.also {
                     checkpointEpoch += 1L
                     publishSnapshot(it)
                     handledNaturalCycle = request.cycle
-                    pendingNatural = null
+                    if (pendingNatural === request) pendingNatural = null
                 }
             }
         }
     }
 
+    private fun hasLoadedSettlement(settlement: NaturalSettlement): Boolean = backendBound &&
+        settlement.request.backendGeneration == backendGeneration && settlement.request.cycle == playbackCycle &&
+        loadedWindow?.generationId == settlement.ending.queueGenerationId &&
+        loadedWindow?.current?.queueEntryId == settlement.ending.queueEntryId &&
+        backend.currentMediaItem?.mediaId == settlement.ending.queueEntryId
+
     internal fun sessionBackend(): Player? = backend.takeIf { backendBound && !isDetached }
+
+    /** 绑定实际仍装载的轮次；自然提交的短交接中逻辑checkpoint可能已指向后项。 */
+    internal fun sleepTimerTrackBinding(): SleepTimerTrackBinding? {
+        assertMain()
+        if (isDetached) return null
+        val window = loadedWindow
+        if (backendBound && window != null && backend.currentMediaItem?.mediaId == window.current.queueEntryId && backend.playerError == null) {
+            return SleepTimerTrackBinding(sessionId, window.generationId, window.current.queueEntryId, playbackCycle)
+        }
+        // Release and source resolution are temporary gaps in the same paused traversal.
+        // Refresh must not turn them into a permanent no-track deadline. Only the live opaque
+        // switch token supplies this identity; failure/cancellation/consumption clears it.
+        val frozen = activeBackendSwitch?.takeIf { switchingBackend } ?: return null
+        val saved = frozen.snapshot ?: return null
+        val entryId = saved.currentEntryId ?: return null
+        return SleepTimerTrackBinding(sessionId, saved.generationId, entryId, frozen.playbackCycle)
+    }
     internal fun sessionBackendGeneration(): Long = backendGeneration
     internal fun isCurrentBackend(player: Player, generation: Long): Boolean =
         !isDetached && backendBound && backend === player && backendGeneration == generation
     internal fun acceptsSessionCommands(): Boolean = !isDetached && !switchingBackend && backendBound
 
-    internal fun canSeekFromSession(): Boolean = acceptsSessionCommands() && !_state.value.preparing &&
+    internal fun canSeekFromSession(): Boolean = acceptsSessionCommands() && !_state.value.preparing && _state.value.failure == null &&
         backend.playbackState in listOf(Player.STATE_READY, Player.STATE_ENDED) && backend.playerError == null &&
         backend.duration != C.TIME_UNSET && backend.duration > 0L &&
         backend.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
@@ -687,6 +760,7 @@ class QueuePlaybackCoordinator(
             pendingNatural = null
             pendingRecovery = null
             activeSeekBinding = null
+            invalidateSeekOwner()
             _state.value = _state.value.copy(preparing = false)
             cleanup { currentOperation?.cancel() }
             cleanup { commandJob?.cancel() }
@@ -746,7 +820,8 @@ class QueuePlaybackCoordinator(
                 onUserIntentChanged()
                 resetRecoveryBudget()
                 val entry = queueStore.page(active.generationId, target, 1).singleOrNull() ?: throw QueueStoreException(QueueStoreIssue.RECOVERY_REQUIRED)
-                selectInternal(active.generationId, active.queueRevision, entry.queueEntryId, play, 0, token)
+                selectInternal(active.generationId, active.queueRevision, entry.queueEntryId, play, 0, token,
+                    manualTrackChange = true)
             }
         }
     }
@@ -773,6 +848,7 @@ class QueuePlaybackCoordinator(
                 }
             }
         } else {
+            invalidateSeekOwner()
             intentRevision += 1L
             resumeIntent = true
             _state.value = _state.value.copy(failure = null)
@@ -784,6 +860,7 @@ class QueuePlaybackCoordinator(
                 backend.playerError?.let { report(QueuePlaybackFailure(errorIssue(it), entryId)) }
             }
             updateTicker()
+            refreshSeekState()
         }
     }
 
@@ -791,12 +868,38 @@ class QueuePlaybackCoordinator(
         assertMain()
         if (isDetached) return
         onUserPause()
+        pauseForInterruption()
+    }
+
+    /** 焦点/noisy暂停不调用手动暂停hook。 */
+    internal fun pauseForInterruption() {
+        assertMain()
+        if (isDetached) return
         pendingCommand = null
         pendingRecovery = null
         resumeIntent = false
         invalidateIntent()
         if (backendBound) backend.pause()
         requestCheckpoint()
+        refreshSeekState()
+    }
+
+    /** 截止先废发声意图；旧自然结束的持久结清仍需完成，不能留下后项的0位置。 */
+    internal fun pauseForSleepTimer() {
+        assertMain()
+        if (isDetached) return
+        pendingCommand = null
+        pendingRecovery = null
+        resumeIntent = false
+        invalidateSeekOwner()
+        intentRevision += 1L
+        val settling = settlingNatural
+        if (settling == null || settling.ending != sleepTimerTrackBinding()) currentOperation?.cancel()
+        // A synchronous pause callback must not cancel the natural completion we just retained.
+        pauseForWindowChange()
+        updateTicker()
+        requestCheckpoint()
+        refreshSeekState()
     }
 
     internal fun stopFromSession() {
@@ -821,7 +924,7 @@ class QueuePlaybackCoordinator(
     internal fun seekFromSession(positionMs: Long) {
         assertMain()
         val binding = seekBinding() ?: return
-        launchCommand { seek(QueueSeekRequest(binding, positionMs)) }
+        launchCommand(preserveSeekOwner = true) { seek(QueueSeekRequest(binding, positionMs)) }
     }
 
     internal fun seekByFromSession(forward: Boolean) {
@@ -852,42 +955,94 @@ class QueuePlaybackCoordinator(
         completedCycles: Int,
         token: Long,
         onCheckpointCommitted: () -> Unit = {},
+        manualTrackChange: Boolean = false,
+        naturalSettlement: NaturalSettlement? = null,
     ): QueueSnapshot {
         val active = activeSnapshot()
         if (active.generationId != generationId || active.queueRevision != expectedQueueRevision) throw QueueStoreException(QueueStoreIssue.CONFLICT)
+        val naturalEnding = naturalSettlement?.ending
+        val endingCheckpoint = naturalEnding?.let {
+            if (active.currentEntryId != it.queueEntryId || sleepTimerTrackBinding() != it) {
+                throw QueueStoreException(QueueStoreIssue.CONFLICT)
+            }
+            requireNotNull(naturalSettlement).endingCheckpoint
+        }
         val window = queueStore.window(generationId, entryId)
         currentCoroutineContext().ensureActive()
         if (isDetached) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CLOSED))
         pauseForWindowChange()
-        val saved = checkpointWrites.withLock {
+        var blockedAdvance = false
+        var saved = checkpointWrites.withLock {
             val live = activeSnapshot()
             if (live.generationId != generationId || live.queueRevision != expectedQueueRevision) throw QueueStoreException(QueueStoreIssue.CONFLICT)
             currentCoroutineContext().ensureActive()
             if (isDetached) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CLOSED))
+            blockedAdvance = naturalEnding != null && beforeNaturalAdvance(naturalEnding)
+            val checkpoint = if (blockedAdvance) requireNotNull(endingCheckpoint)
+                else QueueCheckpoint(entryId, 0L, completedCycles)
+            naturalSettlement?.submittedCheckpoint = checkpoint
             withContext(NonCancellable) {
-                queueStore.saveCheckpoint(generationId, live.checkpointRevision, QueueCheckpoint(entryId, 0L, completedCycles)).also {
+                queueStore.saveCheckpoint(generationId, live.checkpointRevision, checkpoint).also {
                     checkpointEpoch += 1L
                     publishSnapshot(it)
                     onCheckpointCommitted()
+                    if (manualTrackChange) onManualTrackChange()
                 }
             }
         }
-        if (!isDetached) applyWindow(saved, window, 0L, explicitPlay, token)
+        suspend fun stopBeforeHandover(): Boolean {
+            if (blockedAdvance) return true
+            val ending = naturalEnding ?: return false
+            if (isDetached || sleepTimerTrackBinding() != ending || !beforeNaturalAdvance(ending)) return false
+            blockedAdvance = true
+            resumeIntent = false
+            pendingRecovery = null
+            saved = checkpointWrites.withLock {
+                val live = activeSnapshot()
+                if (live.generationId != generationId || live.queueRevision != expectedQueueRevision || live.currentEntryId != entryId) {
+                    throw QueueStoreException(QueueStoreIssue.CONFLICT)
+                }
+                withContext(NonCancellable) {
+                    queueStore.saveCheckpoint(generationId, live.checkpointRevision, requireNotNull(endingCheckpoint)).also {
+                        checkpointEpoch += 1L
+                        publishSnapshot(it)
+                    }
+                }
+            }
+            return true
+        }
+        // Both the durable receipt and provider resolution can suspend while the old traversal
+        // is still loaded. The last check must sit immediately before the actual backend handover.
+        if (stopBeforeHandover()) {
+            resumeIntent = false
+            if (!isDetached) pauseForWindowChange()
+        } else if (!isDetached) applyWindow(saved, window, 0L, explicitPlay, token,
+            beforeHandover = { !stopBeforeHandover() })
         return saved
     }
 
-    private suspend fun applyWindow(saved: QueueSnapshot, window: QueueWindow, positionMs: Long, explicitPlay: Boolean, token: Long, newRound: Boolean = true) {
+    private suspend fun applyWindow(
+        saved: QueueSnapshot,
+        window: QueueWindow,
+        positionMs: Long,
+        explicitPlay: Boolean,
+        token: Long,
+        newRound: Boolean = true,
+        beforeHandover: suspend () -> Boolean = { true },
+    ) {
         if (isDetached) return
         val prepared = try { prepareWindow(window) }
         catch (error: QueuePlaybackException) {
+            if (!beforeHandover()) return
             clearBackend()
             report(error.failure)
             requestRecovery(error.failure, explicitPlay && token == intentRevision)
             return
         }
         try {
-            applyPreparedWindow(saved, prepared, positionMs, explicitPlay, token, newRound)
+            applyPreparedWindow(saved, prepared, positionMs, explicitPlay, token, newRound, beforeHandover)
         } catch (error: CancellationException) { throw error }
+        catch (error: QueueStoreException) { throw error }
         catch (error: Exception) {
             clearBackend()
             val failure = playbackFailure(error, saved.currentEntryId)
@@ -947,6 +1102,7 @@ class QueuePlaybackCoordinator(
     private fun applyKeptWindow(saved: QueueSnapshot, window: QueueWindow) {
         val previous = loadedWindow ?: throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.NOT_READY))
         val currentId = window.current.queueEntryId
+        val previousTimerBinding = SleepTimerTrackBinding(sessionId, previous.generationId, currentId, playbackCycle)
         if (backend.currentMediaItem?.mediaId != currentId || !sameSource(previous.current, window.current)) {
             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, currentId))
         }
@@ -971,6 +1127,8 @@ class QueuePlaybackCoordinator(
             if (backend.currentMediaItem?.mediaId != currentId) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.OUTPUT_ERROR, currentId))
             backend.playerError?.let { throw it }
             loadedWindow = window
+            onRetainedTrackBinding(previousTimerBinding,
+                SleepTimerTrackBinding(sessionId, window.generationId, currentId, playbackCycle))
             _state.value = _state.value.copy(snapshot = saved, failure = null)
         } finally {
             applyingWindow = false
@@ -981,8 +1139,8 @@ class QueuePlaybackCoordinator(
     }
 
     private fun validateSeekBinding(binding: QueueSeekBinding) {
-        if (activeSeekBinding != binding || binding.sessionId != sessionId || binding.backendGeneration != backendGeneration ||
-            isDetached || switchingBackend || !backendBound) {
+        if (binding.sessionId != sessionId || binding.backendGeneration != backendGeneration ||
+            binding.playbackCycle != playbackCycle || isDetached || switchingBackend || !backendBound) {
             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CONFLICT, binding.queueEntryId))
         }
         val saved = _state.value.snapshot ?: throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.NOT_READY))
@@ -995,6 +1153,10 @@ class QueuePlaybackCoordinator(
             backend.playbackState !in listOf(Player.STATE_READY, Player.STATE_ENDED) ||
             !backend.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) {
             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, binding.queueEntryId))
+        }
+        refreshSeekState()
+        if (seekOwner == null || activeSeekBinding != binding) {
+            throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CONFLICT, binding.queueEntryId))
         }
     }
 
@@ -1018,7 +1180,9 @@ class QueuePlaybackCoordinator(
         explicitPlay: Boolean,
         token: Long,
         newRound: Boolean = true,
+        beforeHandover: suspend () -> Boolean = { true },
     ) {
+        currentCoroutineContext().ensureActive()
         if (isDetached) return
         val wanted = window.entries
         val current = window.current
@@ -1038,6 +1202,9 @@ class QueuePlaybackCoordinator(
             val existingIndex = (0 until backend.mediaItemCount).firstOrNull { index ->
                 matches(backend.getMediaItemAt(index), current)
             }
+            // Pause can flush synchronous callbacks. Check the timer after those callbacks,
+            // immediately before replacing the old loaded traversal, including a repeated item.
+            if (!beforeHandover()) return
             loadedWindow = window.copy(entries = wanted, currentIndex = targetIndex)
             _state.value = _state.value.copy(snapshot = saved, failure = null)
             if (existingIndex == null) {
@@ -1139,34 +1306,48 @@ class QueuePlaybackCoordinator(
             return@action
         }
         val order = active.currentPlaybackOrder ?: return@action
-        val advance = naturalQueueAdvance(order, active.entryCount, active.mode, active.checkpoint.completedCycles)
-        fun accepted() {
-            handledNaturalCycle = request.cycle
+        val ending = sleepTimerTrackBinding()
+        if (ending == null) {
             if (pendingNatural === request) pendingNatural = null
+            return@action
         }
-        if (!resumeIntent || advance.targetOrder == null) {
-            val position = backend.currentPosition.coerceAtLeast(0L)
-            val cycles = if (resumeIntent) advance.completedCycles else
-                if (active.checkpoint.completedCycles == Int.MAX_VALUE) Int.MAX_VALUE else active.checkpoint.completedCycles + 1
-            checkpointWrites.withLock {
-                val live = activeSnapshot()
-                if (live.generationId != active.generationId || live.queueRevision != active.queueRevision || live.currentEntryId != active.currentEntryId) {
-                    throw QueueStoreException(QueueStoreIssue.CONFLICT)
-                }
-                currentCoroutineContext().ensureActive()
-                withContext(NonCancellable) {
-                    queueStore.saveCheckpoint(live.generationId, live.checkpointRevision, QueueCheckpoint(live.currentEntryId, position, cycles)).also {
-                        checkpointEpoch += 1L
-                        publishSnapshot(it)
-                        accepted()
+        val settlement = NaturalSettlement(request, ending, active.queueRevision,
+            QueueCheckpoint(ending.queueEntryId, backend.currentPosition.coerceAtLeast(0L),
+                completedCycleCount(active.checkpoint.completedCycles)))
+        settlingNatural = settlement
+        try {
+            val timerBlocked = beforeNaturalAdvance(ending)
+            val advance = naturalQueueAdvance(order, active.entryCount, active.mode, active.checkpoint.completedCycles)
+            fun accepted() {
+                handledNaturalCycle = request.cycle
+                if (pendingNatural === request) pendingNatural = null
+            }
+            if (timerBlocked || !resumeIntent || advance.targetOrder == null) {
+                val position = backend.currentPosition.coerceAtLeast(0L)
+                val cycles = if (resumeIntent && !timerBlocked) advance.completedCycles else completedCycleCount(active.checkpoint.completedCycles)
+                checkpointWrites.withLock {
+                    val live = activeSnapshot()
+                    if (live.generationId != active.generationId || live.queueRevision != active.queueRevision || live.currentEntryId != active.currentEntryId) {
+                        throw QueueStoreException(QueueStoreIssue.CONFLICT)
+                    }
+                    currentCoroutineContext().ensureActive()
+                    withContext(NonCancellable) {
+                        queueStore.saveCheckpoint(live.generationId, live.checkpointRevision, QueueCheckpoint(live.currentEntryId, position, cycles)).also {
+                            checkpointEpoch += 1L
+                            publishSnapshot(it)
+                            accepted()
+                        }
                     }
                 }
+                resumeIntent = false
+                if (!isDetached) pauseForWindowChange()
+            } else {
+                val entry = queueStore.page(active.generationId, advance.targetOrder, 1).singleOrNull() ?: throw QueueStoreException(QueueStoreIssue.RECOVERY_REQUIRED)
+                selectInternal(active.generationId, active.queueRevision, entry.queueEntryId, true, advance.completedCycles, token,
+                    ::accepted, naturalSettlement = settlement)
             }
-            resumeIntent = false
-            if (!isDetached) pauseForWindowChange()
-        } else {
-            val entry = queueStore.page(active.generationId, advance.targetOrder, 1).singleOrNull() ?: throw QueueStoreException(QueueStoreIssue.RECOVERY_REQUIRED)
-            selectInternal(active.generationId, active.queueRevision, entry.queueEntryId, true, advance.completedCycles, token, ::accepted)
+        } finally {
+            settlingNatural = null
         }
     }
 
@@ -1315,18 +1496,20 @@ class QueuePlaybackCoordinator(
 
     private fun publishSnapshot(snapshot: QueueSnapshot?) {
         _state.value = _state.value.copy(snapshot = snapshot)
+        refreshSeekState()
         if (!isDetached) sessionBridge.logicalStateChanged()
     }
 
-    private fun launchCommand(command: suspend () -> Unit) {
+    private fun launchCommand(preserveSeekOwner: Boolean = false, command: suspend () -> Unit) {
         if (isDetached || switchingBackend || !backendBound) return
+        if (!preserveSeekOwner) invalidateSeekOwner()
         // 快速连续标准命令仅保留最近一个；自然完成和恢复各有一个独立槽位。
         pendingCommand = command
         startPendingCommands()
     }
 
     private fun startPendingCommands() {
-        if (isDetached || switchingBackend || !backendBound || currentOperation != null || actions.isLocked || commandJob?.isActive == true) return
+        if (isDetached || switchingBackend || !backendBound || currentOperation != null || actions.isLocked || commandJob != null) return
         val ordinary = pendingCommand
         val recovery = if (ordinary == null) pendingRecovery else null
         val natural = if (ordinary == null && recovery == null) pendingNatural else null
@@ -1357,7 +1540,11 @@ class QueuePlaybackCoordinator(
         job.start()
     }
 
-    private suspend fun <T> action(clearFailure: Boolean = true, block: suspend (Long) -> T): T = withContext(Dispatchers.Main.immediate) {
+    private suspend fun <T> action(
+        clearFailure: Boolean = true,
+        preserveSeekOwner: Boolean = false,
+        block: suspend (Long) -> T,
+    ): T = withContext(Dispatchers.Main.immediate) {
         if (isDetached || switchingBackend || !backendBound) {
             val failure = QueuePlaybackFailure(when {
                 isDetached -> QueuePlaybackIssue.CLOSED
@@ -1372,11 +1559,13 @@ class QueuePlaybackCoordinator(
             report(failure)
             throw QueuePlaybackException(failure)
         }
+        if (preserveSeekOwner) seeking = true else invalidateSeekOwner()
         intentRevision += 1L
         val token = intentRevision
         currentOperation = currentCoroutineContext()[Job]
         _state.value = _state.value.copy(preparing = true, failure = if (clearFailure) null else _state.value.failure)
         try {
+            refreshSeekState()
             sessionBridge.logicalStateChanged()
             block(token)
         } catch (error: QueueStoreException) {
@@ -1394,13 +1583,16 @@ class QueuePlaybackCoordinator(
         } finally {
             currentOperation = null
             actions.unlock()
+            if (preserveSeekOwner) seeking = false
             _state.value = _state.value.copy(preparing = false)
+            refreshSeekState()
             try { if (!isDetached) sessionBridge.logicalStateChanged() }
             finally { startPendingCommands() }
         }
     }
 
     private fun invalidateIntent() {
+        invalidateSeekOwner()
         intentRevision += 1L
         currentOperation?.cancel()
     }
@@ -1409,8 +1601,14 @@ class QueuePlaybackCoordinator(
         if (isDetached || !backendBound || switchingBackend) return false
         val allowed = requestPlay?.invoke() ?: run { backend.play(); backend.playWhenReady }
         resumeIntent = allowed && backend.playWhenReady
+        if (!resumeIntent) {
+            pauseForWindowChange()
+            requestCheckpoint()
+        }
         return resumeIntent
     }
+
+    private fun completedCycleCount(value: Int): Int = if (value == Int.MAX_VALUE) Int.MAX_VALUE else value + 1
 
     private fun reportStore(error: QueueStoreException) {
         val issue = when (error.issue) {
@@ -1426,7 +1624,68 @@ class QueuePlaybackCoordinator(
 
     private fun report(failure: QueuePlaybackFailure) {
         _state.value = _state.value.copy(failure = failure)
+        invalidateSeekOwner()
         if (!isDetached) onFailure(failure)
+    }
+
+    private fun invalidateSeekOwner() {
+        seekActionId = UUID.randomUUID().toString()
+        seekOwner = null
+        activeSeekBinding = null
+        seekReceipt = null
+        _seekState.value = QueueSeekSessionState()
+    }
+
+    /** 只读有界内存/Player字段；checkpoint和进度不属于身份，不能使一次拖动每tick过期。 */
+    private fun refreshSeekState() {
+        val identity = try { currentSeekIdentity() } catch (_: RuntimeException) { null }
+        if (identity == null) {
+            seekOwner = null
+            activeSeekBinding = null
+            seekReceipt = null
+            _seekState.value = QueueSeekSessionState()
+            return
+        }
+        val previous = seekOwner
+        if (seeking && previous?.identity != identity) {
+            seekOwner = null
+            activeSeekBinding = null
+            seekReceipt = null
+            _seekState.value = QueueSeekSessionState()
+            return
+        }
+        val owner = previous?.takeIf { it.identity == identity } ?: run {
+            activeSeekBinding = null
+            seekReceipt = null
+            SeekOwner(UUID.randomUUID().toString(), identity).also { seekOwner = it }
+        }
+        _seekState.value = QueueSeekSessionState(owner.id, activeSeekBinding?.previewId)
+    }
+
+    private fun currentSeekIdentity(): SeekOwnerIdentity? {
+        if (isDetached || !backendBound || switchingBackend || _state.value.failure != null) return null
+        // An external action permanently revokes an in-flight seek's owner. Its late callbacks
+        // cannot mint a replacement owner until that physical operation has left its action.
+        val ownSeek = seeking && seekOwner != null
+        if (seeking && !ownSeek || (_state.value.preparing || applyingWindow) && !ownSeek) return null
+        val playbackState = backend.playbackState
+        if (backend.playerError != null || playbackState !in listOf(Player.STATE_READY, Player.STATE_ENDED) &&
+            !(ownSeek && playbackState == Player.STATE_BUFFERING)) return null
+        if (!ownSeek && !backend.isCommandAvailable(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)) return null
+        val saved = _state.value.snapshot ?: return null
+        val window = loadedWindow ?: return null
+        val current = window.current
+        if (saved.generationId != window.generationId || saved.queueRevision != window.queueRevision ||
+            saved.currentEntryId != current.queueEntryId || backend.currentMediaItem?.mediaId != current.queueEntryId) return null
+        val observedDuration = backend.duration
+        // Some backends temporarily remove duration/seek availability during their own buffer.
+        // Retain only the already verified duration; completion still checks the actual backend.
+        val duration = if (ownSeek && playbackState == Player.STATE_BUFFERING && observedDuration == C.TIME_UNSET)
+            requireNotNull(seekOwner).identity.durationMs else observedDuration
+        if (duration == C.TIME_UNSET || duration <= 0L || playbackCycle < 0L) return null
+        return SeekOwnerIdentity(sessionId, backendGeneration, saved.generationId, saved.queueRevision,
+            current.queueEntryId, current.location?.locationId, current.location?.contentRevision ?: 0L,
+            duration, playbackCycle, seekActionId)
     }
 
     private fun localFailure(entry: QueueEntry): QueuePlaybackFailure? {
@@ -1457,7 +1716,27 @@ class QueuePlaybackCoordinator(
 
     private data class CapturedCheckpoint(val generationId: String, val queueRevision: Long, val intent: Long, val epoch: Long, val checkpoint: QueueCheckpoint)
     private data class SeekReceipt(val request: QueueSeekRequest, val snapshot: QueueSnapshot)
+    private data class SeekOwner(val id: String, val identity: SeekOwnerIdentity)
+    private data class SeekOwnerIdentity(
+        val sessionId: String,
+        val backendGeneration: Long,
+        val generationId: String,
+        val queueRevision: Long,
+        val queueEntryId: String,
+        val locationId: String?,
+        val contentRevision: Long,
+        val durationMs: Long,
+        val playbackCycle: Long,
+        val actionId: String,
+    )
     private data class NaturalCompletion(val entryId: String, val cycle: Long, val backendGeneration: Long)
+    private data class NaturalSettlement(
+        val request: NaturalCompletion,
+        val ending: SleepTimerTrackBinding,
+        val queueRevision: Long,
+        val endingCheckpoint: QueueCheckpoint,
+        var submittedCheckpoint: QueueCheckpoint? = null,
+    )
     private data class RecoveryRequest(val failure: QueuePlaybackFailure, val cycle: Long, val backendGeneration: Long)
 
     companion object {

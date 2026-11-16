@@ -21,6 +21,10 @@ import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
 import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
+import io.github.onlinemo.meloxwatch.model.PlaybackControlsPreferences
+import io.github.onlinemo.meloxwatch.model.ProgressGestureMode
+import io.github.onlinemo.meloxwatch.model.RotaryAction
+import io.github.onlinemo.meloxwatch.model.RotaryOrientation
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.UserPreferences
@@ -447,6 +451,93 @@ class UserPreferencesRepositoryTest {
     }
 
     @Test(timeout = 30000L)
+    fun schemaThreeKeepsNonDefaultPlaybackAndLibraryUntilExplicitControlsMigration() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(schema = 3, revision = 19L).toMutablePreferences().apply {
+            this[stringPreferencesKey("song_tap_policy")] = SongTapPolicy.INSERT_AND_PLAY.name
+            this[stringPreferencesKey("playback_backend")] = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER.name
+            this[intPreferencesKey("playback_speed_tenths")] = 17
+            this[booleanPreferencesKey("media_buttons_enabled")] = false
+            this[booleanPreferencesKey("audio_focus_management")] = false
+            this[booleanPreferencesKey("gapless_playback")] = false
+        }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val first = open(file)
+        val loaded = first.ready()
+        assertEquals(UserPreferences(
+            revision = 19L, restorePosition = false, screenShape = ScreenShape.ROUND,
+            libraryLayout = LibraryLayout.GRID, artworkReadPath = ArtworkReadPath.LOCAL_EXTRACT,
+            songTapPolicy = SongTapPolicy.INSERT_AND_PLAY, playbackBackend = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER,
+            playbackSpeedTenths = 17, mediaButtonsEnabled = false, audioFocusManagement = false, gaplessPlayback = false,
+            controls = PlaybackControlsPreferences(),
+        ), loaded.preferences)
+        assertNull(loaded.recovery)
+        assertArrayEquals(bytes, file.readBytes())
+        val saved = first.repository.save(19L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+        assertEquals(20L, saved.preferences.revision)
+        assertEquals(loaded.preferences.asDraft(), saved.preferences.asDraft())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved.preferences, reopened.ready().preferences)
+        assertTrue(reopened.repository.save(20L, saved.preferences.asDraft()) is PreferencesWriteResult.Unchanged)
+    }
+
+    @Test(timeout = 30000L)
+    fun controlsSurviveReopenAndStaleOrCancelledEditsCannotDiscardThem() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val controls = PlaybackControlsPreferences(
+            rotaryEnabled = true, rotaryAction = RotaryAction.SEEK, rotaryOrientation = RotaryOrientation.REVERSED,
+            rotaryHaptics = true, showMainProgress = false, progressGesture = ProgressGestureMode.TAP_TO_SEEK,
+            sleepTimerSummary = true,
+        )
+        val draft = UserPreferencesDraft(playbackSpeedTenths = 12, controls = controls)
+        val saved = (first.repository.save(0L, draft) as PreferencesWriteResult.Saved).preferences
+        val bytes = file.readBytes()
+        assertEquals(draft, saved.asDraft())
+        assertTrue(first.repository.save(1L, draft) is PreferencesWriteResult.Unchanged)
+        assertEquals(saved, (first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict).current)
+        assertTrue(first.repository.reset(1L, ResetConfirmation.CANCELLED) is PreferencesWriteResult.Cancelled)
+        assertArrayEquals(bytes, file.readBytes())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved, reopened.ready().preferences)
+        assertEquals(UserPreferences(revision = 2L),
+            (reopened.repository.reset(1L, ResetConfirmation.CONFIRMED) as PreferencesWriteResult.Saved).preferences)
+    }
+
+    @Test(timeout = 30000L)
+    fun damagedControlFieldsRecoverSafelyWithoutChangingOtherPreferencesOrBytes() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(schema = UserPreferences.CURRENT_SCHEMA_VERSION, revision = 7L)
+            .toMutablePreferences().apply {
+                this[stringPreferencesKey("rotary_enabled")] = "true"
+                this[stringPreferencesKey("rotary_action")] = "ANYTHING"
+                this[intPreferencesKey("rotary_orientation")] = 1
+                this[intPreferencesKey("rotary_haptics")] = 1
+                this[stringPreferencesKey("show_main_progress")] = "false"
+                this[stringPreferencesKey("progress_gesture")] = "IMMEDIATE_DRAG"
+                this[stringPreferencesKey("sleep_timer_summary")] = "true"
+                this[intPreferencesKey("playback_speed_tenths")] = 18
+            }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val loaded = open(file).ready()
+        assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, loaded.recovery?.reason)
+        assertEquals(setOf(PreferencesField.ROTARY_CONTROL, PreferencesField.ROTARY_TARGET, PreferencesField.ROTARY_DIRECTION,
+            PreferencesField.ROTARY_HAPTICS, PreferencesField.MAIN_PROGRESS, PreferencesField.SEEK_GESTURE,
+            PreferencesField.SLEEP_SUMMARY), loaded.recovery?.fields)
+        assertEquals(PlaybackControlsPreferences(), loaded.preferences.controls)
+        assertEquals(18, loaded.preferences.playbackSpeedTenths)
+        assertEquals(LibraryLayout.GRID, loaded.preferences.libraryLayout)
+        assertEquals(ArtworkReadPath.LOCAL_EXTRACT, loaded.preferences.artworkReadPath)
+        assertFalse(loaded.preferences.restorePosition)
+        assertArrayEquals(bytes, file.readBytes())
+    }
+
+    @Test(timeout = 30000L)
     fun revisionOverflowCannotCommitANegativeRevision() = runBlocking {
         val file = preferencesFile()
         writeFixture(file, fixture(schema = 1, revision = Long.MAX_VALUE))
@@ -619,6 +710,15 @@ class UserPreferencesRepositoryTest {
         intPreferencesKey("playback_speed_tenths") to 10,
         booleanPreferencesKey("gapless_playback") to true,
     ).apply {
+        if (schema >= 4) {
+            this[booleanPreferencesKey("rotary_enabled")] = false
+            this[stringPreferencesKey("rotary_action")] = RotaryAction.MEDIA_VOLUME.name
+            this[stringPreferencesKey("rotary_orientation")] = RotaryOrientation.NORMAL.name
+            this[booleanPreferencesKey("rotary_haptics")] = false
+            this[booleanPreferencesKey("show_main_progress")] = true
+            this[stringPreferencesKey("progress_gesture")] = ProgressGestureMode.DRAG_TO_COMMIT.name
+            this[booleanPreferencesKey("sleep_timer_summary")] = false
+        }
         sorts.forEach { (context, sort) ->
             val suffix = context.name.lowercase(java.util.Locale.ROOT)
             this[stringPreferencesKey("library_sort_" + suffix)] = sort.field.name

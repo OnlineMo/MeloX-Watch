@@ -104,6 +104,7 @@ class DataStoreUserPreferencesRepository internal constructor(
                                 playbackBackend = draft.playbackBackend,
                                 playbackSpeedTenths = draft.playbackSpeedTenths,
                                 gaplessPlayback = draft.gaplessPlayback,
+                                controls = draft.controls,
                             ),
                         )
                     }

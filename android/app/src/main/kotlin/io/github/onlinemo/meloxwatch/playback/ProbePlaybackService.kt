@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
@@ -29,6 +30,14 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
+import io.github.onlinemo.meloxwatch.data.sleep.SleepTimerStoreFactory
+import io.github.onlinemo.meloxwatch.data.sleep.readSleepTimerBootId
+import io.github.onlinemo.meloxwatch.playback.sleep.AndroidSleepTimerNotification
+import io.github.onlinemo.meloxwatch.playback.sleep.AndroidSleepTimerScheduler
+import io.github.onlinemo.meloxwatch.playback.sleep.ServiceSleepTimer
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerClockSample
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerCommands
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerSessionState
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
 import java.util.concurrent.Executor
@@ -61,10 +70,13 @@ class ProbePlaybackService : MediaSessionService() {
     private var bitmapLoader: LocalSessionBitmapLoader? = null
     private var coordinator: QueuePlaybackCoordinator? = null
     private var listening: ServiceListeningObserver? = null
+    private var sleepTimer: ServiceSleepTimer? = null
+    private var timerSaveCommand: Job? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeCommand: Job? = null
     private var initialization: Job? = null
     private var extrasObserver: Job? = null
+    private var seekStateObserver: Job? = null
     private var commandPreferencesObserver: Job? = null
     private var initializing = true
     private var mediaButtonsEnabled = true
@@ -111,18 +123,38 @@ class ProbePlaybackService : MediaSessionService() {
             },
             operations = owner.initialOperations,
             requestPlay = ::requestPlayback,
-            onUserPause = owner::userPause,
+            onUserPause = {
+                owner.userPause()
+                sleepTimer?.onUserPause()
+            },
             onUserIntentChanged = owner::userIntentChanged,
+            onManualTrackChange = { sleepTimer?.onManualTrackChange() },
+            onRetainedTrackBinding = { previous, current -> sleepTimer?.onRetainedTrackBinding(previous, current) },
+            beforeNaturalAdvance = { ending -> sleepTimer?.beforeNaturalAdvance(ending) ?: true },
         )
         coordinator = queues
         owner.attach(queues, statistics)
+        var bootId: String? = null
+        val timer = ServiceSleepTimer(SleepTimerStoreFactory.get(application), serviceScope,
+            now = { SleepTimerClockSample(bootId, SystemClock.elapsedRealtime()) },
+            currentTrack = queues::sleepTimerTrackBinding,
+            scheduler = AndroidSleepTimerScheduler(),
+            notification = AndroidSleepTimerNotification(this),
+            pausePlayback = {
+                owner.userPause()
+                queues.pauseForSleepTimer()
+            },
+            cancelResumeIntent = owner::userPause,
+            onChanged = ::refreshSessionState,
+        )
+        sleepTimer = timer
         val artwork = LocalSessionBitmapLoader(this, application.localProviderIo, serviceScope)
         bitmapLoader = artwork
 
         val builder = MediaSession.Builder(this, queues.sessionPlayer)
             .setCallback(LocalPlaybackCallback())
             .setBitmapLoader(artwork)
-            .setSessionExtras(owner.sessionExtras())
+            .setSessionExtras(sessionExtras())
         val sessionActivity = PendingIntent.getActivity(
             this,
             0,
@@ -133,8 +165,14 @@ class ProbePlaybackService : MediaSessionService() {
         mediaSession = builder.build()
         extrasObserver = serviceScope.launch {
             owner.state.collect {
-                if (!destroyed) mediaSession?.setSessionExtras(owner.sessionExtras())
+                if (!destroyed) {
+                    refreshSessionState()
+                    refreshControllerCommands()
+                }
             }
+        }
+        seekStateObserver = serviceScope.launch {
+            queues.seekState.collect { if (!destroyed) refreshSessionState() }
         }
         commandPreferencesObserver = serviceScope.launch {
             application.preferences.state.collect { saved ->
@@ -147,10 +185,21 @@ class ProbePlaybackService : MediaSessionService() {
                     mediaButtonsEnabled = enabled
                     refreshControllerCommands()
                 }
+                if (!destroyed) {
+                    val summaryEnabled = when (saved) {
+                        is PreferencesState.Ready -> saved.preferences.controls.sleepTimerSummary
+                        is PreferencesState.Unavailable -> saved.lastKnown?.controls?.sleepTimerSummary
+                            ?: owner.currentPreferences.controls.sleepTimerSummary
+                        PreferencesState.Loading -> false
+                    }
+                    timer.setSummaryEnabled(summaryEnabled)
+                }
             }
         }
         initialization = serviceScope.launch {
             try {
+                bootId = readSleepTimerBootId(this@ProbePlaybackService)
+                timer.initialize()
                 owner.initializePreferences()
                 queues.initialize()
             } catch (error: CancellationException) {
@@ -165,6 +214,7 @@ class ProbePlaybackService : MediaSessionService() {
                 if (!destroyed) {
                     initializing = false
                     owner.observePreferences()
+                    refreshSessionState()
                     refreshControllerCommands()
                 }
             }
@@ -179,26 +229,33 @@ class ProbePlaybackService : MediaSessionService() {
         pendingCommand?.cancel()
         initialization?.cancel()
         extrasObserver?.cancel()
+        seekStateObserver?.cancel()
         commandPreferencesObserver?.cancel()
+        timerSaveCommand?.cancel()
         val session = mediaSession
         val owner = playbackOwner
         val artwork = bitmapLoader
         val queues = coordinator
         val statistics = listening
+        val timer = sleepTimer
         mediaSession = null
         coordinator = null
         playbackOwner = null
         bitmapLoader = null
         listening = null
+        sleepTimer = null
         try {
-            try { session?.player?.pause() }
+            try { timer?.detach() }
             finally {
-                try { statistics?.detach() }
+                try { session?.player?.pause() }
                 finally {
-                    try { queues?.detach() }
+                    try { statistics?.detach() }
                     finally {
-                        try { session?.release() }
-                        finally { try { owner?.close() } finally { artwork?.close() } }
+                        try { queues?.detach() }
+                        finally {
+                            try { session?.release() }
+                            finally { try { owner?.close() } finally { artwork?.close() } }
+                        }
                     }
                 }
             }
@@ -217,6 +274,11 @@ class ProbePlaybackService : MediaSessionService() {
                     listOf(
                         async {
                             try { withTimeoutOrNull(1500L) { queues?.close() } }
+                            catch (error: CancellationException) { throw error }
+                            catch (_: Exception) { null }
+                        },
+                        async {
+                            try { withTimeoutOrNull(1500L) { timer?.close() } }
                             catch (error: CancellationException) { throw error }
                             catch (_: Exception) { null }
                         },
@@ -275,7 +337,7 @@ class ProbePlaybackService : MediaSessionService() {
     }
 
     private fun requestPlayback(): Boolean {
-        val accepted = playbackOwner?.requestPlay() == true
+        val accepted = sleepTimer?.beforePlay() == true && playbackOwner?.requestPlay() == true
         if (!accepted) mediaSession?.let { session ->
             // A denied or delayed request stays paused. Media3 stops any warm-up foreground
             // promotion; no cached boolean can incorrectly authorize a later focus request.
@@ -285,23 +347,78 @@ class ProbePlaybackService : MediaSessionService() {
         return accepted
     }
 
-    private fun commandFuture(operationId: String? = null, operation: suspend () -> SessionResult): ListenableFuture<SessionResult> {
-        if (destroyed) return Futures.immediateFuture(receiptResult(failureResult("CLOSED"), operationId))
-        if (initializing || playbackOwner?.state?.value?.switching == true || activeCommand?.isActive == true) {
-            return Futures.immediateFuture(receiptResult(failureResult("BUSY"), operationId))
+    private fun sessionExtras(): Bundle = Bundle(playbackOwner?.sessionExtras() ?: Bundle.EMPTY).apply {
+        coordinator?.let { putAll(it.seekSessionState().toSessionExtras()) }
+        sleepTimer?.let { putAll(SleepTimerSessionState.fromService(it.state.value).toSessionExtras()) }
+    }
+
+    private fun refreshSessionState() {
+        if (!destroyed) mediaSession?.setSessionExtras(sessionExtras())
+    }
+
+    /** 定时取消不等待队列/provider命令；运行时接受与独立写盘状态分别呈现。 */
+    private fun timerResult(operation: (ServiceSleepTimer) -> Boolean): ListenableFuture<SessionResult> {
+        if (destroyed) return Futures.immediateFuture(failureResult("CLOSED"))
+        val timer = sleepTimer
+        if (initializing || timer == null || !timer.state.value.initialized) return Futures.immediateFuture(failureResult("BUSY"))
+        return try {
+            Futures.immediateFuture(if (operation(timer)) SessionResult(SessionResult.RESULT_SUCCESS) else failureResult("CONFLICT"))
+        } catch (_: IllegalArgumentException) {
+            Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
+        }
+    }
+
+    private fun retryTimerSave(arguments: Bundle): ListenableFuture<SessionResult> {
+        val timer = sleepTimer ?: return Futures.immediateFuture(failureResult("NOT_READY"))
+        val expected = try { SleepTimerCommands.readExpected(arguments) }
+        catch (_: IllegalArgumentException) { return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE)) }
+        if (destroyed || initializing || timerSaveCommand != null || expected != timer.generationId) {
+            return Futures.immediateFuture(failureResult(if (destroyed) "CLOSED" else "CONFLICT"))
         }
         val future = SettableFuture.create<SessionResult>()
         val job = serviceScope.launch(start = CoroutineStart.LAZY) {
             try {
-                future.set(receiptResult(operation(), operationId))
+                future.set(if (timer.retryPersistence(expected)) SessionResult(SessionResult.RESULT_SUCCESS) else failureResult("NOT_READY"))
+            } catch (error: CancellationException) {
+                future.cancel(false)
+                throw error
+            }
+        }
+        timerSaveCommand = job
+        future.addListener({ if (future.isCancelled) job.cancel() }, Executor { it.run() })
+        job.invokeOnCompletion {
+            if (!future.isDone) future.cancel(false)
+            if (timerSaveCommand === job) timerSaveCommand = null
+        }
+        job.start()
+        return future
+    }
+
+    private fun commandFuture(operationId: String? = null, operation: suspend () -> SessionResult): ListenableFuture<SessionResult> {
+        if (destroyed) return Futures.immediateFuture(receiptResult(failureResult("CLOSED"), operationId))
+        // Cancellation can still own noncancellable provider/receipt cleanup. Only completion
+        // releases this slot; isActive would admit a new command while that cleanup is running.
+        if (initializing || playbackOwner?.state?.value?.switching == true || activeCommand != null) {
+            return Futures.immediateFuture(receiptResult(failureResult("BUSY"), operationId))
+        }
+        val future = SettableFuture.create<SessionResult>()
+        fun complete(result: SessionResult) {
+            // Publish consumed previews and new owners before acknowledging the command.
+            // Position/checkpoint updates retain the same owner, including our own seek.
+            refreshSessionState()
+            future.set(receiptResult(result, operationId))
+        }
+        val job = serviceScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                complete(operation())
             } catch (error: CancellationException) {
                 future.cancel(false)
                 throw error
             } catch (error: QueuePlaybackException) {
-                future.set(receiptResult(failureResult(error.failure.issue.name, error.failure.queueStoreIssue?.name), operationId))
+                complete(failureResult(error.failure.issue.name, error.failure.queueStoreIssue?.name))
             } catch (error: QueueStoreException) {
                 val issue = if (error.issue == QueueStoreIssue.INVALID_INPUT) "CONFLICT" else error.issue.name
-                future.set(receiptResult(failureResult(issue, error.issue.name), operationId))
+                complete(failureResult(issue, error.issue.name))
             } catch (error: LibraryException) {
                 val issue = when (error.issue) {
                     LibraryIssue.BUSY -> "BUSY"
@@ -314,13 +431,13 @@ class ProbePlaybackService : MediaSessionService() {
                     LibraryIssue.RECOVERY_REQUIRED -> "RECOVERY_REQUIRED"
                     else -> "SOURCE_UNAVAILABLE"
                 }
-                future.set(receiptResult(failureResult(issue), operationId))
+                complete(failureResult(issue))
             } catch (error: PlaylistException) {
-                future.set(receiptResult(failureResult(error.issue.name), operationId))
+                complete(failureResult(error.issue.name))
             } catch (_: IllegalArgumentException) {
-                future.set(receiptResult(SessionResult(SessionError.ERROR_BAD_VALUE), operationId))
+                complete(SessionResult(SessionError.ERROR_BAD_VALUE))
             } catch (_: Exception) {
-                future.set(receiptResult(failureResult("OUTPUT_ERROR"), operationId))
+                complete(failureResult("OUTPUT_ERROR"))
             }
         }
         activeCommand = job
@@ -375,7 +492,7 @@ class ProbePlaybackService : MediaSessionService() {
             .remove(Player.COMMAND_SET_SPEED_AND_PITCH)
         val externalButtonsDisabled = !mediaButtonsEnabled && controller.uid != Process.myUid() &&
             !session.isMediaNotificationController(controller)
-        if (initializing || externalButtonsDisabled) {
+        if (initializing || playbackOwner?.hasUsableBackend != true || externalButtonsDisabled) {
             commands.remove(Player.COMMAND_PLAY_PAUSE).remove(Player.COMMAND_PREPARE).remove(Player.COMMAND_STOP)
                 .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM).remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
                 .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM).remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
@@ -392,6 +509,8 @@ class ProbePlaybackService : MediaSessionService() {
                 .add(PlaybackCommands.playlistQueue)
                 .add(PlaybackCommands.selectEntry).add(PlaybackCommands.retryRestore).add(PlaybackCommands.mutateQueue)
                 .add(PlaybackCommands.beginSeek).add(PlaybackCommands.seekQueue)
+                .add(SleepTimerCommands.arm).add(SleepTimerCommands.cancel)
+                .add(SleepTimerCommands.retrySave).add(SleepTimerCommands.refresh)
         }
         return commands.build()
     }
@@ -434,6 +553,19 @@ class ProbePlaybackService : MediaSessionService() {
                 return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
             }
             return when (customCommand.customAction) {
+                SleepTimerCommands.arm.customAction -> timerResult { timer ->
+                    val command = SleepTimerCommands.readArm(args)
+                    timer.arm(command.minutes, command.mode, command.expectedGeneration)
+                }
+                SleepTimerCommands.cancel.customAction -> timerResult { timer ->
+                    timer.cancel(SleepTimerCommands.readExpected(args))
+                }
+                SleepTimerCommands.refresh.customAction -> timerResult { timer ->
+                    SleepTimerCommands.readRefresh(args)
+                    timer.refresh()
+                    true
+                }
+                SleepTimerCommands.retrySave.customAction -> retryTimerSave(args)
                 PlaybackCommands.playlistQueue.customAction -> {
                     val command = try { PlaybackCommands.readPlaylist(args) }
                     catch (_: RuntimeException) {
@@ -500,12 +632,13 @@ class ProbePlaybackService : MediaSessionService() {
                     SessionResult(SessionResult.RESULT_SUCCESS)
                 }
                 PlaybackCommands.beginSeek.customAction -> {
-                    if (destroyed || initializing || playbackOwner?.state?.value?.switching == true || activeCommand?.isActive == true) {
+                    if (destroyed || initializing || playbackOwner?.state?.value?.switching == true || activeCommand != null) {
                         Futures.immediateFuture(failureResult(if (destroyed) "CLOSED" else "BUSY"))
                     } else try {
                         PlaybackCommands.readBeginSeek(args)
                         val queues = checkNotNull(coordinator)
                         val binding = queues.seekBinding()
+                        refreshSessionState()
                         if (binding != null) Futures.immediateFuture(SessionResult(
                             SessionResult.RESULT_SUCCESS, PlaybackCommands.seekBindingArguments(binding),
                         )) else {

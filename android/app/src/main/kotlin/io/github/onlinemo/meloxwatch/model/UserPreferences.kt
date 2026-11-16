@@ -21,6 +21,7 @@ data class UserPreferences(
     val playbackBackend: PlaybackBackendKind = PlaybackBackendKind.MEDIA3,
     val playbackSpeedTenths: Int = PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS,
     val gaplessPlayback: Boolean = true,
+    val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
 ) {
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION)
@@ -41,10 +42,11 @@ data class UserPreferences(
         playbackBackend = playbackBackend,
         playbackSpeedTenths = playbackSpeedTenths,
         gaplessPlayback = gaplessPlayback,
+        controls = controls,
     )
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 3
+        const val CURRENT_SCHEMA_VERSION = 4
     }
 }
 
@@ -61,6 +63,7 @@ data class UserPreferencesDraft(
     val playbackBackend: PlaybackBackendKind = PlaybackBackendKind.MEDIA3,
     val playbackSpeedTenths: Int = PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS,
     val gaplessPlayback: Boolean = true,
+    val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
 ) {
     init {
         require(librarySorts.keys == LibraryListContext.entries.toSet())

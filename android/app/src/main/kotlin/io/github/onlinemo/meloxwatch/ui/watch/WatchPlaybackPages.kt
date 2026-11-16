@@ -30,6 +30,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.rotary.RotaryScrollEvent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -83,6 +84,10 @@ fun WatchNowPlayingPage(
     onMenu: () -> Unit,
     artwork: @Composable (Dp) -> Unit,
     transport: @Composable (Dp, Boolean) -> Unit,
+    visible: Boolean = true,
+    onInputFocus: (Boolean, Boolean) -> Unit = { _, _ -> },
+    onListPriority: (Boolean) -> Unit = {},
+    onRotaryPlayback: (RotaryScrollEvent) -> Boolean = { false },
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val configuration = LocalConfiguration.current
@@ -112,14 +117,23 @@ fun WatchNowPlayingPage(
         }
     }
     val listState = rememberLazyListState()
+    val scrollRotary = rememberWatchRotaryScroll(listState, visible)
+    val currentPriorityCallback by rememberUpdatedState(onListPriority)
     BoxWithConstraints(Modifier.fillMaxSize().background(WatchPalette.Background).safeDrawingPadding().imePadding()) {
         val detailsWidth = if (round) maxWidth * 0.78f else maxWidth - 24.dp
         val contentWidth = detailsWidth.coerceIn(minOf(48.dp, maxWidth), maxWidth)
         val geometry = nowPlayingGeometry(maxWidth.value, maxHeight.value, windowWidth, windowHeight,
             leftInset, topInset, round, titleHeight, artistHeight)
+        val listHasPriority = geometry == null || listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0
+        LaunchedEffect(listState, visible, geometry != null) {
+            if (visible) snapshotFlow { geometry == null || listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0 }
+                .distinctUntilChanged().collect { currentPriorityCallback(it) }
+        }
         // IME reduces the viewport, not the physical round boundary or its central scroll padding.
         val scrollInset = if (round) maxOf(windowHeight.dp, maxHeight) * 0.22f else 12.dp
-        LazyColumn(Modifier.fillMaxSize(), state = listState,
+        LazyColumn(Modifier.fillMaxSize().watchRotaryInput(visible, "playback", onInputFocus) { event ->
+            if (!listHasPriority && onRotaryPlayback(event)) true else scrollRotary(event)
+        }, state = listState,
             contentPadding = PaddingValues(top = if (geometry == null) scrollInset else 0.dp,
                 bottom = scrollInset + 12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             item(key = "playback:hero") {

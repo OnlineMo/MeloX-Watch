@@ -18,6 +18,13 @@ enum class PreferencesField {
     PLAYBACK_BACKEND,
     PLAYBACK_SPEED,
     GAPLESS,
+    ROTARY_CONTROL,
+    ROTARY_TARGET,
+    ROTARY_DIRECTION,
+    ROTARY_HAPTICS,
+    MAIN_PROGRESS,
+    SEEK_GESTURE,
+    SLEEP_SUMMARY,
 }
 
 enum class PreferencesRecoveryReason {

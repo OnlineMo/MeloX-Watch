@@ -10,6 +10,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -32,6 +36,7 @@ import io.github.onlinemo.meloxwatch.data.ProbeFiles
 import io.github.onlinemo.meloxwatch.data.ProbeTreeSample
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.listening.ListeningIssue
+import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.model.QueueEntry
@@ -39,6 +44,7 @@ import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
 import io.github.onlinemo.meloxwatch.model.QueueSeekBinding
 import io.github.onlinemo.meloxwatch.model.QueueSeekRequest
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
+import io.github.onlinemo.meloxwatch.model.PlaybackControlsPreferences
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendState
@@ -46,6 +52,18 @@ import io.github.onlinemo.meloxwatch.playback.LibraryQueueCommand
 import io.github.onlinemo.meloxwatch.playback.PlaylistQueueCommand
 import io.github.onlinemo.meloxwatch.playback.ProbePlaybackService
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
+import io.github.onlinemo.meloxwatch.playback.QueueSeekSessionState
+import io.github.onlinemo.meloxwatch.playback.input.RotaryAppliedStep
+import io.github.onlinemo.meloxwatch.playback.input.RotaryHapticGate
+import io.github.onlinemo.meloxwatch.playback.input.RotaryHapticState
+import io.github.onlinemo.meloxwatch.playback.input.RotaryInputContext
+import io.github.onlinemo.meloxwatch.playback.input.RotaryStep
+import io.github.onlinemo.meloxwatch.ui.playback.PlaybackPageInput
+import io.github.onlinemo.meloxwatch.ui.playback.PlaybackPageInputContext
+import io.github.onlinemo.meloxwatch.ui.playback.SystemMediaVolume
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerCommands
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerEndMode
+import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerSessionState
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistUiIssue
 import java.util.UUID
 import java.util.concurrent.CancellationException
@@ -55,7 +73,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -73,6 +90,10 @@ enum class ProbePage {
     QUEUE,
     LIBRARY,
     PLAYLISTS,
+    SEEK,
+    VOLUME,
+    SLEEP_TIMER,
+    SLEEP_TIMER_NOTIFICATIONS,
 }
 
 enum class ProbeNotice {
@@ -104,7 +125,7 @@ data class ProbePlaybackState(
     val artist: String? = null,
 )
 
-data class SeekPreview(val binding: QueueSeekBinding, val positionMs: Long)
+enum class SleepTimerCommandIssue { CONNECTION, BUSY, CONFLICT, INVALID_INPUT, FAILED }
 
 data class ProbeUiState(
     val page: ProbePage = ProbePage.HOME,
@@ -123,7 +144,15 @@ data class ProbeUiState(
     val queueIssue: QueuePlaybackIssue? = null,
     val listeningIssue: ListeningIssue? = null,
     val backend: PlaybackBackendState? = null,
-    val seekPreview: SeekPreview? = null,
+    val seekAuthority: QueueSeekSessionState? = null,
+    val inputControls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
+    val controlsStateKey: String = "loading",
+    val settingsRevision: Long = 0L,
+    val inputFocusEpoch: String? = null,
+    val sleepTimer: SleepTimerSessionState? = null,
+    val sleepTimerElapsedMs: Long = 0L,
+    val sleepTimerCommandPending: Boolean = false,
+    val sleepTimerCommandIssue: SleepTimerCommandIssue? = null,
 )
 
 /**
@@ -153,8 +182,39 @@ class ProbeViewModel(
     private var isForeground = false
     private var playbackCommandJob: Job? = null
     private var playbackCommandGeneration = 0L
-    private var seekObservationJob: Job? = null
     private var pendingPlaylistCommand: PendingPlaylistCommand? = null
+    private var sleepTimerCommandJob: Job? = null
+    private var sleepTimerCommandGeneration = 0L
+    private var windowFocused = false
+    private var playbackInputFocused = false
+    private var rotaryInputFocused = false
+    private var playbackListHasPriority = true
+    private var inputFocusToken = UUID.randomUUID().toString()
+    private var hapticState = RotaryHapticState()
+    val mediaVolume = SystemMediaVolume(application, ::canUseMediaVolume)
+    val playbackInput = PlaybackPageInput(viewModelScope, ::playbackInputContext, ::acquireSeekBinding,
+        ::isSeekBindingCurrent, ::dispatchSeek, ::applyRotaryVolume, ::onRotaryApplied)
+
+    init {
+        viewModelScope.launch {
+            (application as MeloXApplication).preferences.state.collect { storage ->
+                val saved = when (storage) {
+                    is PreferencesState.Ready -> storage.preferences
+                    is PreferencesState.Unavailable -> storage.lastKnown
+                    PreferencesState.Loading -> null
+                }
+                val status = when (storage) {
+                    is PreferencesState.Ready -> "ready:${storage.canWrite}:${storage.recovery}"
+                    is PreferencesState.Unavailable -> "unavailable:${storage.failure}"
+                    PreferencesState.Loading -> "loading"
+                }
+                val controls = saved?.controls ?: PlaybackControlsPreferences()
+                _uiState.update { it.copy(inputControls = controls, settingsRevision = saved?.revision ?: 0L,
+                    controlsStateKey = "$status:${saved?.revision}:$controls") }
+                playbackInput.contextChanged()
+            }
+        }
+    }
 
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -169,6 +229,7 @@ class ProbeViewModel(
     fun onForeground() {
         if (isForeground) return
         isForeground = true
+        updateVolumeVisibility()
         refreshCapabilities()
         connectionGeneration += 1L
         val generation = connectionGeneration
@@ -180,16 +241,19 @@ class ProbeViewModel(
                 controller = null
                 playbackCommandGeneration += 1L
                 playbackCommandJob?.cancel()
-                playbackCommandJob = null
                 progressJob?.cancel()
                 progressJob = null
-                stopSeekObservation()
+                playbackInput.invalidate()
+                mediaVolume.onHidden()
+                retireSleepTimerCommand()
                 _uiState.update { state ->
                     state.copy(
                         playback = state.playback.copy(isConnected = false),
                         playbackCommandPending = false,
                         backend = null,
-                        seekPreview = null,
+                        seekAuthority = null,
+                        sleepTimer = null,
+                        sleepTimerCommandPending = false,
                         notice = ProbeNotice.CONNECTION_FAILED,
                     )
                 }
@@ -221,6 +285,7 @@ class ProbeViewModel(
             override fun onExtrasChanged(activeController: MediaController, extras: Bundle) {
                 if (generation != connectionGeneration || !isForeground || controller !== activeController) return
                 capturePlayback()
+                if (_uiState.value.page == ProbePage.SLEEP_TIMER) updateProgressSampling()
             }
         }
         val future = MediaController.Builder(getApplication(), token).setListener(connectionListener).buildAsync()
@@ -233,6 +298,7 @@ class ProbeViewModel(
                 connected.addListener(playerListener)
                 capturePlayback()
                 updateProgressSampling()
+                if (_uiState.value.page == ProbePage.SLEEP_TIMER) refreshSleepTimer()
             } catch (_: ExecutionException) {
                 _uiState.update { state -> state.copy(notice = ProbeNotice.CONNECTION_FAILED) }
             } catch (_: CancellationException) {
@@ -250,10 +316,11 @@ class ProbeViewModel(
         connectionGeneration += 1L
         playbackCommandGeneration += 1L
         playbackCommandJob?.cancel()
-        playbackCommandJob = null
         progressJob?.cancel()
         progressJob = null
-        stopSeekObservation()
+        playbackInput.invalidate()
+        mediaVolume.onHidden()
+        retireSleepTimerCommand()
         if (_uiState.value.isReading) cancelFileRead()
         controller?.removeListener(playerListener)
         controller = null
@@ -261,26 +328,140 @@ class ProbeViewModel(
         connectionFuture = null
         _uiState.update { state ->
             state.copy(playback = state.playback.copy(isConnected = false), playbackCommandPending = false,
-                backend = null, seekPreview = null)
+                backend = null, seekAuthority = null, sleepTimer = null, sleepTimerCommandPending = false)
         }
     }
 
     fun showPage(page: ProbePage) {
-        if (page != ProbePage.PLAYBACK) stopSeekObservation()
         val currentState = _uiState.value
+        if (currentState.page != page) {
+            retirePageInputFocus()
+        }
         if (currentState.page != page && currentState.isReading) {
             // 离页使检查代次失效；不合作的provider晚到结果不能导航回播放页。
             cancelFileRead()
         }
         savedStateHandle[KEY_PAGE] = page.name
-        _uiState.update { state -> state.copy(page = page,
-            seekPreview = state.seekPreview.takeIf { page == ProbePage.PLAYBACK }) }
+        _uiState.update { state -> state.copy(page = page) }
+        playbackInput.contextChanged()
+        updateVolumeVisibility()
         updateProgressSampling()
+        if (page == ProbePage.SLEEP_TIMER && isForeground) refreshSleepTimer()
+    }
+
+    fun armSleepTimer(minutes: Int, mode: SleepTimerEndMode, expectedGeneration: String?, onAccepted: () -> Unit) {
+        startSleepTimerCommand(SleepTimerCommands.arm,
+            SleepTimerCommands.armArguments(minutes, mode, expectedGeneration), onAccepted = onAccepted)
+    }
+
+    /** Cancellation has its own slot and never waits for queue/provider work or an old timer receipt. */
+    fun cancelSleepTimer(expectedGeneration: String?) {
+        startSleepTimerCommand(SleepTimerCommands.cancel, SleepTimerCommands.expectedArguments(expectedGeneration),
+            replacePending = true)
+    }
+
+    fun retrySleepTimerPersistence(expectedGeneration: String?) {
+        startSleepTimerCommand(SleepTimerCommands.retrySave, SleepTimerCommands.expectedArguments(expectedGeneration))
+    }
+
+    fun refreshSleepTimer() {
+        startSleepTimerCommand(SleepTimerCommands.refresh, SleepTimerCommands.refreshArguments())
+    }
+
+    private fun startSleepTimerCommand(command: SessionCommand, arguments: Bundle, replacePending: Boolean = false,
+        onAccepted: () -> Unit = {}) {
+        val active = controller
+        if (!isForeground || active == null || !active.isConnected) {
+            _uiState.update { it.copy(sleepTimerCommandIssue = SleepTimerCommandIssue.CONNECTION) }
+            return
+        }
+        if (sleepTimerCommandJob?.isActive == true && !replacePending) {
+            _uiState.update { it.copy(sleepTimerCommandIssue = SleepTimerCommandIssue.BUSY) }
+            return
+        }
+        retireSleepTimerCommand()
+        val generation = sleepTimerCommandGeneration
+        _uiState.update { it.copy(sleepTimerCommandPending = true, sleepTimerCommandIssue = null) }
+        val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            try {
+                val result = awaitResult(active.sendCustomCommand(command, arguments))
+                if (generation != sleepTimerCommandGeneration || controller !== active || !isForeground) return@launch
+                capturePlayback()
+                val issue = when {
+                    result.resultCode == SessionResult.RESULT_SUCCESS -> null
+                    result.resultCode == SessionError.ERROR_BAD_VALUE -> SleepTimerCommandIssue.INVALID_INPUT
+                    PlaybackCommands.readFailureCode(result.extras) == "CONFLICT" -> SleepTimerCommandIssue.CONFLICT
+                    PlaybackCommands.readFailureCode(result.extras) == "BUSY" -> SleepTimerCommandIssue.BUSY
+                    else -> SleepTimerCommandIssue.FAILED
+                }
+                _uiState.update { it.copy(sleepTimerCommandIssue = issue) }
+                if (issue == null && _uiState.value.page == ProbePage.SLEEP_TIMER) onAccepted()
+                updateProgressSampling()
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (generation == sleepTimerCommandGeneration && controller === active && isForeground) {
+                    capturePlayback()
+                    _uiState.update { it.copy(sleepTimerCommandIssue = SleepTimerCommandIssue.FAILED) }
+                }
+            } finally {
+                if (generation == sleepTimerCommandGeneration) {
+                    sleepTimerCommandJob = null
+                    _uiState.update { it.copy(sleepTimerCommandPending = false) }
+                }
+            }
+        }
+        sleepTimerCommandJob = job
+        job.start()
+    }
+
+    private fun retireSleepTimerCommand() {
+        sleepTimerCommandGeneration += 1L
+        sleepTimerCommandJob?.cancel()
+        sleepTimerCommandJob = null
     }
 
     fun reconnectPlayback() {
         onBackground()
         onForeground()
+    }
+
+    fun setWindowFocused(focused: Boolean) {
+        if (windowFocused == focused) return
+        windowFocused = focused
+        inputFocusToken = UUID.randomUUID().toString()
+        _uiState.update { it.copy(inputFocusEpoch = inputFocusToken) }
+        playbackInput.invalidate()
+        mediaVolume.invalidate()
+        updateVolumeVisibility()
+        updateProgressSampling()
+    }
+
+    private fun retirePageInputFocus() {
+        playbackInputFocused = false
+        rotaryInputFocused = false
+        playbackListHasPriority = true
+        inputFocusToken = UUID.randomUUID().toString()
+        _uiState.update { it.copy(inputFocusEpoch = inputFocusToken) }
+        playbackInput.invalidate()
+        mediaVolume.invalidate()
+    }
+
+    fun setPlaybackInputFocused(page: ProbePage, focused: Boolean, rotaryFocused: Boolean) {
+        if (_uiState.value.page != page) return
+        if (playbackInputFocused == focused && rotaryInputFocused == rotaryFocused) return
+        playbackInputFocused = focused
+        rotaryInputFocused = rotaryFocused
+        inputFocusToken = UUID.randomUUID().toString()
+        _uiState.update { it.copy(inputFocusEpoch = inputFocusToken) }
+        playbackInput.invalidate()
+        mediaVolume.invalidate()
+    }
+
+    fun setPlaybackListPriority(page: ProbePage, priority: Boolean) {
+        if (_uiState.value.page != page || playbackListHasPriority == priority) return
+        playbackListHasPriority = priority
+        playbackInput.contextChanged()
     }
 
     fun pickerCancelled() {
@@ -406,6 +587,7 @@ class ProbeViewModel(
     fun resumeCurrent() {
         val activeController = controller ?: return
         if (!isForeground || _uiState.value.playbackCommandPending || activeController.currentMediaItem == null) return
+        playbackInput.invalidate()
         try {
             _uiState.update { state -> state.copy(queueIssue = null) }
             // 服务把恢复/尾部重播和本次播放意图作为同一命令；预先prepare/seek会异步抢占它。
@@ -437,7 +619,7 @@ class ProbeViewModel(
             onResult(PlaylistUiIssue.SOURCE_UNAVAILABLE)
             return
         }
-        if (playbackCommandJob?.isActive == true || pendingPlaylistCommand != null) {
+        if (playbackCommandJob != null || pendingPlaylistCommand != null) {
             onResult(PlaylistUiIssue.BUSY)
             return
         }
@@ -485,12 +667,14 @@ class ProbeViewModel(
 
     fun previous() {
         val active = controller ?: return
+        playbackInput.invalidate()
         if (active.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)) active.seekToPreviousMediaItem()
         capturePlayback()
     }
 
     fun next() {
         val active = controller ?: return
+        playbackInput.invalidate()
         if (active.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)) active.seekToNextMediaItem()
         capturePlayback()
     }
@@ -505,14 +689,16 @@ class ProbeViewModel(
             onFailure("SOURCE_UNAVAILABLE")
             return
         }
-        if (playbackCommandJob?.isActive == true) {
+        if (playbackCommandJob != null) {
             onFailure("BUSY")
             return
         }
+        playbackInput.invalidate()
+        mediaVolume.invalidate()
         playbackCommandGeneration += 1L
         val generation = playbackCommandGeneration
         _uiState.update { state -> state.copy(playbackCommandPending = true, queueIssue = null) }
-        playbackCommandJob = viewModelScope.launch {
+        val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
                 val (command, args) = request()
                 if (generation != playbackCommandGeneration || controller !== active || !isForeground) return@launch
@@ -546,6 +732,9 @@ class ProbeViewModel(
                 }
             }
         }
+        playbackCommandJob = job
+        job.invokeOnCompletion { if (playbackCommandJob === job) playbackCommandJob = null }
+        job.start()
     }
 
     private suspend fun awaitResult(future: ListenableFuture<SessionResult>): SessionResult =
@@ -566,12 +755,11 @@ class ProbeViewModel(
         rejectPlaylistCommand(PlaylistUiIssue.BUSY)
         playbackCommandGeneration += 1L
         playbackCommandJob?.cancel()
-        playbackCommandJob = null
-        stopSeekObservation()
+        playbackInput.invalidate()
+        mediaVolume.invalidate()
         _uiState.update { state ->
             state.copy(
                 playbackCommandPending = false,
-                seekPreview = null,
                 notice = if (state.playbackCommandPending) ProbeNotice.CANCELLED else state.notice,
             )
         }
@@ -584,76 +772,73 @@ class ProbeViewModel(
         capturePlayback()
     }
 
-    fun beginSeek() {
-        if (!_uiState.value.playback.canSeek || _uiState.value.playbackCommandPending) return
-        stopSeekObservation()
-        _uiState.update { it.copy(seekPreview = null) }
-        startQueueCommand(onAccepted = { result ->
-            val binding = PlaybackCommands.readSeekBinding(result.extras)
-            val playback = _uiState.value.playback
-            val backend = _uiState.value.backend
-            if (_uiState.value.page == ProbePage.PLAYBACK && playback.mediaId == binding.queueEntryId &&
-                playback.canSeek && playback.durationMs == binding.durationMs && backend != null &&
-                !backend.switching && backend.generation == binding.backendGeneration
-            ) {
-                _uiState.update { it.copy(seekPreview = SeekPreview(binding,
-                    playback.positionMs.coerceIn(0L, binding.durationMs))) }
-                observeSeekQueue(binding)
-            } else _uiState.update { it.copy(queueIssue = QueuePlaybackIssue.CONFLICT) }
-        }) {
-            PlaybackCommands.beginSeek to PlaybackCommands.beginSeekArguments()
+    private fun playbackInputContext(): PlaybackPageInputContext {
+        val state = _uiState.value
+        return PlaybackPageInputContext(state.seekAuthority?.ownerId,
+            inputFocusToken.takeIf { windowFocused && playbackInputFocused },
+            isForeground && windowFocused, state.page == ProbePage.PLAYBACK, state.page == ProbePage.SEEK,
+            state.playbackCommandPending || mediaVolume.busy, state.playback.positionMs, state.playback.durationMs,
+            state.inputControls, state.controlsStateKey, state.settingsRevision, playbackListHasPriority, rotaryInputFocused)
+    }
+
+    private suspend fun acquireSeekBinding(): QueueSeekBinding? {
+        val active = controller ?: return null
+        if (!isForeground || !active.isConnected) return null
+        val result = withTimeoutOrNull(INPUT_COMMAND_TIMEOUT_MS) {
+            awaitResult(active.sendCustomCommand(PlaybackCommands.beginSeek, PlaybackCommands.beginSeekArguments()))
+        } ?: return null
+        if (controller !== active || !isForeground || result.resultCode != SessionResult.RESULT_SUCCESS) return null
+        capturePlayback()
+        return PlaybackCommands.readSeekBinding(result.extras).takeIf(::isSeekBindingCurrent)
+    }
+
+    /** Validate existing service extras; requesting another binding would replace the preview. */
+    private fun isSeekBindingCurrent(binding: QueueSeekBinding): Boolean {
+        val active = controller ?: return false
+        val authority = QueueSeekSessionState.fromSessionExtras(active.sessionExtras) ?: return false
+        val state = _uiState.value
+        return isForeground && active.isConnected && authority.ownerId != null && authority.previewId == binding.previewId &&
+            state.seekAuthority?.ownerId == authority.ownerId && state.playback.mediaId == binding.queueEntryId &&
+            state.playback.durationMs == binding.durationMs && state.backend?.let {
+                !it.switching && it.actualBackend != null && it.generation == binding.backendGeneration
+            } == true
+    }
+
+    private suspend fun dispatchSeek(request: QueueSeekRequest): Boolean {
+        val active = controller ?: return false
+        if (!isSeekBindingCurrent(request.binding)) return false
+        val result = withTimeoutOrNull(INPUT_COMMAND_TIMEOUT_MS) {
+            awaitResult(active.sendCustomCommand(PlaybackCommands.seekQueue, PlaybackCommands.seekArguments(request)))
+        } ?: return false
+        if (controller !== active || !isForeground) return false
+        capturePlayback()
+        return result.resultCode == SessionResult.RESULT_SUCCESS
+    }
+
+    private fun canUseMediaVolume(): Boolean = isForeground && windowFocused && !playbackInput.busy &&
+        !_uiState.value.playbackCommandPending && _uiState.value.page in setOf(ProbePage.PLAYBACK, ProbePage.VOLUME)
+
+    private fun applyRotaryVolume(step: RotaryStep): Boolean = mediaVolume.rotary(step)
+
+    private fun updateVolumeVisibility() {
+        if (isForeground && windowFocused && _uiState.value.page in setOf(ProbePage.PLAYBACK, ProbePage.VOLUME)) mediaVolume.onVisible()
+        else mediaVolume.onHidden()
+    }
+
+    private fun onRotaryApplied(applied: RotaryAppliedStep, context: RotaryInputContext) {
+        val application = getApplication<Application>()
+        val vibrator = try {
+            if (Build.VERSION.SDK_INT >= 31) application.getSystemService(VibratorManager::class.java)?.defaultVibrator
+            else application.getSystemService(Vibrator::class.java)
+        } catch (_: RuntimeException) { null }
+        val hasVibrator = try { vibrator?.hasVibrator() == true } catch (_: RuntimeException) { false }
+        val decision = RotaryHapticGate.evaluate(hapticState, applied, context, SystemClock.elapsedRealtime(),
+            enabled = _uiState.value.inputControls.rotaryHaptics, hasVibrator = hasVibrator)
+        hapticState = decision.state
+        if (decision.requestPulse) {
+            try { vibrator?.vibrate(VibrationEffect.createOneShot(RotaryHapticGate.PULSE_DURATION_MS, VibrationEffect.DEFAULT_AMPLITUDE)) }
+            catch (_: RuntimeException) { }
         }
-    }
-
-    fun previewSeek(positionMs: Long) {
-        if (_uiState.value.playbackCommandPending) return
-        _uiState.update { state -> state.copy(seekPreview = state.seekPreview?.let {
-            it.copy(positionMs = positionMs.coerceIn(0L, it.binding.durationMs))
-        }) }
-    }
-
-    fun confirmSeek() {
-        val preview = _uiState.value.seekPreview ?: return
-        if (_uiState.value.playbackCommandPending) return
-        startQueueCommand(onAccepted = { clearSeekPreview() }) {
-            PlaybackCommands.seekQueue to PlaybackCommands.seekArguments(
-                QueueSeekRequest(preview.binding, preview.positionMs),
-            )
-        }
-    }
-
-    fun cancelSeek() {
-        if (!_uiState.value.playbackCommandPending) clearSeekPreview()
-    }
-
-    /** 只在用户预览时读活动指针；checkpoint 更新不会让未提交的目标失效。 */
-    private fun observeSeekQueue(binding: QueueSeekBinding) {
-        stopSeekObservation()
-        seekObservationJob = viewModelScope.launch {
-            try {
-                queues.snapshots().first { snapshot ->
-                    _uiState.value.seekPreview?.binding != binding || snapshot == null || snapshot.generationId != binding.generationId ||
-                        snapshot.queueRevision != binding.queueRevision || snapshot.currentEntryId != binding.queueEntryId
-                }
-                if (_uiState.value.seekPreview?.binding == binding) clearSeekPreview(QueuePlaybackIssue.CONFLICT)
-            } catch (error: kotlinx.coroutines.CancellationException) {
-                throw error
-            } catch (error: QueueStoreException) {
-                if (_uiState.value.seekPreview?.binding == binding) clearSeekPreview(queueIssue(error.issue.name))
-            } catch (_: Exception) {
-                if (_uiState.value.seekPreview?.binding == binding) clearSeekPreview(QueuePlaybackIssue.STORAGE_UNAVAILABLE)
-            }
-        }
-    }
-
-    private fun clearSeekPreview(issue: QueuePlaybackIssue? = null) {
-        stopSeekObservation()
-        _uiState.update { it.copy(seekPreview = null, queueIssue = issue ?: it.queueIssue) }
-    }
-
-    private fun stopSeekObservation() {
-        seekObservationJob?.cancel()
-        seekObservationJob = null
     }
 
     fun cancelFileRead() {
@@ -693,6 +878,7 @@ class ProbeViewModel(
                     _uiState.update { state -> state.copy(isReading = false, notice = ProbeNotice.TIMEOUT) }
                     return@launch
                 }
+                val previousPage = _uiState.value.page
                 _uiState.update { state ->
                     when (result) {
                         is ProbeFileResult.Success -> applyResult(state, result.value).copy(
@@ -706,7 +892,10 @@ class ProbeViewModel(
                         )
                     }
                 }
+                if (_uiState.value.page != previousPage) retirePageInputFocus()
+                playbackInput.contextChanged()
                 savedStateHandle[KEY_PAGE] = _uiState.value.page.name
+                updateVolumeVisibility()
                 updateProgressSampling()
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
@@ -746,32 +935,42 @@ class ProbeViewModel(
             artist = activeController.mediaMetadata.artist?.toString(),
         )
         val backendState = PlaybackBackendState.fromSessionExtras(activeController.sessionExtras)
-        val previousPreview = _uiState.value.seekPreview
         _uiState.update { state ->
-            val preview = state.seekPreview?.takeIf {
-                it.binding.queueEntryId == playback.mediaId && playback.durationMs == it.binding.durationMs &&
-                    playback.canSeek && backendState != null && !backendState.switching &&
-                    backendState.generation == it.binding.backendGeneration
-            }
-            state.copy(playback = playback, backend = backendState, seekPreview = preview)
+            state.copy(playback = playback, backend = backendState,
+                seekAuthority = QueueSeekSessionState.fromSessionExtras(activeController.sessionExtras),
+                sleepTimer = SleepTimerSessionState.fromSessionExtras(activeController.sessionExtras),
+                sleepTimerElapsedMs = SystemClock.elapsedRealtime())
         }
-        if (previousPreview != null && _uiState.value.seekPreview == null) stopSeekObservation()
+        playbackInput.contextChanged()
     }
 
     private fun updateProgressSampling() {
         progressJob?.cancel()
         progressJob = null
-        if (!isForeground || _uiState.value.page != ProbePage.PLAYBACK || controller == null) return
+        if (!isForeground || !windowFocused || controller == null) return
+        val page = _uiState.value.page
+        if (page !in setOf(ProbePage.PLAYBACK, ProbePage.SEEK, ProbePage.VOLUME, ProbePage.SLEEP_TIMER)) return
         progressJob = viewModelScope.launch {
             while (isActive) {
                 capturePlayback()
-                delay(PROGRESS_SAMPLE_INTERVAL_MS)
+                if (page != ProbePage.SLEEP_TIMER) {
+                    if (page == ProbePage.VOLUME) mediaVolume.refresh()
+                    delay(PROGRESS_SAMPLE_INTERVAL_MS)
+                }
+                else {
+                    val timer = _uiState.value.sleepTimer ?: break
+                    val remaining = (timer.deadlineElapsedMs ?: break) - SystemClock.elapsedRealtime()
+                    if (!timer.active || timer.waitingForTrackEnd || remaining <= 0L) break
+                    // Only the visible timer page updates its minute bucket; hidden UI owns no ticker.
+                    delay((remaining % 60_000L).takeIf { it > 0L } ?: 60_000L)
+                }
             }
         }
     }
 
     override fun onCleared() {
         onBackground()
+        playbackInput.close()
         super.onCleared()
     }
 
@@ -779,6 +978,7 @@ class ProbeViewModel(
         private const val KEY_PAGE = "navigation.page"
         private const val FILE_CHECK_TIMEOUT_MS = 8000L
         private const val PROGRESS_SAMPLE_INTERVAL_MS = 1000L
+        private const val INPUT_COMMAND_TIMEOUT_MS = 12_000L
     }
 
     private data class PendingPlaylistCommand(val operationId: String, val onResult: (PlaylistUiIssue?) -> Unit)

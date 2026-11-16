@@ -13,6 +13,10 @@ import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
 import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
 import io.github.onlinemo.meloxwatch.model.PlaybackPreferenceLimits
+import io.github.onlinemo.meloxwatch.model.PlaybackControlsPreferences
+import io.github.onlinemo.meloxwatch.model.ProgressGestureMode
+import io.github.onlinemo.meloxwatch.model.RotaryAction
+import io.github.onlinemo.meloxwatch.model.RotaryOrientation
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.UserPreferences
@@ -38,6 +42,13 @@ internal object PreferencesCodec {
     private val backendKey = stringPreferencesKey("playback_backend")
     private val speedKey = intPreferencesKey("playback_speed_tenths")
     private val gaplessKey = booleanPreferencesKey("gapless_playback")
+    private val rotaryEnabledKey = booleanPreferencesKey("rotary_enabled")
+    private val rotaryActionKey = stringPreferencesKey("rotary_action")
+    private val rotaryOrientationKey = stringPreferencesKey("rotary_orientation")
+    private val rotaryHapticsKey = booleanPreferencesKey("rotary_haptics")
+    private val mainProgressKey = booleanPreferencesKey("show_main_progress")
+    private val progressGestureKey = stringPreferencesKey("progress_gesture")
+    private val sleepSummaryKey = booleanPreferencesKey("sleep_timer_summary")
     private val sortKeys = LibraryListContext.entries.associateWith { context ->
         stringPreferencesKey("library_sort_" + context.name.lowercase(java.util.Locale.ROOT))
     }
@@ -50,6 +61,8 @@ internal object PreferencesCodec {
         libraryLayoutKey.name, artworkPathKey.name,
         songTapKey.name, mediaButtonsKey.name, audioFocusKey.name,
         backendKey.name, speedKey.name, gaplessKey.name,
+        rotaryEnabledKey.name, rotaryActionKey.name, rotaryOrientationKey.name, rotaryHapticsKey.name,
+        mainProgressKey.name, progressGestureKey.name, sleepSummaryKey.name,
     ) + sortKeys.values.map { it.name } + sortDirectionKeys.values.map { it.name }
     private val allFields = PreferencesField.entries.toSet()
 
@@ -62,7 +75,8 @@ internal object PreferencesCodec {
         val storedRevision = raw[revisionKey.name] as? Long
         val revision = storedRevision?.takeIf { value -> value >= 0L } ?: 0L
         val legacy = schemaVersion == 1 || schemaVersion == 2
-        if (!legacy && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
+        val legacyControls = legacy || schemaVersion == 3
+        if (!legacyControls && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
             val isNewer = schemaVersion != null && schemaVersion > UserPreferences.CURRENT_SCHEMA_VERSION
             val reason = if (isNewer) {
                 PreferencesRecoveryReason.NEWER_SCHEMA
@@ -86,7 +100,7 @@ internal object PreferencesCodec {
         val shape = ScreenShape.entries.firstOrNull { candidate -> candidate.name == storedShape }
         if (shape == null) invalidFields.add(PreferencesField.SCREEN_SHAPE)
 
-        // v1/v2 migrate only on an explicit write. Existing values and original bytes survive reads.
+        // Migration occurs only on an explicit write; reads preserve the original file and revision.
         val layout = if (schemaVersion == 1) LibraryLayout.LIST else {
             LibraryLayout.entries.firstOrNull { it.name == raw[libraryLayoutKey.name] }.also {
                 if (it == null) invalidFields.add(PreferencesField.LIBRARY_LAYOUT)
@@ -131,6 +145,35 @@ internal object PreferencesCodec {
         val audioFocus = playbackBoolean(audioFocusKey, PreferencesField.AUDIO_FOCUS)
         val gapless = playbackBoolean(gaplessKey, PreferencesField.GAPLESS)
 
+        fun controlsBoolean(key: Preferences.Key<Boolean>, field: PreferencesField, default: Boolean): Boolean =
+            if (legacyControls) default else {
+                (raw[key.name] as? Boolean).also { if (it == null) invalidFields.add(field) } ?: default
+            }
+        val rotaryAction = if (legacyControls) RotaryAction.MEDIA_VOLUME else {
+            RotaryAction.entries.firstOrNull { it.name == raw[rotaryActionKey.name] }.also {
+                if (it == null) invalidFields.add(PreferencesField.ROTARY_TARGET)
+            } ?: RotaryAction.MEDIA_VOLUME
+        }
+        val rotaryOrientation = if (legacyControls) RotaryOrientation.NORMAL else {
+            RotaryOrientation.entries.firstOrNull { it.name == raw[rotaryOrientationKey.name] }.also {
+                if (it == null) invalidFields.add(PreferencesField.ROTARY_DIRECTION)
+            } ?: RotaryOrientation.NORMAL
+        }
+        val progressGesture = if (legacyControls) ProgressGestureMode.DRAG_TO_COMMIT else {
+            ProgressGestureMode.entries.firstOrNull { it.name == raw[progressGestureKey.name] }.also {
+                if (it == null) invalidFields.add(PreferencesField.SEEK_GESTURE)
+            } ?: ProgressGestureMode.DRAG_TO_COMMIT
+        }
+        val controls = PlaybackControlsPreferences(
+            rotaryEnabled = controlsBoolean(rotaryEnabledKey, PreferencesField.ROTARY_CONTROL, false),
+            rotaryAction = rotaryAction,
+            rotaryOrientation = rotaryOrientation,
+            rotaryHaptics = controlsBoolean(rotaryHapticsKey, PreferencesField.ROTARY_HAPTICS, false),
+            showMainProgress = controlsBoolean(mainProgressKey, PreferencesField.MAIN_PROGRESS, true),
+            progressGesture = progressGesture,
+            sleepTimerSummary = controlsBoolean(sleepSummaryKey, PreferencesField.SLEEP_SUMMARY, false),
+        )
+
         val recovery = when {
             raw[corruptionKey.name] == true -> PreferencesRecovery(PreferencesRecoveryReason.CORRUPT_FILE, allFields)
             invalidFields.isNotEmpty() -> PreferencesRecovery(
@@ -154,9 +197,10 @@ internal object PreferencesCodec {
                 playbackBackend = backend,
                 playbackSpeedTenths = speed,
                 gaplessPlayback = gapless,
+                controls = controls,
             ),
             recovery = recovery,
-            isCanonical = !legacy && recovery == null && raw.keys == canonicalNames,
+            isCanonical = !legacyControls && recovery == null && raw.keys == canonicalNames,
         )
     }
 
@@ -173,6 +217,13 @@ internal object PreferencesCodec {
         backendKey to preferences.playbackBackend.name,
         speedKey to preferences.playbackSpeedTenths,
         gaplessKey to preferences.gaplessPlayback,
+        rotaryEnabledKey to preferences.controls.rotaryEnabled,
+        rotaryActionKey to preferences.controls.rotaryAction.name,
+        rotaryOrientationKey to preferences.controls.rotaryOrientation.name,
+        rotaryHapticsKey to preferences.controls.rotaryHaptics,
+        mainProgressKey to preferences.controls.showMainProgress,
+        progressGestureKey to preferences.controls.progressGesture.name,
+        sleepSummaryKey to preferences.controls.sleepTimerSummary,
     ).apply {
         LibraryListContext.entries.forEach { context ->
             val sort = preferences.librarySorts.getValue(context)

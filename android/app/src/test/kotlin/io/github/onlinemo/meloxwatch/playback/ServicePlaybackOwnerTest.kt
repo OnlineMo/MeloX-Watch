@@ -102,7 +102,10 @@ class ServicePlaybackOwnerTest {
         finally {
             try { queues.detach() }
             finally {
-                try { owner.close() }
+                try {
+                    owner.close()
+                    idleMain()
+                }
                 finally {
                     scope.cancel()
                     try { queues.close() } finally { statistics.close() }
@@ -118,6 +121,7 @@ class ServicePlaybackOwnerTest {
         val before = store.snapshotCalls
         val gate = store.blockSnapshot(skip = 1)
         val retry = scope.async { owner.retryBackendIfNeeded() }
+        idleMain()
         assertTrue(gate.entered.isCompleted)
         assertEquals(PlaybackBackendKind.SYSTEM_MEDIA_PLAYER, owner.state.value.actualBackend)
         assertTrue(owner.state.value.switching)
@@ -172,6 +176,7 @@ class ServicePlaybackOwnerTest {
         owner.observePreferences()
         val gate = store.blockSnapshot(skip = 1)
         val retry = scope.async { owner.retryBackendIfNeeded() }
+        idleMain()
         assertTrue(gate.entered.isCompleted)
         assertEquals(PlaybackBackendKind.SYSTEM_MEDIA_PLAYER, owner.state.value.actualBackend)
         preferences.publish(PlaybackBackendKind.MEDIA3)
@@ -179,6 +184,7 @@ class ServicePlaybackOwnerTest {
         assertTrue(owner.state.value.switching)
 
         retry.cancel()
+        idleMain()
         retry.join()
         idleMain()
         assertTrue(retry.isCancelled)
@@ -199,7 +205,9 @@ class ServicePlaybackOwnerTest {
 
         for (kind in listOf(PlaybackBackendKind.SYSTEM_MEDIA_PLAYER, PlaybackBackendKind.MEDIA3)) {
             preferences.publish(kind)
-            owner.initializePreferences()
+            val applying = scope.async { owner.initializePreferences() }
+            idleMain()
+            applying.await()
             val binding = queues.sessionBackendGeneration()
             assertTrue(binding > previousBinding)
             assertSessionBinding(kind, binding)

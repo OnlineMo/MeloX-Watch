@@ -427,6 +427,7 @@ class PlaybackCommandsTest {
         val arguments = PlaybackCommands.seekArguments(request)
         val decoded = PlaybackCommands.readSeek(arguments)
         assertEquals(request, decoded)
+        assertEquals(7L, decoded.binding.playbackCycle)
         assertFalse(arguments.containsKey("uri"))
         assertFalse(arguments.containsKey("title"))
         arguments.putString("session", "later-service")
@@ -445,10 +446,12 @@ class PlaybackCommandsTest {
             { putInt("backend_generation", 3) }, { putLong("backend_generation", -1L) },
             { putInt("revision", 42) }, { putLong("revision", -1L) }, { remove("entry") },
             { putLong("location", 1L) }, { putLong("content_revision", -1L) },
+            { remove("location") }, { remove("playback_cycle") }, { putInt("playback_cycle", 7) }, { putLong("playback_cycle", -1L) },
             { putInt("duration", 60000) }, { putLong("duration", 0L) }, { putLong("duration", -1L) },
             { remove("position") }, { putInt("position", 10000) }, { putLong("position", -1L) },
             { remove("explicit_play") }, { putInt("explicit_play", 0) },
-            { putInt("schema", 1) }, { putInt("schema", 3) }, { remove("schema") },
+            { putInt("schema", 1) }, { putInt("schema", 2) }, { putInt("schema", 4) }, { remove("schema") },
+            { putString("unknown_seek_field", "ignored") },
         )
         for (mutate in mutations) {
             rejects("malformed seek binding or target") {
@@ -456,6 +459,10 @@ class PlaybackCommandsTest {
             }
         }
         rejects("old begin-seek protocol") { PlaybackCommands.readBeginSeek(Bundle().apply { putInt("schema", 1) }) }
+        rejects("begin-seek schema two has no traversal fence") { PlaybackCommands.readBeginSeek(Bundle().apply { putInt("schema", 2) }) }
+        rejects("begin-seek cannot accept unrecognized arguments") {
+            PlaybackCommands.readBeginSeek(PlaybackCommands.beginSeekArguments().apply { putLong("position", 1L) })
+        }
     }
 
     private fun libraryCommand(selected: TrackKey? = TrackKey(TrackKey.LOCAL_PROVIDER, "selected-local")) = LibraryQueueCommand(
@@ -469,7 +476,7 @@ class PlaybackCommandsTest {
     private fun seekBinding() = QueueSeekBinding(
         previewId = "seek-preview", sessionId = "service-session", backendGeneration = 3L,
         generationId = base().generationId, queueRevision = 42L, queueEntryId = "instance-current",
-        locationId = "location-current", contentRevision = 8L, durationMs = 60000L,
+        locationId = "location-current", contentRevision = 8L, durationMs = 60000L, playbackCycle = 7L,
     )
 
     private fun validLocalArguments(): Bundle = PlaybackCommands.localArguments(entry(), base(), "operation-valid")

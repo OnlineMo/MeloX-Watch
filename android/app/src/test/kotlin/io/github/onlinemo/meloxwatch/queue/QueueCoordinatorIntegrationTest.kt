@@ -447,6 +447,8 @@ class QueueCoordinatorIntegrationTest {
             }
         })
         val binding = coordinator.seekBinding()!!
+        val seekOwner = coordinator.seekState.value.ownerId
+        assertEquals(binding.previewId, coordinator.seekState.value.previewId)
         val gate = testGate()
         operations.seekGate = gate
         operations.seekEntered = CompletableDeferred()
@@ -458,11 +460,15 @@ class QueueCoordinatorIntegrationTest {
         assertEquals(1234L, store.snapshot()!!.positionMs)
         assertEquals(1234L, backend.currentPosition)
         assertTrue(coordinator.state.value.preparing)
+        assertEquals(seekOwner, coordinator.seekState.value.ownerId)
+        assertEquals(binding.previewId, coordinator.seekState.value.previewId)
         assertEquals(1234L, coordinator.sessionPlayer.currentPosition)
         assertTrue(discontinuities.isEmpty())
         gate.complete(Unit)
         val saved = seek.await()
         assertEquals(8900L, saved.positionMs)
+        assertEquals(seekOwner, coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
         assertEquals(1, saved.checkpoint.completedCycles)
         assertTrue(saved.checkpointRevision > before.checkpointRevision)
         assertTrue(backend.playWhenReady)
@@ -537,23 +543,220 @@ class QueueCoordinatorIntegrationTest {
     }
 
     @Test
-    fun durationContentAndQueueChangesRejectStaleSeekWithoutAudioMutation() = onMain {
+    fun durationChangesRejectStaleSeekWithoutAudioMutationAndDisableItsOwner() = onMain {
         seed()
         val durationBinding = coordinator.seekBinding()!!
+        val oldOwner = coordinator.seekState.value.ownerId
         backend.fake.durationMs = 12_000L
         backend.fake.refresh()
+        assertNotEquals(oldOwner, coordinator.seekSessionState().ownerId)
+        assertNull(coordinator.seekState.value.previewId)
         val calls = backend.seekCalls
         expectFailure(QueuePlaybackIssue.SOURCE_CHANGED) { coordinator.seek(QueueSeekRequest(durationBinding, 8000L)) }
-        backend.fake.durationMs = 10_000L
-        backend.fake.refresh()
+        assertEquals(calls, backend.seekCalls)
+        assertNull(coordinator.seekState.value.ownerId)
+    }
+
+    @Test
+    fun resolvedContentChangesRejectStaleSeekWithoutAudioMutationAndDisableItsOwner() = onMain {
+        seed()
         val contentBinding = coordinator.seekBinding()!!
+        val calls = backend.seekCalls
         resolveHook = { it.copy(location = it.location?.copy(contentRevision = 1L)) }
         expectFailure(QueuePlaybackIssue.SOURCE_CHANGED) { coordinator.seek(QueueSeekRequest(contentBinding, 8000L)) }
-        resolveHook = { it }
+        assertEquals(calls, backend.seekCalls)
+        assertNull(coordinator.seekState.value.ownerId)
+    }
+
+    @Test
+    fun queueChangesRejectStaleSeekWithoutAudioMutationAndReplaceTheOwner() = onMain {
+        seed()
         val queueBinding = coordinator.seekBinding()!!
+        val oldOwner = coordinator.seekState.value.ownerId
+        val calls = backend.seekCalls
         coordinator.mutate(edit("new-generation", store.snapshot()!!, QueueMutation.Move("entry-0", 4L)))
+        assertNotEquals(oldOwner, coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
         expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.seek(QueueSeekRequest(queueBinding, 8000L)) }
         assertEquals(calls, backend.seekCalls)
+    }
+
+    @Test
+    fun seekOwnerAndPreviewSurviveProgressAndRealCheckpointWritesWithoutProviderReads() = onMain {
+        seed()
+        val binding = coordinator.seekBinding()!!
+        val owner = coordinator.seekState.value.ownerId
+        assertTrue(owner != null)
+        assertTrue(binding.playbackCycle > 0L)
+        val readsBefore = reads.toList()
+        val checkpoint = store.snapshot()!!
+        val calls = backend.seekCalls
+        repeat(100) {
+            assertEquals(owner, coordinator.seekSessionState().ownerId)
+            assertEquals(binding.previewId, coordinator.seekState.value.previewId)
+        }
+        assertEquals(checkpoint.checkpointRevision, store.snapshot()!!.checkpointRevision)
+        backend.fake.advancePosition(2345L)
+        coordinator.flush()
+        assertEquals(2345L, store.snapshot()!!.positionMs)
+        assertTrue(store.snapshot()!!.checkpointRevision > checkpoint.checkpointRevision)
+        assertEquals(owner, coordinator.seekState.value.ownerId)
+        assertEquals(binding.previewId, coordinator.seekState.value.previewId)
+        assertEquals(readsBefore, reads)
+        assertEquals(calls, backend.seekCalls)
+    }
+
+    @Test
+    fun replacingAPreviewPublishesItsNewIdWhileRetainingTheSameOwner() = onMain {
+        seed()
+        val first = coordinator.seekBinding()!!
+        val owner = coordinator.seekState.value.ownerId
+        val second = coordinator.seekBinding()!!
+        assertNotEquals(first.previewId, second.previewId)
+        assertEquals(first.playbackCycle, second.playbackCycle)
+        assertEquals(owner, coordinator.seekState.value.ownerId)
+        assertEquals(second.previewId, coordinator.seekState.value.previewId)
+        val calls = backend.seekCalls
+        expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.seek(QueueSeekRequest(first, 5000L)) }
+        assertEquals(calls, backend.seekCalls)
+    }
+
+    @Test
+    fun seekKeepsItsOriginalOwnerThroughItsOwnResolverPreparationAndBuffering() = onMain {
+        seed()
+        coordinator.sessionPlayer.play()
+        val binding = coordinator.seekBinding()!!
+        val owner = coordinator.seekState.value.ownerId
+        val sourceEntered = CompletableDeferred<Unit>()
+        val sourceGate = testGate()
+        val seekGate = testGate()
+        resolveHook = {
+            sourceEntered.complete(Unit)
+            sourceGate.await()
+            it
+        }
+        operations.seekGate = seekGate
+        operations.seekEntered = CompletableDeferred()
+        val command = asyncCommand { coordinator.seek(QueueSeekRequest(binding, 5000L)) }
+        sourceEntered.await()
+        assertTrue(coordinator.state.value.preparing)
+        assertEquals(owner, coordinator.seekState.value.ownerId)
+        assertEquals(binding.previewId, coordinator.seekState.value.previewId)
+        coordinator.flush()
+        assertEquals(owner, coordinator.seekSessionState().ownerId)
+        sourceGate.complete(Unit)
+        operations.seekEntered.await()
+        assertEquals(Player.STATE_BUFFERING, backend.playbackState)
+        assertEquals(owner, coordinator.seekState.value.ownerId)
+        assertEquals(binding.previewId, coordinator.seekState.value.previewId)
+        backend.fake.durationMs = C.TIME_UNSET
+        backend.fake.refresh()
+        backend.seekCommandAvailable = false
+        assertEquals(owner, coordinator.seekSessionState().ownerId)
+        assertEquals(binding.previewId, coordinator.seekState.value.previewId)
+        backend.fake.durationMs = binding.durationMs
+        backend.seekCommandAvailable = true
+        backend.fake.refresh()
+        seekGate.complete(Unit)
+        assertEquals(5000L, command.await().positionMs)
+        assertEquals(owner, coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
+        assertTrue(backend.playWhenReady)
+    }
+
+    @Test
+    fun aQueuedNonSeekActionRevokesTheOwnerBeforeALateSeekAcknowledgement() = onMain {
+        seed()
+        val binding = coordinator.seekBinding()!!
+        val gate = testGate()
+        operations.seekGate = gate
+        operations.seekEntered = CompletableDeferred()
+        val command = asyncCommand { coordinator.seek(QueueSeekRequest(binding, 5000L)) }
+        operations.seekEntered.await()
+        coordinator.sessionPlayer.seekToNextMediaItem()
+        assertNull(coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
+        assertFalse(command.isCompleted)
+        gate.complete(Unit)
+        expectFailure(QueuePlaybackIssue.CONFLICT) { command.await() }
+        awaitIdleCommand()
+        assertEquals("entry-2", store.snapshot()!!.currentEntryId)
+        assertEquals(0L, store.snapshot()!!.positionMs)
+        assertFalse(backend.playWhenReady)
+    }
+
+    @Test
+    fun naturalRepeatOfTheSameInstanceRevokesItsOldPlaybackCycleAndPreview() = onMain {
+        seed()
+        coordinator.sessionPlayer.play()
+        val binding = coordinator.seekBinding()!!
+        val owner = coordinator.seekState.value.ownerId
+        val current = store.snapshot()!!.currentEntryId
+        backend.fake.completeNaturally()
+        awaitIdleCommand()
+        assertEquals(current, store.snapshot()!!.currentEntryId)
+        assertEquals(1, store.snapshot()!!.checkpoint.completedCycles)
+        assertNotEquals(owner, coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
+        val next = coordinator.seekBinding()!!
+        assertTrue(next.playbackCycle > binding.playbackCycle)
+        val calls = backend.seekCalls
+        expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.seek(QueueSeekRequest(binding, 5000L)) }
+        assertEquals(calls, backend.seekCalls)
+    }
+
+    @Test
+    fun explicitPauseRevokesAPreviewEvenWhenTheBackendIsAlreadyPaused() = onMain {
+        seed()
+        val binding = coordinator.seekBinding()!!
+        val owner = coordinator.seekState.value.ownerId
+        val calls = backend.seekCalls
+        coordinator.sessionPlayer.pause()
+        assertNotEquals(owner, coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
+        expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.seek(QueueSeekRequest(binding, 5000L)) }
+        assertEquals(calls, backend.seekCalls)
+        assertEquals(1234L, backend.currentPosition)
+        assertFalse(backend.playWhenReady)
+    }
+
+    @Test
+    fun aCompletedSeekReceiptCannotBeReplayedAfterANewNonSeekAction() = onMain {
+        seed()
+        val request = QueueSeekRequest(coordinator.seekBinding()!!, 5000L)
+        coordinator.seek(request)
+        val owner = coordinator.seekState.value.ownerId
+        val calls = backend.seekCalls
+        val readsBefore = reads.toList()
+        coordinator.sessionPlayer.pause()
+        assertNotEquals(owner, coordinator.seekState.value.ownerId)
+        expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.seek(request) }
+        assertEquals(calls, backend.seekCalls)
+        assertEquals(readsBefore, reads)
+        assertEquals(5000L, backend.currentPosition)
+    }
+
+    @Test
+    fun unknownDurationUnavailableSeekAndRealBackendErrorsPublishNoOwner() = onMain {
+        seed()
+        val owner = coordinator.seekState.value.ownerId
+        backend.fake.durationMs = C.TIME_UNSET
+        backend.fake.refresh()
+        assertNull(coordinator.seekSessionState().ownerId)
+        assertNull(coordinator.seekBinding())
+        backend.fake.durationMs = 10_000L
+        backend.fake.refresh()
+        assertNotEquals(owner, coordinator.seekSessionState().ownerId)
+        assertTrue(coordinator.seekState.value.ownerId != null)
+        backend.seekCommandAvailable = false
+        assertNull(coordinator.seekSessionState().ownerId)
+        assertNull(coordinator.seekBinding())
+        backend.seekCommandAvailable = true
+        assertTrue(coordinator.seekSessionState().ownerId != null)
+        backend.fake.fail(PlaybackException("controlled seek failure", null, PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED))
+        assertNull(coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
+        assertNull(coordinator.seekBinding())
     }
 
     @Test
@@ -778,17 +981,25 @@ class QueueCoordinatorIntegrationTest {
     fun backendSwitchKeepsSessionInstancePositionAndCycleAndRejectsOldCallbacks() = onMain {
         seedWithCompletedCycle()
         coordinator.sessionPlayer.play()
+        val binding = coordinator.seekBinding()!!
+        val seekOwner = coordinator.seekState.value.ownerId
         val session = coordinator.sessionPlayer
         val beforeRounds = rounds.toList()
         val old = backend
         val oldListeners = old.listeners.toList()
         val checkpoint = coordinator.freezeForBackendSwitch()
+        assertNull(coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
         coordinator.unbindBackendForSwitch(checkpoint)
+        assertNull(coordinator.seekSessionState().ownerId)
         old.release()
         val pair = createBackend()
         backend = pair.first
         operations = pair.second
         coordinator.restoreAfterBackendSwitch(backend, operations, checkpoint)
+        assertNotEquals(seekOwner, coordinator.seekState.value.ownerId)
+        assertNull(coordinator.seekState.value.previewId)
+        assertEquals(binding.playbackCycle, coordinator.seekBinding()!!.playbackCycle)
         assertSame(session, coordinator.sessionPlayer)
         assertEquals(beforeRounds, rounds)
         assertEquals(1234L, session.currentPosition)
@@ -802,6 +1013,7 @@ class QueueCoordinatorIntegrationTest {
         assertFalse(backend.playWhenReady)
         assertNull(coordinator.state.value.failure)
         expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.restoreAfterBackendSwitch(backend, operations, checkpoint) }
+        expectFailure(QueuePlaybackIssue.CONFLICT) { coordinator.seek(QueueSeekRequest(binding, 5000L)) }
         assertEquals(0, old.lateCalls)
     }
 
@@ -1195,7 +1407,7 @@ class QueueCoordinatorIntegrationTest {
 
         override fun getState(): State {
             val playlist = items.map { item -> MediaItemData.Builder(item.uid).setMediaItem(item.media)
-                .setDurationUs(durationMs * 1000L).setIsSeekable(true).build() }
+                .setDurationUs(if (durationMs == C.TIME_UNSET) C.TIME_UNSET else durationMs * 1000L).setIsSeekable(true).build() }
             val state = when {
                 closed || items.isEmpty() || failure != null -> Player.STATE_IDLE
                 ended -> Player.STATE_ENDED
@@ -1288,6 +1500,10 @@ class QueueCoordinatorIntegrationTest {
         }
 
         fun prepared() { ready = true; ended = false; buffering = false; failure = null; invalidateState() }
+        fun advancePosition(positionMs: Long) {
+            position = positionMs
+            invalidateState()
+        }
         fun acknowledgeSeek(positionMs: Long) {
             position = positionMs
             buffering = false
@@ -1337,6 +1553,7 @@ class QueueCoordinatorIntegrationTest {
         var availableCommandsFailure: IllegalStateException? = null
         var availableCommandsFailureRemaining = Int.MAX_VALUE
         var currentPositionFailure: IllegalStateException? = null
+        var seekCommandAvailable = true
         val listeners = mutableListOf<Player.Listener>()
         val peakWindow get() = fake.peakWindow
 
@@ -1352,7 +1569,9 @@ class QueueCoordinatorIntegrationTest {
             }
             fake.availableCommands
         }
-        override fun isCommandAvailable(command: Int): Boolean = live { fake.isCommandAvailable(command) }
+        override fun isCommandAvailable(command: Int): Boolean = live {
+            (command != Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM || seekCommandAvailable) && fake.isCommandAvailable(command)
+        }
         override fun getRepeatMode(): Int = live { fake.repeatMode }
         override fun getShuffleModeEnabled(): Boolean = live { fake.shuffleModeEnabled }
         override fun getPlaybackState(): Int = live { fake.playbackState }

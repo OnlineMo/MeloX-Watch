@@ -52,6 +52,7 @@ object PlaybackCommands {
     const val STORE_ISSUE = "store_issue"
     private const val SCHEMA = "schema"
     private const val SCHEMA_VERSION = 2
+    private const val SEEK_SCHEMA_VERSION = 3
     private const val GENERATION = "generation"
     private const val REVISION = "revision"
     private const val ENTRY = "entry"
@@ -80,6 +81,7 @@ object PlaybackCommands {
     private const val SESSION = "session"
     private const val BACKEND_GENERATION = "backend_generation"
     private const val CONTENT_REVISION = "content_revision"
+    private const val PLAYBACK_CYCLE = "playback_cycle"
     private const val POSITION = "position"
     private const val EXPLICIT_PLAY = "explicit_play"
     private const val PLAYLIST = "playlist"
@@ -102,6 +104,11 @@ object PlaybackCommands {
         PLAYLIST_CREATED, PLAYLIST_UPDATED, PLAYLIST_OWNER, FOLDER_SOURCE, FOLDER_NODE, FOLDER_SUBTREE,
         CATALOG, CATALOG_REVISION, RULES_REVISION, MEMBER, SELECTED_ORDER,
     )
+    private val SEEK_BINDING_FIELDS = setOf(
+        SCHEMA, PREVIEW, SESSION, BACKEND_GENERATION, GENERATION, REVISION, ENTRY, LOCATION,
+        CONTENT_REVISION, DURATION, PLAYBACK_CYCLE,
+    )
+    private val SEEK_REQUEST_FIELDS = SEEK_BINDING_FIELDS + setOf(POSITION, EXPLICIT_PLAY)
 
     /** 通知只导航到已有播放状态；独立 action 使它不复用普通启动的 PendingIntent。 */
     fun playbackActivityIntent(context: Context): Intent = Intent().setClassName(context, PLAYBACK_ACTIVITY_CLASS).apply {
@@ -287,14 +294,15 @@ object PlaybackCommands {
         )
     }
 
-    fun beginSeekArguments(): Bundle = Bundle().apply { putInt(SCHEMA, SCHEMA_VERSION) }
+    fun beginSeekArguments(): Bundle = Bundle().apply { putInt(SCHEMA, SEEK_SCHEMA_VERSION) }
 
     fun readBeginSeek(arguments: Bundle) {
-        require(arguments.value<Int>(SCHEMA) == SCHEMA_VERSION)
+        require(arguments.keySet() == setOf(SCHEMA))
+        require(arguments.value<Int>(SCHEMA) == SEEK_SCHEMA_VERSION)
     }
 
     fun seekBindingArguments(binding: QueueSeekBinding): Bundle = Bundle().apply {
-        putInt(SCHEMA, SCHEMA_VERSION)
+        putInt(SCHEMA, SEEK_SCHEMA_VERSION)
         putString(PREVIEW, binding.previewId)
         putString(SESSION, binding.sessionId)
         putLong(BACKEND_GENERATION, binding.backendGeneration)
@@ -304,10 +312,14 @@ object PlaybackCommands {
         putString(LOCATION, binding.locationId)
         putLong(CONTENT_REVISION, binding.contentRevision)
         putLong(DURATION, binding.durationMs)
+        putLong(PLAYBACK_CYCLE, binding.playbackCycle)
     }
 
-    fun readSeekBinding(arguments: Bundle): QueueSeekBinding {
-        require(arguments.value<Int>(SCHEMA) == SCHEMA_VERSION)
+    fun readSeekBinding(arguments: Bundle): QueueSeekBinding = readSeekBinding(arguments, SEEK_BINDING_FIELDS)
+
+    private fun readSeekBinding(arguments: Bundle, fields: Set<String>): QueueSeekBinding {
+        require(arguments.keySet() == fields)
+        require(arguments.value<Int>(SCHEMA) == SEEK_SCHEMA_VERSION)
         return QueueSeekBinding(
             previewId = arguments.identifier(PREVIEW),
             sessionId = arguments.identifier(SESSION),
@@ -318,6 +330,7 @@ object PlaybackCommands {
             locationId = arguments.optionalIdentifier(LOCATION),
             contentRevision = arguments.value(CONTENT_REVISION),
             durationMs = arguments.value(DURATION),
+            playbackCycle = arguments.value(PLAYBACK_CYCLE),
         )
     }
 
@@ -327,7 +340,7 @@ object PlaybackCommands {
     }
 
     fun readSeek(arguments: Bundle): QueueSeekRequest = QueueSeekRequest(
-        readSeekBinding(arguments), arguments.value<Long>(POSITION).also { require(it >= 0L) }, arguments.value(EXPLICIT_PLAY),
+        readSeekBinding(arguments, SEEK_REQUEST_FIELDS), arguments.value<Long>(POSITION).also { require(it >= 0L) }, arguments.value(EXPLICIT_PLAY),
     )
 
     fun localArguments(entry: QueueEntry, expected: QueueSnapshot?, operationId: String): Bundle {

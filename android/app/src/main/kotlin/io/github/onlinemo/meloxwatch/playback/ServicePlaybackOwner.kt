@@ -45,28 +45,32 @@ internal class ServicePlaybackOwner(
     private val localIo: LocalProviderIo,
     ensureForeground: () -> Boolean,
     private val onFailure: (PlaybackBackendIssue) -> Unit,
+    private val releaseGuard: PlaybackEngineReleaseGuard = PlaybackEngineReleaseGuard.process,
 ) {
-    private data class Backend(
+    private class Backend(
         val kind: PlaybackBackendKind,
         val player: Player,
         val operations: PlaybackBackendOperations,
+        val releaseGuard: PlaybackEngineReleaseGuard,
+        val releaseLease: PlaybackEngineReleaseGuard.Lease,
         val media3: Media3PlaybackOperations? = null,
         val system: SystemMediaPlayerAdapter? = null,
     ) {
-        fun release() {
-            try { media3?.close() }
-            finally {
-                try { player.pause() }
-                finally { if (system != null) system.releaseOwnedPlayer() else player.release() }
-            }
-        }
+        private val release = ScheduledPlaybackRelease(releaseGuard, releaseLease, player,
+            closeOperations = { media3?.close() },
+            releasePlayer = { if (system != null) system.releaseOwnedPlayer() else player.release() })
+
+        fun releaseLater() = release.start()
+
+        suspend fun releaseAndAwait() = withContext(NonCancellable) { release.start().await() }
     }
 
     private val applicationContext = context.applicationContext.also { checkMain() }
     private val _state = MutableStateFlow(PlaybackBackendState())
     val state = _state.asStateFlow()
     private var quarantined: Backend? = null
-    private var active: Backend? = createBackend(PlaybackBackendKind.MEDIA3, 10)
+    private val pausedBackend = QuarantinedPlaybackBackend(releaseGuard)
+    private var active: Backend? = createInitialBackend()
     private var coordinator: QueuePlaybackCoordinator? = null
     private var listening: ServiceListeningObserver? = null
     private var observer: Player.Listener? = null
@@ -82,34 +86,35 @@ internal class ServicePlaybackOwner(
         player = { active?.player },
         backendGeneration = { _state.value.generation },
         ensureForeground = ensureForeground,
-        pauseQueue = { coordinator?.pauseFromSession() },
+        pauseQueue = { coordinator?.pauseForInterruption() },
         checkpoint = { coordinator?.requestCheckpoint() },
         resumeQueue = { coordinator?.playFromSession() },
         onFailure = ::report,
     ) } catch (error: Exception) {
         val failed = active
         active = null
-        preserveFailure(error) { failed?.release() }
+        preserveFailure(error) { failed?.releaseLater() }
         throw error
     }
 
     init {
         checkMain()
         try {
-            _state.value = _state.value.copy(actualBackend = PlaybackBackendKind.MEDIA3, generation = 1L)
-            bindObserver(checkNotNull(active))
+            _state.value = _state.value.copy(actualBackend = active?.kind, generation = 1L)
+            active?.let(::bindObserver)
         } catch (error: Exception) {
             preserveFailure(error, focus::close)
             preserveFailure(error, ::unbindObserver)
             val failed = active
             active = null
-            preserveFailure(error) { failed?.release() }
+            preserveFailure(error) { failed?.releaseLater() }
             throw error
         }
     }
 
-    val initialPlayer: Player get() = checkNotNull(active).player
-    val initialOperations: PlaybackBackendOperations get() = checkNotNull(active).operations
+    val initialPlayer: Player get() = active?.player ?: pausedBackend
+    val initialOperations: PlaybackBackendOperations get() = active?.operations ?: pausedBackend
+    val hasUsableBackend: Boolean get() = !closed && active != null && !_state.value.switching && !releaseGuard.hasUnconfirmedRelease()
 
     fun attach(queues: QueuePlaybackCoordinator, statistics: ServiceListeningObserver) {
         checkMain()
@@ -145,7 +150,7 @@ internal class ServicePlaybackOwner(
     }
 
     fun requestPlay(): Boolean {
-        if (closed || !preferencesInitialized || _state.value.switching) return false
+        if (!hasUsableBackend || !preferencesInitialized) return false
         val accepted = focus.requestPlay()
         if (accepted) _state.value = _state.value.copy(issue =
             if (active?.kind == currentPreferences.playbackBackend) null else PlaybackBackendIssue.SWITCH_FAILED)
@@ -158,14 +163,18 @@ internal class ServicePlaybackOwner(
 
     fun foregroundDenied() {
         focus.userPause()
-        coordinator?.pauseFromSession()
+        coordinator?.pauseForInterruption()
         report(PlaybackBackendIssue.FOREGROUND_DENIED)
     }
 
-    /** True means this retry owns checkpoint restoration; runtime state carries any failure. */
+    /** True means this retry handled backend recovery, including a guarded rejection. */
     suspend fun retryBackendIfNeeded(): Boolean = withContext(Dispatchers.Main.immediate) {
         preferenceTransactions.withLock {
             if (closed) return@withLock false
+            if (blockedByPriorRelease()) {
+                report(PlaybackBackendIssue.SWITCH_FAILED)
+                return@withLock true
+            }
             val needsBackend = active == null || active?.kind != currentPreferences.playbackBackend || active?.player?.playerError != null
             if (needsBackend) applyPreferencesLocked(currentPreferences, forceRetry = true)
             needsBackend
@@ -189,11 +198,13 @@ internal class ServicePlaybackOwner(
             }
         }
         attempt(focus::close)
+        attempt { previous?.player?.pause() }
         attempt(::unbindObserver)
         active = null
         quarantined = null
-        attempt { previous?.release() }
-        if (retained !== previous) attempt { retained?.release() }
+        attempt { previous?.releaseLater() }
+        if (retained !== previous) attempt { retained?.releaseLater() }
+        attempt(pausedBackend::release)
         _state.value = _state.value.copy(actualBackend = null, switching = false, issue = PlaybackBackendIssue.CLOSED,
             gaplessAvailable = false, generation = _state.value.generation + 1L)
         failure?.let { throw it }
@@ -211,7 +222,7 @@ internal class ServicePlaybackOwner(
             gaplessRequested = saved.gaplessPlayback,
             speed = _state.value.speed.copy(requestedTenths = saved.playbackSpeedTenths))
         focus.setManagementEnabled(saved.audioFocusManagement)
-        if (quarantined != null) {
+        if (quarantined != null || blockedByPriorRelease()) {
             report(PlaybackBackendIssue.SWITCH_FAILED)
             return
         }
@@ -275,7 +286,7 @@ internal class ServicePlaybackOwner(
             active = null
             _state.value = _state.value.copy(actualBackend = null, gaplessAvailable = false,
                 generation = _state.value.generation + 1L)
-            try { previous?.release() }
+            try { previous?.releaseAndAwait() }
             catch (error: Exception) { quarantined = previous; throw error }
             currentCoroutineContext().ensureActive()
             if (closed) throw CancellationException("Playback service closed")
@@ -300,7 +311,7 @@ internal class ServicePlaybackOwner(
             }
             val frozen = checkpoint
             if (unbound && frozen != null && !closed) {
-                if (error !is CancellationException && quarantined == null && previous != null) {
+                if (error !is CancellationException && quarantined == null && previous != null && !releaseGuard.blocksCreation()) {
                     // One bounded rollback rebuilds the old kind only after both prior instances
                     // have been released. It rechecks sources and restores paused through the same
                     // token; the user's saved requested kind remains unchanged and visible.
@@ -346,7 +357,7 @@ internal class ServicePlaybackOwner(
         }
     }
 
-    private fun releaseSwitchBinding(
+    private suspend fun releaseSwitchBinding(
         queues: QueuePlaybackCoordinator,
         statistics: ServiceListeningObserver,
         checkpoint: QueueBackendCheckpoint,
@@ -357,7 +368,7 @@ internal class ServicePlaybackOwner(
         preserveFailure(failure, ::unbindObserver)
         val failed = active
         active = null
-        try { failed?.release() }
+        try { failed?.releaseAndAwait() }
         catch (cleanup: Exception) {
             quarantined = failed
             if (cleanup !== failure) failure.addSuppressed(cleanup)
@@ -409,13 +420,35 @@ internal class ServicePlaybackOwner(
 
     private fun isCurrent(backend: Backend, generation: Long): Boolean = !closed && active === backend && _state.value.generation == generation
 
-    private fun createBackend(kind: PlaybackBackendKind, speedTenths: Int): Backend = when (kind) {
+    private fun blockedByPriorRelease(): Boolean = releaseGuard.hasUnconfirmedRelease() || active == null && releaseGuard.blocksCreation()
+
+    private fun createInitialBackend(): Backend? = try {
+        createBackend(PlaybackBackendKind.MEDIA3, 10)
+    } catch (_: Exception) {
+        // The process guard must yield an inspectable paused service, not an onCreate crash.
+        _state.value = _state.value.copy(actualBackend = null, issue = PlaybackBackendIssue.SWITCH_FAILED)
+        null
+    }
+
+    private fun createBackend(kind: PlaybackBackendKind, speedTenths: Int): Backend {
+        val lease = releaseGuard.acquire()
+        return try {
+            createLeasedBackend(kind, speedTenths, lease)
+        } catch (error: Exception) {
+            // If allocation failed before an owned instance could be released, its resources are
+            // unknown. A configuration failure with confirmed cleanup has already cleared lease.
+            if (releaseGuard.isRetained(lease) && !releaseGuard.releaseStarted(lease)) releaseGuard.quarantine(lease)
+            throw error
+        }
+    }
+
+    private fun createLeasedBackend(kind: PlaybackBackendKind, speedTenths: Int, lease: PlaybackEngineReleaseGuard.Lease): Backend = when (kind) {
         PlaybackBackendKind.SYSTEM_MEDIA_PLAYER -> {
             val platform = SystemMediaPlayerAdapter(applicationContext, localIo, scope, speedTenths)
-            val backend = Backend(kind, platform, platform, system = platform)
+            val backend = Backend(kind, platform, platform, releaseGuard, lease, system = platform)
             try { platform.initializePlatform(); backend }
             catch (error: Exception) {
-                try { backend.release() }
+                try { backend.releaseLater() }
                 catch (cleanup: Exception) { quarantined = backend; error.addSuppressed(cleanup) }
                 throw error
             }
@@ -427,7 +460,7 @@ internal class ServicePlaybackOwner(
             val player = ExoPlayer.Builder(applicationContext).setRenderersFactory(renderers)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(localDataSource)).setReleaseTimeoutMs(1500L).build()
             val operations = Media3PlaybackOperations(player)
-            val backend = Backend(kind, player, operations, media3 = operations)
+            val backend = Backend(kind, player, operations, releaseGuard, lease, media3 = operations)
             try {
                 player.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), false)
@@ -438,7 +471,7 @@ internal class ServicePlaybackOwner(
                         .setAudioOffloadMode(TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_DISABLED).build()).build()
                 backend
             } catch (error: Exception) {
-                try { backend.release() }
+                try { backend.releaseLater() }
                 catch (cleanup: Exception) { quarantined = backend; error.addSuppressed(cleanup) }
                 throw error
             }

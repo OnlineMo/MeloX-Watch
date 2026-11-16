@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -35,7 +36,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Shapes
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -58,8 +58,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -97,6 +95,13 @@ import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendIssue
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendState
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
+import io.github.onlinemo.meloxwatch.playback.input.SeekGestureMode
+import io.github.onlinemo.meloxwatch.playback.input.SeekGestureSurface
+import io.github.onlinemo.meloxwatch.ui.playback.MediaVolumeIssue
+import io.github.onlinemo.meloxwatch.ui.playback.PlaybackProgressInputIssue
+import io.github.onlinemo.meloxwatch.ui.playback.PlaybackProgressInputPhase
+import io.github.onlinemo.meloxwatch.ui.playback.SleepTimerControls
+import io.github.onlinemo.meloxwatch.ui.playback.SleepTimerSummaryPreferences
 import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesControls
 import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesViewModel
 import io.github.onlinemo.meloxwatch.ui.queue.QueueViewModel
@@ -123,6 +128,10 @@ import io.github.onlinemo.meloxwatch.ui.watch.WatchGlyph
 import io.github.onlinemo.meloxwatch.ui.watch.WatchPalette
 import io.github.onlinemo.meloxwatch.ui.watch.WatchNowPlayingPage
 import io.github.onlinemo.meloxwatch.ui.watch.WatchPlaybackPages
+import io.github.onlinemo.meloxwatch.ui.watch.WatchProgressBar
+import io.github.onlinemo.meloxwatch.ui.watch.rememberRotaryAxisSteps
+import io.github.onlinemo.meloxwatch.ui.watch.rememberWatchRotaryScroll
+import io.github.onlinemo.meloxwatch.ui.watch.watchRotaryInput
 import java.net.URI
 import java.net.URISyntaxException
 import java.util.Locale
@@ -194,6 +203,11 @@ class MainActivity : ComponentActivity() {
         sourcesViewModel.onBackground()
         (application as MeloXApplication).onUiBackground()
         super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (::probeViewModel.isInitialized) probeViewModel.setWindowFocused(hasFocus)
     }
 
     private fun acceptLaunchIntent(source: Intent?) {
@@ -269,6 +283,11 @@ private fun ProbeApp(
     activity: MainActivity,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val mainProgress by viewModel.playbackInput.mainState.collectAsStateWithLifecycle()
+    val independentProgress by viewModel.playbackInput.independentState.collectAsStateWithLifecycle()
+    val rotaryPending by viewModel.playbackInput.rotaryPending.collectAsStateWithLifecycle()
+    val inputBusy = rotaryPending || mainProgress.phase != PlaybackProgressInputPhase.IDLE ||
+        independentProgress.phase != PlaybackProgressInputPhase.IDLE
     val preferences by preferencesViewModel.uiState.collectAsStateWithLifecycle()
     val queue by queueViewModel.uiState.collectAsStateWithLifecycle()
     val library by libraryViewModel.uiState.collectAsStateWithLifecycle()
@@ -284,7 +303,7 @@ private fun ProbeApp(
         preferences.effective.screenShape
     }
     LaunchedEffect(state.page) {
-        if (state.page == ProbePage.SETTINGS) preferencesViewModel.enterEditor()
+        if (state.page in setOf(ProbePage.SETTINGS, ProbePage.SLEEP_TIMER_NOTIFICATIONS)) preferencesViewModel.enterEditor()
         else if (preferences.isEditing) preferencesViewModel.clearDraft()
     }
     LifecycleStartEffect(state.page) {
@@ -456,7 +475,7 @@ private fun ProbeApp(
         }
     }
     val returnHome = {
-        if (state.page == ProbePage.SETTINGS) preferencesViewModel.clearDraft()
+        if (state.page in setOf(ProbePage.SETTINGS, ProbePage.SLEEP_TIMER_NOTIFICATIONS)) preferencesViewModel.clearDraft()
         viewModel.showPage(ProbePage.HOME)
     }
     val openPlaylists = {
@@ -482,7 +501,11 @@ private fun ProbeApp(
                 else -> if (playlists.playlistId == null) playlistsViewModel.showCatalog() else playlistsViewModel.returnToDetails()
             }
             state.page == ProbePage.QUEUE && queue.editor != null -> queueViewModel.cancelEdit()
-            state.page == ProbePage.PLAYBACK && state.seekPreview != null && !state.playbackCommandPending -> viewModel.cancelSeek()
+            state.page == ProbePage.SLEEP_TIMER_NOTIFICATIONS -> {
+                preferencesViewModel.clearDraft()
+                viewModel.showPage(ProbePage.SLEEP_TIMER)
+            }
+            state.page in setOf(ProbePage.SEEK, ProbePage.VOLUME, ProbePage.SLEEP_TIMER) -> viewModel.showPage(ProbePage.PLAYBACK)
             state.page == ProbePage.LIBRARY && libraryViewModel.back() -> Unit
             else -> returnHome()
         }
@@ -502,7 +525,10 @@ private fun ProbeApp(
                     preferences.effective.artworkReadPath, library.artworkRevision, visiblePage,
                     onMenu = returnHome, openDocument = openDocument,
                     onAddPlaying = { playlistEntryViewModel.addPlaying(showAddTargets) }, onPlaylists = openPlaylists)
-            } else ProbePageContent(screenShape, resetScroll,
+            } else ProbePageContent(screenShape, resetScroll, visible = visiblePage, ownerKey = page,
+                onInputFocus = { within, direct ->
+                    if (page == ProbePage.SEEK) viewModel.setPlaybackInputFocused(page, within, direct)
+                },
                 onVisibleKeys = if (page == ProbePage.LIBRARY && visiblePage) libraryViewModel::setVisibleItemKeys else null) {
                 if (page == ProbePage.QUEUE) {
                     item(key = "player:menu") {
@@ -529,6 +555,14 @@ private fun ProbeApp(
                     ProbePage.INPUT -> item { InputCheck() }
                     ProbePage.PLAYBACK -> Unit // Dedicated viewport above; business actions keep the same owners.
                     ProbePage.DEVICE -> item { DeviceDetails() }
+                    ProbePage.SEEK -> item { SeekControls(state, viewModel) }
+                    ProbePage.VOLUME -> item { MediaVolumeControls(viewModel) }
+                    ProbePage.SLEEP_TIMER -> item {
+                        SleepTimerControls(state, viewModel) { viewModel.showPage(ProbePage.SLEEP_TIMER_NOTIFICATIONS) }
+                    }
+                    ProbePage.SLEEP_TIMER_NOTIFICATIONS -> item {
+                        SleepTimerSummaryPreferences(preferencesViewModel) { viewModel.showPage(ProbePage.SLEEP_TIMER) }
+                    }
                     ProbePage.SETTINGS -> item {
                         PreferencesControls(preferencesViewModel, onCancel = { viewModel.showPage(ProbePage.HOME) })
                     }
@@ -585,7 +619,7 @@ private fun ProbeApp(
         }
     }
     if (state.page in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK)) {
-        WatchPlaybackPages(state.page, !state.playbackCommandPending && state.seekPreview == null && queue.editor == null,
+        WatchPlaybackPages(state.page, !state.playbackCommandPending && !inputBusy && queue.editor == null,
             onPage = { page -> if (page != state.page) viewModel.showPage(page) }, content = renderPage)
     } else {
         renderPage(state.page, true)
@@ -596,6 +630,9 @@ private fun ProbeApp(
 private fun ProbePageContent(
     screenShape: ScreenShape,
     resetScroll: Pair<String?, Long>?,
+    visible: Boolean,
+    ownerKey: Any?,
+    onInputFocus: (Boolean, Boolean) -> Unit = { _, _ -> },
     onVisibleKeys: ((List<Any>) -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
@@ -604,6 +641,7 @@ private fun ProbePageContent(
     val fullWindowSize = LocalWindowInfo.current.containerSize
     val fullWindowHeight = with(density) { fullWindowSize.height.toDp() }
     val listState = rememberLazyListState()
+    val scrollRotary = rememberWatchRotaryScroll(listState, visible)
     LaunchedEffect(onVisibleKeys, resetScroll) {
         if (onVisibleKeys != null) snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.key } }
             .distinctUntilChanged().collect(onVisibleKeys)
@@ -628,7 +666,8 @@ private fun ProbePageContent(
         val roundInset = maxOf(fullWindowHeight, maxHeight) * 0.22f
         val verticalInset = if (protectsRoundBounds) roundInset else 12.dp
         LazyColumn(
-            modifier = Modifier.width(contentWidth).align(Alignment.Center),
+            modifier = Modifier.width(contentWidth).align(Alignment.Center)
+                .watchRotaryInput(visible, ownerKey, onInputFocus, scrollRotary),
             state = listState,
             contentPadding = PaddingValues(top = verticalInset, bottom = verticalInset + 12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -650,6 +689,7 @@ private fun LazyListScope.homeContent(
     item { ProbeButton(stringResource(R.string.playlist_heading)) { viewModel.showPage(ProbePage.PLAYLISTS) } }
     item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
     item { ProbeButton(stringResource(R.string.playback_settings), onClick = { viewModel.showPage(ProbePage.SETTINGS) }) }
+    item { ProbeButton(stringResource(R.string.sleep_timer_title), onClick = { viewModel.showPage(ProbePage.SLEEP_TIMER) }) }
     item(key = "menu:device-checks") {
         var expanded by rememberSaveable { mutableStateOf(false) }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -742,6 +782,7 @@ private fun NowPlayingContent(
     onPlaylists: () -> Unit,
 ) {
     val playback = state.playback
+    val rotaryAxis = rememberRotaryAxisSteps()
     val track = entry.playingTrack
     val title = playback.title?.takeIf(String::isNotBlank) ?: track?.title ?: stringResource(R.string.probe_unnamed_audio)
     val artist = track?.metadata?.artist?.takeIf(String::isNotBlank) ?: playback.artist?.takeIf(String::isNotBlank)
@@ -749,7 +790,13 @@ private fun NowPlayingContent(
     WatchNowPlayingPage(screenShape, title, artist.takeIf { playback.hasMedia },
         stringResource(R.string.watch_open_menu), onMenu,
         artwork = { size -> NowPlayingArtwork(track, artworkPath, artworkRevision, visible, size) },
-        transport = { centerSize, horizontal -> WatchTransport(state, viewModel, centerSize, horizontal) }) {
+        transport = { centerSize, horizontal -> WatchTransport(state, viewModel, centerSize, horizontal) },
+        visible = visible,
+        onInputFocus = { within, direct -> viewModel.setPlaybackInputFocused(ProbePage.PLAYBACK, within, direct) },
+        onListPriority = { viewModel.setPlaybackListPriority(ProbePage.PLAYBACK, it) },
+        onRotaryPlayback = { event -> rotaryAxis(event)?.let {
+            viewModel.playbackInput.rotary(SystemClock.elapsedRealtime(), it)
+        } ?: false }) {
         OperationStatus(state, onCancel = viewModel::cancelFileRead, onRetryQueue = viewModel::retryQueueRestore)
         PlaybackDetails(state, viewModel, openDocument, title, artist)
         if (playback.hasMedia) {
@@ -778,7 +825,10 @@ private fun PlaybackDetails(state: ProbeUiState, viewModel: ProbeViewModel, open
             BodyText(stringResource(R.string.playback_preparing_queue))
             ProbeButton(stringResource(R.string.playback_cancel_prepare), onClick = viewModel::pause)
         }
-        SeekControls(state, viewModel)
+        if (state.inputControls.showMainProgress) PlaybackProgressControl(state, viewModel, SeekGestureSurface.MAIN_PROGRESS)
+        ProbeButton(stringResource(R.string.playback_seek_open)) { viewModel.showPage(ProbePage.SEEK) }
+        ProbeButton(stringResource(R.string.input_media_volume_title)) { viewModel.showPage(ProbePage.VOLUME) }
+        ProbeButton(stringResource(R.string.sleep_timer_title)) { viewModel.showPage(ProbePage.SLEEP_TIMER) }
         BodyText(stringResource(R.string.watch_swipe_queue))
         ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) })
         if (selected != null && state.selectedQueueEntry?.queueEntryId != playback.mediaId) {
@@ -857,58 +907,119 @@ private fun WatchTransport(state: ProbeUiState, viewModel: ProbeViewModel,
 
 @Composable
 private fun SeekControls(state: ProbeUiState, viewModel: ProbeViewModel) {
-    val playback = state.playback
-    val preview = state.seekPreview
-    val durationMs = playback.durationMs
+    val main by viewModel.playbackInput.mainState.collectAsStateWithLifecycle()
+    val independent by viewModel.playbackInput.independentState.collectAsStateWithLifecycle()
+    val rotary by viewModel.playbackInput.rotaryPending.collectAsStateWithLifecycle()
+    val surface = SeekGestureSurface.INDEPENDENT_CONTROLS
+    val context = viewModel.playbackInput.progressContext(surface)
+    val duration = state.playback.durationMs
+    val enabled = context.foreground && context.ownerId != null && context.canSeek && !rotary &&
+        main.phase == PlaybackProgressInputPhase.IDLE && independent.phase == PlaybackProgressInputPhase.IDLE &&
+        duration != null && duration > 0L
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(
-            text = stringResource(
-                R.string.probe_position,
-                elapsedTime(playback.positionMs),
-                durationMs?.let(::elapsedTime) ?: stringResource(R.string.probe_unknown_duration),
-            ),
-            style = MaterialTheme.typography.bodyMedium,
-            color = SecondaryText,
-        )
-        if (!playback.canSeek || durationMs == null || durationMs <= 0L) {
-            BodyText(stringResource(R.string.probe_seek_unavailable))
-            return@Column
+        BodyText(stringResource(R.string.input_seek_scope))
+        PlaybackProgressControl(state, viewModel, surface)
+        ProbeButton(stringResource(R.string.probe_seek_back), enabled && state.playback.positionMs > 0L) {
+            viewModel.playbackInput.seekBy(surface, -10_000L)
         }
-        if (preview == null) {
-            ProbeButton(
-                stringResource(R.string.playback_seek_open),
-                enabled = !state.playbackCommandPending,
-                onClick = viewModel::beginSeek,
-            )
-            return@Column
+        ProbeButton(stringResource(R.string.probe_seek_forward), enabled && state.playback.positionMs < (duration ?: 0L)) {
+            viewModel.playbackInput.seekBy(surface, 10_000L)
         }
-        val targetMs = preview.positionMs
-        val boundDuration = preview.binding.durationMs
-        val enabled = !state.playbackCommandPending
-        val seekLabel = stringResource(R.string.probe_seek_label)
-        BodyText(stringResource(R.string.playback_seek_scope))
-        Slider(
-            value = (targetMs.toDouble() / boundDuration.toDouble()).toFloat().coerceIn(0f, 1f),
-            onValueChange = { fraction ->
-                viewModel.previewSeek((fraction.toDouble() * boundDuration).toLong())
-            },
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics { contentDescription = seekLabel },
-            enabled = enabled,
-        )
-        BodyText(stringResource(R.string.probe_seek_preview, elapsedTime(targetMs)))
-        ProbeButton(stringResource(R.string.probe_seek_back), enabled && targetMs > 0L) {
-            viewModel.previewSeek((targetMs - 10000L).coerceAtLeast(0L))
+        ProbeButton(stringResource(R.string.playback_seek_start), enabled && state.playback.positionMs > 0L) {
+            viewModel.playbackInput.setProgress(surface, 0.0)
         }
-        ProbeButton(stringResource(R.string.probe_seek_forward), enabled && targetMs < boundDuration) {
-            val remaining = boundDuration - targetMs
-            viewModel.previewSeek(targetMs + minOf(10000L, remaining))
-        }
-        ProbeButton(stringResource(R.string.playback_seek_start), enabled && targetMs != 0L) {
-            viewModel.previewSeek(0L)
-        }
-        ProbeButton(stringResource(R.string.probe_seek_commit), enabled, primary = true, onClick = viewModel::confirmSeek)
-        ProbeButton(stringResource(R.string.probe_cancel), enabled, onClick = viewModel::cancelSeek)
     }
+}
+
+@Composable
+private fun PlaybackProgressControl(state: ProbeUiState, model: ProbeViewModel, surface: SeekGestureSurface) {
+    val main by model.playbackInput.mainState.collectAsStateWithLifecycle()
+    val independent by model.playbackInput.independentState.collectAsStateWithLifecycle()
+    val rotary by model.playbackInput.rotaryPending.collectAsStateWithLifecycle()
+    val progress = if (surface == SeekGestureSurface.MAIN_PROGRESS) main else independent
+    val other = if (surface == SeekGestureSurface.MAIN_PROGRESS) independent else main
+    val context = model.playbackInput.progressContext(surface)
+    val duration = state.playback.durationMs?.takeIf { it > 0L }
+    val submitting = progress.phase in setOf(PlaybackProgressInputPhase.COMMITTING, PlaybackProgressInputPhase.CANCELLING)
+    val otherBusy = rotary || other.phase != PlaybackProgressInputPhase.IDLE
+    val enabled = context.foreground && context.ownerId != null && context.canSeek && !submitting && !otherBusy && duration != null
+    val preview = progress.previewPositionMs ?: duration?.let { total ->
+        progress.previewFraction?.let { (it * total.toDouble()).toLong().coerceIn(0L, total) }
+    }
+    val fraction = duration?.let { total ->
+        progress.previewFraction ?: ((preview ?: state.playback.positionMs).coerceIn(0L, total).toDouble() / total.toDouble())
+    }
+    val reason = stringResource(when {
+        duration == null -> R.string.input_seek_unknown_duration
+        submitting || otherBusy || state.playbackCommandPending -> R.string.input_seek_busy
+        !context.foreground || context.ownerId == null && state.seekAuthority?.ownerId != null -> R.string.input_seek_unfocused
+        else -> R.string.probe_seek_unavailable
+    })
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        BodyText(stringResource(R.string.probe_position, elapsedTime(state.playback.positionMs),
+            duration?.let(::elapsedTime) ?: stringResource(R.string.probe_unknown_duration)))
+        WatchProgressBar(fraction, context.settings.mode, enabled,
+            context.ownerId to context.controlsStateKey, stringResource(R.string.input_seek_progress), reason,
+            onBegin = { model.playbackInput.begin(surface) },
+            onDrag = { id, value -> model.playbackInput.drag(surface, id, value) },
+            onRelease = { model.playbackInput.release(surface, it) },
+            onTap = { id, value -> model.playbackInput.tap(surface, id, value) },
+            onCancel = { model.playbackInput.cancel(surface, it) },
+            onSetProgress = { model.playbackInput.setProgress(surface, it) })
+        if (preview != null) BodyText(stringResource(R.string.probe_seek_preview, elapsedTime(preview)))
+        if (progress.phase == PlaybackProgressInputPhase.ACQUIRING) BodyText(stringResource(R.string.input_seek_acquiring))
+        if (submitting || rotary) BodyText(stringResource(R.string.input_seek_busy))
+        progress.issue?.takeIf { progress.issueOwnerId == context.ownerId }?.let {
+            BodyText(stringResource(progressIssueText(it)), isError = true)
+        }
+        progress.gestureId?.takeIf { progress.phase in setOf(PlaybackProgressInputPhase.ACQUIRING, PlaybackProgressInputPhase.PREVIEW) }?.let { id ->
+            ProbeButton(stringResource(R.string.probe_cancel)) { model.playbackInput.cancel(surface, id) }
+        }
+    }
+}
+
+@Composable
+private fun MediaVolumeControls(model: ProbeViewModel) {
+    val volume by model.mediaVolume.state.collectAsStateWithLifecycle()
+    val maximum = volume.maximum
+    val current = volume.current
+    val range = maximum?.minus(volume.minimum)?.takeIf { it > 0 }
+    val fraction = range?.let { ((volume.preview ?: current ?: volume.minimum) - volume.minimum).toDouble() / it.toDouble() }
+    val enabled = volume.adjustable
+    val reason = stringResource(volumeIssueText(volume.issue))
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        BodyText(stringResource(R.string.input_volume_scope))
+        if (current != null && maximum != null) BodyText(stringResource(R.string.input_volume_value, current, maximum), isPrimary = true)
+        WatchProgressBar(fraction, SeekGestureMode.DRAG_TO_COMMIT, enabled, volume.ownerId,
+            stringResource(R.string.input_media_volume_title), reason,
+            onBegin = model.mediaVolume::begin, onDrag = model.mediaVolume::drag,
+            onRelease = model.mediaVolume::release, onTap = model.mediaVolume::tap,
+            onCancel = model.mediaVolume::cancel, onSetProgress = model.mediaVolume::setProgress)
+        volume.preview?.let { BodyText(stringResource(R.string.input_volume_preview, it)) }
+        ProbeButton(stringResource(R.string.input_volume_less), enabled && !model.mediaVolume.busy && (current ?: 0) > volume.minimum) {
+            model.mediaVolume.change(-1)
+        }
+        ProbeButton(stringResource(R.string.input_volume_more), enabled && !model.mediaVolume.busy && (current ?: 0) < (maximum ?: 0)) {
+            model.mediaVolume.change(1)
+        }
+        if (enabled && volume.issue != null) BodyText(reason, isError = true)
+        ProbeButton(stringResource(R.string.probe_refresh), onClick = model.mediaVolume::refresh)
+        volume.gestureId?.let { id -> ProbeButton(stringResource(R.string.probe_cancel)) { model.mediaVolume.cancel(id) } }
+    }
+}
+
+private fun progressIssueText(issue: PlaybackProgressInputIssue): Int = when (issue) {
+    PlaybackProgressInputIssue.BINDING_UNAVAILABLE -> R.string.input_seek_binding_changed
+    PlaybackProgressInputIssue.INVALID_FRACTION -> R.string.input_seek_invalid_position
+    PlaybackProgressInputIssue.SEEK_REJECTED, PlaybackProgressInputIssue.REQUEST_FAILED -> R.string.input_seek_unconfirmed
+}
+
+private fun volumeIssueText(issue: MediaVolumeIssue?): Int = when (issue) {
+    MediaVolumeIssue.FIXED -> R.string.input_volume_fixed
+    MediaVolumeIssue.REMOTE_OUTPUT -> R.string.input_volume_remote
+    MediaVolumeIssue.OUTPUT_CHANGED -> R.string.input_volume_output_changed
+    MediaVolumeIssue.SET_REJECTED -> R.string.input_volume_unconfirmed
+    MediaVolumeIssue.UNAVAILABLE, null -> R.string.input_volume_unavailable
 }
 
 @Composable
@@ -1114,6 +1225,10 @@ private fun pageTitle(page: ProbePage): Int = when (page) {
     ProbePage.QUEUE -> R.string.playback_queue
     ProbePage.LIBRARY -> R.string.library_title
     ProbePage.PLAYLISTS -> R.string.playlist_heading
+    ProbePage.SEEK -> R.string.playback_seek_open
+    ProbePage.VOLUME -> R.string.input_media_volume_title
+    ProbePage.SLEEP_TIMER -> R.string.sleep_timer_title
+    ProbePage.SLEEP_TIMER_NOTIFICATIONS -> R.string.prefs_sleep_summary
 }
 
 private fun queueIssueText(issue: QueuePlaybackIssue): Int = when (issue) {

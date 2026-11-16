@@ -17,6 +17,10 @@ import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
 import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
 import io.github.onlinemo.meloxwatch.model.PlaybackPreferenceLimits
+import io.github.onlinemo.meloxwatch.model.PlaybackControlsPreferences
+import io.github.onlinemo.meloxwatch.model.ProgressGestureMode
+import io.github.onlinemo.meloxwatch.model.RotaryAction
+import io.github.onlinemo.meloxwatch.model.RotaryOrientation
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.UserPreferences
@@ -191,6 +195,41 @@ class PreferencesViewModel(
     @MainThread
     fun setGaplessPlayback(enabled: Boolean) {
         editDraft { it.copy(gaplessPlayback = enabled) }
+    }
+
+    @MainThread
+    fun setRotaryEnabled(enabled: Boolean) {
+        editDraft { it.copy(controls = it.controls.copy(rotaryEnabled = enabled)) }
+    }
+
+    @MainThread
+    fun setRotaryAction(action: RotaryAction) {
+        editDraft { it.copy(controls = it.controls.copy(rotaryAction = action)) }
+    }
+
+    @MainThread
+    fun setRotaryOrientation(orientation: RotaryOrientation) {
+        editDraft { it.copy(controls = it.controls.copy(rotaryOrientation = orientation)) }
+    }
+
+    @MainThread
+    fun setRotaryHaptics(enabled: Boolean) {
+        editDraft { it.copy(controls = it.controls.copy(rotaryHaptics = enabled)) }
+    }
+
+    @MainThread
+    fun setMainProgressVisible(visible: Boolean) {
+        editDraft { it.copy(controls = it.controls.copy(showMainProgress = visible)) }
+    }
+
+    @MainThread
+    fun setProgressGesture(mode: ProgressGestureMode) {
+        editDraft { it.copy(controls = it.controls.copy(progressGesture = mode)) }
+    }
+
+    @MainThread
+    fun setSleepTimerSummary(enabled: Boolean) {
+        editDraft { it.copy(controls = it.controls.copy(sleepTimerSummary = enabled)) }
     }
 
     /** 明确丢弃当前草稿，按最新确认值建立新基线；冲突不自动更新 expectedRevision。 */
@@ -383,6 +422,8 @@ class PreferencesViewModel(
         val layout = LibraryLayout.entries.firstOrNull { it.name == (savedStateHandle.get<Any>(KEY_LAYOUT) as? String) }
         val artworkPath = ArtworkReadPath.entries.firstOrNull { it.name == (savedStateHandle.get<Any>(KEY_ARTWORK) as? String) }
         val oldDraft = !savedStateHandle.contains(KEY_EDITOR_SCHEMA)
+        val editorSchema = savedStateHandle.get<Any>(KEY_EDITOR_SCHEMA) as? Int
+        val legacyControls = oldDraft || editorSchema == 3
         val tapPolicy = if (oldDraft) SongTapPolicy.ASK else SongTapPolicy.entries.firstOrNull {
             it.name == (savedStateHandle.get<Any>(KEY_TAP_POLICY) as? String)
         }
@@ -397,6 +438,19 @@ class PreferencesViewModel(
         val mediaButtons = if (oldDraft) true else savedStateHandle.get<Any>(KEY_MEDIA_BUTTONS) as? Boolean
         val audioFocus = if (oldDraft) true else savedStateHandle.get<Any>(KEY_AUDIO_FOCUS) as? Boolean
         val gapless = if (oldDraft) true else savedStateHandle.get<Any>(KEY_GAPLESS) as? Boolean
+        val rotaryEnabled = if (legacyControls) false else savedStateHandle.get<Any>(KEY_ROTARY_ENABLED) as? Boolean
+        val rotaryAction = if (legacyControls) RotaryAction.MEDIA_VOLUME else RotaryAction.entries.firstOrNull {
+            it.name == (savedStateHandle.get<Any>(KEY_ROTARY_ACTION) as? String)
+        }
+        val rotaryOrientation = if (legacyControls) RotaryOrientation.NORMAL else RotaryOrientation.entries.firstOrNull {
+            it.name == (savedStateHandle.get<Any>(KEY_ROTARY_ORIENTATION) as? String)
+        }
+        val rotaryHaptics = if (legacyControls) false else savedStateHandle.get<Any>(KEY_ROTARY_HAPTICS) as? Boolean
+        val mainProgress = if (legacyControls) true else savedStateHandle.get<Any>(KEY_MAIN_PROGRESS) as? Boolean
+        val progressGesture = if (legacyControls) ProgressGestureMode.DRAG_TO_COMMIT else ProgressGestureMode.entries.firstOrNull {
+            it.name == (savedStateHandle.get<Any>(KEY_PROGRESS_GESTURE) as? String)
+        }
+        val sleepSummary = if (legacyControls) false else savedStateHandle.get<Any>(KEY_SLEEP_SUMMARY) as? Boolean
         val sorts = LibraryListContext.entries.associateWith { context ->
             val field = LibrarySortField.entries.firstOrNull {
                 it.name == (savedStateHandle.get<Any>(sortKey(context)) as? String)
@@ -408,7 +462,9 @@ class PreferencesViewModel(
             layout != null && artworkPath != null && sorts.values.all { it != null } &&
             tapPolicy != null && backend != null && speed != null &&
             mediaButtons != null && audioFocus != null && gapless != null &&
-            (oldDraft || savedStateHandle.get<Any>(KEY_EDITOR_SCHEMA) == UserPreferences.CURRENT_SCHEMA_VERSION)
+            rotaryEnabled != null && rotaryAction != null && rotaryOrientation != null && rotaryHaptics != null &&
+            mainProgress != null && progressGesture != null && sleepSummary != null &&
+            (legacyControls || editorSchema == UserPreferences.CURRENT_SCHEMA_VERSION)
         ) {
             UserPreferencesDraft(
                 restorePosition = restore,
@@ -422,6 +478,8 @@ class PreferencesViewModel(
                 playbackBackend = backend,
                 playbackSpeedTenths = speed,
                 gaplessPlayback = gapless,
+                controls = PlaybackControlsPreferences(rotaryEnabled, rotaryAction, rotaryOrientation, rotaryHaptics,
+                    mainProgress, progressGesture, sleepSummary),
             )
         } else {
             null
@@ -454,6 +512,13 @@ class PreferencesViewModel(
             savedStateHandle[KEY_BACKEND] = draft.playbackBackend.name
             savedStateHandle[KEY_SPEED] = draft.playbackSpeedTenths
             savedStateHandle[KEY_GAPLESS] = draft.gaplessPlayback
+            savedStateHandle[KEY_ROTARY_ENABLED] = draft.controls.rotaryEnabled
+            savedStateHandle[KEY_ROTARY_ACTION] = draft.controls.rotaryAction.name
+            savedStateHandle[KEY_ROTARY_ORIENTATION] = draft.controls.rotaryOrientation.name
+            savedStateHandle[KEY_ROTARY_HAPTICS] = draft.controls.rotaryHaptics
+            savedStateHandle[KEY_MAIN_PROGRESS] = draft.controls.showMainProgress
+            savedStateHandle[KEY_PROGRESS_GESTURE] = draft.controls.progressGesture.name
+            savedStateHandle[KEY_SLEEP_SUMMARY] = draft.controls.sleepTimerSummary
             LibraryListContext.entries.forEach { context ->
                 savedStateHandle[sortKey(context)] = draft.librarySorts.getValue(context).field.name
                 savedStateHandle[sortDirectionKey(context)] = draft.librarySorts.getValue(context).descending
@@ -472,6 +537,13 @@ class PreferencesViewModel(
             savedStateHandle.remove<String>(KEY_BACKEND)
             savedStateHandle.remove<Int>(KEY_SPEED)
             savedStateHandle.remove<Boolean>(KEY_GAPLESS)
+            savedStateHandle.remove<Boolean>(KEY_ROTARY_ENABLED)
+            savedStateHandle.remove<String>(KEY_ROTARY_ACTION)
+            savedStateHandle.remove<String>(KEY_ROTARY_ORIENTATION)
+            savedStateHandle.remove<Boolean>(KEY_ROTARY_HAPTICS)
+            savedStateHandle.remove<Boolean>(KEY_MAIN_PROGRESS)
+            savedStateHandle.remove<String>(KEY_PROGRESS_GESTURE)
+            savedStateHandle.remove<Boolean>(KEY_SLEEP_SUMMARY)
             LibraryListContext.entries.forEach { context ->
                 savedStateHandle.remove<String>(sortKey(context))
                 savedStateHandle.remove<Boolean>(sortDirectionKey(context))
@@ -494,6 +566,13 @@ class PreferencesViewModel(
         const val KEY_BACKEND = "preferences.editor.backend"
         const val KEY_SPEED = "preferences.editor.speed_tenths"
         const val KEY_GAPLESS = "preferences.editor.gapless"
+        const val KEY_ROTARY_ENABLED = "preferences.editor.rotary_enabled"
+        const val KEY_ROTARY_ACTION = "preferences.editor.rotary_action"
+        const val KEY_ROTARY_ORIENTATION = "preferences.editor.rotary_orientation"
+        const val KEY_ROTARY_HAPTICS = "preferences.editor.rotary_haptics"
+        const val KEY_MAIN_PROGRESS = "preferences.editor.main_progress"
+        const val KEY_PROGRESS_GESTURE = "preferences.editor.progress_gesture"
+        const val KEY_SLEEP_SUMMARY = "preferences.editor.sleep_summary"
         const val KEY_PREVIEW = "preferences.editor.preview"
         fun sortKey(context: LibraryListContext) = "preferences.editor.sort.${context.name}"
         fun sortDirectionKey(context: LibraryListContext) = "preferences.editor.descending.${context.name}"
