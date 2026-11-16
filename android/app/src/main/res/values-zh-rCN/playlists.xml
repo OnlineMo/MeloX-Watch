@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_heading">歌单</string>
+    <string name="playlist_loading">正在加载…</string>
+    <string name="playlist_saving">正在保存…</string>
+    <string name="playlist_previous_data">此页显示上次的数据。重新加载后可继续操作。</string>
+    <string name="playlist_new_data">已有新变化，重新加载可查看。</string>
+    <string name="playlist_all_playlists">全部歌单</string>
+    <string name="playlist_reload">重新加载</string>
+    <string name="playlist_favorites">本地收藏</string>
+    <plurals name="playlist_favorites_count">
+        <item quantity="other">本地收藏 · %1$d 首</item>
+    </plurals>
+    <string name="playlist_create">新建歌单</string>
+    <string name="playlist_create_folder">新建文件夹歌单</string>
+    <string name="playlist_create_keyword">按路径关键词创建</string>
+    <string name="playlist_no_playlists">还没有歌单。可以新建空歌单或导入歌单。</string>
+    <string name="playlist_empty">此歌单暂无成员。</string>
+    <string name="playlist_manual_kind">普通歌单</string>
+    <string name="playlist_folder_kind">文件夹歌单</string>
+    <plurals name="playlist_track_count">
+        <item quantity="other">%1$d 首</item>
+    </plurals>
+    <string name="playlist_first_page">回到第一页</string>
+    <string name="playlist_previous_page">上一页</string>
+    <string name="playlist_next_page">下一页</string>
+    <string name="playlist_page_range">第 %1$d–%2$d 项，共 %3$d 项</string>
+    <string name="playlist_member_label">%1$d · %2$s</string>
+    <string name="playlist_unnamed_track">未命名曲目</string>
+    <string name="playlist_unnamed_playlist">歌单</string>
+    <string name="playlist_position">第 %1$d 项</string>
+    <string name="playlist_available">可播放</string>
+    <string name="playlist_missing">文件缺失，保留原位置</string>
+    <string name="playlist_needs_authorization">需要重新授权，保留原位置</string>
+    <string name="playlist_unavailable">暂时不可用，保留原位置</string>
+    <string name="playlist_unresolved">尚未关联本地曲目，保留原位置</string>
+    <string name="playlist_play_complete">播放完整歌单</string>
+    <string name="playlist_insert_complete">将完整歌单插到下一首</string>
+    <string name="playlist_play_from_member">从此处播放完整歌单</string>
+    <string name="playlist_insert_member">插入下一首</string>
+    <string name="playlist_insert_member_play">插入后立即播放</string>
+    <string name="playlist_rename">重命名歌单</string>
+    <string name="playlist_delete">删除歌单</string>
+    <string name="playlist_remove">从此歌单移除</string>
+    <string name="playlist_move">调整位置</string>
+    <string name="playlist_favorite">加入本地收藏</string>
+    <string name="playlist_unfavorite">取消本地收藏</string>
+    <string name="playlist_add_to_playlist">加入其他歌单</string>
+    <string name="playlist_back_to_details">返回歌单</string>
+    <string name="playlist_name">歌单名称</string>
+    <string name="playlist_name_explanation">名称需为 1–80 个字符。允许重名，已有歌单各自保留。</string>
+    <string name="playlist_save">保存</string>
+    <string name="playlist_cancel">取消</string>
+    <string name="playlist_delete_explanation">删除此歌单及其成员关系。音频文件、本地收藏、其他歌单和当前播放队列都会保留。</string>
+    <string name="playlist_confirm_delete">确认删除歌单</string>
+    <string name="playlist_remove_explanation">仅移除此成员关系。曲库、音频文件、本地收藏和当前播放队列都会保留。</string>
+    <string name="playlist_confirm_remove">确认从歌单移除</string>
+    <string name="playlist_move_explanation">选择目标位置后保存。新建队列使用保存顺序，当前队列保留自己的顺序。取消会保留原歌单顺序。</string>
+    <string name="playlist_destination">目标位置 · 1–%1$d</string>
+    <string name="playlist_move_up">上移</string>
+    <string name="playlist_move_down">下移</string>
+    <string name="playlist_reauthorize">重新授权</string>
+    <string name="playlist_reassociate">选择文件重新关联</string>
+    <string name="playlist_reassociation_explanation">仅名称相同不会替代原曲目。关联前需要检查并确认所选文件。</string>
+    <string name="playlist_folder_members_explanation">成员跟随绑定的文件夹。可调整顺序和绑定，成员增减由完整扫描同步。</string>
+    <string name="playlist_sync_folder">同步文件夹成员</string>
+    <string name="playlist_change_folder">更换绑定文件夹</string>
+    <string name="playlist_choose_authorized_folder">请选择已授权来源中的文件夹。</string>
+    <string name="playlist_choose_folder">选择文件夹</string>
+    <string name="playlist_folder_sync_explanation">同步使用完整成功扫描。原成员保持顺序，新成员按稳定顺序追加。扫描中断时保留原成员。</string>
+    <string name="playlist_rebind_explanation">确认更换文件夹后将重建歌单成员与顺序，音频文件和当前队列保留。</string>
+    <string name="playlist_preview_again">重新预览</string>
+    <string name="playlist_folder_preview">共 %1$d 项 · 新增 %2$d 项 · 移除 %3$d 项</string>
+    <string name="playlist_confirm_folder">确认文件夹歌单变化</string>
+    <string name="playlist_confirm_rebind">确认换文件夹并重建</string>
+    <string name="playlist_keyword">路径关键词</string>
+    <string name="playlist_keyword_explanation">在已授权、已索引的相对路径中匹配连续字面字符串。结果保存为普通歌单快照。</string>
+    <string name="playlist_preview_matches">预览匹配结果</string>
+    <plurals name="playlist_keyword_count">
+        <item quantity="other">匹配 %1$d 首</item>
+    </plurals>
+    <string name="playlist_confirm_broad_keyword">已检查较宽的匹配范围，加入全部匹配曲目。</string>
+    <string name="playlist_confirm_empty_keyword">按此名称创建空歌单。</string>
+    <string name="playlist_create_snapshot">创建此歌单快照</string>
+    <plurals name="playlist_choose_target_count">
+        <item quantity="other">为 %1$d 首选择目标歌单</item>
+    </plurals>
+    <string name="playlist_manual_targets_only">请选择普通歌单。文件夹歌单的成员由绑定目录维护。</string>
+    <plurals name="playlist_add_explanation">
+        <item quantity="other">按选择顺序加入 %1$d 首。已存在的曲目会计为重复，音频文件保留原位。</item>
+    </plurals>
+    <string name="playlist_confirm_add">确认加入曲目</string>
+    <string name="playlist_choose_another_playlist">选择其他歌单</string>
+    <string name="playlist_created">歌单已创建。</string>
+    <string name="playlist_deleted">歌单已删除，音频文件保留。</string>
+    <string name="playlist_saved">变化已保存。</string>
+    <string name="playlist_unchanged">当前已是所请求的状态。</string>
+    <plurals name="playlist_same_name_result">
+        <item quantity="other">另有 %1$d 个同名歌单，各自保留。</item>
+    </plurals>
+    <string name="playlist_add_result">新增 %1$d 项 · 已存在 %2$d 项</string>
+    <string name="playlist_import_json">导入 JSON 歌单</string>
+    <string name="playlist_import_m3u8">导入 M3U8 · UTF-8</string>
+    <string name="playlist_import_m3u">导入 M3U · UTF-8</string>
+    <string name="playlist_import_m3u_gb">导入 M3U · GB18030</string>
+    <string name="playlist_import_heading">检查歌单导入</string>
+    <string name="playlist_import_new_explanation">确认后创建独立歌单。保存前按原顺序检查成员。</string>
+    <string name="playlist_import_merge_explanation">确认后合并到所选歌单。保留旧顺序并追加新曲目，重复项会如实报告。</string>
+    <string name="playlist_import_permission_explanation">导入的描述不授予访问权，音频文件和文件夹授权需另行准备。</string>
+    <string name="playlist_choose_import_document">选择歌单文件</string>
+    <string name="playlist_import_counts">共 %1$d 项 · 匹配 %2$d 项 · 未关联 %3$d 项</string>
+    <plurals name="playlist_import_ambiguous_count">
+        <item quantity="other">%1$d 项匹配有歧义，将保留为未关联项。</item>
+    </plurals>
+    <plurals name="playlist_import_blocked_count">
+        <item quantity="other">%1$d 项外部或不安全引用将保留为未关联项。</item>
+    </plurals>
+    <plurals name="playlist_import_duplicate_count">
+        <item quantity="other">发现 %1$d 项重复引用，确认后的结果会报告去重情况。</item>
+    </plurals>
+    <plurals name="playlist_keep_unresolved">
+        <item quantity="other">保留全部 %1$d 个未关联位置，以后再关联。</item>
+    </plurals>
+    <string name="playlist_confirm_import_new">确认导入为新歌单</string>
+    <string name="playlist_confirm_import_merge">确认合并到此歌单</string>
+    <string name="playlist_import_unmatched">尚无已核验的本地匹配</string>
+    <string name="playlist_import_ambiguous">有多个可能的匹配，稍后手动选择</string>
+    <string name="playlist_import_blocked">保留引用描述，稍后重新关联</string>
+    <string name="playlist_merge_json">合并 JSON 歌单</string>
+    <string name="playlist_merge_m3u">合并 M3U8 歌单</string>
+    <string name="playlist_export_json">导出 JSON 歌单</string>
+    <string name="playlist_export_m3u8">导出 M3U8 · UTF-8</string>
+    <string name="playlist_export_m3u">导出 M3U · UTF-8</string>
+    <string name="playlist_export_heading">导出歌单</string>
+    <plurals name="playlist_export_explanation">
+        <item quantity="other">导出 %1$d 项成员及其顺序。其他设备上的音频文件和系统授权需另行准备。</item>
+    </plurals>
+    <string name="playlist_m3u_portability">相对引用需要目标设备上的对应文件夹。未关联成员在导入时仍会保留显示。</string>
+    <string name="playlist_choose_export_document">选择目标并导出</string>
+    <string name="playlist_retry_export">重试所选目标</string>
+    <plurals name="playlist_export_completed">
+        <item quantity="other">导出已完成并核验 · %1$d 项</item>
+    </plurals>
+    <plurals name="playlist_replace_queue_explanation">
+        <item quantity="other">建立包含全部 %1$d 项的队列并播放，替换当前 %2$d 项队列。</item>
+    </plurals>
+    <plurals name="playlist_insert_queue_explanation">
+        <item quantity="other">在当前曲目后插入 %1$d 项，保持当前播放状态。</item>
+    </plurals>
+    <plurals name="playlist_insert_play_explanation">
+        <item quantity="other">在当前曲目后插入 %1$d 项，并开始播放首个插入项。</item>
+    </plurals>
+    <string name="playlist_play_pending">正在等待播放确认…</string>
+    <string name="playlist_confirm_play">确认播放操作</string>
+    <string name="playlist_retry_play">重试此次播放操作</string>
+    <string name="playlist_checked_option">已选择：%1$s</string>
+    <string name="playlist_unchecked_option">未选择：%1$s</string>
+    <string name="playlist_error_busy">另一项操作正在收尾。保留草稿，稍后重试。</string>
+    <string name="playlist_error_conflict">此歌单已变化。重新加载并检查草稿后再保存。</string>
+    <string name="playlist_error_name">请输入有效的 1–80 字符名称，名称不能包含控制字符。</string>
+    <string name="playlist_error_position">请输入此歌单范围内的位置。</string>
+    <string name="playlist_error_keyword">请输入非空路径关键词。</string>
+    <string name="playlist_error_input">请检查所选内容后重试，原数据保留。</string>
+    <string name="playlist_error_not_found">此歌单或成员已不存在，重新加载后可继续。</string>
+    <string name="playlist_error_automatic">文件夹成员由完整扫描同步，可更换绑定或调整顺序。</string>
+    <string name="playlist_error_expired">此列表视图已过期，请重新加载并检查。</string>
+    <string name="playlist_error_changed">曲库或所选内容已变化，确认前请重新预览。</string>
+    <string name="playlist_error_source">所选来源不可用。保留成员，并恢复访问或选择其他来源。</string>
+    <string name="playlist_error_incomplete">所选列表或扫描未完整完成。保留当前数据后重试。</string>
+    <string name="playlist_error_storage_full">空间不足，无法保存。释放空间后重试，草稿保留。</string>
+    <string name="playlist_error_storage">存储暂时不可用，草稿保留以便重试。</string>
+    <string name="playlist_error_recovery">已保存的数据需要先恢复，再继续编辑。</string>
+    <string name="playlist_error_document">此文件的内容或编码无效，请选择有效歌单文件。</string>
+    <string name="playlist_error_document_unsupported">此歌单格式或版本不受支持，请选择兼容歌单。</string>
+    <string name="playlist_error_document_large">此交换文件超过导入限额，请选择较小文件。</string>
+    <string name="playlist_error_document_read">无法读取所选文件，请恢复授权或重新选择。</string>
+    <string name="playlist_error_document_write">导出未完成，原歌单保留。请选择目标后重试。</string>
+</resources>

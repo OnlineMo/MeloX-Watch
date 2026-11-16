@@ -272,6 +272,35 @@ class ServiceListeningObserverTest {
         assertEquals(0, backend.lateCalls)
     }
 
+    @Test
+    fun aListenerRemovalFailureStillFencesTheReleasedBackendAndPreservesTheRoundOnRebind() = runBlocking {
+        val entry = entry(0)
+        beginPlaying(entry)
+        advance(1000L, 1000L)
+        val previous = backend
+        val stale = previous.listeners.single()
+        previous.failNextRemoval = true
+        try { observer.unbindBackend(); throw AssertionError("Expected listener removal failure") }
+        catch (_: IllegalStateException) { }
+        previous.player.release()
+        stale.onIsPlayingChanged(true)
+        stale.onTimelineChanged(Timeline.EMPTY, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
+
+        backend = ControlledPlayer().also { it.choose(entry) }
+        observer.bindBackend(backend.player)
+        backend.notifyPlaying(true)
+        advance(1000L, 1000L)
+        backend.notifyPlaying(false)
+        observer.detach()
+        backend.player.release()
+        observer.close()
+
+        assertEquals(0, previous.lateCalls)
+        assertEquals(0, backend.lateCalls)
+        assertEquals(1, repository.accepted.size)
+        assertEquals(2000L, repository.totalListeningMs)
+    }
+
     private suspend fun beginPlaying(entry: QueueEntry) {
         backend.choose(entry)
         observer.beginRound(entry)
@@ -293,6 +322,7 @@ class ServiceListeningObserverTest {
         var positionMs = 0L
         var playing = false
         var speed = 1f
+        var failNextRemoval = false
         var released = false
             private set
         var lateCalls = 0
@@ -313,7 +343,10 @@ class ServiceListeningObserverTest {
                         "isPlaying" -> playing
                         "getPlaybackParameters" -> PlaybackParameters(speed)
                         "addListener" -> { listeners.add(requireNotNull(args)[0] as Player.Listener); null }
-                        "removeListener" -> { listeners.remove(requireNotNull(args)[0] as Player.Listener); null }
+                        "removeListener" -> {
+                            if (failNextRemoval) { failNextRemoval = false; throw IllegalStateException("Controlled listener removal failure") }
+                            listeners.remove(requireNotNull(args)[0] as Player.Listener); null
+                        }
                         "release" -> { released = true; null }
                         else -> throw AssertionError("unexpected player method ${method.name}")
                     }

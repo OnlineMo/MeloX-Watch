@@ -37,6 +37,7 @@ data class LibraryRowRecord(
 
 data class LibraryGroupRecord(val groupKey: String, val title: String?, val subtitle: String?, val trackCount: Long)
 data class LibrarySectionRecord(val sectionKey: String, val trackCount: Long)
+data class LibraryTrackKeyRecord(val providerId: String, val trackId: String)
 
 @Dao
 interface LibraryDao {
@@ -117,6 +118,8 @@ interface LibraryDao {
     @RawQuery suspend fun sectionRows(query: SupportSQLiteQuery): List<LibrarySectionRecord>
     @RawQuery suspend fun nodeRows(query: SupportSQLiteQuery): List<LibraryNodeVersionEntity>
     @RawQuery suspend fun aliasRows(query: SupportSQLiteQuery): List<LibraryAliasEntity>
+    @RawQuery suspend fun text(query: SupportSQLiteQuery): String?
+    @RawQuery suspend fun trackKeys(query: SupportSQLiteQuery): List<LibraryTrackKeyRecord>
     @Query("SELECT * FROM import_operations WHERE operationId = :id") suspend fun importRecord(id: String): LibraryImportEntity?
     @Query("SELECT * FROM import_operations WHERE ownedSourceId = :sourceId AND phase = 'COMMITTED'") suspend fun ownedImport(sourceId: String): LibraryImportEntity?
     @Insert suspend fun insertImport(value: LibraryImportEntity)

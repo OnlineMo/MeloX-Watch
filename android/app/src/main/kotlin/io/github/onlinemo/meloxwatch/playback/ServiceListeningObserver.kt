@@ -29,7 +29,7 @@ import kotlinx.coroutines.sync.withLock
 /** The service owns one sampler and one coalescing writer. Closing consumes captures, never a released player. */
 @UnstableApi
 internal class ServiceListeningObserver(
-    private val player: Player,
+    player: Player,
     private val repository: ListeningRepository,
     private val scope: CoroutineScope,
     private val onFailure: (ListeningIssue) -> Unit,
@@ -40,26 +40,29 @@ internal class ServiceListeningObserver(
     private var deferred: ActiveRound? = null
     private var sampling: Job? = null
     private var detached = false
+    private var attachedPlayer: Player? = player
+    private var backendGeneration = 0L
+    private var listener: Player.Listener? = null
     private var lastWrittenElapsedMs = 0L
     private val writes = Mutex()
     private val requests = Channel<Unit>(Channel.CONFLATED)
-    private val listener = object : Player.Listener {
+    private fun backendListener(bound: Player, generation: Long) = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
-            if (detached) return
+            if (!isCurrentBinding(bound, generation)) return
             capture()
             if (isPlaying) startSampling() else { sampling?.cancel(); sampling = null; requests.trySend(Unit) }
         }
         override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
-            if (detached) return
+            if (!isCurrentBinding(bound, generation)) return
             val round = current
             if (round != null && oldPosition.mediaItem?.mediaId == round.entryId) {
                 capture(ListeningSample(System.currentTimeMillis(), SystemClock.elapsedRealtime(), ZoneId.systemDefault().id,
-                    oldPosition.positionMs.coerceAtLeast(0L), false, player.playbackParameters.speed))
+                    oldPosition.positionMs.coerceAtLeast(0L), false, bound.playbackParameters.speed))
             }
             current?.progress?.reset(sampleForCurrent())
         }
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
-            if (detached) return
+            if (!isCurrentBinding(bound, generation)) return
             val sample = sampleForCurrent()
             val oldSpeed = current?.progress?.baselineSpeed
             if (sample != null && oldSpeed != null) capture(sample.copy(speed = oldSpeed))
@@ -67,17 +70,17 @@ internal class ServiceListeningObserver(
             requests.trySend(Unit)
         }
         override fun onPlayerError(error: PlaybackException) {
-            if (!detached) { capture(); requests.trySend(Unit) }
+            if (isCurrentBinding(bound, generation)) { capture(); requests.trySend(Unit) }
         }
         override fun onTimelineChanged(timeline: Timeline, reason: Int) {
-            if (!detached) { capture(); if (current?.progress?.hasUnacknowledgedProgress == true) requests.trySend(Unit) }
+            if (isCurrentBinding(bound, generation)) { capture(); if (current?.progress?.hasUnacknowledgedProgress == true) requests.trySend(Unit) }
         }
     }
     private val writer: Job
 
     init {
         check(Looper.myLooper() == Looper.getMainLooper() && player.applicationLooper == Looper.getMainLooper())
-        player.addListener(listener)
+        listener = backendListener(player, backendGeneration).also(player::addListener)
         writer = scope.launch(Dispatchers.Main.immediate) {
             while (isActive) {
                 requests.receive()
@@ -111,13 +114,40 @@ internal class ServiceListeningObserver(
         catch (error: Exception) { onFailure((error as? ListeningException)?.issue ?: ListeningIssue.STORAGE_UNAVAILABLE) }
     }
 
+    /** Capture and stop the sampler before release; the durable round remains the same. */
+    fun unbindBackend() {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (detached || attachedPlayer == null) return
+        val bound = attachedPlayer
+        val oldListener = listener
+        try { capture() }
+        finally {
+            // No failure from a player getter or listener removal may leave a sampler attached
+            // to the instance the service is about to release.
+            backendGeneration += 1L
+            attachedPlayer = null
+            listener = null
+            sampling?.cancel(); sampling = null
+            current?.progress?.reset(null)
+            requests.trySend(Unit)
+            if (bound != null && oldListener != null) bound.removeListener(oldListener)
+        }
+    }
+
+    fun bindBackend(backend: Player) {
+        check(Looper.myLooper() == Looper.getMainLooper() && backend.applicationLooper == Looper.getMainLooper())
+        check(!detached && attachedPlayer == null)
+        backendGeneration += 1L
+        attachedPlayer = backend
+        listener = backendListener(backend, backendGeneration).also(backend::addListener)
+        current?.progress?.reset(sampleForCurrent())
+        if (backend.isPlaying) startSampling()
+    }
+
     fun detach() {
         if (detached) return
-        capture()
-        detached = true
-        player.removeListener(listener)
-        sampling?.cancel(); sampling = null
-        deferred = null
+        try { unbindBackend() }
+        finally { detached = true; deferred = null }
     }
 
     suspend fun close() {
@@ -130,7 +160,7 @@ internal class ServiceListeningObserver(
     private fun startSampling() {
         if (sampling?.isActive == true || detached) return
         sampling = scope.launch(Dispatchers.Main.immediate) {
-            while (isActive && !detached && player.isPlaying) {
+            while (isActive && !detached && attachedPlayer?.isPlaying == true) {
                 delay(SAMPLE_INTERVAL_MS)
                 if (!detached) capture()
             }
@@ -158,10 +188,11 @@ internal class ServiceListeningObserver(
     }
 
     private fun sampleForCurrent(): ListeningSample? {
-        if (detached || player.currentMediaItem?.mediaId != current?.entryId) return null
+        val bound = attachedPlayer ?: return null
+        if (detached || bound.currentMediaItem?.mediaId != current?.entryId) return null
         return ListeningSample(System.currentTimeMillis(), SystemClock.elapsedRealtime(), ZoneId.systemDefault().id,
-            player.currentPosition.coerceAtLeast(0L), player.isPlaying, player.playbackParameters.speed,
-            player.duration.takeIf { it != C.TIME_UNSET && it > 0L })
+            bound.currentPosition.coerceAtLeast(0L), bound.isPlaying, bound.playbackParameters.speed,
+            bound.duration.takeIf { it != C.TIME_UNSET && it > 0L })
     }
 
     private suspend fun flush() = writes.withLock {
@@ -176,7 +207,7 @@ internal class ServiceListeningObserver(
                 current = waiting
                 deferred = null
                 waiting.progress.reset(sampleForCurrent())
-                if (player.isPlaying) startSampling()
+                if (attachedPlayer?.isPlaying == true) startSampling()
             }
         } catch (error: CancellationException) { throw error }
         catch (error: Exception) { onFailure((error as? ListeningException)?.issue ?: ListeningIssue.STORAGE_UNAVAILABLE) }
@@ -187,6 +218,9 @@ internal class ServiceListeningObserver(
         val commit = repository.submit(update)
         round.acknowledge(update, commit.acceptedListeningMs)
     }
+
+    private fun isCurrentBinding(bound: Player, generation: Long): Boolean =
+        !detached && attachedPlayer === bound && backendGeneration == generation
 
     companion object {
         private const val SAMPLE_INTERVAL_MS = 1000L

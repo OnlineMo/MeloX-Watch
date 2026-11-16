@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_entry_browse">浏览歌单</string>
+    <plurals name="playlist_entry_add_all">
+        <item quantity="other">将当前完整列表添加到歌单 · %1$d 首</item>
+    </plurals>
+    <string name="playlist_entry_preparing">正在准备…</string>
+    <string name="playlist_entry_saving">正在保存…</string>
+    <string name="playlist_entry_picker_pending">正在选择文档…</string>
+    <string name="playlist_entry_picker_cancelled">已取消选择文档。</string>
+    <string name="playlist_entry_no_picker">系统文档选择器不可用。歌单草稿已保留。</string>
+    <string name="playlist_entry_dismiss">关闭提示</string>
+    <string name="playlist_entry_retry">重试</string>
+    <string name="playlist_entry_folder_heading">选择已索引的文件夹</string>
+    <string name="playlist_entry_import_root">选择相对路径的来源文件夹</string>
+    <string name="playlist_entry_import_root_explanation">请选择歌单路径起点对应的索引文件夹。相对路径只匹配该授权文件夹内的文件。</string>
+    <string name="playlist_entry_use_folder">使用此文件夹及其子文件夹</string>
+    <string name="playlist_entry_no_indexed_folders">本页没有已索引的子文件夹。请在“来源”中添加或刷新已授权文件夹。</string>
+    <string name="playlist_entry_replacement_heading">选择曲库中的歌曲</string>
+    <string name="playlist_entry_replacement_explanation">请为此歌单成员选择确切的已索引歌曲，再预览并确认关联。</string>
+    <string name="playlist_entry_reassociation_heading">核对此歌单成员</string>
+    <string name="playlist_entry_original_member">第 %1$d 项：%2$s</string>
+    <string name="playlist_entry_replacement_member">关联到：%1$s</string>
+    <string name="playlist_entry_reassociation_impact">这会更新此歌单成员的关联，并保留它的位置。</string>
+    <string name="playlist_entry_preview_changed">曲库或歌单已有变化。请重新载入并选择成员。</string>
+    <string name="playlist_entry_reassociation_checked">已确认：将此成员关联到所选歌曲</string>
+    <string name="playlist_entry_reassociation_unchecked">确认将此成员关联到所选歌曲</string>
+    <string name="playlist_entry_confirm_reassociation">保存此关联</string>
+    <string name="playlist_entry_choose_another_track">选择另一首歌曲</string>
+    <string name="playlist_entry_reassociation_completed">歌单成员已更新。</string>
+    <string name="playlist_entry_reauthorization_explanation">打开“来源”，重新选择原来源。请在那里核对来源身份，再确认恢复访问。</string>
+    <string name="playlist_entry_open_reauthorization">核对来源授权</string>
+    <string name="playlist_entry_identity_required">请从本地曲库打开此歌曲，以使用收藏和歌单操作。</string>
+    <string name="playlist_entry_queue_waiting">正在读取当前播放队列…</string>
+</resources>

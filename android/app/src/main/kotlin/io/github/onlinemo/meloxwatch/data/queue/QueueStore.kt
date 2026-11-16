@@ -5,6 +5,9 @@ import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueLimits
 import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.QueueMutationCandidate
+import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
+import io.github.onlinemo.meloxwatch.model.QueueOrderPolicy
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.QueueWindow
 import kotlinx.coroutines.flow.Flow
@@ -19,6 +22,7 @@ data class QueueReplacementRequest(
     val initialPositionMs: Long = 0L,
     // 仅明确清队列/移除最后一个实例的动作可设为 true，空列表点歌不能清旧队列。
     val allowEmpty: Boolean = false,
+    val orderPolicy: QueueOrderPolicy = QueueOrderPolicy.MATERIALIZE_MODE,
 ) {
     init {
         require(operationId.isNotBlank())
@@ -85,6 +89,19 @@ interface QueueStore {
         request: QueueReplacementRequest,
         source: QueuePageSource,
         beforePublish: suspend (QueueWindow?) -> Unit = {},
+    ): QueueCommit
+
+    /**
+     * 完整编辑在新 generation 分批构造；Store 围栏 generation/queueRevision/current 实例。
+     * 外部内容与访问权由 beforePublish 调用方核验，Store 不调用 provider 或声称内容未变化。
+     * 插入 source 只串行读一次，每批至多100；其它 mutation 不接受外部 producer。
+     * callback 在事务外，返回真实 continuation checkpoint；null 复用提交点的旧持久位置。
+     * 已完成 operation 只回读 receipt，不再次 source/preflight/安装。
+     */
+    suspend fun mutate(
+        request: QueueMutationRequest,
+        source: QueuePageSource? = null,
+        beforePublish: suspend (QueueMutationCandidate) -> QueueCheckpoint? = { null },
     ): QueueCommit
 
     /** 以已冻结播放序号作数据库锚点，返回至多 100 条，不以 SQL OFFSET 走过前页。 */

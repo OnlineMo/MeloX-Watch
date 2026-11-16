@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_folder_maintenance_pending">有文件夹歌单尚未更新。请在歌单中检查来源并重试同步。</string>
+</resources>

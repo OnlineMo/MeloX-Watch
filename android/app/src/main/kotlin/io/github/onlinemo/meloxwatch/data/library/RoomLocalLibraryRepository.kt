@@ -26,6 +26,7 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistQueueCatalogToken
 import io.github.onlinemo.meloxwatch.model.FrozenQueueView
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.TrackKey
@@ -42,6 +43,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /** One application owner; only short database work is serialized, never provider I/O. */
 class RoomLocalLibraryRepository(
@@ -102,6 +104,13 @@ class RoomLocalLibraryRepository(
         database.withPreservedTransaction {
             expireViews()
             val current = meta()
+            query.folderNodeId?.let { nodeId ->
+                val folder = dao.currentNode(nodeId) ?: fail(LibraryIssue.INVALID_INPUT)
+                if (folder.sourceId != query.sourceId || !folder.directory) fail(LibraryIssue.INVALID_INPUT)
+                if (dao.text(LibrarySql.relativePath(current.revision, folder.sourceId, nodeId)) == null) {
+                    fail(LibraryIssue.SOURCE_CHANGED)
+                }
+            }
             val draft = LibraryViewToken(id(), current.revision, current.rulesRevision, 0L, query, sort, current.shortAudioFilter, owner,
                 statisticsEpoch = current.statisticsEpoch)
             val token = draft.copy(totalCount = dao.scalar(LibrarySql.count(draft)))
@@ -178,15 +187,96 @@ class RoomLocalLibraryRepository(
         }
     }
 
+    /** Resolve only within the exact live lease; a caller-supplied id cannot open latest data. */
+    internal suspend fun playlistTracks(context: PlaylistQueueCatalogToken, keys: List<TrackKey>): List<LibraryTrack?> = access {
+        if (keys.size > LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT)
+        database.withPreservedTransaction {
+            val view = liveViews[context.id] ?: fail(LibraryIssue.VIEW_EXPIRED)
+            checkView(view)
+            if (view.revision != context.revision || view.rulesRevision != context.rulesRevision) fail(LibraryIssue.SOURCE_CHANGED)
+            val distinct = keys.distinct()
+            val rows = dao.rows(LibrarySql.rowsForKeys(view, distinct))
+            val resolved = linkedMapOf<TrackKey, LibraryTrack>()
+            for (row in rows) {
+                val track = row.model()
+                if (track.trackKey !in distinct || resolved.put(track.trackKey, track) != null) fail(LibraryIssue.RECOVERY_REQUIRED)
+            }
+            keys.map { resolved[it] }
+        }
+    }
+
+    internal suspend fun playlistRelativeMatches(
+        view: LibraryViewToken, rootNodeId: String, components: List<String>,
+    ): List<TrackKey> = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            if (view.query.sourceId == null || view.query.folderNodeId != rootNodeId || !view.query.folderSubtree) {
+                fail(LibraryIssue.INVALID_INPUT)
+            }
+            dao.trackKeys(LibrarySql.scopedRelativePathMatches(view.revision, view.query.sourceId, rootNodeId, components, 2))
+                .map { TrackKey(it.providerId, it.trackId) }
+        }
+    }
+
+    internal suspend fun playlistRelativePath(view: LibraryViewToken, track: LibraryTrack): String? = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            if (track.sourceId == null || track.nodeId == null || track.availability != LibraryAvailability.AVAILABLE) null
+            else dao.text(LibrarySql.relativePath(view.revision, track.sourceId, track.nodeId))
+        }
+    }
+
+    internal suspend fun validatePlaylistView(view: LibraryViewToken) = access {
+        database.withPreservedTransaction { checkView(view) }
+    }
+
+    internal suspend fun playlistOverlap(view: LibraryViewToken, base: io.github.onlinemo.meloxwatch.data.playlists.PlaylistViewToken): Long = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            val playlistDao = database.playlistDao()
+            val lease = playlistDao.view(base.viewId) ?: fail(LibraryIssue.VIEW_EXPIRED)
+            if (lease.generationId != base.snapshot.generationId || lease.expiresElapsedMs <= elapsedMs()) {
+                fail(LibraryIssue.VIEW_EXPIRED)
+            }
+            val generation = playlistDao.generation(base.snapshot.generationId) ?: fail(LibraryIssue.VIEW_EXPIRED)
+            if (generation.revision != base.snapshot.revision || generation.memberCount != base.snapshot.memberCount) {
+                fail(LibraryIssue.SOURCE_CHANGED)
+            }
+            dao.scalar(LibrarySql.playlistOverlap(view, generation.dataGenerationId))
+        }
+    }
+
+    internal suspend fun playlistAvailableScopeCount(view: LibraryViewToken): Long = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            dao.scalar(LibrarySql.count(view.copy(query = LibraryQuery(readableOnly = true))))
+        }
+    }
+
     override suspend fun closeView(viewId: String) {
         // A cancelled owner still releases its lease; large reclamation retains cancellation.
         withContext(NonCancellable) {
-            access {
-                database.withPreservedTransaction { dao.deleteView(viewId) }
-                liveViews.remove(viewId)
-            }
+            releaseViewMetadata(viewId)
         }
         access { cleanVersions() }
+    }
+
+    /** A playlist owner retains this exact token when the cancellable close deadline expires. */
+    suspend fun closePlaylistView(viewId: String, timeoutMs: Long) {
+        require(timeoutMs > 0L)
+        withContext(NonCancellable) {
+            // The deadline must be inside the protected handoff so mutex and queued Room waits
+            // remain cancellable. Retrying a committed metadata deletion is harmless.
+            withTimeout(timeoutMs) {
+                releaseViewMetadata(viewId)
+                access { cleanVersions() }
+            }
+        }
+    }
+
+    private suspend fun releaseViewMetadata(viewId: String) = access {
+        database.withPreservedTransaction { dao.deleteView(viewId) }
+        liveViews.remove(viewId)
     }
 
     override fun queueSource(view: LibraryViewToken): QueuePageSource {
@@ -654,7 +744,10 @@ class RoomLocalLibraryRepository(
         val root = source.spec.rootObjectId?.let { dao.node(value.sourceId, it) }
         return source.copy(displayName = root?.lastKnownName)
     }
-    private fun sourceVersion(value: LibrarySourceEntity, revision: Long) = LibrarySourceVersionEntity(value.sourceId, revision, null, value.state, value.spec, value.grantId, value.absenceScanId, value.absenceScanSequence)
+    private fun sourceVersion(value: LibrarySourceEntity, revision: Long) = LibrarySourceVersionEntity(
+        value.sourceId, revision, null, value.state, value.spec, value.grantId, value.absenceScanId, value.absenceScanSequence,
+        rootObjectId = LibraryCodec.source(value.spec).rootObjectId,
+    )
     private fun grantRecord(id: String, spec: LocalSourceSpec, value: LocalGrantObservation) = LibraryGrantEntity(id, spec.sourceId, spec.uri, LibraryCodec.grant(value), value.read.name, value.acceptedPersistedFlags, value.appOwned)
     private fun sourceState(grant: LocalGrantObservation) = if (grant.read == ObservedCapability.AVAILABLE) LibrarySourceState.ACTIVE else if (grant.read == ObservedCapability.UNAVAILABLE) LibrarySourceState.NEEDS_AUTHORIZATION else LibrarySourceState.UNAVAILABLE
     private fun validateSource(spec: LocalSourceSpec, grant: LocalGrantObservation) {
@@ -709,7 +802,8 @@ class RoomLocalLibraryRepository(
     }
     private fun fingerprint(view: LibraryViewToken): String = LibrarySortKeys.fingerprint(LibrarySortKeys.identity(view.revision.toString(), view.rulesRevision.toString(), view.totalCount.toString(),
         view.query.search, view.query.sourceId.orEmpty(), view.query.folderNodeId.orEmpty(), view.query.albumKey.orEmpty(), view.query.artistKey.orEmpty(), view.query.addedSinceEpochMs?.toString().orEmpty(),
-        view.query.includeHidden.toString(), view.sort.field.name, view.sort.descending.toString(), view.shortAudioFilter.toString(), view.owner.name,
+        view.query.includeHidden.toString(), view.query.folderSubtree.toString(), view.query.relativePathKeyword.orEmpty(),
+        view.query.readableOnly.toString(), view.sort.field.name, view.sort.descending.toString(), view.shortAudioFilter.toString(), view.owner.name,
         view.sortRuleVersion.toString(), view.statisticsEpoch.toString()))
     private suspend fun storeView(token: LibraryViewToken) {
         expireViews()
@@ -773,7 +867,8 @@ class RoomLocalLibraryRepository(
         }
         val old = dao.currentNode(node.nodeId)
         val version = LibraryNodeVersionEntity(if (old?.validFrom == revision) old.versionId else id(), node.nodeId, candidate.sourceId,
-            parent?.nodeId, candidate.displayName, candidate.uri, candidate.directory, revision, null)
+            parent?.nodeId, candidate.displayName, candidate.uri, candidate.directory, revision, null,
+            pathName = java.text.Normalizer.normalize(candidate.displayName, java.text.Normalizer.Form.NFC))
         if (old?.validFrom == revision) dao.updateNodeVersion(version)
         else { dao.closeNodeVersion(node.nodeId, revision); dao.insertNodeVersion(version) }
         // Rules must remain identifiable after an unknown-name rescan or old-version cleanup.

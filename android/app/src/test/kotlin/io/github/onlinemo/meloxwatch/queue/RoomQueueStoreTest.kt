@@ -28,6 +28,7 @@ import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueLimits
 import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.QueueOrderPolicy
 import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
@@ -686,7 +687,7 @@ class RoomQueueStoreTest {
         database.close()
         withContext(Dispatchers.IO) {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { independent ->
-                independent.version = 3
+                independent.version = 4
             }
         }
         database = open(file)
@@ -694,7 +695,7 @@ class RoomQueueStoreTest {
         expectIssue(QueueStoreIssue.RECOVERY_REQUIRED) { store.initialize() }
         withContext(Dispatchers.IO) {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
-                assertEquals(3, independent.version)
+                assertEquals(4, independent.version)
                 independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
                     assertTrue(cursor.moveToFirst())
                     assertEquals(3L, cursor.getLong(0))
@@ -751,7 +752,8 @@ class RoomQueueStoreTest {
     private suspend fun request(operation: String, count: Long): QueueReplacementRequest = request(operation, count, store.snapshot())
 
     private fun request(operation: String, count: Long, base: QueueSnapshot?): QueueReplacementRequest =
-        QueueReplacementRequest(operation, base?.generationId, base?.queueRevision ?: 0L, FrozenQueueView("view-$operation", 1L, count))
+        QueueReplacementRequest(operation, base?.generationId, base?.queueRevision ?: 0L, FrozenQueueView("view-$operation", 1L, count),
+            orderPolicy = QueueOrderPolicy.PRESERVE_SUPPLIED)
 
     private fun source(
         view: FrozenQueueView,

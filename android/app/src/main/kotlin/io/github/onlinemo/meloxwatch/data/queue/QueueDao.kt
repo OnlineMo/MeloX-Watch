@@ -42,6 +42,30 @@ interface QueueDao {
     suspend fun page(generationId: String, first: Long, limit: Int): List<QueueEntryEntity>
 
     @Query(
+        "SELECT * FROM queue_entries WHERE generationId = :generationId AND originalOrder >= :first " +
+            "ORDER BY originalOrder LIMIT :limit",
+    )
+    suspend fun originalPage(generationId: String, first: Long, limit: Int): List<QueueEntryEntity>
+
+    @Query("SELECT COUNT(*) FROM queue_entries WHERE generationId = :generationId AND originalOrder != playbackOrder")
+    suspend fun nonOriginalOrders(generationId: String): Long
+
+    /** 负临时槽只在未发布 STAGING 的短事务里使用；SEALED/PUBLISHED 永远不可改序。 */
+    @Query(
+        "UPDATE queue_entries SET playbackOrder = :destination WHERE generationId = :generationId " +
+            "AND playbackOrder = :source AND EXISTS " +
+            "(SELECT 1 FROM queue_generations WHERE generationId = :generationId AND phase = 0)",
+    )
+    suspend fun moveStagingSlot(generationId: String, source: Long, destination: Long): Int
+
+    @Query(
+        "UPDATE queue_entries SET playbackOrder = :playbackOrder WHERE generationId = :generationId " +
+            "AND queueEntryId = :entryId AND EXISTS " +
+            "(SELECT 1 FROM queue_generations WHERE generationId = :generationId AND phase = 0)",
+    )
+    suspend fun setStagingOrder(generationId: String, entryId: String, playbackOrder: Long): Int
+
+    @Query(
         "SELECT * FROM queue_entries WHERE generationId = :generationId " +
             "AND playbackOrder BETWEEN :first AND :last ORDER BY playbackOrder LIMIT 3",
     )
@@ -71,9 +95,10 @@ interface QueueDao {
 
     @Query(
         "UPDATE queue_head SET activeGenerationId = :generationId, queueRevision = :nextRevision, " +
-            "checkpointRevision = 0, currentEntryId = :currentEntryId, positionMs = :positionMs, completedCycles = 0 " +
+            "checkpointRevision = 0, currentEntryId = :currentEntryId, positionMs = :positionMs, completedCycles = :completedCycles " +
             "WHERE id = 1 AND queueRevision = :expectedRevision " +
-            "AND ((activeGenerationId IS NULL AND :expectedGenerationId IS NULL) OR activeGenerationId = :expectedGenerationId)",
+            "AND ((activeGenerationId IS NULL AND :expectedGenerationId IS NULL) OR activeGenerationId = :expectedGenerationId) " +
+            "AND (:checkCurrent = 0 OR ((currentEntryId IS NULL AND :expectedCurrentEntryId IS NULL) OR currentEntryId = :expectedCurrentEntryId))",
     )
     suspend fun publish(
         generationId: String,
@@ -82,6 +107,9 @@ interface QueueDao {
         nextRevision: Long,
         currentEntryId: String?,
         positionMs: Long,
+        completedCycles: Int = 0,
+        checkCurrent: Boolean = false,
+        expectedCurrentEntryId: String? = null,
     ): Int
 
     @Query(

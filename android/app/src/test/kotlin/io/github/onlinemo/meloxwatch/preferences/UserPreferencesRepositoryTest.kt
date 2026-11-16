@@ -20,7 +20,9 @@ import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
+import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
 import io.github.onlinemo.meloxwatch.model.ScreenShape
+import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
 import java.io.File
@@ -354,6 +356,97 @@ class UserPreferencesRepositoryTest {
     }
 
     @Test(timeout = 30000L)
+    fun allPlaybackPreferencesSurviveReopenAndAStaleEditorCannotOverwriteThem() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val draft = UserPreferencesDraft(
+            songTapPolicy = SongTapPolicy.INSERT_AND_PLAY,
+            mediaButtonsEnabled = false,
+            audioFocusManagement = false,
+            playbackBackend = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER,
+            playbackSpeedTenths = 17,
+            gaplessPlayback = false,
+        )
+        val saved = (first.repository.save(0L, draft) as PreferencesWriteResult.Saved).preferences
+        val bytes = file.readBytes()
+        assertEquals(draft, saved.asDraft())
+        assertTrue(first.repository.save(1L, draft) is PreferencesWriteResult.Unchanged)
+        assertEquals(saved, (first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict).current)
+        assertTrue(first.repository.reset(1L, ResetConfirmation.CANCELLED) is PreferencesWriteResult.Cancelled)
+        assertArrayEquals(bytes, file.readBytes())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved, reopened.ready().preferences)
+        val reset = reopened.repository.reset(1L, ResetConfirmation.CONFIRMED) as PreferencesWriteResult.Saved
+        assertEquals(UserPreferences(revision = 2L), reset.preferences)
+    }
+
+    @Test(timeout = 30000L)
+    fun schemaTwoPreservesItsLibraryValuesAndBytesUntilExplicitPlaybackMigration() = runBlocking {
+        val file = preferencesFile()
+        val sorts = UserPreferences().librarySorts.toMutableMap().apply {
+            this[LibraryListContext.ALL] = LibrarySort(LibrarySortField.FILENAME_NATURAL, true)
+        }.toMap()
+        val raw = completeFixture(schema = 2, revision = 9L, sorts = sorts).toMutablePreferences().apply {
+            remove(stringPreferencesKey("song_tap_policy"))
+            remove(booleanPreferencesKey("media_buttons_enabled"))
+            remove(booleanPreferencesKey("audio_focus_management"))
+            remove(stringPreferencesKey("playback_backend"))
+            remove(intPreferencesKey("playback_speed_tenths"))
+            remove(booleanPreferencesKey("gapless_playback"))
+        }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val first = open(file)
+        val loaded = first.ready()
+        assertEquals(UserPreferences(
+            revision = 9L, restorePosition = false, screenShape = ScreenShape.ROUND,
+            libraryLayout = LibraryLayout.GRID, artworkReadPath = ArtworkReadPath.LOCAL_EXTRACT, librarySorts = sorts,
+        ), loaded.preferences)
+        assertNull(loaded.recovery)
+        assertArrayEquals(bytes, file.readBytes())
+        val saved = first.repository.save(9L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+        assertEquals(10L, saved.preferences.revision)
+        assertEquals(loaded.preferences.asDraft(), saved.preferences.asDraft())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved.preferences, reopened.ready().preferences)
+        assertTrue(reopened.repository.save(10L, saved.preferences.asDraft()) is PreferencesWriteResult.Unchanged)
+    }
+
+    @Test(timeout = 30000L)
+    fun invalidPlaybackTypesAndRangesOnlyRecoverTheAffectedFieldsWithoutWriting() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(schema = UserPreferences.CURRENT_SCHEMA_VERSION, revision = 4L)
+            .toMutablePreferences().apply {
+                this[stringPreferencesKey("song_tap_policy")] = "UNKNOWN"
+                this[stringPreferencesKey("playback_backend")] = "UNKNOWN"
+                this[intPreferencesKey("playback_speed_tenths")] = 21
+                this[stringPreferencesKey("media_buttons_enabled")] = "not boolean"
+                this[stringPreferencesKey("audio_focus_management")] = "not boolean"
+                this[stringPreferencesKey("gapless_playback")] = "not boolean"
+            }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val loaded = open(file).ready()
+        assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, loaded.recovery?.reason)
+        assertEquals(setOf(
+            PreferencesField.SONG_TAP_POLICY, PreferencesField.PLAYBACK_BACKEND, PreferencesField.PLAYBACK_SPEED,
+            PreferencesField.MEDIA_BUTTONS, PreferencesField.AUDIO_FOCUS, PreferencesField.GAPLESS,
+        ), loaded.recovery?.fields)
+        assertEquals(SongTapPolicy.ASK, loaded.preferences.songTapPolicy)
+        assertEquals(PlaybackBackendKind.MEDIA3, loaded.preferences.playbackBackend)
+        assertEquals(10, loaded.preferences.playbackSpeedTenths)
+        assertTrue(loaded.preferences.mediaButtonsEnabled)
+        assertTrue(loaded.preferences.audioFocusManagement)
+        assertTrue(loaded.preferences.gaplessPlayback)
+        assertEquals(LibraryLayout.GRID, loaded.preferences.libraryLayout)
+        assertEquals(ArtworkReadPath.LOCAL_EXTRACT, loaded.preferences.artworkReadPath)
+        assertArrayEquals(bytes, file.readBytes())
+    }
+
+    @Test(timeout = 30000L)
     fun revisionOverflowCannotCommitANegativeRevision() = runBlocking {
         val file = preferencesFile()
         writeFixture(file, fixture(schema = 1, revision = Long.MAX_VALUE))
@@ -507,6 +600,31 @@ class UserPreferencesRepositoryTest {
         booleanPreferencesKey("restore_position") to false,
         stringPreferencesKey("screen_shape") to ScreenShape.ROUND.name,
     )
+
+    private fun completeFixture(
+        schema: Int,
+        revision: Long,
+        sorts: Map<LibraryListContext, LibrarySort> = UserPreferences().librarySorts,
+    ): Preferences = mutablePreferencesOf(
+        intPreferencesKey("schema_version") to schema,
+        longPreferencesKey("revision") to revision,
+        booleanPreferencesKey("restore_position") to false,
+        stringPreferencesKey("screen_shape") to ScreenShape.ROUND.name,
+        stringPreferencesKey("library_layout") to LibraryLayout.GRID.name,
+        stringPreferencesKey("artwork_read_path") to ArtworkReadPath.LOCAL_EXTRACT.name,
+        stringPreferencesKey("song_tap_policy") to SongTapPolicy.ASK.name,
+        booleanPreferencesKey("media_buttons_enabled") to true,
+        booleanPreferencesKey("audio_focus_management") to true,
+        stringPreferencesKey("playback_backend") to PlaybackBackendKind.MEDIA3.name,
+        intPreferencesKey("playback_speed_tenths") to 10,
+        booleanPreferencesKey("gapless_playback") to true,
+    ).apply {
+        sorts.forEach { (context, sort) ->
+            val suffix = context.name.lowercase(java.util.Locale.ROOT)
+            this[stringPreferencesKey("library_sort_" + suffix)] = sort.field.name
+            this[booleanPreferencesKey("library_descending_" + suffix)] = sort.descending
+        }
+    }
 
     private class StoreSession(
         private val job: Job,

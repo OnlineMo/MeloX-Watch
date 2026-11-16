@@ -12,6 +12,12 @@ enum class PreferencesField {
     LIBRARY_LAYOUT,
     ARTWORK_READ_PATH,
     LIBRARY_SORTS,
+    SONG_TAP_POLICY,
+    MEDIA_BUTTONS,
+    AUDIO_FOCUS,
+    PLAYBACK_BACKEND,
+    PLAYBACK_SPEED,
+    GAPLESS,
 }
 
 enum class PreferencesRecoveryReason {

@@ -24,14 +24,16 @@ internal fun QueueReplacementRequest.record(generationId: String) = QueueGenerat
     startOriginalOrder = startOriginalOrder,
     initialPositionMs = initialPositionMs,
     allowEmpty = allowEmpty,
+    orderPolicy = orderPolicy.name,
 )
 
 internal fun QueueGenerationEntity.matches(request: QueueReplacementRequest): Boolean =
-    operationId == request.operationId &&
+    operationKind == "REPLACE" && operationId == request.operationId &&
         expectedGenerationId == request.expectedGenerationId && expectedQueueRevision == request.expectedQueueRevision &&
         viewId == request.view.id && viewRevision == request.view.revision && totalCount == request.view.totalCount &&
         shuffle == request.mode.shuffle && repeatMode == request.mode.repeat.name && cycleLimit == request.mode.cycleLimit &&
-        startOriginalOrder == request.startOriginalOrder && initialPositionMs == request.initialPositionMs && allowEmpty == request.allowEmpty
+        startOriginalOrder == request.startOriginalOrder && initialPositionMs == request.initialPositionMs && allowEmpty == request.allowEmpty &&
+        orderPolicy == request.orderPolicy.name
 
 internal fun QueueEntry.record(generationId: String) = QueueEntryEntity(
     generationId = generationId,

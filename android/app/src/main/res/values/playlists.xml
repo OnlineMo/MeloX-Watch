@@ -1,0 +1,193 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_heading">Playlists</string>
+    <string name="playlist_loading">Loading…</string>
+    <string name="playlist_saving">Saving…</string>
+    <string name="playlist_previous_data">This page shows earlier data. Reload to continue.</string>
+    <string name="playlist_new_data">There are new changes. Reload to see them.</string>
+    <string name="playlist_all_playlists">All playlists</string>
+    <string name="playlist_reload">Reload</string>
+    <string name="playlist_favorites">Local favorites</string>
+    <plurals name="playlist_favorites_count">
+        <item quantity="one">Local favorites · %1$d track</item>
+        <item quantity="other">Local favorites · %1$d tracks</item>
+    </plurals>
+    <string name="playlist_create">Create playlist</string>
+    <string name="playlist_create_folder">Create folder playlist</string>
+    <string name="playlist_create_keyword">Create from path keyword</string>
+    <string name="playlist_no_playlists">No playlists yet. Create an empty playlist or import one.</string>
+    <string name="playlist_empty">This playlist has no members yet.</string>
+    <string name="playlist_manual_kind">Manual playlist</string>
+    <string name="playlist_folder_kind">Folder playlist</string>
+    <plurals name="playlist_track_count">
+        <item quantity="one">%1$d track</item>
+        <item quantity="other">%1$d tracks</item>
+    </plurals>
+    <string name="playlist_first_page">First page</string>
+    <string name="playlist_previous_page">Previous page</string>
+    <string name="playlist_next_page">Next page</string>
+    <string name="playlist_page_range">%1$d–%2$d of %3$d</string>
+    <string name="playlist_member_label">%1$d · %2$s</string>
+    <string name="playlist_unnamed_track">Unnamed track</string>
+    <string name="playlist_unnamed_playlist">Playlist</string>
+    <string name="playlist_position">Position %1$d</string>
+    <string name="playlist_available">Available</string>
+    <string name="playlist_missing">File missing; position is kept</string>
+    <string name="playlist_needs_authorization">Authorization is needed; position is kept</string>
+    <string name="playlist_unavailable">Temporarily unavailable; position is kept</string>
+    <string name="playlist_unresolved">Not linked to a local track; position is kept</string>
+    <string name="playlist_play_complete">Play the complete playlist</string>
+    <string name="playlist_insert_complete">Add the complete playlist next</string>
+    <string name="playlist_play_from_member">Play complete playlist from here</string>
+    <string name="playlist_insert_member">Add this track next</string>
+    <string name="playlist_insert_member_play">Add next and play this track</string>
+    <string name="playlist_rename">Rename playlist</string>
+    <string name="playlist_delete">Delete playlist</string>
+    <string name="playlist_remove">Remove from this playlist</string>
+    <string name="playlist_move">Change position</string>
+    <string name="playlist_favorite">Add to local favorites</string>
+    <string name="playlist_unfavorite">Remove from local favorites</string>
+    <string name="playlist_add_to_playlist">Add to another playlist</string>
+    <string name="playlist_back_to_details">Back to playlist</string>
+    <string name="playlist_name">Playlist name</string>
+    <string name="playlist_name_explanation">Use 1–80 characters. Matching names stay as separate playlists.</string>
+    <string name="playlist_save">Save</string>
+    <string name="playlist_cancel">Cancel</string>
+    <string name="playlist_delete_explanation">Delete this playlist and its member links. Audio files, local favorites, other playlists, and the active playback queue are kept.</string>
+    <string name="playlist_confirm_delete">Confirm playlist deletion</string>
+    <string name="playlist_remove_explanation">Remove only this member link. The library, audio file, local favorites, and active playback queue are kept.</string>
+    <string name="playlist_confirm_remove">Confirm removal from playlist</string>
+    <string name="playlist_move_explanation">Choose a position, then save. New queues use the saved order; the active queue keeps its own order. Cancel keeps the previous playlist order.</string>
+    <string name="playlist_destination">Target position · 1–%1$d</string>
+    <string name="playlist_move_up">Move up</string>
+    <string name="playlist_move_down">Move down</string>
+    <string name="playlist_reauthorize">Restore authorization</string>
+    <string name="playlist_reassociate">Choose a file to link</string>
+    <string name="playlist_reassociation_explanation">A matching name alone will not replace a track. Review and confirm the selected file before linking.</string>
+    <string name="playlist_folder_members_explanation">Folder membership follows the bound folder. You can change order and binding; members are added or removed by a completed scan.</string>
+    <string name="playlist_sync_folder">Sync folder members</string>
+    <string name="playlist_change_folder">Change bound folder</string>
+    <string name="playlist_choose_authorized_folder">Choose a folder from an authorized source.</string>
+    <string name="playlist_choose_folder">Choose folder</string>
+    <string name="playlist_folder_sync_explanation">Sync uses a complete successful scan. Existing members keep their order and new members are appended in a stable order. Interrupted scans keep the previous members.</string>
+    <string name="playlist_rebind_explanation">Confirming a different folder rebuilds the playlist members and order. Audio files and the active queue are kept.</string>
+    <string name="playlist_preview_again">Preview again</string>
+    <string name="playlist_folder_preview">Members: %1$d · added: %2$d · removed: %3$d</string>
+    <string name="playlist_confirm_folder">Confirm folder playlist changes</string>
+    <string name="playlist_confirm_rebind">Confirm folder change and rebuild</string>
+    <string name="playlist_keyword">Path keyword</string>
+    <string name="playlist_keyword_explanation">Match a continuous literal phrase in authorized, indexed relative paths. The result is a manual playlist snapshot.</string>
+    <string name="playlist_preview_matches">Preview matches</string>
+    <plurals name="playlist_keyword_count">
+        <item quantity="one">%1$d matching track</item>
+        <item quantity="other">%1$d matching tracks</item>
+    </plurals>
+    <string name="playlist_confirm_broad_keyword">I reviewed this broad match and want all matched tracks.</string>
+    <string name="playlist_confirm_empty_keyword">Create an empty playlist with this name.</string>
+    <string name="playlist_create_snapshot">Create this playlist snapshot</string>
+    <plurals name="playlist_choose_target_count">
+        <item quantity="one">Choose a playlist for %1$d track</item>
+        <item quantity="other">Choose a playlist for %1$d tracks</item>
+    </plurals>
+    <string name="playlist_manual_targets_only">Choose a manual playlist. Folder members are maintained by their bound folder.</string>
+    <plurals name="playlist_add_explanation">
+        <item quantity="one">Add %1$d selected track in selection order. Existing tracks are counted as duplicates; audio files are kept in place.</item>
+        <item quantity="other">Add %1$d selected tracks in selection order. Existing tracks are counted as duplicates; audio files are kept in place.</item>
+    </plurals>
+    <string name="playlist_confirm_add">Confirm adding tracks</string>
+    <string name="playlist_choose_another_playlist">Choose another playlist</string>
+    <string name="playlist_created">Playlist created.</string>
+    <string name="playlist_deleted">Playlist deleted. Audio files are kept.</string>
+    <string name="playlist_saved">Changes saved.</string>
+    <string name="playlist_unchanged">The requested change is already applied.</string>
+    <plurals name="playlist_same_name_result">
+        <item quantity="one">%1$d other playlist shares this name and remains separate.</item>
+        <item quantity="other">%1$d other playlists share this name and remain separate.</item>
+    </plurals>
+    <string name="playlist_add_result">Added %1$d · already present %2$d</string>
+    <string name="playlist_import_json">Import JSON playlist</string>
+    <string name="playlist_import_m3u8">Import M3U8 · UTF-8</string>
+    <string name="playlist_import_m3u">Import M3U · UTF-8</string>
+    <string name="playlist_import_m3u_gb">Import M3U · GB18030</string>
+    <string name="playlist_import_heading">Review playlist import</string>
+    <string name="playlist_import_new_explanation">Confirm to create a separate playlist. Review members in their original order before saving.</string>
+    <string name="playlist_import_merge_explanation">Confirm to merge into the selected playlist. Keep its existing order and append new tracks; duplicates are reported.</string>
+    <string name="playlist_import_permission_explanation">Imported descriptions do not grant access. Audio files and folder authorization are prepared separately.</string>
+    <string name="playlist_choose_import_document">Choose playlist document</string>
+    <string name="playlist_import_counts">Members: %1$d · matched: %2$d · unresolved: %3$d</string>
+    <plurals name="playlist_import_ambiguous_count">
+        <item quantity="one">%1$d ambiguous member will remain unresolved.</item>
+        <item quantity="other">%1$d ambiguous members will remain unresolved.</item>
+    </plurals>
+    <plurals name="playlist_import_blocked_count">
+        <item quantity="one">%1$d external or unsafe reference will remain unresolved.</item>
+        <item quantity="other">%1$d external or unsafe references will remain unresolved.</item>
+    </plurals>
+    <plurals name="playlist_import_duplicate_count">
+        <item quantity="one">%1$d duplicate reference was found. The confirmed result reports deduplication.</item>
+        <item quantity="other">%1$d duplicate references were found. The confirmed result reports deduplication.</item>
+    </plurals>
+    <plurals name="playlist_keep_unresolved">
+        <item quantity="one">Keep the %1$d unresolved position for later linking.</item>
+        <item quantity="other">Keep all %1$d unresolved positions for later linking.</item>
+    </plurals>
+    <string name="playlist_confirm_import_new">Confirm new playlist import</string>
+    <string name="playlist_confirm_import_merge">Confirm merge into this playlist</string>
+    <string name="playlist_import_unmatched">No verified local match</string>
+    <string name="playlist_import_ambiguous">Several possible matches; choose later</string>
+    <string name="playlist_import_blocked">Reference kept as a description for later linking</string>
+    <string name="playlist_merge_json">Merge a JSON playlist</string>
+    <string name="playlist_merge_m3u">Merge an M3U8 playlist</string>
+    <string name="playlist_export_json">Export JSON playlist</string>
+    <string name="playlist_export_m3u8">Export M3U8 · UTF-8</string>
+    <string name="playlist_export_m3u">Export M3U · UTF-8</string>
+    <string name="playlist_export_heading">Export playlist</string>
+    <plurals name="playlist_export_explanation">
+        <item quantity="one">Export %1$d member and its order. Audio files and system authorization are prepared separately on another device.</item>
+        <item quantity="other">Export %1$d members and their order. Audio files and system authorization are prepared separately on another device.</item>
+    </plurals>
+    <string name="playlist_m3u_portability">Relative references need the corresponding folder on the destination device. Unlinked members remain visible during import.</string>
+    <string name="playlist_choose_export_document">Choose destination and export</string>
+    <string name="playlist_retry_export">Retry selected destination</string>
+    <plurals name="playlist_export_completed">
+        <item quantity="one">Export completed and verified · %1$d member</item>
+        <item quantity="other">Export completed and verified · %1$d members</item>
+    </plurals>
+    <plurals name="playlist_replace_queue_explanation">
+        <item quantity="one">Build a complete queue of %1$d member and play. Current queue size to replace: %2$d.</item>
+        <item quantity="other">Build a complete queue of %1$d members and play. Current queue size to replace: %2$d.</item>
+    </plurals>
+    <plurals name="playlist_insert_queue_explanation">
+        <item quantity="one">Insert %1$d member after the current track. Keep the current playback state.</item>
+        <item quantity="other">Insert %1$d members after the current track. Keep the current playback state.</item>
+    </plurals>
+    <plurals name="playlist_insert_play_explanation">
+        <item quantity="one">Insert %1$d member after the current track and start it.</item>
+        <item quantity="other">Insert %1$d members after the current track and start the first inserted member.</item>
+    </plurals>
+    <string name="playlist_play_pending">Waiting for playback confirmation…</string>
+    <string name="playlist_confirm_play">Confirm playback action</string>
+    <string name="playlist_retry_play">Retry this playback action</string>
+    <string name="playlist_checked_option">Selected: %1$s</string>
+    <string name="playlist_unchecked_option">Not selected: %1$s</string>
+    <string name="playlist_error_busy">Another operation is finishing. Keep your draft and try again.</string>
+    <string name="playlist_error_conflict">This playlist changed. Reload and review your draft before saving again.</string>
+    <string name="playlist_error_name">Enter a valid name of 1–80 characters. Control characters are not allowed.</string>
+    <string name="playlist_error_position">Enter a position within this playlist.</string>
+    <string name="playlist_error_keyword">Enter a nonempty path keyword.</string>
+    <string name="playlist_error_input">Check your selection and try again. The previous data is kept.</string>
+    <string name="playlist_error_not_found">This playlist or member is no longer present. Reload to continue.</string>
+    <string name="playlist_error_automatic">Folder members follow completed scans. Change the folder binding or order instead.</string>
+    <string name="playlist_error_expired">This list view has expired. Reload and review it again.</string>
+    <string name="playlist_error_changed">The library or selection changed. Preview again before confirming.</string>
+    <string name="playlist_error_source">The selected source is unavailable. Keep the members and restore access or choose another source.</string>
+    <string name="playlist_error_incomplete">The selected list or scan is incomplete. Keep the current data and try again.</string>
+    <string name="playlist_error_storage_full">There is not enough space to save. Free space and retry; your draft is kept.</string>
+    <string name="playlist_error_storage">Storage is temporarily unavailable. Your draft is kept for retry.</string>
+    <string name="playlist_error_recovery">Saved data needs recovery before editing can continue.</string>
+    <string name="playlist_error_document">This document has invalid content or encoding. Choose a valid playlist document.</string>
+    <string name="playlist_error_document_unsupported">This playlist format or version is unsupported. Choose a compatible playlist.</string>
+    <string name="playlist_error_document_large">This exchange document exceeds the import limits. Choose a smaller document.</string>
+    <string name="playlist_error_document_read">The selected document could not be read. Restore authorization or choose it again.</string>
+    <string name="playlist_error_document_write">The export did not finish. The original playlist is kept; choose a destination and retry.</string>
+</resources>

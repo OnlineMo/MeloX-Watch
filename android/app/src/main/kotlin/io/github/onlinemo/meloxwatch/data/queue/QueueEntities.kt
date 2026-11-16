@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.queue
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -31,6 +32,14 @@ data class QueueGenerationEntity(
     val phase: Int = QueuePhase.STAGING,
     val writtenCount: Long = 0L,
     val committedQueueRevision: Long? = null,
+    @ColumnInfo(defaultValue = "'REPLACE'")
+    val operationKind: String = "REPLACE",
+    @ColumnInfo(defaultValue = "''")
+    val operationFingerprint: String = "",
+    @ColumnInfo(defaultValue = "NULL")
+    val expectedCurrentEntryId: String? = null,
+    @ColumnInfo(defaultValue = "'PRESERVE_SUPPLIED'")
+    val orderPolicy: String = "PRESERVE_SUPPLIED",
 )
 
 @Entity(

@@ -31,7 +31,11 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesRecoveryReason
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
+import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
+import io.github.onlinemo.meloxwatch.model.PlaybackPreferenceLimits
 import io.github.onlinemo.meloxwatch.model.ScreenShape
+import io.github.onlinemo.meloxwatch.model.SongTapPolicy
+import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
 
 /** 放入宿主的可滚动 item；宿主负责标题、真实窗口避让与导航 enterEditor/clearDraft。 */
 @Composable
@@ -110,6 +114,7 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
                 )
             }
             Explanation(stringResource(R.string.library_artwork_scope))
+            PlaybackSettingsEditor(draft, state.canEdit, viewModel)
             Explanation(stringResource(R.string.prefs_save_scope))
             if (state.confirmReset) {
                 Text(stringResource(R.string.prefs_reset_question), style = MaterialTheme.typography.bodyLarge)
@@ -173,7 +178,92 @@ private fun CurrentPreferences(state: PreferencesEditorState) {
             R.string.library_artwork_system
         } else R.string.library_artwork_local,
     )))
+    Explanation(stringResource(R.string.prefs_song_tap_value, tapPolicyLabel(state.effective.songTapPolicy)))
+    Explanation(stringResource(R.string.prefs_playback_backend_value, backendLabel(state.effective.playbackBackend)))
+    Explanation(stringResource(R.string.prefs_playback_speed_value, state.effective.playbackSpeedTenths / 10f))
+    Explanation(stringResource(R.string.prefs_media_buttons_value, onOffLabel(state.effective.mediaButtonsEnabled)))
+    Explanation(stringResource(R.string.prefs_audio_focus_value, onOffLabel(state.effective.audioFocusManagement)))
+    Explanation(stringResource(R.string.prefs_gapless_value, onOffLabel(state.effective.gaplessPlayback)))
 }
+
+@Composable
+private fun PlaybackSettingsEditor(draft: UserPreferencesDraft, enabled: Boolean, viewModel: PreferencesViewModel) {
+    Text(stringResource(R.string.prefs_song_tap), style = MaterialTheme.typography.titleMedium)
+    Column(Modifier.fillMaxWidth().selectableGroup()) {
+        SongTapPolicy.entries.forEach { policy ->
+            PreferenceChoice(tapPolicyLabel(policy), draft.songTapPolicy == policy, enabled) {
+                viewModel.setSongTapPolicy(policy)
+            }
+        }
+    }
+    Explanation(stringResource(R.string.prefs_song_tap_scope))
+    Text(stringResource(R.string.prefs_playback_backend), style = MaterialTheme.typography.titleMedium)
+    Column(Modifier.fillMaxWidth().selectableGroup()) {
+        PlaybackBackendKind.entries.forEach { backend ->
+            PreferenceChoice(backendLabel(backend), draft.playbackBackend == backend, enabled) {
+                viewModel.setPlaybackBackend(backend)
+            }
+        }
+    }
+    Explanation(stringResource(R.string.prefs_backend_scope))
+    Text(stringResource(R.string.prefs_playback_speed_value, draft.playbackSpeedTenths / 10f),
+        style = MaterialTheme.typography.titleMedium)
+    PreferenceButton(stringResource(R.string.prefs_speed_slower),
+        enabled = enabled && draft.playbackSpeedTenths > PlaybackPreferenceLimits.MIN_SPEED_TENTHS) {
+        viewModel.setPlaybackSpeedTenths(draft.playbackSpeedTenths - 1)
+    }
+    PreferenceButton(stringResource(R.string.prefs_speed_faster),
+        enabled = enabled && draft.playbackSpeedTenths < PlaybackPreferenceLimits.MAX_SPEED_TENTHS) {
+        viewModel.setPlaybackSpeedTenths(draft.playbackSpeedTenths + 1)
+    }
+    PreferenceButton(stringResource(R.string.prefs_speed_normal),
+        enabled = enabled && draft.playbackSpeedTenths != PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS) {
+        viewModel.setPlaybackSpeedTenths(PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS)
+    }
+    Explanation(stringResource(R.string.prefs_speed_scope))
+    PreferenceToggle(stringResource(R.string.prefs_gapless), draft.gaplessPlayback, enabled, viewModel::setGaplessPlayback)
+    Explanation(stringResource(R.string.prefs_gapless_scope))
+    PreferenceToggle(stringResource(R.string.prefs_media_buttons), draft.mediaButtonsEnabled, enabled, viewModel::setMediaButtonsEnabled)
+    Explanation(stringResource(R.string.prefs_media_buttons_scope))
+    PreferenceToggle(stringResource(R.string.prefs_audio_focus), draft.audioFocusManagement, enabled, viewModel::setAudioFocusManagement)
+    Explanation(stringResource(R.string.prefs_audio_focus_scope))
+}
+
+@Composable
+private fun PreferenceChoice(label: String, selected: Boolean, enabled: Boolean, onSelected: () -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).semantics(mergeDescendants = true) {}
+        .selectable(selected = selected, enabled = enabled, role = Role.RadioButton, onClick = onSelected),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        RadioButton(selected = selected, onClick = null, enabled = enabled)
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+    }
+}
+
+@Composable
+private fun PreferenceToggle(label: String, checked: Boolean, enabled: Boolean, onChanged: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 56.dp).semantics(mergeDescendants = true) {}
+        .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onChanged),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge)
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
+    }
+}
+
+@Composable
+private fun tapPolicyLabel(policy: SongTapPolicy): String = stringResource(when (policy) {
+    SongTapPolicy.ASK -> R.string.prefs_song_tap_ask
+    SongTapPolicy.INSERT_AND_PLAY -> R.string.prefs_song_tap_insert
+    SongTapPolicy.REPLACE_COMPLETE_LIST -> R.string.prefs_song_tap_replace
+})
+
+@Composable
+private fun backendLabel(backend: PlaybackBackendKind): String = stringResource(when (backend) {
+    PlaybackBackendKind.MEDIA3 -> R.string.prefs_backend_media3
+    PlaybackBackendKind.SYSTEM_MEDIA_PLAYER -> R.string.prefs_backend_system
+})
+
+@Composable
+private fun onOffLabel(enabled: Boolean): String = stringResource(if (enabled) R.string.prefs_on else R.string.prefs_off)
 
 @Composable
 private fun StorageStatus(state: PreferencesEditorState, onRetryRead: () -> Unit) {
@@ -253,6 +343,12 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
     val layout = stringResource(R.string.library_layout)
     val artwork = stringResource(R.string.library_artwork_path)
     val sorts = stringResource(R.string.library_sort)
+    val tapPolicy = stringResource(R.string.prefs_song_tap)
+    val mediaButtons = stringResource(R.string.prefs_media_buttons)
+    val audioFocus = stringResource(R.string.prefs_audio_focus)
+    val backend = stringResource(R.string.prefs_playback_backend)
+    val speed = stringResource(R.string.prefs_playback_speed)
+    val gapless = stringResource(R.string.prefs_gapless)
     val separator = stringResource(R.string.prefs_field_separator)
     return PreferencesField.entries.filter { field -> field in fields }.joinToString(separator) { field ->
         when (field) {
@@ -263,6 +359,12 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
             PreferencesField.LIBRARY_LAYOUT -> layout
             PreferencesField.ARTWORK_READ_PATH -> artwork
             PreferencesField.LIBRARY_SORTS -> sorts
+            PreferencesField.SONG_TAP_POLICY -> tapPolicy
+            PreferencesField.MEDIA_BUTTONS -> mediaButtons
+            PreferencesField.AUDIO_FOCUS -> audioFocus
+            PreferencesField.PLAYBACK_BACKEND -> backend
+            PreferencesField.PLAYBACK_SPEED -> speed
+            PreferencesField.GAPLESS -> gapless
         }
     }
 }

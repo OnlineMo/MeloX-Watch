@@ -12,6 +12,11 @@ import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.QueueMutation
+import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
+import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
+import io.github.onlinemo.meloxwatch.model.QueueSeekBinding
+import io.github.onlinemo.meloxwatch.model.QueueSeekRequest
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.ui.MainActivity
@@ -101,7 +106,7 @@ class PlaybackCommandsTest {
 
     @Test
     fun missingOrUnknownSchemaRejectsLocalAndSelectionCommands() {
-        for (schema in listOf<Int?>(null, 0, 2)) {
+        for (schema in listOf<Int?>(null, 0, 3)) {
             val local = validLocalArguments()
             val selection = PlaybackCommands.selectionArguments(base(), "instance-other")
             if (schema == null) {
@@ -113,6 +118,20 @@ class PlaybackCommandsTest {
             }
             rejects("local schema $schema") { PlaybackCommands.readLocal(local) }
             rejects("selection schema $schema") { PlaybackCommands.readSelection(selection) }
+        }
+    }
+
+    @Test
+    fun legacyLocalAndSelectionCommandsKeepTheirIdentityUnderSchemaTwo() = runBlocking {
+        for (schema in listOf(1, 2)) {
+            val local = PlaybackCommands.readLocal(validLocalArguments().apply { putInt("schema", schema) })
+            assertEquals(entry().copy(originalOrder = 0L, playbackOrder = 0L), local.source.read(0L, 1).entries.single())
+            assertEquals(base().generationId, local.request.expectedGenerationId)
+            assertEquals(base().queueRevision, local.request.expectedQueueRevision)
+            val selection = PlaybackCommands.readSelection(
+                PlaybackCommands.selectionArguments(base(), "instance-other").apply { putInt("schema", schema) },
+            )
+            assertEquals(QueueSelectionCommand(base().generationId, 42L, "instance-other"), selection)
         }
     }
 
@@ -299,20 +318,30 @@ class PlaybackCommandsTest {
     }
 
     @Test
-    fun aLibraryCommandCarriesOnlyAnAdoptableLeaseAndStableSelection() {
+    fun aLibraryCommandFreezesTheCompleteListAndQueueIntentWithoutCarryingUris() {
         val selected = TrackKey(TrackKey.LOCAL_PROVIDER, "selected-local")
-        val arguments = PlaybackCommands.libraryArguments("view-library", selected, base(), "play-library")
+        val command = libraryCommand(selected)
+        val arguments = PlaybackCommands.libraryArguments(command)
         val decoded = PlaybackCommands.readLibrary(arguments)
-        assertEquals(LibraryQueueCommand("view-library", "play-library", base().generationId, 42L, selected), decoded)
+        assertEquals(command, decoded)
+        assertEquals(10001L, decoded.viewCount)
+        assertEquals(10000L, decoded.selectedOriginalOrder)
         assertFalse(arguments.containsKey("entries"))
         assertFalse(arguments.containsKey("uri"))
-        assertFalse(arguments.containsKey("totalCount"))
         arguments.putString("view", "changed-view")
         arguments.putString("track", "changed-selection")
+        arguments.putLong("view_count", 1L)
+        arguments.putBoolean("shuffle", false)
+        arguments.putString("current_entry", "changed-current")
+        arguments.putString("action", LibraryQueueAction.INSERT_AND_PLAY.name)
         assertEquals("view-library", decoded.viewId)
         assertEquals(selected, decoded.selected)
-        val playAll = PlaybackCommands.readLibrary(PlaybackCommands.libraryArguments("all-view", null, null, "new-library"))
+        assertEquals(command, decoded)
+        val playAll = PlaybackCommands.readLibrary(PlaybackCommands.libraryArguments(
+            libraryCommand(null).copy(expectedGenerationId = null, expectedQueueRevision = 0L, expectedCurrentEntryId = null),
+        ))
         assertNull(playAll.selected)
+        assertNull(playAll.selectedOriginalOrder)
         assertNull(playAll.expectedGenerationId)
         assertEquals(0L, playAll.expectedQueueRevision)
     }
@@ -321,20 +350,127 @@ class PlaybackCommandsTest {
     fun malformedLibraryLeasesAndPrimitiveTypesRejectBeforeQueueMutation() {
         val mutations: List<Bundle.() -> Unit> = listOf(
             { putInt("revision", 0) }, { putLong("revision", -1L) }, { remove("revision") },
-            { putString("schema", "1") }, { putInt("schema", 2) }, { remove("schema") },
+            { putString("schema", "2") }, { putInt("schema", 1) }, { putInt("schema", 3) }, { remove("schema") },
             { putString("view", "") }, { putString("view", "x".repeat(129)) }, { putByteArray("view", byteArrayOf(1)) },
             { putBoolean("generation", false) }, { putString("generation", " ") },
             { putString("track", "") }, { putLong("track", 1L) }, { putString("track", "x".repeat(129)) },
+            { remove("view_revision") }, { putInt("view_revision", 7) }, { putLong("view_revision", -1L) },
+            { remove("view_count") }, { putLong("view_count", 0L) }, { putInt("view_count", 10001) },
+            { putInt("selected_order", 10000) }, { putLong("selected_order", 10001L) }, { remove("selected_order") },
+            { putString("current_entry", " ") }, { putBoolean("current_entry", false) },
+            { remove("shuffle") }, { putInt("shuffle", 0) }, { putString("repeat", "UNKNOWN") },
+            { putLong("cycle_limit", 2L) }, { putInt("cycle_limit", 0) }, { putInt("cycle_limit", 100) },
+            { putString("action", "PLAY_PAGE") }, { remove("action") },
         )
         for (mutate in mutations) {
-            val arguments = PlaybackCommands.libraryArguments("library-view", null, base(), "library-operation")
+            val arguments = PlaybackCommands.libraryArguments(libraryCommand())
             arguments.mutate()
             rejects("invalid library lease/primitive") { PlaybackCommands.readLibrary(arguments) }
         }
         rejects("online selection through the local-library command") {
-            PlaybackCommands.libraryArguments("library-view", TrackKey("online", "selected"), base(), "library-operation")
+            libraryCommand(TrackKey("online", "selected"))
         }
     }
+
+    @Test
+    fun managementCommandsFreezeTheExactInstanceAndCurrentEntryFence() {
+        val edits = listOf(
+            QueueMutation.Remove("duplicate-instance", confirmedCurrent = true),
+            QueueMutation.Move("duplicate-instance", 10000L),
+            QueueMutation.SetMode(QueueMode(true, QueueRepeatMode.SINGLE, 99)),
+        )
+        for (edit in edits) {
+            val request = QueueMutationRequest("edit-operation", base().generationId, 42L, base().currentEntryId, edit)
+            val arguments = PlaybackCommands.mutationArguments(request)
+            val decoded = PlaybackCommands.readMutation(arguments)
+            assertEquals(request, decoded)
+            assertFalse(arguments.containsKey("uri"))
+            arguments.putString("entry", "another-instance")
+            arguments.putString("current_entry", "another-current")
+            arguments.putLong("revision", 43L)
+            assertEquals(request, decoded)
+        }
+        rejects("insertion without the frozen library producer") {
+            PlaybackCommands.mutationArguments(QueueMutationRequest(
+                "insert-operation", base().generationId, 42L, base().currentEntryId,
+                QueueMutation.InsertNext(FrozenQueueView("library", 7L, 10001L), base().currentEntryId),
+            ))
+        }
+    }
+
+    @Test
+    fun malformedManagementCommandsCannotInventConfirmationOrTargetPositions() {
+        val mutations: List<Bundle.() -> Unit> = listOf(
+            { remove("confirmed_current") }, { putString("confirmed_current", "true") },
+            { putInt("revision", 42) }, { putLong("revision", -1L) }, { remove("revision") },
+            { putBoolean("current_entry", false) }, { putString("current_entry", "") },
+            { putString("entry", "") }, { putString("operation", "") },
+            { putInt("schema", 1) }, { putInt("schema", 3) }, { remove("schema") },
+            { putString("action", "MOVE"); putInt("destination_order", 1) },
+            { putString("action", "MOVE"); putLong("destination_order", -1L) },
+            { putString("action", "MODE"); putString("shuffle", "true") },
+            { putString("action", "INSERT_NEXT") },
+        )
+        for (mutate in mutations) {
+            val arguments = PlaybackCommands.mutationArguments(QueueMutationRequest(
+                "edit-operation", base().generationId, 42L, base().currentEntryId,
+                QueueMutation.Remove("duplicate-instance", true),
+            )).apply(mutate)
+            rejects("malformed management command") { PlaybackCommands.readMutation(arguments) }
+        }
+    }
+
+    @Test
+    fun seekProtocolKeepsTheServiceBackendAndContentBindingUntilSubmission() {
+        val binding = seekBinding()
+        val request = QueueSeekRequest(binding, Long.MAX_VALUE, explicitPlay = true)
+        val arguments = PlaybackCommands.seekArguments(request)
+        val decoded = PlaybackCommands.readSeek(arguments)
+        assertEquals(request, decoded)
+        assertFalse(arguments.containsKey("uri"))
+        assertFalse(arguments.containsKey("title"))
+        arguments.putString("session", "later-service")
+        arguments.putLong("backend_generation", binding.backendGeneration + 1L)
+        arguments.putLong("content_revision", binding.contentRevision + 1L)
+        arguments.putLong("position", 0L)
+        assertEquals(request, decoded)
+        assertEquals(binding, PlaybackCommands.readSeekBinding(PlaybackCommands.seekBindingArguments(binding)))
+        PlaybackCommands.readBeginSeek(PlaybackCommands.beginSeekArguments())
+    }
+
+    @Test
+    fun seekRejectsUnknownDurationOldProtocolAndWrongPrimitiveFences() {
+        val mutations: List<Bundle.() -> Unit> = listOf(
+            { remove("session") }, { putLong("session", 1L) }, { putString("preview", "") },
+            { putInt("backend_generation", 3) }, { putLong("backend_generation", -1L) },
+            { putInt("revision", 42) }, { putLong("revision", -1L) }, { remove("entry") },
+            { putLong("location", 1L) }, { putLong("content_revision", -1L) },
+            { putInt("duration", 60000) }, { putLong("duration", 0L) }, { putLong("duration", -1L) },
+            { remove("position") }, { putInt("position", 10000) }, { putLong("position", -1L) },
+            { remove("explicit_play") }, { putInt("explicit_play", 0) },
+            { putInt("schema", 1) }, { putInt("schema", 3) }, { remove("schema") },
+        )
+        for (mutate in mutations) {
+            rejects("malformed seek binding or target") {
+                PlaybackCommands.readSeek(PlaybackCommands.seekArguments(QueueSeekRequest(seekBinding(), 10000L)).apply(mutate))
+            }
+        }
+        rejects("old begin-seek protocol") { PlaybackCommands.readBeginSeek(Bundle().apply { putInt("schema", 1) }) }
+    }
+
+    private fun libraryCommand(selected: TrackKey? = TrackKey(TrackKey.LOCAL_PROVIDER, "selected-local")) = LibraryQueueCommand(
+        viewId = "view-library", operationId = "play-library",
+        expectedGenerationId = base().generationId, expectedQueueRevision = base().queueRevision,
+        selected = selected, viewRevision = 7L, viewCount = 10001L,
+        selectedOriginalOrder = selected?.let { 10000L }, expectedCurrentEntryId = base().currentEntryId,
+        mode = QueueMode(true, QueueRepeatMode.SINGLE, 2), action = LibraryQueueAction.REPLACE_COMPLETE_LIST,
+    )
+
+    private fun seekBinding() = QueueSeekBinding(
+        previewId = "seek-preview", sessionId = "service-session", backendGeneration = 3L,
+        generationId = base().generationId, queueRevision = 42L, queueEntryId = "instance-current",
+        locationId = "location-current", contentRevision = 8L, durationMs = 60000L,
+    )
 
     private fun validLocalArguments(): Bundle = PlaybackCommands.localArguments(entry(), base(), "operation-valid")
 

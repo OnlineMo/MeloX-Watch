@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="prefs_song_tap">Tap a song</string>
+    <string name="prefs_song_tap_ask">Ask each time</string>
+    <string name="prefs_song_tap_insert">Insert and play</string>
+    <string name="prefs_song_tap_replace">Play the complete current list</string>
+    <string name="prefs_song_tap_value">Song tap: %1$s</string>
+    <string name="prefs_song_tap_scope">The complete list includes every result in the current filter and sort order.</string>
+    <string name="prefs_playback_backend">Playback engine</string>
+    <string name="prefs_backend_media3">Media3</string>
+    <string name="prefs_backend_system">System MediaPlayer</string>
+    <string name="prefs_playback_backend_value">Saved engine: %1$s</string>
+    <string name="prefs_backend_scope">Changing the engine pauses playback and preserves the current song and position. Resume when ready.</string>
+    <string name="prefs_playback_speed">Playback speed</string>
+    <string name="prefs_playback_speed_value">Speed: %1$.1f×</string>
+    <string name="prefs_speed_slower">Decrease by 0.1</string>
+    <string name="prefs_speed_faster">Increase by 0.1</string>
+    <string name="prefs_speed_normal">Normal speed (1.0×)</string>
+    <string name="prefs_speed_scope">Choose 0.5–2.0× with pitch preserved. A saved change applies when the active engine can accept it; check playback for the actual speed.</string>
+    <string name="prefs_gapless">Continuous playback</string>
+    <string name="prefs_gapless_value">Continuous playback: %1$s</string>
+    <string name="prefs_gapless_scope">Used for compatible consecutive tracks when the active engine supports it. Playback reports when it cannot apply the saved choice.</string>
+    <string name="prefs_media_buttons">Respond to headphone media buttons</string>
+    <string name="prefs_media_buttons_value">Headphone buttons: %1$s</string>
+    <string name="prefs_media_buttons_scope">Controls this app’s response; headphone pairing and system settings stay separate.</string>
+    <string name="prefs_audio_focus">Manage audio focus</string>
+    <string name="prefs_audio_focus_value">Audio focus management: %1$s</string>
+    <string name="prefs_audio_focus_scope">Enabled by default. Turning this off still respects platform playback conditions and pauses when headphones disconnect.</string>
+</resources>

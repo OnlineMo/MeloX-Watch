@@ -72,6 +72,7 @@ data class LibrarySourceVersionEntity(
     val grantId: String,
     val absenceScanId: String?,
     val absenceScanSequence: Long?,
+    val rootObjectId: String? = null,
 )
 
 @Entity(tableName = "local_locations", indices = [Index(value = ["identityKey"], unique = true, name = "index_local_locations_identityKey")])
@@ -221,6 +222,7 @@ data class LibraryNodeVersionEntity(
     val directory: Boolean,
     val validFrom: Long,
     val validTo: Long?,
+    val pathName: String? = null,
 )
 
 @Entity(

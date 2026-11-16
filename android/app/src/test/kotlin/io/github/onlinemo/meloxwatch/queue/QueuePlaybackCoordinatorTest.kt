@@ -23,6 +23,8 @@ import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.QueueMutationCandidate
+import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
 import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.QueueWindow
@@ -33,6 +35,7 @@ import io.github.onlinemo.meloxwatch.playback.QueuePlaybackCoordinator
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackException
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackFailure
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
+import io.github.onlinemo.meloxwatch.playback.PlaybackBackendOperations
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -62,7 +65,8 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 
 /**
- * 真正的主 Looper ExoPlayer，DB gate 只控制 IO 时序；不把这些断言当音频/设备验收。
+ * 主 Looper ExoPlayer 的窗口/命令，DB gate 控制 IO 时序；准备/seek 用明确的意图 stub。
+ * content://audio 假 URI 不证明实际 READY、解码、出声或设备验收。
  * 不用 JUnit timeout 的额外线程，保持与 Service 相同的主线程调用约束。
  */
 @UnstableApi
@@ -86,7 +90,7 @@ class QueuePlaybackCoordinatorTest {
         )
         queues = ControlledQueueStore(List(3) { entry(it.toLong()) })
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope)
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope, operations = IntentOnlyOperations(backend))
     }
 
     @After
@@ -251,7 +255,8 @@ class QueuePlaybackCoordinatorTest {
         val failures = mutableListOf<QueuePlaybackIssue>()
         coordinator.detach()
         coordinator.close()
-        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope) { failures.add(it.issue) }
+        coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
+            onFailure = { failures.add(it.issue) }, operations = IntentOnlyOperations(backend))
         coordinator.initialize()
         val gate = Gate(ignoreCancellation = true)
         queues.windowGate = gate
@@ -319,6 +324,7 @@ class QueuePlaybackCoordinatorTest {
                 assertFalse("round identity must be ready before playback", backend.playWhenReady)
                 rounds.add(current.queueEntryId)
             },
+            operations = IntentOnlyOperations(backend),
         )
         coordinator.initialize()
         assertEquals(listOf("entry-1", "entry-0", "entry-2"), resolvedIds)
@@ -355,6 +361,7 @@ class QueuePlaybackCoordinatorTest {
                 current
             },
             onRoundChanged = { rounds.add(it.queueEntryId) },
+            operations = IntentOnlyOperations(backend),
         )
         coordinator.initialize()
         resolvedIds.clear()
@@ -389,6 +396,7 @@ class QueuePlaybackCoordinatorTest {
                 readGate?.waitForRelease()
                 current
             },
+            operations = IntentOnlyOperations(backend),
         )
         coordinator.initialize()
         resolvedIds.clear()
@@ -415,6 +423,7 @@ class QueuePlaybackCoordinatorTest {
         coordinator.close()
         coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
             onRoundChanged = { roundGate?.waitForRelease() },
+            operations = IntentOnlyOperations(backend),
         )
         coordinator.initialize()
         val gate = Gate(ignoreCancellation = true)
@@ -664,7 +673,7 @@ class QueuePlaybackCoordinatorTest {
         coordinator.detach()
         coordinator.close()
         coordinator = QueuePlaybackCoordinator(backend, queues, FixedPreferences(), scope,
-            resolveEntry = resolveEntry, onRoundChanged = onRoundChanged)
+            resolveEntry = resolveEntry, onRoundChanged = onRoundChanged, operations = IntentOnlyOperations(backend))
     }
 
     private fun replacement(operation: String, base: QueueSnapshot) = QueueReplacementRequest(
@@ -730,6 +739,12 @@ class QueuePlaybackCoordinatorTest {
         override suspend fun initialize(): QueueSnapshot = snapshot()
         override suspend fun snapshot(): QueueSnapshot = active.value ?: error("Initialized queue required")
         override fun snapshots(): Flow<QueueSnapshot?> = active
+
+        override suspend fun mutate(
+            request: QueueMutationRequest,
+            source: QueuePageSource?,
+            beforePublish: suspend (QueueMutationCandidate) -> QueueCheckpoint?,
+        ): QueueCommit = throw AssertionError("This intent-only store covers replacement/checkpoints; mutation integration uses real Room in QueueCoordinatorIntegrationTest")
 
         override suspend fun replace(
             request: QueueReplacementRequest,
@@ -801,6 +816,7 @@ class QueuePlaybackCoordinatorTest {
 
     /** 委托真实后端；销毁后的任何协调器 getter/mutation 都立即计数并失败。 */
     private class ReleaseGuard(private val delegate: ExoPlayer) : ExoPlayer by delegate {
+        var preparedForIntentTest = false
         var released = false
             private set
         var lateCalls = 0
@@ -828,7 +844,7 @@ class QueuePlaybackCoordinatorTest {
         override fun getRepeatMode(): Int = live { delegate.repeatMode }
         override fun getShuffleModeEnabled(): Boolean = live { delegate.shuffleModeEnabled }
         override fun getPlayWhenReady(): Boolean = live { delegate.playWhenReady }
-        override fun getPlaybackState(): Int = live { delegate.playbackState }
+        override fun getPlaybackState(): Int = live { if (preparedForIntentTest && delegate.currentMediaItem != null) Player.STATE_READY else delegate.playbackState }
         override fun getPlayerError(): ExoPlaybackException? = live { delegate.playerError }
         override fun getCurrentMediaItem(): MediaItem? = live { delegate.currentMediaItem }
         override fun getCurrentMediaItemIndex(): Int = live { delegate.currentMediaItemIndex }
@@ -868,6 +884,20 @@ class QueuePlaybackCoordinatorTest {
             check(!released)
             released = true
             delegate.release()
+        }
+    }
+
+    /** 此 stub 只使旧意图/释放测试不等待不存在的音频；实际后端 await 由独立测试验证。 */
+    private class IntentOnlyOperations(override val player: ReleaseGuard) : PlaybackBackendOperations {
+        override fun setPauseAtBoundary(pause: Boolean) = player.setPauseAtEndOfMediaItems(pause)
+        override suspend fun prepareAndAwait(expectedMediaId: String) {
+            assertEquals(expectedMediaId, player.currentMediaItem?.mediaId)
+            player.prepare()
+            player.preparedForIntentTest = true
+        }
+        override suspend fun seekAndAwait(expectedMediaId: String, positionMs: Long) {
+            assertEquals(expectedMediaId, player.currentMediaItem?.mediaId)
+            player.seekTo(positionMs)
         }
     }
 }

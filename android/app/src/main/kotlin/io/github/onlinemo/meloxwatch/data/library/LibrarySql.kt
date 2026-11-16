@@ -1,10 +1,35 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import androidx.sqlite.db.SimpleSQLiteQuery
+import io.github.onlinemo.meloxwatch.model.TrackKey
 
 /** All ordering happens in SQLite over versioned rows. No OFFSET or in-memory library sort. */
 internal object LibrarySql {
     private fun valid(alias: String, revision: Long) = "$alias.validFrom <= $revision AND ($alias.validTo IS NULL OR $alias.validTo >= $revision)"
+
+    private fun pathSegment(alias: String) = "$alias.pathName != '' AND $alias.pathName NOT IN ('.', '..') " +
+        "AND instr($alias.pathName, '/') = 0 AND instr($alias.pathName, char(92)) = 0 AND instr($alias.pathName, char(0)) = 0"
+
+    /** Only indexed enumeration edges below an authorized root contribute to a relative path. */
+    private fun relativePaths(revision: Long, sourceFiltered: Boolean = false): String = """
+        relative_paths(sourceId, nodeId, relativePath, directory) AS (
+            SELECT n.sourceId, n.nodeId, CASE WHEN n.directory = 1 THEN '' ELSE n.pathName END, n.directory
+            FROM local_node_versions n
+            JOIN local_nodes identity ON identity.nodeId = n.nodeId AND identity.sourceId = n.sourceId
+            JOIN local_source_versions sv ON sv.sourceId = n.sourceId AND ${valid("sv", revision)}
+            JOIN local_grants g ON g.grantId = sv.grantId
+            WHERE n.parentNodeId IS NULL AND ${valid("n", revision)}
+                AND identity.objectId = sv.rootObjectId ${if (sourceFiltered) "AND n.sourceId = ?" else ""}
+                AND sv.state = 'ACTIVE' AND g.readCapability = 'AVAILABLE'
+                AND (n.directory = 1 OR (${pathSegment("n")}))
+            UNION ALL
+            SELECT n.sourceId, n.nodeId,
+                CASE WHEN p.relativePath = '' THEN n.pathName ELSE p.relativePath || '/' || n.pathName END, n.directory
+            FROM local_node_versions n JOIN relative_paths p
+                ON p.sourceId = n.sourceId AND p.nodeId = n.parentNodeId AND p.directory = 1
+            WHERE ${valid("n", revision)} AND ${pathSegment("n")}
+        )
+    """.trimIndent()
 
     private fun excluded(source: String, node: String, revision: Long): String = """
         EXISTS (SELECT 1 FROM scan_rules rule WHERE rule.sourceId = $source
@@ -21,15 +46,30 @@ internal object LibrarySql {
     private fun cte(view: LibraryViewToken): Pair<String, MutableList<Any?>> {
         val revision = view.revision
         val args = mutableListOf<Any?>()
+        if (view.query.relativePathKeyword != null && view.query.sourceId != null) args += view.query.sourceId
         val aliases = mutableListOf(valid("av", revision))
         view.query.sourceId?.let { aliases += "av.sourceId = ?"; args += it }
         view.query.folderNodeId?.let {
-            aliases += "EXISTS (SELECT 1 FROM local_node_versions folder WHERE folder.nodeId = av.nodeId AND folder.parentNodeId = ? AND ${valid("folder", revision)})"
+            aliases += if (view.query.folderSubtree) """
+                av.nodeId IN (WITH RECURSIVE descendants(nodeId, directory) AS (
+                    SELECT n.nodeId, n.directory FROM local_node_versions n
+                    WHERE n.nodeId = ? AND n.sourceId = av.sourceId AND n.directory = 1 AND ${valid("n", revision)}
+                    UNION ALL SELECT n.nodeId, n.directory FROM local_node_versions n
+                        JOIN descendants d ON n.parentNodeId = d.nodeId AND d.directory = 1
+                    WHERE n.sourceId = av.sourceId AND ${valid("n", revision)}
+                ) SELECT nodeId FROM descendants WHERE directory = 0)
+            """.trimIndent() else "EXISTS (SELECT 1 FROM local_node_versions folder WHERE folder.nodeId = av.nodeId AND folder.sourceId = av.sourceId AND folder.parentNodeId = ? AND ${valid("folder", revision)})"
+            args += it
+        }
+        view.query.relativePathKeyword?.let {
+            // instr is literal and case sensitive: %, _ and backslash cannot become SQL wildcards.
+            aliases += "EXISTS (SELECT 1 FROM relative_paths p WHERE p.sourceId = av.sourceId AND p.nodeId = av.nodeId AND instr(p.relativePath, ?) > 0)"
             args += it
         }
         if (!view.query.includeHidden) aliases += "NOT ${excluded("av.sourceId", "av.nodeId", revision)}"
         val filters = mutableListOf(valid("t", revision), "t.member = 1")
-        if (!view.query.includeHidden || view.query.sourceId != null || view.query.folderNodeId != null) filters += "a.ownerTrackId IS NOT NULL"
+        if (!view.query.includeHidden || view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null) filters += "a.ownerTrackId IS NOT NULL"
+        if (view.query.readableOnly) filters += "a.availabilityRank = 0"
         if (!view.query.includeHidden) filters += "COALESCE(a.availabilityRank, 3) != 5"
         if (!view.query.includeHidden && view.shortAudioFilter) filters += "(t.durationMs IS NULL OR t.durationMs >= ${LibraryLimits.SHORT_AUDIO_MS})"
         view.query.albumKey?.let { filters += "t.albumKey = ?"; args += it }
@@ -42,7 +82,7 @@ internal object LibrarySql {
         }
         val (primary, nullRank, section) = sortColumns(view.sort.field)
         val sql = """
-            WITH alias_rows AS (
+            WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""} alias_rows AS (
                 SELECT av.*, aa.objectId, sv.spec AS sourceSpec, g.uri AS grantUri, g.observation AS grantObservation,
                     lv.contentRevision AS actualContentRevision, lv.contentToken AS actualContentToken,
                     lv.verifiedContentToken AS actualVerifiedContentToken, lv.sizeBytes AS actualSizeBytes,
@@ -125,6 +165,14 @@ internal object LibrarySql {
         val (sql, args) = cte(view)
         return SimpleSQLiteQuery("$sql SELECT COUNT(*) FROM ordered WHERE availabilityRank = 0", args.toTypedArray())
     }
+    fun playlistOverlap(view: LibraryViewToken, dataGenerationId: String): SimpleSQLiteQuery {
+        val (sql, args) = cte(view)
+        args += dataGenerationId
+        return SimpleSQLiteQuery("""$sql SELECT COUNT(*) FROM ordered t WHERE EXISTS (
+            SELECT 1 FROM playlist_members member WHERE member.generationId = ?
+                AND member.providerId = t.providerId AND member.trackId = t.trackId)
+        """.trimIndent(), args.toTypedArray())
+    }
     fun rows(view: LibraryViewToken, cursor: LibraryCursor?, limit: Int, before: Boolean = false): SimpleSQLiteQuery {
         val (sql, args) = cte(view)
         val where = if (cursor == null) "" else "WHERE ${boundary(view, cursor, before, args)}"
@@ -135,6 +183,16 @@ internal object LibrarySql {
         val (sql, args) = cte(view)
         args += providerId; args += trackId
         return SimpleSQLiteQuery("$sql SELECT * FROM ordered WHERE providerId = ? AND trackId = ? LIMIT 1", args.toTypedArray())
+    }
+    fun rowsForKeys(view: LibraryViewToken, keys: List<TrackKey>): SimpleSQLiteQuery {
+        require(keys.size <= LibraryLimits.PAGE_SIZE)
+        val (sql, args) = cte(view)
+        val predicate = keys.joinToString(" OR ") {
+            args += it.providerId; args += it.trackId
+            "(providerId = ? AND trackId = ?)"
+        }.ifEmpty { "0" }
+        args += keys.size + 1
+        return SimpleSQLiteQuery("$sql SELECT * FROM ordered WHERE ($predicate) LIMIT ?", args.toTypedArray())
     }
     fun countBefore(view: LibraryViewToken, cursor: LibraryCursor): SimpleSQLiteQuery {
         val (sql, args) = cte(view)
@@ -184,6 +242,54 @@ internal object LibrarySql {
             ) SELECT EXISTS (SELECT 1 FROM scan_rules r WHERE r.sourceId = ? AND ${valid("r", revision)}
                 AND (r.nodeId = ? OR (r.subtree = 1 AND r.nodeId IN (SELECT nodeId FROM ancestors))))
         """.trimIndent(), arrayOf(start, sourceId, nodeId.orEmpty()))
+    }
+
+    fun relativePath(revision: Long, sourceId: String, nodeId: String): SimpleSQLiteQuery = SimpleSQLiteQuery(
+        "WITH RECURSIVE ${relativePaths(revision, true)} SELECT relativePath FROM relative_paths WHERE sourceId = ? AND nodeId = ? LIMIT 1",
+        arrayOf(sourceId, sourceId, nodeId),
+    )
+
+    fun relativePathMatches(revision: Long, sourceId: String, path: String, limit: Int): SimpleSQLiteQuery = SimpleSQLiteQuery(
+        """WITH RECURSIVE ${relativePaths(revision, true)}
+            SELECT DISTINCT t.providerId, t.trackId FROM relative_paths p
+            JOIN local_alias_versions av ON av.sourceId = p.sourceId AND av.nodeId = p.nodeId AND ${valid("av", revision)}
+            JOIN local_track_locations relation ON relation.locationId = av.locationId AND ${valid("relation", revision)}
+            JOIN local_track_versions t ON t.trackId = relation.trackId AND ${valid("t", revision)}
+            JOIN local_source_versions sv ON sv.sourceId = av.sourceId AND ${valid("sv", revision)}
+            WHERE p.relativePath = ? AND p.directory = 0 AND t.member = 1
+                AND (av.readIssue IS NULL OR av.readIssue = 'METADATA_UNREADABLE')
+                AND NOT ${excluded("av.sourceId", "av.nodeId", revision)}
+                AND NOT (sv.absenceScanId IS NOT NULL AND av.lastSeenSequence < sv.absenceScanSequence
+                    AND EXISTS (SELECT 1 FROM scan_absence_candidates absent WHERE absent.scanId = sv.absenceScanId AND absent.aliasId = av.aliasId))
+            ORDER BY t.providerId, t.trackId LIMIT ?
+        """.trimIndent(), arrayOf(sourceId, path, limit),
+    )
+    /** Walk only the chosen indexed root and the already validated literal components, at most 16 edges. */
+    fun scopedRelativePathMatches(
+        revision: Long, sourceId: String, rootNodeId: String, components: List<String>, limit: Int,
+    ): SimpleSQLiteQuery {
+        require(components.size in 1..16 && limit in 1..LibraryLimits.PAGE_SIZE)
+        val names = components.indices.joinToString(" ") { "WHEN $it THEN ?" }
+        val args = mutableListOf<Any?>(rootNodeId, sourceId, sourceId)
+        args.addAll(components)
+        args += limit
+        return SimpleSQLiteQuery("""
+            WITH RECURSIVE path_matches(nodeId, depth, directory) AS (
+                SELECT n.nodeId, 0, n.directory FROM local_node_versions n
+                    WHERE n.nodeId = ? AND n.sourceId = ? AND n.directory = 1 AND ${valid("n", revision)}
+                UNION ALL
+                SELECT n.nodeId, p.depth + 1, n.directory FROM local_node_versions n JOIN path_matches p
+                    ON n.parentNodeId = p.nodeId AND p.directory = 1
+                    WHERE n.sourceId = ? AND ${valid("n", revision)} AND p.depth < ${components.size}
+                        AND n.pathName = CASE p.depth $names END
+            )
+            SELECT DISTINCT t.providerId, t.trackId FROM path_matches p
+                JOIN local_alias_versions av ON av.nodeId = p.nodeId AND ${valid("av", revision)}
+                JOIN local_track_locations relation ON relation.locationId = av.locationId AND ${valid("relation", revision)}
+                JOIN local_track_versions t ON t.trackId = relation.trackId AND ${valid("t", revision)}
+                WHERE p.depth = ${components.size} AND p.directory = 0 AND t.member = 1
+                ORDER BY t.providerId, t.trackId LIMIT ?
+        """.trimIndent(), args.toTypedArray())
     }
     fun absentAliases(sourceId: String, scanId: String, after: String?, limit: Int): SimpleSQLiteQuery {
         val args = mutableListOf<Any?>(sourceId, scanId)

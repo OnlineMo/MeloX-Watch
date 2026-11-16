@@ -78,10 +78,15 @@ data class LibraryQuery(
     val artistKey: String? = null,
     val addedSinceEpochMs: Long? = null,
     val includeHidden: Boolean = false,
+    val folderSubtree: Boolean = false,
+    val relativePathKeyword: String? = null,
+    val readableOnly: Boolean = false,
 ) {
     init {
         require(search.length <= 4096)
         require(folderNodeId == null || sourceId != null)
+        require(!folderSubtree || folderNodeId != null)
+        require(relativePathKeyword == null || relativePathKeyword.isNotBlank() && relativePathKeyword.length <= 4096)
     }
 }
 

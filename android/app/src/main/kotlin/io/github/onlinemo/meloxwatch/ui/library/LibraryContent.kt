@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -18,7 +17,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,7 +28,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -44,9 +44,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.rememberTextMeasurer
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.artwork.ArtworkLease
@@ -55,11 +55,22 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryAvailability
 import io.github.onlinemo.meloxwatch.data.library.LibraryGroupKind
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrack
+import io.github.onlinemo.meloxwatch.data.library.LibraryViewToken
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
+import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueAction
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueCommand
+import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryStatus
+import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryUiState
+import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryViewModel
+import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistTrackControls
+import io.github.onlinemo.meloxwatch.ui.watch.WatchActionRow
+import io.github.onlinemo.meloxwatch.ui.watch.WatchContentRow
+import io.github.onlinemo.meloxwatch.ui.watch.WatchPalette
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -74,7 +85,7 @@ fun LazyListScope.libraryContent(
     sources: SourcesUiState,
     sourceModel: SourcesViewModel,
     commandPending: Boolean,
-    onPlay: (String, TrackKey?) -> Unit,
+    onPlay: (LibraryQueueCommand) -> Unit,
     onPlayPreview: (QueueEntry) -> Unit,
     onChooseFile: () -> Unit,
     onChooseTree: () -> Unit,
@@ -82,8 +93,16 @@ fun LazyListScope.libraryContent(
     listening: ListeningUiState,
     listeningModel: ListeningViewModel,
     onPermissionSettings: () -> Unit,
+    playlistEntry: PlaylistEntryUiState,
+    playlistEntryModel: PlaylistEntryViewModel,
+    onPlaylists: () -> Unit,
+    onAddToPlaylist: (LibraryViewToken, TrackKey?, String?) -> Unit,
 ) {
-    item(key = "library:navigation") { LibraryNavigation(state, model) }
+    item(key = "library:navigation") {
+        LibraryNavigation(state, model)
+        LibraryButton(stringResource(R.string.playlist_entry_browse), true, onPlaylists)
+        PlaylistEntryStatus(playlistEntry, playlistEntryModel)
+    }
     if (state.screen == LibraryScreen.SOURCES) {
         sourcesContent(sources, sourceModel, commandPending, onPlayPreview, onChooseFile, onChooseTree, onMediaStore, onPermissionSettings)
         return
@@ -108,6 +127,9 @@ fun LazyListScope.libraryContent(
             LibraryButton(stringResource(R.string.library_reload), !state.loading, model::reload)
         }
     }
+    if (state.playPreparing || state.playDraft != null || state.playIssue != null) {
+        item(key = "library:play-confirmation") { LibraryPlayConfirmation(state, model, commandPending, onPlay) }
+    }
     if (state.screen !in setOf(LibraryScreen.ALBUMS, LibraryScreen.ARTISTS)) {
         stickyHeader(key = "library:refresh-action") {
             Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
@@ -118,7 +140,7 @@ fun LazyListScope.libraryContent(
         item(key = "library:refresh-artwork") { ArtworkRefreshControls(state, model) }
     }
     if (state.screen == LibraryScreen.DETAIL) {
-        detailContent(state, sourceModel, commandPending, onPlay)
+        detailContent(state, model, sourceModel, commandPending, onPlay, playlistEntry, playlistEntryModel, onPlaylists, onAddToPlaylist)
         return
     }
     if (state.screen == LibraryScreen.ALBUMS || state.screen == LibraryScreen.ARTISTS) {
@@ -151,7 +173,14 @@ fun LazyListScope.libraryContent(
     if (page != null) {
         item(key = "library:play-all") {
             LibraryButton(stringResource(R.string.library_play_all, page.view.totalCount), state.canPlay && !commandPending) {
-                onPlay(page.view.viewId, null)
+                model.preparePlay(null, onCommit = onPlay)
+            }
+            LibraryButton(stringResource(R.string.library_insert_all_next, page.view.totalCount), state.canPlay && !commandPending) {
+                model.preparePlay(null, LibraryQueueAction.INSERT_NEXT, onPlay)
+            }
+            LibraryButton(pluralStringResource(R.plurals.playlist_entry_add_all, libraryPluralQuantity(page.view.totalCount),
+                page.view.totalCount), state.canPlay && !playlistEntry.addPreparing) {
+                onAddToPlaylist(page.view, null, null)
             }
             LibraryButton(stringResource(R.string.library_sort), state.preferencesWritable && !state.loading, model::beginSort)
         }
@@ -160,11 +189,14 @@ fun LazyListScope.libraryContent(
         if (page.tracks.isEmpty() && !state.loading && state.issue == null) item { LibraryText(stringResource(R.string.library_empty)) }
         if (state.layout == LibraryLayout.GRID) {
             items(page.tracks.chunked(2), key = { "pair:${it.first().trackKey.trackId}" }) { pair ->
-                TrackPair(pair, state, model, pair.first() == page.tracks.firstOrNull())
+                TrackPair(pair, state, model, pair.first() == page.tracks.firstOrNull(), commandPending, onPlay)
             }
         } else {
             items(page.tracks, key = { "track:${it.trackKey.providerId}:${it.trackKey.trackId}" }) { track ->
-                TrackCard(track, state.preferences.artworkReadPath, state.canPlay, artworkRevision = state.artworkRevision) { model.openDetail(track) }
+                TrackCard(track, state.preferences.artworkReadPath, state.canPlay && !commandPending,
+                    artworkRevision = state.artworkRevision, onDetail = { model.openDetail(track) }) {
+                    model.preparePlay(track.trackKey, onCommit = onPlay)
+                }
             }
         }
         item(key = "library:page-controls") {
@@ -176,6 +208,35 @@ fun LazyListScope.libraryContent(
                 LibraryButton(stringResource(R.string.library_next_page), state.hasNext, model::nextPage)
             }
         }
+    }
+}
+
+@Composable
+private fun LibraryPlayConfirmation(
+    state: LibraryUiState, model: LibraryViewModel, pending: Boolean, onPlay: (LibraryQueueCommand) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (state.playPreparing) LibraryText(stringResource(R.string.library_preparing_play))
+        state.playIssue?.let { LibraryText(stringResource(libraryIssueText(it)), error = true) }
+        state.playDraft?.let { draft ->
+            val command = draft.command
+            LibraryText(stringResource(R.string.library_play_choice), primary = true)
+            draft.selectedTitle?.let { LibraryText(it, primary = true) }
+            LibraryText(stringResource(R.string.library_replace_impact,
+                draft.previousCount, command.viewCount, (command.selectedOriginalOrder ?: 0L) + 1L))
+            val inserted = if (command.selected == null) command.viewCount else 1L
+            LibraryText(stringResource(R.string.library_insert_impact, inserted))
+            LibraryButton(stringResource(R.string.prefs_song_tap_insert), !pending && !state.playPreparing) {
+                model.confirmPlay(LibraryQueueAction.INSERT_AND_PLAY, onPlay)
+            }
+            LibraryButton(stringResource(R.string.prefs_song_tap_replace), !pending && !state.playPreparing) {
+                model.confirmPlay(LibraryQueueAction.REPLACE_COMPLETE_LIST, onPlay)
+            }
+            LibraryButton(stringResource(R.string.library_insert_next), !pending && !state.playPreparing) {
+                model.confirmPlay(LibraryQueueAction.INSERT_NEXT, onPlay)
+            }
+        }
+        LibraryButton(stringResource(R.string.probe_cancel), !pending, model::cancelPlay)
     }
 }
 
@@ -237,7 +298,8 @@ private fun Sections(state: LibraryUiState, model: LibraryViewModel) {
 }
 
 @Composable
-private fun TrackPair(tracks: List<LibraryTrack>, state: LibraryUiState, model: LibraryViewModel, first: Boolean) {
+private fun TrackPair(tracks: List<LibraryTrack>, state: LibraryUiState, model: LibraryViewModel, first: Boolean,
+    pending: Boolean, onPlay: (LibraryQueueCommand) -> Unit) {
     val measurer = rememberTextMeasurer()
     val label = stringResource(R.string.library_grid_measure)
     val style = MaterialTheme.typography.bodyLarge
@@ -249,30 +311,38 @@ private fun TrackPair(tracks: List<LibraryTrack>, state: LibraryUiState, model: 
             if (first && !allowsGrid) LibraryText(stringResource(R.string.library_grid_fallback))
             if (allowsGrid) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 for (track in tracks) Box(Modifier.weight(1f)) {
-                    TrackCard(track, state.preferences.artworkReadPath, state.canPlay, grid = true, artworkRevision = state.artworkRevision) { model.openDetail(track) }
+                    TrackCard(track, state.preferences.artworkReadPath, state.canPlay && !pending, grid = true,
+                        artworkRevision = state.artworkRevision, onDetail = { model.openDetail(track) }) {
+                        model.preparePlay(track.trackKey, onCommit = onPlay)
+                    }
                 }
                 if (tracks.size == 1) Box(Modifier.weight(1f))
-            } else for (track in tracks) TrackCard(track, state.preferences.artworkReadPath, state.canPlay, artworkRevision = state.artworkRevision) { model.openDetail(track) }
+            } else for (track in tracks) TrackCard(track, state.preferences.artworkReadPath, state.canPlay && !pending,
+                artworkRevision = state.artworkRevision, onDetail = { model.openDetail(track) }) {
+                model.preparePlay(track.trackKey, onCommit = onPlay)
+            }
         }
     }
 }
 
 @Composable
 private fun TrackCard(track: LibraryTrack, path: ArtworkReadPath, enabled: Boolean, grid: Boolean = false,
-    artworkRevision: Long = 0L, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp)) {
-        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            if (grid) {
-                TrackArtwork(track, path, artworkRevision)
-                TrackLabel(track)
-            } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                TrackArtwork(track, path, artworkRevision)
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) { TrackLabel(track) }
+    artworkRevision: Long = 0L, onDetail: () -> Unit, onClick: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        WatchContentRow(onClick = onClick, enabled = enabled) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (grid) {
+                    TrackArtwork(track, path, artworkRevision)
+                    TrackLabel(track)
+                } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TrackArtwork(track, path, artworkRevision)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) { TrackLabel(track) }
+                }
+                if (track.availability != LibraryAvailability.AVAILABLE) LibraryText(stringResource(availabilityText(track.availability)))
+                if (track.metadataIssue != null) LibraryText(stringResource(R.string.library_metadata_unreadable))
             }
-            if (track.availability != LibraryAvailability.AVAILABLE) LibraryText(stringResource(availabilityText(track.availability)))
-            if (track.metadataIssue != null) LibraryText(stringResource(R.string.library_metadata_unreadable))
         }
+        LibraryButton(stringResource(R.string.library_open_detail), enabled, onDetail)
     }
 }
 
@@ -285,11 +355,13 @@ private fun TrackLabel(track: LibraryTrack) {
 }
 
 @Composable
-internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, revision: Long = 0L) {
+internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, revision: Long = 0L,
+    size: Dp = 56.dp, modifier: Modifier = Modifier, visible: Boolean = true) {
     val app = LocalContext.current.applicationContext as MeloXApplication
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var lease by remember(track.trackKey, track.location, path, revision) { mutableStateOf<ArtworkLease?>(null) }
-    LaunchedEffect(track.trackKey, track.location, path, revision, lifecycle) {
+    LaunchedEffect(track.trackKey, track.location, path, revision, lifecycle, visible) {
+        if (!visible) return@LaunchedEffect
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             var acquired: ArtworkLease? = null
             try {
@@ -304,15 +376,18 @@ internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, revision: 
         }
     }
     val description = stringResource(R.string.library_artwork, track.title)
-    Box(Modifier.size(56.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+    Box(modifier.size(size).clip(RoundedCornerShape(10.dp)).background(WatchPalette.Raised)
         .semantics { contentDescription = description }, contentAlignment = Alignment.Center) {
         val image = lease?.bitmap
         if (image == null) Text("♪", style = MaterialTheme.typography.titleLarge)
-        else Image(image.asImageBitmap(), contentDescription = null, modifier = Modifier.size(56.dp))
+        else Image(image.asImageBitmap(), contentDescription = null, modifier = Modifier.size(size), contentScale = ContentScale.Crop)
     }
 }
 
-private fun LazyListScope.detailContent(state: LibraryUiState, sources: SourcesViewModel, pending: Boolean, onPlay: (String, TrackKey?) -> Unit) {
+private fun LazyListScope.detailContent(state: LibraryUiState, model: LibraryViewModel, sources: SourcesViewModel,
+    pending: Boolean, onPlay: (LibraryQueueCommand) -> Unit, playlistEntry: PlaylistEntryUiState,
+    playlistEntryModel: PlaylistEntryViewModel, onPlaylists: () -> Unit,
+    onAddToPlaylist: (LibraryViewToken, TrackKey?, String?) -> Unit) {
     val track = state.detail
     if (track == null) { item { LibraryText(stringResource(R.string.library_detail_missing)) }; return }
     item(key = "library:detail-art") { TrackArtwork(track, state.preferences.artworkReadPath, state.artworkRevision) }
@@ -330,9 +405,22 @@ private fun LazyListScope.detailContent(state: LibraryUiState, sources: SourcesV
     item { LibraryText(stringResource(R.string.library_listening_value, track.playCount, formatDuration(track.listeningMs))) }
     if (track.metadataIssue != null) item { LibraryText(stringResource(R.string.library_metadata_unreadable), error = true) }
     item {
+        LibraryText(stringResource(R.string.prefs_song_tap_value, stringResource(when (state.preferences.songTapPolicy) {
+            SongTapPolicy.ASK -> R.string.prefs_song_tap_ask
+            SongTapPolicy.INSERT_AND_PLAY -> R.string.prefs_song_tap_insert
+            SongTapPolicy.REPLACE_COMPLETE_LIST -> R.string.prefs_song_tap_replace
+        })))
         LibraryButton(stringResource(R.string.library_play_selected), state.canPlay && !pending) {
-            onPlay(requireNotNull(state.page).view.viewId, track.trackKey)
+            model.preparePlay(track.trackKey, onCommit = onPlay)
         }
+        LibraryButton(stringResource(R.string.library_insert_next), state.canPlay && !pending) {
+            model.preparePlay(track.trackKey, LibraryQueueAction.INSERT_NEXT, onPlay)
+        }
+    }
+    item(key = "library:detail-playlist-actions") {
+        PlaylistTrackControls(playlistEntry, playlistEntryModel, onAdd = {
+            state.page?.view?.let { view -> onAddToPlaylist(view, track.trackKey, track.title) }
+        }, onPlaylists = onPlaylists, canAdd = state.canPlay)
     }
     if (track.sourceId != null && track.nodeId != null) item {
         LibraryButton(stringResource(R.string.library_exclude_file), true) { sources.excludeTrack(track.sourceId, track.nodeId) }
@@ -379,9 +467,7 @@ internal fun libraryPluralQuantity(count: Long): Int = count.coerceIn(0L, Int.MA
 
 @Composable
 internal fun LibraryButton(label: String, enabled: Boolean = true, onClick: () -> Unit) {
-    OutlinedButton(onClick = onClick, enabled = enabled, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
-        Text(label, textAlign = TextAlign.Center)
-    }
+    WatchActionRow(label, enabled, onClick = onClick)
 }
 
 internal fun libraryScreenTitle(screen: LibraryScreen): Int = when (screen) {

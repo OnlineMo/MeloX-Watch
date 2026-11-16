@@ -15,7 +15,10 @@ import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
+import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
+import io.github.onlinemo.meloxwatch.model.PlaybackPreferenceLimits
 import io.github.onlinemo.meloxwatch.model.ScreenShape
+import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
 import kotlinx.coroutines.CancellationException
@@ -157,6 +160,37 @@ class PreferencesViewModel(
     @MainThread
     fun setArtworkReadPath(path: ArtworkReadPath) {
         editDraft { draft -> draft.copy(artworkReadPath = path) }
+    }
+
+    @MainThread
+    fun setSongTapPolicy(policy: SongTapPolicy) {
+        editDraft { it.copy(songTapPolicy = policy) }
+    }
+
+    @MainThread
+    fun setMediaButtonsEnabled(enabled: Boolean) {
+        editDraft { it.copy(mediaButtonsEnabled = enabled) }
+    }
+
+    @MainThread
+    fun setAudioFocusManagement(enabled: Boolean) {
+        editDraft { it.copy(audioFocusManagement = enabled) }
+    }
+
+    @MainThread
+    fun setPlaybackBackend(backend: PlaybackBackendKind) {
+        editDraft { it.copy(playbackBackend = backend) }
+    }
+
+    @MainThread
+    fun setPlaybackSpeedTenths(speed: Int) {
+        if (speed !in PlaybackPreferenceLimits.MIN_SPEED_TENTHS..PlaybackPreferenceLimits.MAX_SPEED_TENTHS) return
+        editDraft { it.copy(playbackSpeedTenths = speed) }
+    }
+
+    @MainThread
+    fun setGaplessPlayback(enabled: Boolean) {
+        editDraft { it.copy(gaplessPlayback = enabled) }
     }
 
     /** 明确丢弃当前草稿，按最新确认值建立新基线；冲突不自动更新 expectedRevision。 */
@@ -348,6 +382,21 @@ class PreferencesViewModel(
         val shape = ScreenShape.entries.firstOrNull { value -> value.name == shapeName }
         val layout = LibraryLayout.entries.firstOrNull { it.name == (savedStateHandle.get<Any>(KEY_LAYOUT) as? String) }
         val artworkPath = ArtworkReadPath.entries.firstOrNull { it.name == (savedStateHandle.get<Any>(KEY_ARTWORK) as? String) }
+        val oldDraft = !savedStateHandle.contains(KEY_EDITOR_SCHEMA)
+        val tapPolicy = if (oldDraft) SongTapPolicy.ASK else SongTapPolicy.entries.firstOrNull {
+            it.name == (savedStateHandle.get<Any>(KEY_TAP_POLICY) as? String)
+        }
+        val backend = if (oldDraft) PlaybackBackendKind.MEDIA3 else PlaybackBackendKind.entries.firstOrNull {
+            it.name == (savedStateHandle.get<Any>(KEY_BACKEND) as? String)
+        }
+        val speed = if (oldDraft) PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS else {
+            (savedStateHandle.get<Any>(KEY_SPEED) as? Int)?.takeIf {
+                it in PlaybackPreferenceLimits.MIN_SPEED_TENTHS..PlaybackPreferenceLimits.MAX_SPEED_TENTHS
+            }
+        }
+        val mediaButtons = if (oldDraft) true else savedStateHandle.get<Any>(KEY_MEDIA_BUTTONS) as? Boolean
+        val audioFocus = if (oldDraft) true else savedStateHandle.get<Any>(KEY_AUDIO_FOCUS) as? Boolean
+        val gapless = if (oldDraft) true else savedStateHandle.get<Any>(KEY_GAPLESS) as? Boolean
         val sorts = LibraryListContext.entries.associateWith { context ->
             val field = LibrarySortField.entries.firstOrNull {
                 it.name == (savedStateHandle.get<Any>(sortKey(context)) as? String)
@@ -356,9 +405,24 @@ class PreferencesViewModel(
             if (field == null || direction == null) null else LibrarySort(field, direction)
         }
         val draft = if (active && revision != null && restore != null && shape != null &&
-            layout != null && artworkPath != null && sorts.values.all { it != null }
+            layout != null && artworkPath != null && sorts.values.all { it != null } &&
+            tapPolicy != null && backend != null && speed != null &&
+            mediaButtons != null && audioFocus != null && gapless != null &&
+            (oldDraft || savedStateHandle.get<Any>(KEY_EDITOR_SCHEMA) == UserPreferences.CURRENT_SCHEMA_VERSION)
         ) {
-            UserPreferencesDraft(restore, shape, layout, artworkPath, sorts.mapValues { checkNotNull(it.value) })
+            UserPreferencesDraft(
+                restorePosition = restore,
+                screenShape = shape,
+                libraryLayout = layout,
+                artworkReadPath = artworkPath,
+                librarySorts = sorts.mapValues { checkNotNull(it.value) },
+                songTapPolicy = tapPolicy,
+                mediaButtonsEnabled = mediaButtons,
+                audioFocusManagement = audioFocus,
+                playbackBackend = backend,
+                playbackSpeedTenths = speed,
+                gaplessPlayback = gapless,
+            )
         } else {
             null
         }
@@ -378,22 +442,36 @@ class PreferencesViewModel(
         savedStateHandle[KEY_ACTIVE] = current.isEditing
         val draft = current.draft
         if (current.isEditing && draft != null && current.baseRevision != null) {
+            savedStateHandle[KEY_EDITOR_SCHEMA] = UserPreferences.CURRENT_SCHEMA_VERSION
             savedStateHandle[KEY_REVISION] = current.baseRevision
             savedStateHandle[KEY_RESTORE_POSITION] = draft.restorePosition
             savedStateHandle[KEY_SCREEN_SHAPE] = draft.screenShape.name
             savedStateHandle[KEY_LAYOUT] = draft.libraryLayout.name
             savedStateHandle[KEY_ARTWORK] = draft.artworkReadPath.name
+            savedStateHandle[KEY_TAP_POLICY] = draft.songTapPolicy.name
+            savedStateHandle[KEY_MEDIA_BUTTONS] = draft.mediaButtonsEnabled
+            savedStateHandle[KEY_AUDIO_FOCUS] = draft.audioFocusManagement
+            savedStateHandle[KEY_BACKEND] = draft.playbackBackend.name
+            savedStateHandle[KEY_SPEED] = draft.playbackSpeedTenths
+            savedStateHandle[KEY_GAPLESS] = draft.gaplessPlayback
             LibraryListContext.entries.forEach { context ->
                 savedStateHandle[sortKey(context)] = draft.librarySorts.getValue(context).field.name
                 savedStateHandle[sortDirectionKey(context)] = draft.librarySorts.getValue(context).descending
             }
             savedStateHandle[KEY_PREVIEW] = current.previewEnabled
         } else {
+            savedStateHandle.remove<Int>(KEY_EDITOR_SCHEMA)
             savedStateHandle.remove<Long>(KEY_REVISION)
             savedStateHandle.remove<Boolean>(KEY_RESTORE_POSITION)
             savedStateHandle.remove<String>(KEY_SCREEN_SHAPE)
             savedStateHandle.remove<String>(KEY_LAYOUT)
             savedStateHandle.remove<String>(KEY_ARTWORK)
+            savedStateHandle.remove<String>(KEY_TAP_POLICY)
+            savedStateHandle.remove<Boolean>(KEY_MEDIA_BUTTONS)
+            savedStateHandle.remove<Boolean>(KEY_AUDIO_FOCUS)
+            savedStateHandle.remove<String>(KEY_BACKEND)
+            savedStateHandle.remove<Int>(KEY_SPEED)
+            savedStateHandle.remove<Boolean>(KEY_GAPLESS)
             LibraryListContext.entries.forEach { context ->
                 savedStateHandle.remove<String>(sortKey(context))
                 savedStateHandle.remove<Boolean>(sortDirectionKey(context))
@@ -404,11 +482,18 @@ class PreferencesViewModel(
 
     private companion object {
         const val KEY_ACTIVE = "preferences.editor.active"
+        const val KEY_EDITOR_SCHEMA = "preferences.editor.schema"
         const val KEY_REVISION = "preferences.editor.revision"
         const val KEY_RESTORE_POSITION = "preferences.editor.restore_position"
         const val KEY_SCREEN_SHAPE = "preferences.editor.screen_shape"
         const val KEY_LAYOUT = "preferences.editor.library_layout"
         const val KEY_ARTWORK = "preferences.editor.artwork_path"
+        const val KEY_TAP_POLICY = "preferences.editor.song_tap_policy"
+        const val KEY_MEDIA_BUTTONS = "preferences.editor.media_buttons"
+        const val KEY_AUDIO_FOCUS = "preferences.editor.audio_focus"
+        const val KEY_BACKEND = "preferences.editor.backend"
+        const val KEY_SPEED = "preferences.editor.speed_tenths"
+        const val KEY_GAPLESS = "preferences.editor.gapless"
         const val KEY_PREVIEW = "preferences.editor.preview"
         fun sortKey(context: LibraryListContext) = "preferences.editor.sort.${context.name}"
         fun sortDirectionKey(context: LibraryListContext) = "preferences.editor.descending.${context.name}"

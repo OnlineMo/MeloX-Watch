@@ -35,11 +35,18 @@ import io.github.onlinemo.meloxwatch.data.listening.ListeningIssue
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.model.QueueEntry
+import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
+import io.github.onlinemo.meloxwatch.model.QueueSeekBinding
+import io.github.onlinemo.meloxwatch.model.QueueSeekRequest
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
+import io.github.onlinemo.meloxwatch.playback.PlaybackBackendState
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueCommand
+import io.github.onlinemo.meloxwatch.playback.PlaylistQueueCommand
 import io.github.onlinemo.meloxwatch.playback.ProbePlaybackService
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
+import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistUiIssue
 import java.util.UUID
 import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
@@ -48,6 +55,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -64,6 +72,7 @@ enum class ProbePage {
     SETTINGS,
     QUEUE,
     LIBRARY,
+    PLAYLISTS,
 }
 
 enum class ProbeNotice {
@@ -92,7 +101,10 @@ data class ProbePlaybackState(
     val hasError: Boolean = false,
     val hasPrevious: Boolean = false,
     val hasNext: Boolean = false,
+    val artist: String? = null,
 )
+
+data class SeekPreview(val binding: QueueSeekBinding, val positionMs: Long)
 
 data class ProbeUiState(
     val page: ProbePage = ProbePage.HOME,
@@ -110,6 +122,8 @@ data class ProbeUiState(
     val playbackCommandPending: Boolean = false,
     val queueIssue: QueuePlaybackIssue? = null,
     val listeningIssue: ListeningIssue? = null,
+    val backend: PlaybackBackendState? = null,
+    val seekPreview: SeekPreview? = null,
 )
 
 /**
@@ -139,6 +153,8 @@ class ProbeViewModel(
     private var isForeground = false
     private var playbackCommandJob: Job? = null
     private var playbackCommandGeneration = 0L
+    private var seekObservationJob: Job? = null
+    private var pendingPlaylistCommand: PendingPlaylistCommand? = null
 
     private val playerListener = object : Player.Listener {
         override fun onEvents(player: Player, events: Player.Events) {
@@ -160,12 +176,20 @@ class ProbeViewModel(
         val connectionListener = object : MediaController.Listener {
             override fun onDisconnected(disconnected: MediaController) {
                 if (generation != connectionGeneration || !isForeground) return
+                rejectPlaylistCommand(PlaylistUiIssue.SOURCE_UNAVAILABLE)
                 controller = null
+                playbackCommandGeneration += 1L
+                playbackCommandJob?.cancel()
+                playbackCommandJob = null
                 progressJob?.cancel()
                 progressJob = null
+                stopSeekObservation()
                 _uiState.update { state ->
                     state.copy(
                         playback = state.playback.copy(isConnected = false),
+                        playbackCommandPending = false,
+                        backend = null,
+                        seekPreview = null,
                         notice = ProbeNotice.CONNECTION_FAILED,
                     )
                 }
@@ -193,6 +217,11 @@ class ProbeViewModel(
                     )
                 }
             }
+
+            override fun onExtrasChanged(activeController: MediaController, extras: Bundle) {
+                if (generation != connectionGeneration || !isForeground || controller !== activeController) return
+                capturePlayback()
+            }
         }
         val future = MediaController.Builder(getApplication(), token).setListener(connectionListener).buildAsync()
         connectionFuture = future
@@ -216,6 +245,7 @@ class ProbeViewModel(
     }
 
     fun onBackground() {
+        rejectPlaylistCommand(PlaylistUiIssue.BUSY)
         isForeground = false
         connectionGeneration += 1L
         playbackCommandGeneration += 1L
@@ -223,19 +253,23 @@ class ProbeViewModel(
         playbackCommandJob = null
         progressJob?.cancel()
         progressJob = null
+        stopSeekObservation()
         if (_uiState.value.isReading) cancelFileRead()
         controller?.removeListener(playerListener)
         controller = null
         connectionFuture?.let { future -> MediaController.releaseFuture(future) }
         connectionFuture = null
         _uiState.update { state ->
-            state.copy(playback = state.playback.copy(isConnected = false), playbackCommandPending = false)
+            state.copy(playback = state.playback.copy(isConnected = false), playbackCommandPending = false,
+                backend = null, seekPreview = null)
         }
     }
 
     fun showPage(page: ProbePage) {
+        if (page != ProbePage.PLAYBACK) stopSeekObservation()
         savedStateHandle[KEY_PAGE] = page.name
-        _uiState.update { state -> state.copy(page = page) }
+        _uiState.update { state -> state.copy(page = page,
+            seekPreview = state.seekPreview.takeIf { page == ProbePage.PLAYBACK }) }
         updateProgressSampling()
     }
 
@@ -360,13 +394,17 @@ class ProbeViewModel(
             }
             return
         }
+        resumeCurrent()
+    }
+
+    /** Transport resumes the current session item; another browsed document remains a separate choice. */
+    fun resumeCurrent() {
+        val activeController = controller ?: return
+        if (!isForeground || _uiState.value.playbackCommandPending || activeController.currentMediaItem == null) return
         try {
             _uiState.update { state -> state.copy(queueIssue = null) }
-            if (activeController.playbackState == Player.STATE_IDLE && activeController.currentMediaItem != null) {
-                activeController.prepare()
-            }
-            if (activeController.playbackState == Player.STATE_ENDED) activeController.seekTo(0L)
-            if (selected != null || activeController.currentMediaItem != null) activeController.play()
+            // 服务把恢复/尾部重播和本次播放意图作为同一命令；预先prepare/seek会异步抢占它。
+            activeController.play()
         } catch (_: IllegalStateException) {
             _uiState.update { state -> state.copy(notice = ProbeNotice.COMMAND_REJECTED) }
         }
@@ -382,12 +420,55 @@ class ProbeViewModel(
 
     fun retryQueueRestore() = startQueueCommand(PlaybackCommands.retryRestore) { Bundle.EMPTY }
 
-    fun playLibraryView(viewId: String, selected: TrackKey?) {
+    fun playLibraryView(command: LibraryQueueCommand) {
+        _uiState.update { it.copy(selectedAudio = null, selectedQueueEntry = null) }
         startQueueCommand(onAccepted = { showPage(ProbePage.PLAYBACK) }) {
-            val saved = queues.snapshot()
-            PlaybackCommands.replaceLibraryView to PlaybackCommands.libraryArguments(
-                viewId, selected, saved, "library:${UUID.randomUUID()}",
-            )
+            PlaybackCommands.replaceLibraryView to PlaybackCommands.libraryArguments(command)
+        }
+    }
+
+    fun playPlaylistView(command: PlaylistQueueCommand, onResult: (PlaylistUiIssue?) -> Unit) {
+        if (controller == null || !isForeground) {
+            onResult(PlaylistUiIssue.SOURCE_UNAVAILABLE)
+            return
+        }
+        if (playbackCommandJob?.isActive == true || pendingPlaylistCommand != null) {
+            onResult(PlaylistUiIssue.BUSY)
+            return
+        }
+        pendingPlaylistCommand = PendingPlaylistCommand(command.operationId, onResult)
+        _uiState.update { it.copy(selectedAudio = null, selectedQueueEntry = null) }
+        startQueueCommand(
+            onFailure = { code -> completePlaylistCommand(command.operationId, playlistCommandIssue(code)) },
+            onResult = { result ->
+                val issue = playlistCommandResultIssue(result, command.operationId)
+                if (issue != null && result.resultCode == SessionResult.RESULT_SUCCESS) {
+                    _uiState.update { it.copy(queueIssue = QueuePlaybackIssue.SOURCE_CHANGED) }
+                }
+                // ACK先交给仍可见的意图所有者；导航后隐藏页面会丢弃该运行时草稿。
+                if (completePlaylistCommand(command.operationId, issue) && issue == null) showPage(ProbePage.PLAYBACK)
+            },
+        ) {
+            PlaybackCommands.playlistQueue to PlaybackCommands.playlistArguments(command)
+        }
+    }
+
+    private fun completePlaylistCommand(operationId: String, issue: PlaylistUiIssue?): Boolean {
+        val pending = pendingPlaylistCommand ?: return false
+        if (pending.operationId != operationId) return false
+        pendingPlaylistCommand = null
+        pending.onResult(issue)
+        return true
+    }
+
+    private fun rejectPlaylistCommand(issue: PlaylistUiIssue) {
+        val pending = pendingPlaylistCommand ?: return
+        completePlaylistCommand(pending.operationId, issue)
+    }
+
+    fun editQueue(request: QueueMutationRequest, onAccepted: () -> Unit) {
+        startQueueCommand(onAccepted = { onAccepted() }) {
+            PlaybackCommands.mutateQueue to PlaybackCommands.mutationArguments(request)
         }
     }
 
@@ -412,9 +493,17 @@ class ProbeViewModel(
     private fun startQueueCommand(command: SessionCommand, arguments: suspend () -> Bundle) =
         startQueueCommand { command to arguments() }
 
-    private fun startQueueCommand(onAccepted: () -> Unit = {}, request: suspend () -> Pair<SessionCommand, Bundle>) {
-        val active = controller ?: return
-        if (!isForeground || playbackCommandJob?.isActive == true) return
+    private fun startQueueCommand(onAccepted: (SessionResult) -> Unit = {}, onFailure: (String) -> Unit = {},
+        onResult: ((SessionResult) -> Unit)? = null, request: suspend () -> Pair<SessionCommand, Bundle>) {
+        val active = controller
+        if (active == null || !isForeground) {
+            onFailure("SOURCE_UNAVAILABLE")
+            return
+        }
+        if (playbackCommandJob?.isActive == true) {
+            onFailure("BUSY")
+            return
+        }
         playbackCommandGeneration += 1L
         val generation = playbackCommandGeneration
         _uiState.update { state -> state.copy(playbackCommandPending = true, queueIssue = null) }
@@ -426,20 +515,25 @@ class ProbeViewModel(
                 if (generation != playbackCommandGeneration || controller !== active || !isForeground) return@launch
                 _uiState.update { state ->
                     state.copy(queueIssue = if (result.resultCode == SessionResult.RESULT_SUCCESS) state.queueIssue else {
-                        queueIssue(result.extras.getString(PlaybackCommands.FAILURE))
+                        queueIssue(PlaybackCommands.readFailureCode(result.extras))
                     })
                 }
                 capturePlayback()
-                if (result.resultCode == SessionResult.RESULT_SUCCESS) onAccepted()
+                if (onResult != null) onResult(result)
+                else if (result.resultCode == SessionResult.RESULT_SUCCESS) onAccepted(result)
+                else onFailure(PlaybackCommands.readFailureCode(result.extras) ?: "SOURCE_UNAVAILABLE")
             } catch (error: kotlinx.coroutines.CancellationException) {
+                if (generation == playbackCommandGeneration) onFailure("CANCELLED")
                 throw error
             } catch (error: QueueStoreException) {
                 if (generation == playbackCommandGeneration) {
                     _uiState.update { state -> state.copy(queueIssue = queueIssue(error.issue.name)) }
+                    onFailure(error.issue.name)
                 }
             } catch (_: Exception) {
                 if (generation == playbackCommandGeneration) {
                     _uiState.update { state -> state.copy(queueIssue = QueuePlaybackIssue.SOURCE_UNAVAILABLE) }
+                    onFailure("SOURCE_UNAVAILABLE")
                 }
             } finally {
                 if (generation == playbackCommandGeneration) {
@@ -464,12 +558,15 @@ class ProbeViewModel(
         }
 
     fun pause() {
+        rejectPlaylistCommand(PlaylistUiIssue.BUSY)
         playbackCommandGeneration += 1L
         playbackCommandJob?.cancel()
         playbackCommandJob = null
+        stopSeekObservation()
         _uiState.update { state ->
             state.copy(
                 playbackCommandPending = false,
+                seekPreview = null,
                 notice = if (state.playbackCommandPending) ProbeNotice.CANCELLED else state.notice,
             )
         }
@@ -482,12 +579,76 @@ class ProbeViewModel(
         capturePlayback()
     }
 
-    fun seekTo(mediaId: String?, positionMs: Long) {
-        val activeController = controller ?: return
-        if (activeController.currentMediaItem?.mediaId != mediaId || !_uiState.value.playback.canSeek) return
-        val durationMs = _uiState.value.playback.durationMs ?: return
-        activeController.seekTo(positionMs.coerceIn(0L, durationMs))
-        capturePlayback()
+    fun beginSeek() {
+        if (!_uiState.value.playback.canSeek || _uiState.value.playbackCommandPending) return
+        stopSeekObservation()
+        _uiState.update { it.copy(seekPreview = null) }
+        startQueueCommand(onAccepted = { result ->
+            val binding = PlaybackCommands.readSeekBinding(result.extras)
+            val playback = _uiState.value.playback
+            val backend = _uiState.value.backend
+            if (_uiState.value.page == ProbePage.PLAYBACK && playback.mediaId == binding.queueEntryId &&
+                playback.canSeek && playback.durationMs == binding.durationMs && backend != null &&
+                !backend.switching && backend.generation == binding.backendGeneration
+            ) {
+                _uiState.update { it.copy(seekPreview = SeekPreview(binding,
+                    playback.positionMs.coerceIn(0L, binding.durationMs))) }
+                observeSeekQueue(binding)
+            } else _uiState.update { it.copy(queueIssue = QueuePlaybackIssue.CONFLICT) }
+        }) {
+            PlaybackCommands.beginSeek to PlaybackCommands.beginSeekArguments()
+        }
+    }
+
+    fun previewSeek(positionMs: Long) {
+        if (_uiState.value.playbackCommandPending) return
+        _uiState.update { state -> state.copy(seekPreview = state.seekPreview?.let {
+            it.copy(positionMs = positionMs.coerceIn(0L, it.binding.durationMs))
+        }) }
+    }
+
+    fun confirmSeek() {
+        val preview = _uiState.value.seekPreview ?: return
+        if (_uiState.value.playbackCommandPending) return
+        startQueueCommand(onAccepted = { clearSeekPreview() }) {
+            PlaybackCommands.seekQueue to PlaybackCommands.seekArguments(
+                QueueSeekRequest(preview.binding, preview.positionMs),
+            )
+        }
+    }
+
+    fun cancelSeek() {
+        if (!_uiState.value.playbackCommandPending) clearSeekPreview()
+    }
+
+    /** 只在用户预览时读活动指针；checkpoint 更新不会让未提交的目标失效。 */
+    private fun observeSeekQueue(binding: QueueSeekBinding) {
+        stopSeekObservation()
+        seekObservationJob = viewModelScope.launch {
+            try {
+                queues.snapshots().first { snapshot ->
+                    _uiState.value.seekPreview?.binding != binding || snapshot == null || snapshot.generationId != binding.generationId ||
+                        snapshot.queueRevision != binding.queueRevision || snapshot.currentEntryId != binding.queueEntryId
+                }
+                if (_uiState.value.seekPreview?.binding == binding) clearSeekPreview(QueuePlaybackIssue.CONFLICT)
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: QueueStoreException) {
+                if (_uiState.value.seekPreview?.binding == binding) clearSeekPreview(queueIssue(error.issue.name))
+            } catch (_: Exception) {
+                if (_uiState.value.seekPreview?.binding == binding) clearSeekPreview(QueuePlaybackIssue.STORAGE_UNAVAILABLE)
+            }
+        }
+    }
+
+    private fun clearSeekPreview(issue: QueuePlaybackIssue? = null) {
+        stopSeekObservation()
+        _uiState.update { it.copy(seekPreview = null, queueIssue = issue ?: it.queueIssue) }
+    }
+
+    private fun stopSeekObservation() {
+        seekObservationJob?.cancel()
+        seekObservationJob = null
     }
 
     fun cancelFileRead() {
@@ -577,8 +738,19 @@ class ProbeViewModel(
             hasError = activeController.playerError != null,
             hasPrevious = activeController.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM),
             hasNext = activeController.isCommandAvailable(Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM),
+            artist = activeController.mediaMetadata.artist?.toString(),
         )
-        _uiState.update { state -> state.copy(playback = playback) }
+        val backendState = PlaybackBackendState.fromSessionExtras(activeController.sessionExtras)
+        val previousPreview = _uiState.value.seekPreview
+        _uiState.update { state ->
+            val preview = state.seekPreview?.takeIf {
+                it.binding.queueEntryId == playback.mediaId && playback.durationMs == it.binding.durationMs &&
+                    playback.canSeek && backendState != null && !backendState.switching &&
+                    backendState.generation == it.binding.backendGeneration
+            }
+            state.copy(playback = playback, backend = backendState, seekPreview = preview)
+        }
+        if (previousPreview != null && _uiState.value.seekPreview == null) stopSeekObservation()
     }
 
     private fun updateProgressSampling() {
@@ -603,6 +775,27 @@ class ProbeViewModel(
         private const val FILE_CHECK_TIMEOUT_MS = 8000L
         private const val PROGRESS_SAMPLE_INTERVAL_MS = 1000L
     }
+
+    private data class PendingPlaylistCommand(val operationId: String, val onResult: (PlaylistUiIssue?) -> Unit)
+}
+
+internal fun playlistCommandResultIssue(result: SessionResult, operationId: String): PlaylistUiIssue? {
+    return try {
+        if (PlaybackCommands.readReceiptOperation(result.extras) != operationId) PlaylistUiIssue.SOURCE_CHANGED
+        else if (result.resultCode == SessionResult.RESULT_SUCCESS) null
+        else if (result.resultCode == SessionError.ERROR_BAD_VALUE) PlaylistUiIssue.INVALID_INPUT
+        else playlistCommandIssue(PlaybackCommands.readFailureCode(result.extras))
+    } catch (_: RuntimeException) {
+        PlaylistUiIssue.SOURCE_CHANGED
+    }
+}
+
+private fun playlistCommandIssue(code: String?): PlaylistUiIssue = when (code) {
+    "INCOMPLETE" -> PlaylistUiIssue.INCOMPLETE_SCAN
+    "REVISION_EXHAUSTED" -> PlaylistUiIssue.RECOVERY_REQUIRED
+    "CANCELLED", "NOT_READY" -> PlaylistUiIssue.BUSY
+    "PERMISSION_DENIED", "FILE_MISSING", "LOCATION_MISSING", "CLOSED", "OUTPUT_ERROR" -> PlaylistUiIssue.SOURCE_UNAVAILABLE
+    else -> PlaylistUiIssue.entries.firstOrNull { it.name == code } ?: PlaylistUiIssue.SOURCE_UNAVAILABLE
 }
 
 private fun ProbeAudio.queueEntry(): QueueEntry = QueueEntry(

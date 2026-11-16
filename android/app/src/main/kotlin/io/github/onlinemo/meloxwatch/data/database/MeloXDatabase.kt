@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import io.github.onlinemo.meloxwatch.data.library.LibraryAbsenceEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasVersionEntity
@@ -17,6 +19,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryLocationVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryNodeEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryNodeVersionEntity
+import io.github.onlinemo.meloxwatch.data.library.LibraryPathMigrations
 import io.github.onlinemo.meloxwatch.data.library.LibraryRuleEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryScanEntity
 import io.github.onlinemo.meloxwatch.data.library.LibrarySeenEntity
@@ -33,10 +36,24 @@ import io.github.onlinemo.meloxwatch.data.listening.ListeningMetaEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningRoundEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningSegmentEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningTrackEntity
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistDao
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistGenerationEntity
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistHeadEntity
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMemberEntity
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMetaEntity
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMigrations
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistReceiptEntity
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistViewEntity
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangeDao
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangeMigrations
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangePreviewEntity
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangeRowEntity
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExportReceiptEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueDao
 import io.github.onlinemo.meloxwatch.data.queue.QueueEntryEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueGenerationEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueHeadEntity
+import io.github.onlinemo.meloxwatch.data.queue.QueueMigrations
 
 /** Queue and local library share one database while retaining independent version domains. */
 @Database(
@@ -50,23 +67,36 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueHeadEntity
         LibraryRuleEntity::class, LibraryViewEntity::class, LibraryImportEntity::class,
         ListeningMetaEntity::class, ListeningRoundEntity::class, ListeningSegmentEntity::class,
         ListeningHistoryEntity::class, ListeningTrackEntity::class, ListeningDayEntity::class,
+        PlaylistMetaEntity::class, PlaylistHeadEntity::class, PlaylistGenerationEntity::class,
+        PlaylistMemberEntity::class, PlaylistViewEntity::class, PlaylistReceiptEntity::class,
+        PlaylistExchangePreviewEntity::class, PlaylistExchangeRowEntity::class, PlaylistExportReceiptEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
     abstract fun queueDao(): QueueDao
     abstract fun libraryDao(): LibraryDao
     abstract fun listeningDao(): ListeningDao
+    abstract fun playlistDao(): PlaylistDao
+    abstract fun playlistExchangeDao(): PlaylistExchangeDao
 
     companion object {
         const val FILE_NAME = "melox.db"
         val MIGRATION_1_2 = LibraryMigrations.V1_TO_V2
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                QueueMigrations.applyV2ToV3(database)
+                LibraryPathMigrations.applyV2ToV3(database)
+                PlaylistMigrations.applyV2ToV3(database)
+                PlaylistExchangeMigrations.applyV2ToV3(database)
+            }
+        }
 
         fun open(context: Context): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
-        ).addMigrations(MIGRATION_1_2).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
     }
 }

@@ -98,6 +98,12 @@ class DataStoreUserPreferencesRepository internal constructor(
                                 libraryLayout = draft.libraryLayout,
                                 artworkReadPath = draft.artworkReadPath,
                                 librarySorts = draft.librarySorts.toMap(),
+                                songTapPolicy = draft.songTapPolicy,
+                                mediaButtonsEnabled = draft.mediaButtonsEnabled,
+                                audioFocusManagement = draft.audioFocusManagement,
+                                playbackBackend = draft.playbackBackend,
+                                playbackSpeedTenths = draft.playbackSpeedTenths,
+                                gaplessPlayback = draft.gaplessPlayback,
                             ),
                         )
                     }
