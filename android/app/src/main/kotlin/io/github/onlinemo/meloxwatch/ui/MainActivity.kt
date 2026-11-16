@@ -886,6 +886,7 @@ private fun WatchTransport(state: ProbeUiState, viewModel: ProbeViewModel,
             playback.isConnected && playback.hasNext && !state.playbackCommandPending, onClick = viewModel::next)
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val sideControlsFitRow = maxWidth >= 104.dp
         if (horizontal) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically) {
@@ -898,7 +899,7 @@ private fun WatchTransport(state: ProbeUiState, viewModel: ProbeViewModel,
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 center()
-                if (maxWidth >= 104.dp) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { previous(); next() }
+                if (sideControlsFitRow) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { previous(); next() }
                 else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { previous(); next() }
             }
         }

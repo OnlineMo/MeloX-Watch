@@ -127,7 +127,7 @@ internal class SystemMediaPlayerAdapter(
         if (!prepared || inFlightSeek != null) throw sourceError("PREPARATION_FAILED", PlaybackException.ERROR_CODE_INVALID_STATE)
     }
 
-    override suspend fun seekAndAwait(expectedMediaId: String, positionMs: Long) = withContext(Dispatchers.Main.immediate) {
+    override suspend fun seekAndAwait(expectedMediaId: String, positionMs: Long): Unit = withContext(Dispatchers.Main.immediate) {
         requireCurrent(expectedMediaId)
         require(positionMs >= 0L)
         if (!prepared || failure != null) throw sourceError("SEEK_UNAVAILABLE", PlaybackException.ERROR_CODE_INVALID_STATE)

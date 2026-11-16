@@ -1230,7 +1230,7 @@ private fun playlistUiIssue(error: Exception): PlaylistUiIssue = when (error) {
     is TimeoutCancellationException -> PlaylistUiIssue.BUSY
     is PlaylistException -> when (error.issue) {
         PlaylistIssue.BUSY -> PlaylistUiIssue.BUSY
-        PlaylistIssue.CONFLICT -> PlaylistUiIssue.CONFLICT
+        PlaylistIssue.CONFLICT, PlaylistIssue.DUPLICATE_REFERENCE -> PlaylistUiIssue.CONFLICT
         PlaylistIssue.INVALID_INPUT -> PlaylistUiIssue.INVALID_INPUT
         PlaylistIssue.NOT_FOUND -> PlaylistUiIssue.NOT_FOUND
         PlaylistIssue.AUTOMATIC_MEMBERS -> PlaylistUiIssue.AUTOMATIC_MEMBERS
