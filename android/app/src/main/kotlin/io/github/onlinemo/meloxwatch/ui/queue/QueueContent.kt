@@ -223,6 +223,7 @@ private fun entryStatusText(entry: QueueEntry): Int {
         LocalAccess.PERSISTED -> R.string.queue_access_persisted
         LocalAccess.MEDIA_PERMISSION -> R.string.queue_access_media_permission
         LocalAccess.PERSISTENCE_REJECTED -> R.string.queue_access_not_persisted
+        LocalAccess.APP_OWNED -> R.string.library_access_owned
     }
 }
 

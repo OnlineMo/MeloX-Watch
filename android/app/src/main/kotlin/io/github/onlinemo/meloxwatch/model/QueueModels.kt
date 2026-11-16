@@ -12,6 +12,7 @@ enum class LocalAccess {
     PERSISTED,
     MEDIA_PERMISSION,
     PERSISTENCE_REJECTED,
+    APP_OWNED,
 }
 
 /**

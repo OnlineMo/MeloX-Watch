@@ -8,6 +8,9 @@ import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 enum class QueuePlaybackIssue {
     BUSY,
     CONFLICT,
+    VIEW_EXPIRED,
+    SOURCE_CHANGED,
+    CONTENT_UNKNOWN,
     NOT_READY,
     CLOSED,
     STORAGE_FULL,

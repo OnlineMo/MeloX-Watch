@@ -64,6 +64,16 @@
 
 报告artifact `14170988432` 原始ZIP104179字节、SHA-256 `42c318ec10c2b2dd954255d9b92ca9102cd412589310eea7fc648b9156b51069`；job日志SHA-256 `400592cbef13828b78934ec9071410def527981699659bfbe240f98b2b862676`；实际Room JUnit XML `ea9674378db62da759c8cf9b9a21b73d335863464a290c655cb5bb2e495725ec`；lint XML `787e0e2d3c6c0d238da59cdea4cb2fae64210902aa8ac87398eaf72b125b1cf8`。缺少app锁、其余变体/阶段，schema1 hash不变；继续仅作 `failed-partial` 诊断，不导入基线或导出APK。上述lint及suppressed修正后尚未云执行。
 
+第七轮 [run `43739171033`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43739171033) / attempt `1` 绑定 source `938e5a0215a5c75beef0ff8e10404aa2c7dda22e`、实际checkout/build `d6240d6024d3f3d5ebd5c760b156933e393b9501`、job `132888378859`。verification12分07秒及normal39秒成功，正常阶段显式解析203个配置；严格Debug13秒因已锁但未解析的 `kotlin-stdlib-common:2.2.21` 失败，后两严格阶段未尝试。Debug/Release/Diagnostic各58项、0失败/错误/跳过，测试清单一致；三个lint XML均零issue。
+
+同一真实FULL case三变体分别0.130/0.175/0.228秒通过。冻结测试源码SHA-256 `b70584b621514564ef9070f502e4188891635ed2e5719455c73ec2a31fd0bbff` 断言直接 `SQLiteFullException`、独立且不是FULL的suppressed `SQLiteException`、旧队列、重开、独立连接完整性/3条和205条显式重试。成功JUnit不输出原生异常堆栈；这里将通过的确切case绑定冻结断言，不声称成功XML打印了底层栈。
+
+artifact `14171827542` 原始ZIP142163字节、SHA-256 `632ba8a7881a4ba01def485ce0402ab73ac442adfce9794fd63f5229145e5253`；job日志SHA-256 `0163cdd77d1e1bb6f9ab30098abe8a573b6d849d90e240b75085e2b3a9265a03`。完整FULL/阶段诊断摘要SHA-256 `ebdcc6673a97c1b3bf565533ce338a3a8cffe81fe5610e18eb6050106b453992`。schema1仍11896字节/原hash；资料状态 `failed-partial`，不得导入锁/schema或验收APK。Library后续214项的定义与独立状态见LP-01～03记录，这一轮58项成功不覆盖它们。
+
+## 接受的P1严格整合基线
+
+上述待验证状态是整合前记录。新run43767150224/attempt1已执行6套63项Debug测试，失败/错误/跳过0、lint0；source64f34a93257079851c0d020b1104bf20ad466328、真实checkout2e2226fcbcac9a2f196dee245a8a9d7445471631。原始PR APK核验通过后，PR #28正常合入5c883d877913f63e5928269eabfa0a52210ceb67。当前Library基线保留新增P0读通道回归，并进入独立schema2采集；不沿用P1成功替代Library云验。可信run43768826854的原稳定Debug签名归档、固定证书及APK核验通过，原APK已在VM安装启动；稳定覆盖升级、VM音频/布局、真表和256原AC仍待验，readiness保持false。原始设备证据仅留本地，精确产物绑定见docs/13。
+
 ## 后续必需实现
 
 本主题只提供完整持久队列与设置基础，探针来源检查仍是少量样本。LP-01/02的完整扫描与授权恢复、LP-03真实曲库/统计、LP-04完整增删重排/点击策略/可配置模式、LP-05双后端，以及歌词/音效/文件写入/备份/主题/传输/手机端和在线业务，均继续按05及21实现。初始化schema、实际迁移与库→队列的完整冻结查询将随对应主题重验。

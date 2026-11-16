@@ -7,6 +7,12 @@ import android.database.sqlite.SQLiteFullException
 import androidx.room.Room
 import androidx.room.withTransaction
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
+import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
+import io.github.onlinemo.meloxwatch.data.local.SourceReadException
+import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.data.local.fixtureAudioProvider
+import io.github.onlinemo.meloxwatch.data.local.fixtureDescriptor
 import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
 import io.github.onlinemo.meloxwatch.data.queue.QueuePhase
@@ -27,6 +33,8 @@ import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -337,17 +345,241 @@ class RoomQueueStoreTest {
     }
 
     @Test(timeout = 30000L)
+    fun sealedNonzeroSelectionUsesTheForwardOnlyProducerOnceAndGuardsOutsideTheTransaction() = runBlocking {
+        val oldRequest = request("old", 3L)
+        val old = store.replace(oldRequest, source(oldRequest.view)).snapshot
+        val next = request("sealed-selection", 205L).copy(startOriginalOrder = 155L, mode = QueueMode(shuffle = true))
+        val producer = source(next.view, reversed = true)
+        val offsets = mutableListOf<Long>()
+        var nextOffset = 0L
+        var guarded = false
+        val committed = store.replace(next, QueuePageSource { offset, limit ->
+            assertEquals("A frozen producer cannot seek or restart", nextOffset, offset)
+            assertFalse(database.inTransaction())
+            offsets.add(offset)
+            producer.read(offset, limit).also { nextOffset += it.entries.size }
+        }) { candidate ->
+            guarded = true
+            assertFalse("Resource validation cannot hold a SQLite transaction", database.inTransaction())
+            assertEquals(205L, nextOffset)
+            val staged = database.queueDao().operation(next.operationId) ?: throw AssertionError("Sealed journal required")
+            assertEquals(QueuePhase.SEALED, staged.phase)
+            assertEquals(205L, database.queueDao().orderStats(staged.generationId).entryCount)
+            val window = requireNotNull(candidate)
+            assertEquals(staged.generationId, window.generationId)
+            assertEquals(old.queueRevision + 1L, window.queueRevision)
+            assertEquals(205L, window.totalCount)
+            assertEquals(listOf(156L, 155L, 154L), window.entries.map { it.originalOrder })
+            assertEquals(1, window.currentIndex)
+            assertEquals(49L, window.current.playbackOrder)
+            assertEquals(old, store.snapshot())
+            // Old playback can advance while the new resource is checked; checkpoint revisions
+            // do not change the queue CAS domain or force the forward-only producer to restart.
+            val progressed = store.saveCheckpoint(old.generationId, old.checkpointRevision, QueueCheckpoint("entry-1", 555L))
+            assertEquals(old.queueRevision, progressed.queueRevision)
+            assertEquals(old.checkpointRevision + 1L, progressed.checkpointRevision)
+        }.snapshot
+
+        assertTrue(guarded)
+        assertEquals(listOf(0L, 100L, 200L), offsets)
+        assertEquals("entry-155", committed.currentEntryId)
+        assertEquals(49L, committed.currentPlaybackOrder)
+        assertEquals(0L, committed.checkpointRevision)
+        assertEquals(3L, database.queueDao().orderStats(old.generationId).entryCount)
+        reopen()
+        assertEquals(committed, store.snapshot())
+        assertEquals(0L, database.queueDao().orderStats(old.generationId).entryCount)
+        assertIndependentIntegrity(205L, 0L)
+    }
+
+    @Test(timeout = 30000L)
+    fun realProviderOpenDenialOrSameSizeContentChangeAfterSealPreservesTheOldQueue() = runBlocking {
+        val oldRequest = request("old", 3L)
+        val initial = store.replace(oldRequest, source(oldRequest.view)).snapshot
+        val old = store.saveCheckpoint(initial.generationId, initial.checkpointRevision, QueueCheckpoint("entry-1", 8765L))
+        val oldRows = store.page(old.generationId, 0L)
+
+        for ((fault, issue) in listOf("open-denied" to SourceReadIssue.PERMISSION_DENIED, "changed-bytes" to SourceReadIssue.SOURCE_CHANGED)) {
+            val audio = temporaryFolder.newFile("$fault.mp3").apply { writeBytes(ByteArray(2048) { (it % 113).toByte() }) }
+            val authority = "queue-$fault"
+            val provider = fixtureAudioProvider(authority, audio)
+            val descriptor = fixtureDescriptor(authority, audio)
+            val io = LocalProviderIo()
+            val sources = AndroidLocalSources(RuntimeEnvironment.getApplication(), io)
+            val next = request(fault, 205L).copy(startOriginalOrder = 155L)
+            val producer = source(next.view)
+            val selected = entry(155L, 205L).copy(trackKey = descriptor.trackKey, location = descriptor.location)
+            expectSourceIssue(issue) {
+                store.replace(next, QueuePageSource { offset, limit ->
+                    producer.read(offset, limit).let { page ->
+                        page.copy(entries = page.entries.map { if (it.originalOrder == 155L) selected else it })
+                    }
+                }) { candidate ->
+                    assertFalse(database.inTransaction())
+                    val journal = database.queueDao().operation(next.operationId) ?: throw AssertionError("Sealed journal required")
+                    assertEquals(QueuePhase.SEALED, journal.phase)
+                    assertEquals(descriptor.location, requireNotNull(candidate).current.location)
+                    assertEquals(old, store.snapshot())
+                    if (fault == "open-denied") provider.openDenied = true
+                    else audio.writeBytes(ByteArray(2048) { ((it + 1) % 113).toByte() })
+                    sources.validateRead(descriptor)
+                }
+            }
+            withTimeout(10000L) { io.awaitIdle() }
+            assertTrue(provider.queryReads > 0)
+            assertEquals(if (fault == "open-denied") 0 else 1, provider.audioReads)
+            assertDiscarded(next.operationId, old)
+            assertEquals(oldRows, store.page(old.generationId, 0L))
+            assertEquals(8765L, store.snapshot()?.positionMs)
+        }
+        reopen()
+        assertEquals(old, store.snapshot())
+        assertIndependentIntegrity(3L, 8765L)
+    }
+
+    @Test(timeout = 30000L)
+    fun transientPreviewOpenPermissionLossAtTheSealedGuardCannotReplaceTheOldQueue() = runBlocking {
+        val oldRequest = request("old", 3L)
+        val initial = store.replace(oldRequest, source(oldRequest.view)).snapshot
+        val old = store.saveCheckpoint(initial.generationId, initial.checkpointRevision, QueueCheckpoint("entry-1", 2345L))
+        val oldRows = store.page(old.generationId, 0L)
+        val audio = temporaryFolder.newFile("transient.mp3").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val provider = fixtureAudioProvider("queue-transient-open", audio)
+        val io = LocalProviderIo()
+        val sources = AndroidLocalSources(RuntimeEnvironment.getApplication(), io)
+        val location = LocalLocationReference("temporary-preview", "content://queue-transient-open/audio")
+        val next = request("transient-open-denied", 3L).copy(startOriginalOrder = 1L)
+        val producer = source(next.view)
+        expectSourceIssue(SourceReadIssue.PERMISSION_DENIED) {
+            store.replace(next, QueuePageSource { offset, limit ->
+                producer.read(offset, limit).let { page ->
+                    page.copy(entries = page.entries.map { if (it.originalOrder == 1L) it.copy(location = location) else it })
+                }
+            }) { candidate ->
+                val current = requireNotNull(candidate).current
+                assertEquals(0L, current.location?.contentRevision)
+                assertEquals(old, store.snapshot())
+                assertFalse(database.inTransaction())
+                provider.openDenied = true
+                sources.verifyTransientRead(requireNotNull(current.location))
+            }
+        }
+        withTimeout(10000L) { io.awaitIdle() }
+        assertEquals(1, provider.queryReads)
+        assertEquals(0, provider.audioReads)
+        assertDiscarded(next.operationId, old)
+        assertEquals(oldRows, store.page(old.generationId, 0L))
+        reopen()
+        assertEquals(old, store.snapshot())
+        assertIndependentIntegrity(3L, 2345L)
+    }
+
+    @Test(timeout = 40000L)
+    fun cancellationDuringAnIgnoringProviderQueryAbortsSealedRowsWithoutFreeingItsPhysicalChannel() = runBlocking {
+        val oldRequest = request("old", 3L)
+        val initial = store.replace(oldRequest, source(oldRequest.view)).snapshot
+        val old = store.saveCheckpoint(initial.generationId, initial.checkpointRevision, QueueCheckpoint("entry-1", 4321L))
+        val audio = temporaryFolder.newFile("cancelled.mp3").apply { writeBytes(ByteArray(1024) { 7 }) }
+        val provider = fixtureAudioProvider("queue-cancelled-query", audio)
+        val descriptor = fixtureDescriptor("queue-cancelled-query", audio)
+        val io = LocalProviderIo()
+        val sources = AndroidLocalSources(RuntimeEnvironment.getApplication(), io)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        provider.beforeQuery = {
+            entered.countDown()
+            assertTrue("The fixture must always be released", release.await(20L, TimeUnit.SECONDS))
+        }
+        val next = request("cancelled-sealed", 505L).copy(startOriginalOrder = 355L)
+        val producer = source(next.view)
+        val selected = entry(355L, 505L).copy(trackKey = descriptor.trackKey, location = descriptor.location)
+        val preparation = launch {
+            store.replace(next, QueuePageSource { offset, limit ->
+                producer.read(offset, limit).let { page ->
+                    page.copy(entries = page.entries.map { if (it.originalOrder == 355L) selected else it })
+                }
+            }) { candidate ->
+                assertEquals(descriptor.location, requireNotNull(candidate).current.location)
+                assertFalse(database.inTransaction())
+                sources.validateRead(descriptor)
+            }
+        }
+        try {
+            withContext(Dispatchers.IO) { assertTrue(entered.await(10L, TimeUnit.SECONDS)) }
+            withTimeout(10000L) { preparation.cancelAndJoin() }
+            assertTrue(preparation.isCancelled)
+            assertEquals(old, store.snapshot())
+            val abandoned = database.queueDao().operation(next.operationId) ?: throw AssertionError("Recovery journal required")
+            assertEquals(QueuePhase.ABORTED, abandoned.phase)
+            assertEquals(405L, database.queueDao().orderStats(abandoned.generationId).entryCount)
+            expectSourceIssue(SourceReadIssue.BUSY) { sources.validateRead(descriptor) }
+            assertEquals(1, provider.queryReads)
+            assertEquals(0, provider.audioReads)
+        } finally {
+            release.countDown()
+            withTimeout(10000L) { preparation.cancelAndJoin() }
+            withTimeout(10000L) { io.awaitIdle() }
+        }
+        provider.beforeQuery = null
+        reopen()
+        assertDiscarded(next.operationId, old)
+        assertIndependentIntegrity(3L, 4321L)
+    }
+
+    @Test(timeout = 30000L)
+    fun aCompetitorPublishedWhileTheSealedGuardWaitsWinsTheFinalCas() = runBlocking {
+        val oldRequest = request("old", 3L)
+        val old = store.replace(oldRequest, source(oldRequest.view)).snapshot
+        val contender = RoomQueueStore(database)
+        contender.initialize()
+        val stale = request("sealed-stale", 205L).copy(startOriginalOrder = 155L)
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val staleResult = async {
+            expectIssue(QueueStoreIssue.CONFLICT) {
+                store.replace(stale, source(stale.view)) { candidate ->
+                    assertFalse(database.inTransaction())
+                    assertEquals("entry-155", requireNotNull(candidate).current.queueEntryId)
+                    val journal = database.queueDao().operation(stale.operationId) ?: throw AssertionError("Sealed journal required")
+                    assertEquals(QueuePhase.SEALED, journal.phase)
+                    entered.complete(Unit)
+                    release.await()
+                }
+            }
+        }
+        val committed = try {
+            withTimeout(10000L) { entered.await() }
+            val newer = request("sealed-winner", 2L, old)
+            contender.replace(newer, source(newer.view)).snapshot
+        } finally {
+            release.complete(Unit)
+        }
+        withTimeout(10000L) { staleResult.await() }
+        assertDiscarded(stale.operationId, committed)
+        reopen()
+        assertEquals(committed, store.snapshot())
+        assertIndependentIntegrity(2L, 0L)
+    }
+
+    @Test(timeout = 30000L)
     fun historicalOperationReplayAcknowledgesItWithoutReactivatingIt() = runBlocking {
         val firstRequest = request("first", 3L)
         val first = store.replace(firstRequest, source(firstRequest.view)).snapshot
         val secondRequest = request("second", 2L)
         val second = store.replace(secondRequest, source(secondRequest.view)).snapshot
         assertNotEquals(first.generationId, second.generationId)
-        reopen()
-        val replay = store.replace(firstRequest, QueuePageSource { _, _ -> throw AssertionError("replay must not read its old producer") })
+        // Receipt handoff defers inactive cleanup; even replay cannot start a whole old-generation
+        // deletion pass or rerun a resource guard before acknowledging a historical operation.
+        assertEquals(3L, database.queueDao().orderStats(first.generationId).entryCount)
+        val replay = store.replace(firstRequest, QueuePageSource { _, _ -> throw AssertionError("replay must not read its old producer") }) {
+            throw AssertionError("replay must not validate current or historical resources")
+        }
         assertTrue(replay.wasReplay)
         assertEquals(first.generationId, replay.appliedGenerationId)
         assertEquals(second, replay.snapshot)
+        assertEquals(second, store.snapshot())
+        assertEquals(3L, database.queueDao().orderStats(first.generationId).entryCount)
+        reopen()
         assertEquals(second, store.snapshot())
         expectIssue(QueueStoreIssue.INVALID_INPUT) {
             store.replace(firstRequest.copy(mode = QueueMode(shuffle = true)), source(firstRequest.view))
@@ -363,7 +595,14 @@ class RoomQueueStoreTest {
         val neverRead = QueuePageSource { _, _ -> throw AssertionError("zero references need no producer I/O") }
         expectIssue(QueueStoreIssue.INVALID_INPUT) { store.replace(empty, neverRead) }
         assertEquals(old, store.snapshot())
-        val cleared = store.replace(empty.copy(operationId = "confirmed-clear", allowEmpty = true), neverRead).snapshot
+        var guarded = false
+        val cleared = store.replace(empty.copy(operationId = "confirmed-clear", allowEmpty = true), neverRead) { candidate ->
+            guarded = true
+            assertNull(candidate)
+            assertFalse(database.inTransaction())
+            assertEquals(old, store.snapshot())
+        }.snapshot
+        assertTrue(guarded)
         assertEquals(0L, cleared.entryCount)
         assertNull(cleared.currentEntryId)
         assertEquals(emptyList<QueueEntry>(), store.page(cleared.generationId, 0L))
@@ -447,7 +686,7 @@ class RoomQueueStoreTest {
         database.close()
         withContext(Dispatchers.IO) {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { independent ->
-                independent.version = 2
+                independent.version = 3
             }
         }
         database = open(file)
@@ -455,7 +694,7 @@ class RoomQueueStoreTest {
         expectIssue(QueueStoreIssue.RECOVERY_REQUIRED) { store.initialize() }
         withContext(Dispatchers.IO) {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
-                assertEquals(2, independent.version)
+                assertEquals(3, independent.version)
                 independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
                     assertTrue(cursor.moveToFirst())
                     assertEquals(3L, cursor.getLong(0))
@@ -548,6 +787,16 @@ class RoomQueueStoreTest {
         throw AssertionError("expected $expected")
     }
 
+    private suspend fun expectSourceIssue(expected: SourceReadIssue, action: suspend () -> Unit): SourceReadException {
+        try {
+            action()
+        } catch (error: SourceReadException) {
+            assertEquals(expected, error.issue)
+            return error
+        }
+        throw AssertionError("expected $expected")
+    }
+
     private suspend fun assertDiscarded(operation: String, active: QueueSnapshot) {
         assertEquals(active, store.snapshot())
         val rejected = database.queueDao().operation(operation) ?: throw AssertionError("staged operation must retain its recovery identity")
@@ -570,7 +819,7 @@ class RoomQueueStoreTest {
                 assertTrue(cursor.moveToFirst())
                 assertEquals("ok", cursor.getString(0))
             }
-            assertEquals(1, independent.version)
+            assertEquals(2, independent.version)
             independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals(expectedEntries, cursor.getLong(0))

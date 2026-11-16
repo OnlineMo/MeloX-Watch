@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -21,8 +22,16 @@ ROOM_SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database
 
 
 def required_build_inputs():
-    # 初始 schema 是后续迁移基线；无 Room 的 P0 不要求虚构此文件。
-    schemas = (ROOM_SCHEMA_DIRECTORY + '/1.json',) if (ROOT / 'android' / ROOM_DATABASE_SOURCE).is_file() else ()
+    source = ROOT / 'android' / ROOM_DATABASE_SOURCE
+    schemas = ()
+    if source.is_file():
+        # 初始与当前 schema 均须由云端生成并审阅，升级不能落入普通构建后才发现漂移。
+        versions = re.findall(r'@Database\s*\([\s\S]*?\bversion\s*=\s*([0-9]+)\s*[,)]',
+                              source.read_text(encoding='utf-8'))
+        require(len(versions) == 1 and int(versions[0]) > 0,
+                'Room database must declare one positive literal schema version')
+        schemas = tuple(ROOM_SCHEMA_DIRECTORY + f'/{version}.json'
+                        for version in dict.fromkeys((1, int(versions[0]))))
     return (*DEPENDENCY_INPUTS, *schemas)
 
 

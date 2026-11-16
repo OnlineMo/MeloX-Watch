@@ -45,6 +45,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -69,11 +70,20 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.media3.common.Player
 import io.github.onlinemo.meloxwatch.R
+import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.data.ProbeAccess
 import io.github.onlinemo.meloxwatch.data.ProbeDocument
 import io.github.onlinemo.meloxwatch.data.ProbeFileIssue
 import io.github.onlinemo.meloxwatch.data.ProbeFiles
+import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
+import io.github.onlinemo.meloxwatch.ui.library.LibraryScreen
+import io.github.onlinemo.meloxwatch.ui.library.LibraryViewModel
+import io.github.onlinemo.meloxwatch.ui.library.ListeningViewModel
+import io.github.onlinemo.meloxwatch.ui.library.SourcesViewModel
+import io.github.onlinemo.meloxwatch.ui.library.libraryContent
+import io.github.onlinemo.meloxwatch.ui.library.listeningIssueText
 import io.github.onlinemo.meloxwatch.model.ScreenShape
+import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesControls
 import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesViewModel
@@ -83,21 +93,29 @@ import java.net.URI
 import java.net.URISyntaxException
 import java.util.Locale
 import kotlin.math.roundToInt
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 class MainActivity : ComponentActivity() {
     private lateinit var probeViewModel: ProbeViewModel
     private lateinit var preferencesViewModel: PreferencesViewModel
     private lateinit var queueViewModel: QueueViewModel
+    private lateinit var libraryViewModel: LibraryViewModel
+    private lateinit var sourcesViewModel: SourcesViewModel
+    private lateinit var listeningViewModel: ListeningViewModel
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         probeViewModel = ViewModelProvider(this)[ProbeViewModel::class.java]
         preferencesViewModel = ViewModelProvider(this)[PreferencesViewModel::class.java]
         queueViewModel = ViewModelProvider(this)[QueueViewModel::class.java]
-        if (savedInstanceState == null) acceptExternalAudio(intent)
+        libraryViewModel = ViewModelProvider(this)[LibraryViewModel::class.java]
+        sourcesViewModel = ViewModelProvider(this)[SourcesViewModel::class.java]
+        listeningViewModel = ViewModelProvider(this)[ListeningViewModel::class.java]
+        if (savedInstanceState == null) acceptLaunchIntent(intent)
         setContent {
             ProbeTheme {
-                ProbeApp(probeViewModel, preferencesViewModel, queueViewModel, this)
+                ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
+                    libraryViewModel, sourcesViewModel, listeningViewModel, this)
             }
         }
     }
@@ -105,23 +123,44 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        acceptExternalAudio(intent)
+        acceptLaunchIntent(intent)
     }
 
     override fun onStart() {
         super.onStart()
+        (application as MeloXApplication).onUiForeground()
         probeViewModel.onForeground()
     }
 
     override fun onStop() {
         probeViewModel.onBackground()
+        sourcesViewModel.onBackground()
+        (application as MeloXApplication).onUiBackground()
         super.onStop()
     }
 
+    private fun acceptLaunchIntent(source: Intent?) {
+        if (PlaybackCommands.opensPlayback(source)) {
+            probeViewModel.showPage(ProbePage.PLAYBACK)
+            return
+        }
+        acceptExternalAudio(source)
+    }
+
+    @Suppress("DEPRECATION")
     private fun acceptExternalAudio(source: Intent?) {
         val sourceIntent = source ?: return
-        val uri = sourceIntent.data ?: return
-        if (sourceIntent.action == Intent.ACTION_VIEW) probeViewModel.selectDocument(uri, sourceIntent.flags)
+        if (sourceIntent.action !in setOf(Intent.ACTION_VIEW, Intent.ACTION_SEND)) return
+        val uri = try {
+            if (sourceIntent.action == Intent.ACTION_VIEW) sourceIntent.data
+            else if (android.os.Build.VERSION.SDK_INT >= 33) sourceIntent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+            else sourceIntent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+        } catch (_: RuntimeException) { null }
+        probeViewModel.showPage(ProbePage.LIBRARY)
+        libraryViewModel.show(LibraryScreen.SOURCES)
+        sourcesViewModel.cancelReauthorization()
+        if (uri == null || uri.scheme != "content" || uri.authority.isNullOrBlank()) sourcesViewModel.invalidSelection()
+        else sourcesViewModel.selected(LocalSourceKind.DOCUMENT, uri, sourceIntent.flags)
     }
 }
 
@@ -161,11 +200,17 @@ private fun ProbeApp(
     viewModel: ProbeViewModel,
     preferencesViewModel: PreferencesViewModel,
     queueViewModel: QueueViewModel,
+    libraryViewModel: LibraryViewModel,
+    sourcesViewModel: SourcesViewModel,
+    listeningViewModel: ListeningViewModel,
     activity: MainActivity,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val preferences by preferencesViewModel.uiState.collectAsStateWithLifecycle()
     val queue by queueViewModel.uiState.collectAsStateWithLifecycle()
+    val library by libraryViewModel.uiState.collectAsStateWithLifecycle()
+    val sources by sourcesViewModel.uiState.collectAsStateWithLifecycle()
+    val listening by listeningViewModel.uiState.collectAsStateWithLifecycle()
     val screenShape = if (state.page == ProbePage.SETTINGS) {
         preferences.previewScreenShape ?: preferences.effective.screenShape
     } else {
@@ -176,8 +221,25 @@ private fun ProbeApp(
         else if (preferences.isEditing) preferencesViewModel.clearDraft()
     }
     LifecycleStartEffect(state.page) {
-        if (state.page == ProbePage.QUEUE) queueViewModel.onVisible()
-        onStopOrDispose { queueViewModel.onHidden() }
+        val queueVisible = state.page == ProbePage.QUEUE
+        val libraryVisible = state.page == ProbePage.LIBRARY
+        if (queueVisible) queueViewModel.onVisible()
+        if (libraryVisible) libraryViewModel.onVisible()
+        onStopOrDispose {
+            if (queueVisible) queueViewModel.onHidden()
+            if (libraryVisible) libraryViewModel.onHidden()
+        }
+    }
+    LifecycleStartEffect(state.page, library.screen) {
+        val sourcesVisible = state.page == ProbePage.LIBRARY && library.screen == LibraryScreen.SOURCES
+        val listeningVisible = state.page == ProbePage.LIBRARY &&
+            library.screen in setOf(LibraryScreen.HISTORY, LibraryScreen.STATISTICS)
+        if (sourcesVisible) sourcesViewModel.onVisible()
+        if (listeningVisible) listeningViewModel.onVisible(library.screen)
+        onStopOrDispose {
+            if (sourcesVisible) sourcesViewModel.onHidden()
+            if (listeningVisible) listeningViewModel.onHidden()
+        }
     }
     val savedPages = rememberSaveableStateHolder()
     val documentPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -206,6 +268,39 @@ private fun ProbeApp(
                 permanently = !activity.shouldShowRequestPermissionRationale(viewModel.audioPermission),
             )
         }
+    }
+    val libraryFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        val uri = data?.data
+        if (result.resultCode == Activity.RESULT_OK && data != null && uri != null)
+            sourcesViewModel.selected(LocalSourceKind.DOCUMENT, uri, data.flags)
+        else sourcesViewModel.pickerCancelled()
+    }
+    val libraryTreePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val data = result.data
+        val uri = data?.data
+        if (result.resultCode == Activity.RESULT_OK && data != null && uri != null)
+            sourcesViewModel.selected(LocalSourceKind.TREE, uri, data.flags)
+        else sourcesViewModel.pickerCancelled()
+    }
+    val libraryPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) sourcesViewModel.addMediaStore() else sourcesViewModel.permissionDenied()
+    }
+    val chooseLibraryFile = {
+        try {
+            libraryFilePicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("audio/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
+        } catch (_: ActivityNotFoundException) { sourcesViewModel.noPicker(tree = false) }
+    }
+    val chooseLibraryTree = {
+        try {
+            libraryTreePicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
+        } catch (_: ActivityNotFoundException) { sourcesViewModel.noPicker(tree = true) }
+    }
+    val addLibraryMedia = {
+        if (viewModel.hasAudioPermission()) sourcesViewModel.addMediaStore()
+        else libraryPermission.launch(viewModel.audioPermission)
     }
     val openDocument = {
         if (state.hasDocumentPicker) {
@@ -251,13 +346,21 @@ private fun ProbeApp(
         if (state.page == ProbePage.SETTINGS) preferencesViewModel.clearDraft()
         viewModel.showPage(ProbePage.HOME)
     }
-    BackHandler(enabled = state.page != ProbePage.HOME, onBack = returnHome)
+    val back = {
+        if (state.page != ProbePage.LIBRARY || !libraryViewModel.back()) returnHome()
+    }
+    BackHandler(enabled = state.page != ProbePage.HOME, onBack = back)
     savedPages.SaveableStateProvider(state.page.name) {
-        val resetScroll = if (state.page == ProbePage.QUEUE) queue.snapshot?.generationId to queue.pageStart else null
-        ProbePageContent(screenShape, resetScroll) {
+        val resetScroll = when (state.page) {
+            ProbePage.QUEUE -> queue.snapshot?.generationId to queue.pageStart
+            ProbePage.LIBRARY -> "${library.screen}:${library.page?.view?.viewId}:${library.artworkRefreshPreview?.refreshId}" to library.pageStart
+            else -> null
+        }
+        ProbePageContent(screenShape, resetScroll,
+            onVisibleKeys = if (state.page == ProbePage.LIBRARY) libraryViewModel::setVisibleItemKeys else null) {
             item { PageTitle(stringResource(pageTitle(state.page))) }
             if (state.page != ProbePage.HOME) {
-                item { ProbeButton(stringResource(R.string.probe_back), onClick = returnHome) }
+                item { ProbeButton(stringResource(R.string.probe_back), onClick = back) }
             }
             item {
                 OperationStatus(
@@ -285,6 +388,11 @@ private fun ProbeApp(
                     queueViewModel::nextPage,
                     queueViewModel::retry,
                 )
+                ProbePage.LIBRARY -> libraryContent(library, libraryViewModel, sources, sourcesViewModel,
+                    state.playbackCommandPending || !state.playback.isConnected,
+                    viewModel::playLibraryView, viewModel::playTemporaryEntry,
+                    chooseLibraryFile, chooseLibraryTree, addLibraryMedia,
+                    listening, listeningViewModel, openSettings)
             }
         }
     }
@@ -294,6 +402,7 @@ private fun ProbeApp(
 private fun ProbePageContent(
     screenShape: ScreenShape,
     resetScroll: Pair<String?, Long>?,
+    onVisibleKeys: ((List<Any>) -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     val configuration = LocalConfiguration.current
@@ -301,6 +410,10 @@ private fun ProbePageContent(
     val fullWindowSize = LocalWindowInfo.current.containerSize
     val fullWindowHeight = with(density) { fullWindowSize.height.toDp() }
     val listState = rememberLazyListState()
+    LaunchedEffect(onVisibleKeys, resetScroll) {
+        if (onVisibleKeys != null) snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.key } }
+            .distinctUntilChanged().collect(onVisibleKeys)
+    }
     LaunchedEffect(resetScroll) {
         if (resetScroll != null) listState.scrollToItem(0)
     }
@@ -339,6 +452,7 @@ private fun LazyListScope.homeContent(
     openSettings: () -> Unit,
 ) {
     item { BodyText(stringResource(R.string.probe_intro)) }
+    item { ProbeButton(stringResource(R.string.library_title), primary = true) { viewModel.showPage(ProbePage.LIBRARY) } }
     item {
         ProbeButton(
             stringResource(R.string.probe_open_audio),
@@ -648,6 +762,7 @@ private fun OperationStatus(state: ProbeUiState, onCancel: () -> Unit, onRetryQu
                 onClick = onRetryQueue,
             )
         }
+        state.listeningIssue?.let { BodyText(stringResource(listeningIssueText(it)), isError = true) }
         if (state.isReading) ProbeButton(stringResource(R.string.probe_cancel), onClick = onCancel)
     }
 }
@@ -714,11 +829,15 @@ private fun pageTitle(page: ProbePage): Int = when (page) {
     ProbePage.DEVICE -> R.string.probe_device
     ProbePage.SETTINGS -> R.string.playback_settings
     ProbePage.QUEUE -> R.string.playback_queue
+    ProbePage.LIBRARY -> R.string.library_title
 }
 
 private fun queueIssueText(issue: QueuePlaybackIssue): Int = when (issue) {
     QueuePlaybackIssue.BUSY -> R.string.playback_queue_busy
     QueuePlaybackIssue.CONFLICT -> R.string.playback_queue_conflict
+    QueuePlaybackIssue.VIEW_EXPIRED -> R.string.library_view_expired
+    QueuePlaybackIssue.SOURCE_CHANGED -> R.string.library_source_changed
+    QueuePlaybackIssue.CONTENT_UNKNOWN -> R.string.library_content_unknown
     QueuePlaybackIssue.NOT_READY -> R.string.playback_queue_not_ready
     QueuePlaybackIssue.CLOSED -> R.string.playback_queue_closed
     QueuePlaybackIssue.STORAGE_FULL -> R.string.playback_storage_full

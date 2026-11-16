@@ -12,16 +12,22 @@ data class UserPreferences(
     val revision: Long = 0L,
     val restorePosition: Boolean = true,
     val screenShape: ScreenShape = ScreenShape.AUTO,
+    val libraryLayout: LibraryLayout = LibraryLayout.LIST,
+    val artworkReadPath: ArtworkReadPath = ArtworkReadPath.SYSTEM_THUMBNAIL,
+    val librarySorts: Map<LibraryListContext, LibrarySort> = defaultLibrarySorts(),
 ) {
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION)
         require(revision >= 0L)
+        require(librarySorts.keys == LibraryListContext.entries.toSet())
     }
 
-    fun asDraft(): UserPreferencesDraft = UserPreferencesDraft(restorePosition, screenShape)
+    fun asDraft(): UserPreferencesDraft = UserPreferencesDraft(
+        restorePosition, screenShape, libraryLayout, artworkReadPath, librarySorts.toMap(),
+    )
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 1
+        const val CURRENT_SCHEMA_VERSION = 2
     }
 }
 
@@ -29,4 +35,11 @@ data class UserPreferences(
 data class UserPreferencesDraft(
     val restorePosition: Boolean = true,
     val screenShape: ScreenShape = ScreenShape.AUTO,
-)
+    val libraryLayout: LibraryLayout = LibraryLayout.LIST,
+    val artworkReadPath: ArtworkReadPath = ArtworkReadPath.SYSTEM_THUMBNAIL,
+    val librarySorts: Map<LibraryListContext, LibrarySort> = defaultLibrarySorts(),
+) {
+    init {
+        require(librarySorts.keys == LibraryListContext.entries.toSet())
+    }
+}

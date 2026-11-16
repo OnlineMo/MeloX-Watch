@@ -15,6 +15,11 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
 import io.github.onlinemo.meloxwatch.data.preferences.ResetConfirmation
 import io.github.onlinemo.meloxwatch.data.preferences.createUserPreferencesDataStore
+import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.LibraryLayout
+import io.github.onlinemo.meloxwatch.model.LibraryListContext
+import io.github.onlinemo.meloxwatch.model.LibrarySort
+import io.github.onlinemo.meloxwatch.model.LibrarySortField
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
@@ -286,7 +291,7 @@ class UserPreferencesRepositoryTest {
     @Test(timeout = 30000L)
     fun aNewerSchemaRemainsUntouchedEvenWhenSaveOrResetIsRequested() = runBlocking {
         val file = preferencesFile()
-        writeFixture(file, fixture(schema = 2, revision = 12L))
+        writeFixture(file, fixture(schema = UserPreferences.CURRENT_SCHEMA_VERSION + 1, revision = 12L))
         val originalBytes = file.readBytes()
         val session = open(file)
         val loaded = session.ready()
@@ -299,6 +304,53 @@ class UserPreferencesRepositoryTest {
         assertEquals(PreferencesFailure.UNSUPPORTED_SCHEMA, (saved as PreferencesWriteResult.Failed).failure)
         assertEquals(PreferencesFailure.UNSUPPORTED_SCHEMA, (reset as PreferencesWriteResult.Failed).failure)
         assertArrayEquals(originalBytes, file.readBytes())
+    }
+
+    @Test(timeout = 30000L)
+    fun legacyPlaybackSettingsMigrateOnlyOnExplicitSaveWithoutResettingTheirValues() = runBlocking {
+        val file = preferencesFile()
+        writeFixture(file, fixture(schema = 1, revision = 6L))
+        val legacyBytes = file.readBytes()
+        val first = open(file)
+        val loaded = first.ready()
+        assertEquals(false, loaded.preferences.restorePosition)
+        assertEquals(ScreenShape.ROUND, loaded.preferences.screenShape)
+        assertNull(loaded.recovery)
+        assertArrayEquals(legacyBytes, file.readBytes())
+
+        val result = first.repository.save(6L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+        assertEquals(7L, result.preferences.revision)
+        assertEquals(loaded.preferences.asDraft(), result.preferences.asDraft())
+        first.close()
+        val reopened = open(file)
+        assertEquals(result.preferences, reopened.ready().preferences)
+        assertTrue(reopened.repository.save(7L, result.preferences.asDraft()) is PreferencesWriteResult.Unchanged)
+    }
+
+    @Test(timeout = 30000L)
+    fun libraryAppearanceAndPerListSortsSurviveReopenAndConflictCannotDiscardThem() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val sorts = UserPreferences().librarySorts.toMutableMap().apply {
+            this[LibraryListContext.ALL] = LibrarySort(LibrarySortField.FILENAME_NATURAL, true)
+            this[LibraryListContext.ALBUM] = LibrarySort(LibrarySortField.ALBUM_TRACK, false)
+            this[LibraryListContext.ARTIST] = LibrarySort(LibrarySortField.PLAY_COUNT, true)
+        }.toMap()
+        val draft = UserPreferencesDraft(
+            restorePosition = false,
+            screenShape = ScreenShape.RECTANGULAR,
+            libraryLayout = LibraryLayout.GRID,
+            artworkReadPath = ArtworkReadPath.LOCAL_EXTRACT,
+            librarySorts = sorts,
+        )
+        val saved = (first.repository.save(0L, draft) as PreferencesWriteResult.Saved).preferences
+        val committedBytes = file.readBytes()
+        val conflict = first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict
+        assertEquals(saved, conflict.current)
+        assertArrayEquals(committedBytes, file.readBytes())
+        first.close()
+        assertEquals(draft, open(file).ready().preferences.asDraft())
     }
 
     @Test(timeout = 30000L)

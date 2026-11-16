@@ -311,7 +311,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
     def test_room_schema_bootstrap_preserves_generated_version_and_still_exports_no_apk(self):
         source = self.android / build.ROOM_DATABASE_SOURCE
         source.parent.mkdir(parents=True)
-        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        source.write_text('@Database(version = 1, exportSchema = true)\n', encoding='utf-8')
         schema = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
 
         def generated(command, **kwargs):
@@ -333,7 +333,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
     def test_bootstrap_rejects_room_schema_drift_during_independent_strict_validation(self):
         source = self.android / build.ROOM_DATABASE_SOURCE
         source.parent.mkdir(parents=True)
-        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        source.write_text('@Database(version = 1, exportSchema = true)\n', encoding='utf-8')
         schema = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
 
         def generated(command, **kwargs):
@@ -355,7 +355,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
     def test_trusted_room_build_rejects_missing_committed_initial_schema(self):
         source = self.android / build.ROOM_DATABASE_SOURCE
         source.parent.mkdir(parents=True)
-        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        source.write_text('@Database(version = 1, exportSchema = true)\n', encoding='utf-8')
         self.write_inputs()
         with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build.subprocess, 'run') as process:
             with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
@@ -365,7 +365,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
     def test_strict_build_cannot_export_an_apk_after_changing_reviewed_schema_bytes(self):
         source = self.android / build.ROOM_DATABASE_SOURCE
         source.parent.mkdir(parents=True)
-        source.write_text('unexecuted Room declaration fixture\n', encoding='utf-8')
+        source.write_text('@Database(version = 1, exportSchema = true)\n', encoding='utf-8')
         schema = self.android / build.ROOM_SCHEMA_DIRECTORY / '1.json'
         self.write_inputs((*build.DEPENDENCY_INPUTS, schema.relative_to(self.android).as_posix()))
 
@@ -391,6 +391,38 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 build.build('debug')
             inspect.assert_not_called()
         self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_schema_upgrade_bootstraps_current_version_even_with_reviewed_initial_inputs(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('@Database(\n entities = [QueueEntity::class],\n version = 2,\n exportSchema = true,\n)', encoding='utf-8')
+        initial = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
+        current = build.ROOM_SCHEMA_DIRECTORY + '/2.json'
+        self.write_inputs((*build.DEPENDENCY_INPUTS, initial))
+        with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs:
+                          self.write_inputs((*build.DEPENDENCY_REPORT_FILES, current))) as process, \
+                patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.build('debug')
+            self.assertEqual(process.call_count, 5)
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['missing_inputs_at_start'], [current])
+        self.assertIn(initial, manifest['files'])
+        self.assertIn(current, manifest['files'])
+        self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_trusted_schema_upgrade_cannot_generate_current_version(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('@Database(version = 2, exportSchema = true)', encoding='utf-8')
+        self.write_inputs((*build.DEPENDENCY_INPUTS, build.ROOM_SCHEMA_DIRECTORY + '/1.json'))
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build.subprocess, 'run') as process:
+            with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
+                build.build('debug')
+            process.assert_not_called()
 
 
 if __name__ == '__main__':

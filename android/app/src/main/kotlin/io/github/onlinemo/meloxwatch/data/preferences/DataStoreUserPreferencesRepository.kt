@@ -95,6 +95,9 @@ class DataStoreUserPreferencesRepository internal constructor(
                                 revision = current.revision + 1L,
                                 restorePosition = draft.restorePosition,
                                 screenShape = draft.screenShape,
+                                libraryLayout = draft.libraryLayout,
+                                artworkReadPath = draft.artworkReadPath,
+                                librarySorts = draft.librarySorts.toMap(),
                             ),
                         )
                     }

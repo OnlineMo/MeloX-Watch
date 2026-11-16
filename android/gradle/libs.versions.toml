@@ -12,6 +12,7 @@ datastore = "1.1.7"
 ksp = "2.2.21-2.0.5"
 robolectric = "4.16.1"
 robolectric-sdk = "8.0.0_r4-robolectric-r1-i7"
+robolectric-sdk30 = "11-robolectric-6757853-i7"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activity" }
@@ -33,6 +34,7 @@ room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
 datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 robolectric-test = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 robolectric-sdk = { module = "org.robolectric:android-all-instrumented", version.ref = "robolectric-sdk" }
+robolectric-sdk30 = { module = "org.robolectric:android-all-instrumented", version.ref = "robolectric-sdk30" }
 
 [plugins]
 room = { id = "androidx.room", version.ref = "room" }

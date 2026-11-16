@@ -10,6 +10,11 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
 import io.github.onlinemo.meloxwatch.data.preferences.ResetConfirmation
 import io.github.onlinemo.meloxwatch.data.preferences.UserPreferencesRepositoryFactory
+import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.LibraryLayout
+import io.github.onlinemo.meloxwatch.model.LibraryListContext
+import io.github.onlinemo.meloxwatch.model.LibrarySort
+import io.github.onlinemo.meloxwatch.model.LibrarySortField
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
@@ -142,6 +147,16 @@ class PreferencesViewModel(
     @MainThread
     fun setScreenShape(shape: ScreenShape) {
         editDraft { draft -> draft.copy(screenShape = shape) }
+    }
+
+    @MainThread
+    fun setLibraryLayout(layout: LibraryLayout) {
+        editDraft { draft -> draft.copy(libraryLayout = layout) }
+    }
+
+    @MainThread
+    fun setArtworkReadPath(path: ArtworkReadPath) {
+        editDraft { draft -> draft.copy(artworkReadPath = path) }
     }
 
     /** 明确丢弃当前草稿，按最新确认值建立新基线；冲突不自动更新 expectedRevision。 */
@@ -331,8 +346,19 @@ class PreferencesViewModel(
         val restore = savedStateHandle.get<Any>(KEY_RESTORE_POSITION) as? Boolean
         val shapeName = savedStateHandle.get<Any>(KEY_SCREEN_SHAPE) as? String
         val shape = ScreenShape.entries.firstOrNull { value -> value.name == shapeName }
-        val draft = if (active && revision != null && restore != null && shape != null) {
-            UserPreferencesDraft(restore, shape)
+        val layout = LibraryLayout.entries.firstOrNull { it.name == (savedStateHandle.get<Any>(KEY_LAYOUT) as? String) }
+        val artworkPath = ArtworkReadPath.entries.firstOrNull { it.name == (savedStateHandle.get<Any>(KEY_ARTWORK) as? String) }
+        val sorts = LibraryListContext.entries.associateWith { context ->
+            val field = LibrarySortField.entries.firstOrNull {
+                it.name == (savedStateHandle.get<Any>(sortKey(context)) as? String)
+            }
+            val direction = savedStateHandle.get<Any>(sortDirectionKey(context)) as? Boolean
+            if (field == null || direction == null) null else LibrarySort(field, direction)
+        }
+        val draft = if (active && revision != null && restore != null && shape != null &&
+            layout != null && artworkPath != null && sorts.values.all { it != null }
+        ) {
+            UserPreferencesDraft(restore, shape, layout, artworkPath, sorts.mapValues { checkNotNull(it.value) })
         } else {
             null
         }
@@ -355,11 +381,23 @@ class PreferencesViewModel(
             savedStateHandle[KEY_REVISION] = current.baseRevision
             savedStateHandle[KEY_RESTORE_POSITION] = draft.restorePosition
             savedStateHandle[KEY_SCREEN_SHAPE] = draft.screenShape.name
+            savedStateHandle[KEY_LAYOUT] = draft.libraryLayout.name
+            savedStateHandle[KEY_ARTWORK] = draft.artworkReadPath.name
+            LibraryListContext.entries.forEach { context ->
+                savedStateHandle[sortKey(context)] = draft.librarySorts.getValue(context).field.name
+                savedStateHandle[sortDirectionKey(context)] = draft.librarySorts.getValue(context).descending
+            }
             savedStateHandle[KEY_PREVIEW] = current.previewEnabled
         } else {
             savedStateHandle.remove<Long>(KEY_REVISION)
             savedStateHandle.remove<Boolean>(KEY_RESTORE_POSITION)
             savedStateHandle.remove<String>(KEY_SCREEN_SHAPE)
+            savedStateHandle.remove<String>(KEY_LAYOUT)
+            savedStateHandle.remove<String>(KEY_ARTWORK)
+            LibraryListContext.entries.forEach { context ->
+                savedStateHandle.remove<String>(sortKey(context))
+                savedStateHandle.remove<Boolean>(sortDirectionKey(context))
+            }
             savedStateHandle.remove<Boolean>(KEY_PREVIEW)
         }
     }
@@ -369,6 +407,10 @@ class PreferencesViewModel(
         const val KEY_REVISION = "preferences.editor.revision"
         const val KEY_RESTORE_POSITION = "preferences.editor.restore_position"
         const val KEY_SCREEN_SHAPE = "preferences.editor.screen_shape"
+        const val KEY_LAYOUT = "preferences.editor.library_layout"
+        const val KEY_ARTWORK = "preferences.editor.artwork_path"
         const val KEY_PREVIEW = "preferences.editor.preview"
+        fun sortKey(context: LibraryListContext) = "preferences.editor.sort.${context.name}"
+        fun sortDirectionKey(context: LibraryListContext) = "preferences.editor.descending.${context.name}"
     }
 }

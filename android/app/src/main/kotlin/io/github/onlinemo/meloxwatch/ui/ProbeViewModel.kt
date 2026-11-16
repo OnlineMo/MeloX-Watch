@@ -31,6 +31,7 @@ import io.github.onlinemo.meloxwatch.data.ProbeFileResult
 import io.github.onlinemo.meloxwatch.data.ProbeFiles
 import io.github.onlinemo.meloxwatch.data.ProbeTreeSample
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
+import io.github.onlinemo.meloxwatch.data.listening.ListeningIssue
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.model.QueueEntry
@@ -62,6 +63,7 @@ enum class ProbePage {
     DEVICE,
     SETTINGS,
     QUEUE,
+    LIBRARY,
 }
 
 enum class ProbeNotice {
@@ -107,6 +109,7 @@ data class ProbeUiState(
     val playback: ProbePlaybackState = ProbePlaybackState(),
     val playbackCommandPending: Boolean = false,
     val queueIssue: QueuePlaybackIssue? = null,
+    val listeningIssue: ListeningIssue? = null,
 )
 
 /**
@@ -173,6 +176,12 @@ class ProbeViewModel(
                 if (sessionError.message.startsWith("QUEUE_")) {
                     val issue = queueIssue(sessionError.message.removePrefix("QUEUE_"))
                     _uiState.update { state -> state.copy(queueIssue = issue) }
+                    return
+                }
+                if (sessionError.message.startsWith("LISTENING_")) {
+                    val issue = ListeningIssue.entries.firstOrNull { it.name == sessionError.message.removePrefix("LISTENING_") }
+                        ?: ListeningIssue.STORAGE_UNAVAILABLE
+                    _uiState.update { it.copy(listeningIssue = issue) }
                     return
                 }
                 val backgroundDenied = sessionError.code == SessionError.ERROR_INVALID_STATE &&
@@ -378,6 +387,21 @@ class ProbeViewModel(
 
     fun retryQueueRestore() = startQueueCommand(PlaybackCommands.retryRestore) { Bundle.EMPTY }
 
+    fun playLibraryView(viewId: String, selected: TrackKey?) {
+        startQueueCommand(onAccepted = { showPage(ProbePage.PLAYBACK) }) {
+            val saved = queues.snapshot()
+            PlaybackCommands.replaceLibraryView to PlaybackCommands.libraryArguments(
+                viewId, selected, saved, "library:${UUID.randomUUID()}",
+            )
+        }
+    }
+
+    fun playTemporaryEntry(entry: QueueEntry) {
+        startQueueCommand(onAccepted = { showPage(ProbePage.PLAYBACK) }) {
+            PlaybackCommands.replaceLocal to PlaybackCommands.localArguments(entry, queues.snapshot(), "preview:${UUID.randomUUID()}")
+        }
+    }
+
     fun previous() {
         val active = controller ?: return
         if (active.isCommandAvailable(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)) active.seekToPreviousMediaItem()
@@ -393,7 +417,7 @@ class ProbeViewModel(
     private fun startQueueCommand(command: SessionCommand, arguments: suspend () -> Bundle) =
         startQueueCommand { command to arguments() }
 
-    private fun startQueueCommand(request: suspend () -> Pair<SessionCommand, Bundle>) {
+    private fun startQueueCommand(onAccepted: () -> Unit = {}, request: suspend () -> Pair<SessionCommand, Bundle>) {
         val active = controller ?: return
         if (!isForeground || playbackCommandJob?.isActive == true) return
         playbackCommandGeneration += 1L
@@ -411,6 +435,7 @@ class ProbeViewModel(
                     })
                 }
                 capturePlayback()
+                if (result.resultCode == SessionResult.RESULT_SUCCESS) onAccepted()
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
             } catch (error: QueueStoreException) {
