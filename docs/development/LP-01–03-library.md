@@ -1,10 +1,10 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中，最新实际Debug218项执行、217通过；原BUSY回归通过，唯一失败在新增测试的协程await异常引用断言。保留物理关闭callback的原引用及全部顺序重试断言，只修正await恢复边界，待精确新快照云验。Release/Diagnostic、完整严格构建及设备AC尚未通过。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中；最新五阶段资料中Debug/Release/Diagnostic各226项实际通过，生成输入已独立审查并按原字节导入。该bootstrap运行按合同拒绝，正常严格APK构建、真实数据库升级与设备AC仍待验证。
 
 ## 数据身份、迁移与完整列表
 
-`MeloXApplication`共享一个`melox.db`和一个物理provider IO通道。Room从v1的三张队列表显式迁移到v2，新增27张实际使用的来源、授权、位置/版本、曲目/关系、扫描、视图、导入和聆听表及44个索引；不重建队列表，不使用破坏性fallback。KSP schema必须取自完整云端资料，尚未手写或导入失败运行的schema。CI按实际数据库版本要求已提交的schema1及schema2，真实1→2迁移fixture等待可审阅的schema1基线。
+`MeloXApplication`共享一个`melox.db`和一个物理provider IO通道。Room从v1的三张队列表显式迁移到v2，新增27张实际使用的来源、授权、位置/版本、曲目/关系、扫描、视图、导入和聆听表及44个索引；不重建队列表，不使用破坏性fallback。schema1及schema2现取自完整五阶段云端原资料，经字段、约束与DDL独审后导入；失败的部分资料仍不作基线。CI按实际数据库版本要求两份schema，真实seeded 1→2迁移测试与设备覆盖升级仍待验证。
 
 TrackKey、位置、来源对象、授权与每次入队实例分开；同名不是实体证据。扫描先提交本代次已见对象，再提交解析成功或错误，保留首次加入时间和稳定插入序。来源/授权/规则/代次在每次写入重核；只有完整成功范围才能激活分批准备的缺失结论。取消、撤权、坏文件、排除和部分子树失败不会清空旧库或用户关系。旧库先打开，私有副本恢复作为独立可重试工作，失败不阻止已有可用音乐播放。
 
@@ -99,3 +99,9 @@ artifact `14178678082` ZIP SHA-256为`fa18eeb5b6cd2405bd4f205e25956d6b1a4ac3712a
 artifact `14179844026`为148555字节，ZIP SHA-256 `da695d787bb458c54482f04f2f2cc0bddee9abe527770361d4714a7efef1feda`；日志SHA-256 `9fae2401507e4c2f18a5c71e26a2db429ee10f9383434672a3b47bc9084f4b73`。匿名build证据SHA-256 `3406aa02fbfac0760aa5a77c442ab2785c873c650c75bfcb3bc16697da40152c`，失败证据 `bff4344f681bf544636bb0ce21fa42d3ecad2628efc0858ab00c134b3182f762`，unit摘要 `9720a6a124ca6a1d556f5a237a560f94885c6e23500247ba531daff851c5b4a1`。本次仍为failed-partial，schema/锁不导入基线；原始记录只留ignored本地。修正后的218项仍待云端重跑。
 
 P0同版本`androidx.compose.runtime:runtime-android:1.9.3`实际直依赖在run43755199209五阶段全部成功，common真实边及7个配置保留，811项官方哈希独立核验。此主题补齐同一真实API直依赖，保持工具链版本和全部STRICT规则；不复制P0的app锁或不相符的schema。该主题自身五阶段、完整依赖及迁移仍待验证，不能凭P0结果填通过。来源AAR SHA-256为`dc7a8a161d6dfff96801a2d89b1f5d4adb61c0dfa16cb5970215e70aa1d83407`，官方module为`9492b2ecb5da90bb3f6304e26fe06faff20c573e473a7da6351f0df52180f05a`，POM声明Apache-2.0。LP-04/05、CUE、LP-09及exchange并行WIP不进入这一小修复快照，所有256原AC/readiness仍未通过。
+
+## 当前完整资料与后续严格构建
+
+上文为历史轮次。[run43792499334](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43792499334)/attempt1现在提供本主题完整五阶段原资料，source `e2971ee4688c1a34626d8fe2cb70ca3f78c15a26`与实际checkout `60f0b36378a53da2400ca3ded82badd5ab349c8b`的tree相同。Debug/Release/Diagnostic各26套226项真实通过，完整列表10000/10001项及保旧队列/重开路径保留原180000ms timeout。每变体lint为2条Hint，Fatal/Error/Warning为0。
+
+工作流最终按bootstrap合同拒绝，没有可接受APK。原XML、lock、schema1/2经独立资格审查后仅按原ZIP字节导入，细节及全部SHA见[依赖记录](DEV-104-dependencies.md#library完整云资料与sdk30基线导入)。普通严格PR构建、真实seeded schema1→2、覆盖升级与256原AC仍待验证；LP-04/05/07/08/09并行WIP未进入这个冻结源码。
