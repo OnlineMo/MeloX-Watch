@@ -1,0 +1,2819 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 2,
+    "identityHash": "f785aceb921839fb08cede7dd1eba81a",
+    "entities": [
+      {
+        "tableName": "queue_generations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generationId` TEXT NOT NULL, `operationId` TEXT NOT NULL, `expectedGenerationId` TEXT, `expectedQueueRevision` INTEGER NOT NULL, `viewId` TEXT NOT NULL, `viewRevision` INTEGER NOT NULL, `totalCount` INTEGER NOT NULL, `shuffle` INTEGER NOT NULL, `repeatMode` TEXT NOT NULL, `cycleLimit` INTEGER, `startOriginalOrder` INTEGER NOT NULL, `initialPositionMs` INTEGER NOT NULL, `allowEmpty` INTEGER NOT NULL, `phase` INTEGER NOT NULL, `writtenCount` INTEGER NOT NULL, `committedQueueRevision` INTEGER, PRIMARY KEY(`generationId`))",
+        "fields": [
+          {
+            "fieldPath": "generationId",
+            "columnName": "generationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedGenerationId",
+            "columnName": "expectedGenerationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "expectedQueueRevision",
+            "columnName": "expectedQueueRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "viewId",
+            "columnName": "viewId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "viewRevision",
+            "columnName": "viewRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCount",
+            "columnName": "totalCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "shuffle",
+            "columnName": "shuffle",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "repeatMode",
+            "columnName": "repeatMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cycleLimit",
+            "columnName": "cycleLimit",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "startOriginalOrder",
+            "columnName": "startOriginalOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "initialPositionMs",
+            "columnName": "initialPositionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "allowEmpty",
+            "columnName": "allowEmpty",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "writtenCount",
+            "columnName": "writtenCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "committedQueueRevision",
+            "columnName": "committedQueueRevision",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queue_generations_operationId",
+            "unique": true,
+            "columnNames": [
+              "operationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queue_generations_operationId` ON `${TABLE_NAME}` (`operationId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "queue_entries",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`generationId` TEXT NOT NULL, `queueEntryId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `originalOrder` INTEGER NOT NULL, `playbackOrder` INTEGER NOT NULL, `displayName` TEXT, `durationMs` INTEGER, `accountId` TEXT, `locationId` TEXT, `locationUri` TEXT, `grantUri` TEXT, `grantFlags` INTEGER, `access` TEXT, `contentRevision` INTEGER, PRIMARY KEY(`generationId`, `queueEntryId`), FOREIGN KEY(`generationId`) REFERENCES `queue_generations`(`generationId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "generationId",
+            "columnName": "generationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "queueEntryId",
+            "columnName": "queueEntryId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalOrder",
+            "columnName": "originalOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playbackOrder",
+            "columnName": "playbackOrder",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "locationUri",
+            "columnName": "locationUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "grantUri",
+            "columnName": "grantUri",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "grantFlags",
+            "columnName": "grantFlags",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "access",
+            "columnName": "access",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "contentRevision",
+            "columnName": "contentRevision",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "generationId",
+            "queueEntryId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queue_entries_generationId_originalOrder",
+            "unique": true,
+            "columnNames": [
+              "generationId",
+              "originalOrder"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queue_entries_generationId_originalOrder` ON `${TABLE_NAME}` (`generationId`, `originalOrder`)"
+          },
+          {
+            "name": "index_queue_entries_generationId_playbackOrder",
+            "unique": true,
+            "columnNames": [
+              "generationId",
+              "playbackOrder"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_queue_entries_generationId_playbackOrder` ON `${TABLE_NAME}` (`generationId`, `playbackOrder`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "queue_generations",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "generationId"
+            ],
+            "referencedColumns": [
+              "generationId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "queue_head",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `activeGenerationId` TEXT, `queueRevision` INTEGER NOT NULL, `checkpointRevision` INTEGER NOT NULL, `currentEntryId` TEXT, `positionMs` INTEGER NOT NULL, `completedCycles` INTEGER NOT NULL, PRIMARY KEY(`id`), FOREIGN KEY(`activeGenerationId`) REFERENCES `queue_generations`(`generationId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`activeGenerationId`, `currentEntryId`) REFERENCES `queue_entries`(`generationId`, `queueEntryId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeGenerationId",
+            "columnName": "activeGenerationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "queueRevision",
+            "columnName": "queueRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "checkpointRevision",
+            "columnName": "checkpointRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "currentEntryId",
+            "columnName": "currentEntryId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "positionMs",
+            "columnName": "positionMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "completedCycles",
+            "columnName": "completedCycles",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_queue_head_activeGenerationId",
+            "unique": false,
+            "columnNames": [
+              "activeGenerationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queue_head_activeGenerationId` ON `${TABLE_NAME}` (`activeGenerationId`)"
+          },
+          {
+            "name": "index_queue_head_activeGenerationId_currentEntryId",
+            "unique": false,
+            "columnNames": [
+              "activeGenerationId",
+              "currentEntryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_queue_head_activeGenerationId_currentEntryId` ON `${TABLE_NAME}` (`activeGenerationId`, `currentEntryId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "queue_generations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "activeGenerationId"
+            ],
+            "referencedColumns": [
+              "generationId"
+            ]
+          },
+          {
+            "table": "queue_entries",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "activeGenerationId",
+              "currentEntryId"
+            ],
+            "referencedColumns": [
+              "generationId",
+              "queueEntryId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "library_meta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `revision` INTEGER NOT NULL, `rulesRevision` INTEGER NOT NULL, `nextAddedSequence` INTEGER NOT NULL, `nextScanSequence` INTEGER NOT NULL, `shortAudioFilter` INTEGER NOT NULL, `statisticsEpoch` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rulesRevision",
+            "columnName": "rulesRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextAddedSequence",
+            "columnName": "nextAddedSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextScanSequence",
+            "columnName": "nextScanSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "shortAudioFilter",
+            "columnName": "shortAudioFilter",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "statisticsEpoch",
+            "columnName": "statisticsEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "local_sources",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sourceId` TEXT NOT NULL, `spec` TEXT NOT NULL, `grantId` TEXT NOT NULL, `revision` INTEGER NOT NULL, `authEpoch` INTEGER NOT NULL, `state` TEXT NOT NULL, `activeScanId` TEXT, `latestScanId` TEXT, `absenceScanId` TEXT, `absenceScanSequence` INTEGER, `watermark` TEXT, PRIMARY KEY(`sourceId`))",
+        "fields": [
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "spec",
+            "columnName": "spec",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grantId",
+            "columnName": "grantId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authEpoch",
+            "columnName": "authEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "activeScanId",
+            "columnName": "activeScanId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "latestScanId",
+            "columnName": "latestScanId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "absenceScanId",
+            "columnName": "absenceScanId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "absenceScanSequence",
+            "columnName": "absenceScanSequence",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "watermark",
+            "columnName": "watermark",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sourceId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_sources_activeScanId",
+            "unique": false,
+            "columnNames": [
+              "activeScanId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_sources_activeScanId` ON `${TABLE_NAME}` (`activeScanId`)"
+          },
+          {
+            "name": "index_local_sources_latestScanId",
+            "unique": false,
+            "columnNames": [
+              "latestScanId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_sources_latestScanId` ON `${TABLE_NAME}` (`latestScanId`)"
+          },
+          {
+            "name": "index_local_sources_absenceScanId",
+            "unique": false,
+            "columnNames": [
+              "absenceScanId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_sources_absenceScanId` ON `${TABLE_NAME}` (`absenceScanId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "local_grants",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`grantId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `uri` TEXT NOT NULL, `observation` TEXT NOT NULL, `readCapability` TEXT NOT NULL, `acceptedPersistedFlags` INTEGER NOT NULL, `appOwned` INTEGER NOT NULL, PRIMARY KEY(`grantId`), FOREIGN KEY(`sourceId`) REFERENCES `local_sources`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "grantId",
+            "columnName": "grantId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "uri",
+            "columnName": "uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "observation",
+            "columnName": "observation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "readCapability",
+            "columnName": "readCapability",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "acceptedPersistedFlags",
+            "columnName": "acceptedPersistedFlags",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "appOwned",
+            "columnName": "appOwned",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "grantId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_grants_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_grants_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_sources",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_source_versions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sourceId` TEXT NOT NULL, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, `state` TEXT NOT NULL, `spec` TEXT NOT NULL, `grantId` TEXT NOT NULL, `absenceScanId` TEXT, `absenceScanSequence` INTEGER, PRIMARY KEY(`sourceId`, `validFrom`), FOREIGN KEY(`sourceId`) REFERENCES `local_sources`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`grantId`) REFERENCES `local_grants`(`grantId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "spec",
+            "columnName": "spec",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "grantId",
+            "columnName": "grantId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "absenceScanId",
+            "columnName": "absenceScanId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "absenceScanSequence",
+            "columnName": "absenceScanSequence",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sourceId",
+            "validFrom"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_source_versions_grantId",
+            "unique": false,
+            "columnNames": [
+              "grantId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_source_versions_grantId` ON `${TABLE_NAME}` (`grantId`)"
+          },
+          {
+            "name": "index_local_source_versions_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_source_versions_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          },
+          {
+            "name": "index_local_source_versions_absenceScanId",
+            "unique": false,
+            "columnNames": [
+              "absenceScanId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_source_versions_absenceScanId` ON `${TABLE_NAME}` (`absenceScanId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_sources",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          },
+          {
+            "table": "local_grants",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "grantId"
+            ],
+            "referencedColumns": [
+              "grantId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_locations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`locationId` TEXT NOT NULL, `identityKey` TEXT NOT NULL, `contentRevision` INTEGER NOT NULL, `contentToken` TEXT, `verifiedContentToken` TEXT, `previousVerifiedContentToken` TEXT, `sizeBytes` INTEGER, `modifiedEpochMs` INTEGER, `appOwned` INTEGER NOT NULL, PRIMARY KEY(`locationId`))",
+        "fields": [
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "identityKey",
+            "columnName": "identityKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentRevision",
+            "columnName": "contentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentToken",
+            "columnName": "contentToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verifiedContentToken",
+            "columnName": "verifiedContentToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "previousVerifiedContentToken",
+            "columnName": "previousVerifiedContentToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "modifiedEpochMs",
+            "columnName": "modifiedEpochMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "appOwned",
+            "columnName": "appOwned",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "locationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_locations_identityKey",
+            "unique": true,
+            "columnNames": [
+              "identityKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_locations_identityKey` ON `${TABLE_NAME}` (`identityKey`)"
+          }
+        ]
+      },
+      {
+        "tableName": "local_location_versions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`versionId` TEXT NOT NULL, `locationId` TEXT NOT NULL, `contentRevision` INTEGER NOT NULL, `contentToken` TEXT, `verifiedContentToken` TEXT, `sizeBytes` INTEGER, `modifiedEpochMs` INTEGER, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, PRIMARY KEY(`versionId`), FOREIGN KEY(`locationId`) REFERENCES `local_locations`(`locationId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "versionId",
+            "columnName": "versionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentRevision",
+            "columnName": "contentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentToken",
+            "columnName": "contentToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "verifiedContentToken",
+            "columnName": "verifiedContentToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "modifiedEpochMs",
+            "columnName": "modifiedEpochMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "versionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_location_versions_locationId_validFrom",
+            "unique": true,
+            "columnNames": [
+              "locationId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_location_versions_locationId_validFrom` ON `${TABLE_NAME}` (`locationId`, `validFrom`)"
+          },
+          {
+            "name": "index_local_location_versions_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_location_versions_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_locations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "locationId"
+            ],
+            "referencedColumns": [
+              "locationId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_tracks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`trackId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `firstAddedEpochMs` INTEGER NOT NULL, `firstAddedSequence` INTEGER NOT NULL, PRIMARY KEY(`trackId`))",
+        "fields": [
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstAddedEpochMs",
+            "columnName": "firstAddedEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstAddedSequence",
+            "columnName": "firstAddedSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "trackId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_tracks_firstAddedSequence",
+            "unique": true,
+            "columnNames": [
+              "firstAddedSequence"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_tracks_firstAddedSequence` ON `${TABLE_NAME}` (`firstAddedSequence`)"
+          }
+        ]
+      },
+      {
+        "tableName": "local_track_locations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`relationId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `locationId` TEXT NOT NULL, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, PRIMARY KEY(`relationId`), FOREIGN KEY(`trackId`) REFERENCES `local_tracks`(`trackId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`locationId`) REFERENCES `local_locations`(`locationId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "relationId",
+            "columnName": "relationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "relationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_track_locations_trackId_validFrom",
+            "unique": false,
+            "columnNames": [
+              "trackId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_locations_trackId_validFrom` ON `${TABLE_NAME}` (`trackId`, `validFrom`)"
+          },
+          {
+            "name": "index_local_track_locations_locationId_validFrom",
+            "unique": false,
+            "columnNames": [
+              "locationId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_locations_locationId_validFrom` ON `${TABLE_NAME}` (`locationId`, `validFrom`)"
+          },
+          {
+            "name": "index_local_track_locations_locationId_validTo_relationId",
+            "unique": false,
+            "columnNames": [
+              "locationId",
+              "validTo",
+              "relationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_locations_locationId_validTo_relationId` ON `${TABLE_NAME}` (`locationId`, `validTo`, `relationId`)"
+          },
+          {
+            "name": "index_local_track_locations_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_locations_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_tracks",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "trackId"
+            ],
+            "referencedColumns": [
+              "trackId"
+            ]
+          },
+          {
+            "table": "local_locations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "locationId"
+            ],
+            "referencedColumns": [
+              "locationId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_track_versions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`versionId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, `member` INTEGER NOT NULL, `firstAddedEpochMs` INTEGER NOT NULL, `firstAddedSequence` INTEGER NOT NULL, `filename` TEXT NOT NULL, `displayTitle` TEXT NOT NULL, `title` TEXT, `artist` TEXT, `artists` TEXT NOT NULL, `album` TEXT, `albumArtist` TEXT, `durationMs` INTEGER, `discNumber` INTEGER, `trackNumber` INTEGER, `compilation` INTEGER NOT NULL, `mimeType` TEXT, `parserVersion` INTEGER NOT NULL, `metadataIssue` TEXT, `titleKey` TEXT NOT NULL, `artistKey` TEXT NOT NULL, `albumSortKey` TEXT NOT NULL, `filenameKey` TEXT NOT NULL, `albumKey` TEXT NOT NULL, `searchText` TEXT NOT NULL, `titleSection` TEXT NOT NULL, `artistSection` TEXT NOT NULL, `albumSection` TEXT NOT NULL, `filenameSection` TEXT NOT NULL, `playCount` INTEGER NOT NULL, `listeningMs` INTEGER NOT NULL, `statisticsEpoch` INTEGER NOT NULL, PRIMARY KEY(`versionId`), FOREIGN KEY(`trackId`) REFERENCES `local_tracks`(`trackId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "versionId",
+            "columnName": "versionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "member",
+            "columnName": "member",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstAddedEpochMs",
+            "columnName": "firstAddedEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstAddedSequence",
+            "columnName": "firstAddedSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filename",
+            "columnName": "filename",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayTitle",
+            "columnName": "displayTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "artist",
+            "columnName": "artist",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "artists",
+            "columnName": "artists",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "album",
+            "columnName": "album",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "albumArtist",
+            "columnName": "albumArtist",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "discNumber",
+            "columnName": "discNumber",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "trackNumber",
+            "columnName": "trackNumber",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "compilation",
+            "columnName": "compilation",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mimeType",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "parserVersion",
+            "columnName": "parserVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "metadataIssue",
+            "columnName": "metadataIssue",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "titleKey",
+            "columnName": "titleKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artistKey",
+            "columnName": "artistKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumSortKey",
+            "columnName": "albumSortKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filenameKey",
+            "columnName": "filenameKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumKey",
+            "columnName": "albumKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "searchText",
+            "columnName": "searchText",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "titleSection",
+            "columnName": "titleSection",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artistSection",
+            "columnName": "artistSection",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumSection",
+            "columnName": "albumSection",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filenameSection",
+            "columnName": "filenameSection",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playCount",
+            "columnName": "playCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listeningMs",
+            "columnName": "listeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "statisticsEpoch",
+            "columnName": "statisticsEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "versionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_track_versions_trackId_validFrom",
+            "unique": true,
+            "columnNames": [
+              "trackId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_track_versions_trackId_validFrom` ON `${TABLE_NAME}` (`trackId`, `validFrom`)"
+          },
+          {
+            "name": "index_local_track_versions_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_versions_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          },
+          {
+            "name": "index_local_track_versions_titleKey_trackId",
+            "unique": false,
+            "columnNames": [
+              "titleKey",
+              "trackId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_versions_titleKey_trackId` ON `${TABLE_NAME}` (`titleKey`, `trackId`)"
+          },
+          {
+            "name": "index_local_track_versions_albumKey_trackId",
+            "unique": false,
+            "columnNames": [
+              "albumKey",
+              "trackId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_track_versions_albumKey_trackId` ON `${TABLE_NAME}` (`albumKey`, `trackId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_tracks",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "trackId"
+            ],
+            "referencedColumns": [
+              "trackId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_artist_values",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`versionId` TEXT NOT NULL, `ordinal` INTEGER NOT NULL, `artistKey` TEXT NOT NULL, `displayName` TEXT, PRIMARY KEY(`versionId`, `ordinal`), FOREIGN KEY(`versionId`) REFERENCES `local_track_versions`(`versionId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "versionId",
+            "columnName": "versionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ordinal",
+            "columnName": "ordinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artistKey",
+            "columnName": "artistKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "versionId",
+            "ordinal"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_artist_values_artistKey_versionId",
+            "unique": false,
+            "columnNames": [
+              "artistKey",
+              "versionId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_artist_values_artistKey_versionId` ON `${TABLE_NAME}` (`artistKey`, `versionId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_track_versions",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "versionId"
+            ],
+            "referencedColumns": [
+              "versionId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_nodes",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`nodeId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `objectId` TEXT NOT NULL, `lastKnownName` TEXT, PRIMARY KEY(`nodeId`), FOREIGN KEY(`sourceId`) REFERENCES `local_sources`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "nodeId",
+            "columnName": "nodeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "objectId",
+            "columnName": "objectId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastKnownName",
+            "columnName": "lastKnownName",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "nodeId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_nodes_sourceId_objectId",
+            "unique": true,
+            "columnNames": [
+              "sourceId",
+              "objectId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_nodes_sourceId_objectId` ON `${TABLE_NAME}` (`sourceId`, `objectId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_sources",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_node_versions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`versionId` TEXT NOT NULL, `nodeId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `parentNodeId` TEXT, `name` TEXT, `uri` TEXT NOT NULL, `directory` INTEGER NOT NULL, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, PRIMARY KEY(`versionId`), FOREIGN KEY(`nodeId`) REFERENCES `local_nodes`(`nodeId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "versionId",
+            "columnName": "versionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nodeId",
+            "columnName": "nodeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentNodeId",
+            "columnName": "parentNodeId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "uri",
+            "columnName": "uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "directory",
+            "columnName": "directory",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "versionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_node_versions_nodeId_validFrom",
+            "unique": true,
+            "columnNames": [
+              "nodeId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_node_versions_nodeId_validFrom` ON `${TABLE_NAME}` (`nodeId`, `validFrom`)"
+          },
+          {
+            "name": "index_local_node_versions_sourceId_parentNodeId",
+            "unique": false,
+            "columnNames": [
+              "sourceId",
+              "parentNodeId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_node_versions_sourceId_parentNodeId` ON `${TABLE_NAME}` (`sourceId`, `parentNodeId`)"
+          },
+          {
+            "name": "index_local_node_versions_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_node_versions_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_nodes",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "nodeId"
+            ],
+            "referencedColumns": [
+              "nodeId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_access_aliases",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`aliasId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `objectId` TEXT NOT NULL, `locationId` TEXT NOT NULL, PRIMARY KEY(`aliasId`), FOREIGN KEY(`sourceId`) REFERENCES `local_sources`(`sourceId`) ON UPDATE NO ACTION ON DELETE RESTRICT , FOREIGN KEY(`locationId`) REFERENCES `local_locations`(`locationId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "aliasId",
+            "columnName": "aliasId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "objectId",
+            "columnName": "objectId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "aliasId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_access_aliases_sourceId_objectId",
+            "unique": true,
+            "columnNames": [
+              "sourceId",
+              "objectId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_access_aliases_sourceId_objectId` ON `${TABLE_NAME}` (`sourceId`, `objectId`)"
+          },
+          {
+            "name": "index_local_access_aliases_locationId",
+            "unique": false,
+            "columnNames": [
+              "locationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_access_aliases_locationId` ON `${TABLE_NAME}` (`locationId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_sources",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "sourceId"
+            ]
+          },
+          {
+            "table": "local_locations",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "locationId"
+            ],
+            "referencedColumns": [
+              "locationId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "local_alias_versions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`versionId` TEXT NOT NULL, `aliasId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `locationId` TEXT NOT NULL, `nodeId` TEXT NOT NULL, `uri` TEXT NOT NULL, `filename` TEXT NOT NULL, `readIssue` TEXT, `lastSeenSequence` INTEGER NOT NULL, `contentRevision` INTEGER NOT NULL, `providerContentToken` TEXT, `sizeBytes` INTEGER, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, PRIMARY KEY(`versionId`), FOREIGN KEY(`aliasId`) REFERENCES `local_access_aliases`(`aliasId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "versionId",
+            "columnName": "versionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "aliasId",
+            "columnName": "aliasId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "locationId",
+            "columnName": "locationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nodeId",
+            "columnName": "nodeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "uri",
+            "columnName": "uri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "filename",
+            "columnName": "filename",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "readIssue",
+            "columnName": "readIssue",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "lastSeenSequence",
+            "columnName": "lastSeenSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentRevision",
+            "columnName": "contentRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerContentToken",
+            "columnName": "providerContentToken",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "sizeBytes",
+            "columnName": "sizeBytes",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "versionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_local_alias_versions_aliasId_validFrom",
+            "unique": true,
+            "columnNames": [
+              "aliasId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_local_alias_versions_aliasId_validFrom` ON `${TABLE_NAME}` (`aliasId`, `validFrom`)"
+          },
+          {
+            "name": "index_local_alias_versions_sourceId_locationId",
+            "unique": false,
+            "columnNames": [
+              "sourceId",
+              "locationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_alias_versions_sourceId_locationId` ON `${TABLE_NAME}` (`sourceId`, `locationId`)"
+          },
+          {
+            "name": "index_local_alias_versions_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_local_alias_versions_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_access_aliases",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "aliasId"
+            ],
+            "referencedColumns": [
+              "aliasId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "scan_generations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scanId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `sourceRevision` INTEGER NOT NULL, `authEpoch` INTEGER NOT NULL, `rulesRevision` INTEGER NOT NULL, `mode` TEXT NOT NULL, `phase` TEXT NOT NULL, `sequence` INTEGER NOT NULL, `startedRevision` INTEGER NOT NULL, `seen` INTEGER NOT NULL, `processed` INTEGER NOT NULL, `added` INTEGER NOT NULL, `skipped` INTEGER NOT NULL, `failed` INTEGER NOT NULL, `enumerationComplete` INTEGER NOT NULL, `authorizationValid` INTEGER NOT NULL, `rulesUnchanged` INTEGER NOT NULL, `sourceUnchanged` INTEGER NOT NULL, `excludedSubtrees` INTEGER NOT NULL, `absenceAfterAliasId` TEXT, `absenceDone` INTEGER NOT NULL, `watermark` TEXT, `issue` TEXT, PRIMARY KEY(`scanId`))",
+        "fields": [
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceRevision",
+            "columnName": "sourceRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authEpoch",
+            "columnName": "authEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rulesRevision",
+            "columnName": "rulesRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mode",
+            "columnName": "mode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sequence",
+            "columnName": "sequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "startedRevision",
+            "columnName": "startedRevision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seen",
+            "columnName": "seen",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "processed",
+            "columnName": "processed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "added",
+            "columnName": "added",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "skipped",
+            "columnName": "skipped",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failed",
+            "columnName": "failed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "enumerationComplete",
+            "columnName": "enumerationComplete",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorizationValid",
+            "columnName": "authorizationValid",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rulesUnchanged",
+            "columnName": "rulesUnchanged",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceUnchanged",
+            "columnName": "sourceUnchanged",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "excludedSubtrees",
+            "columnName": "excludedSubtrees",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "absenceAfterAliasId",
+            "columnName": "absenceAfterAliasId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "absenceDone",
+            "columnName": "absenceDone",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "watermark",
+            "columnName": "watermark",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "issue",
+            "columnName": "issue",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scanId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_generations_sourceId",
+            "unique": false,
+            "columnNames": [
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_generations_sourceId` ON `${TABLE_NAME}` (`sourceId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "scan_seen",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scanId` TEXT NOT NULL, `objectId` TEXT NOT NULL, `nodeId` TEXT NOT NULL, `aliasId` TEXT, `metadataProcessed` INTEGER NOT NULL, `metadataPayload` TEXT, `metadataAfterRelationId` TEXT, PRIMARY KEY(`scanId`, `objectId`))",
+        "fields": [
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "objectId",
+            "columnName": "objectId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nodeId",
+            "columnName": "nodeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "aliasId",
+            "columnName": "aliasId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "metadataProcessed",
+            "columnName": "metadataProcessed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "metadataPayload",
+            "columnName": "metadataPayload",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "metadataAfterRelationId",
+            "columnName": "metadataAfterRelationId",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scanId",
+            "objectId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_seen_scanId_aliasId",
+            "unique": false,
+            "columnNames": [
+              "scanId",
+              "aliasId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_seen_scanId_aliasId` ON `${TABLE_NAME}` (`scanId`, `aliasId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "scan_frontier",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scanId` TEXT NOT NULL, `objectId` TEXT NOT NULL, `candidate` TEXT NOT NULL, `state` TEXT NOT NULL, PRIMARY KEY(`scanId`, `objectId`))",
+        "fields": [
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "objectId",
+            "columnName": "objectId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "candidate",
+            "columnName": "candidate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "state",
+            "columnName": "state",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scanId",
+            "objectId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_frontier_scanId_state_objectId",
+            "unique": false,
+            "columnNames": [
+              "scanId",
+              "state",
+              "objectId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_frontier_scanId_state_objectId` ON `${TABLE_NAME}` (`scanId`, `state`, `objectId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "scan_absence_candidates",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scanId` TEXT NOT NULL, `aliasId` TEXT NOT NULL, PRIMARY KEY(`scanId`, `aliasId`))",
+        "fields": [
+          {
+            "fieldPath": "scanId",
+            "columnName": "scanId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "aliasId",
+            "columnName": "aliasId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scanId",
+            "aliasId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_absence_candidates_aliasId",
+            "unique": false,
+            "columnNames": [
+              "aliasId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_absence_candidates_aliasId` ON `${TABLE_NAME}` (`aliasId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "scan_rules",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`versionId` TEXT NOT NULL, `ruleId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `nodeId` TEXT NOT NULL, `subtree` INTEGER NOT NULL, `validFrom` INTEGER NOT NULL, `validTo` INTEGER, PRIMARY KEY(`versionId`))",
+        "fields": [
+          {
+            "fieldPath": "versionId",
+            "columnName": "versionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ruleId",
+            "columnName": "ruleId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nodeId",
+            "columnName": "nodeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "subtree",
+            "columnName": "subtree",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validFrom",
+            "columnName": "validFrom",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "validTo",
+            "columnName": "validTo",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "versionId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_scan_rules_ruleId_validFrom",
+            "unique": true,
+            "columnNames": [
+              "ruleId",
+              "validFrom"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_scan_rules_ruleId_validFrom` ON `${TABLE_NAME}` (`ruleId`, `validFrom`)"
+          },
+          {
+            "name": "index_scan_rules_sourceId_nodeId",
+            "unique": false,
+            "columnNames": [
+              "sourceId",
+              "nodeId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_rules_sourceId_nodeId` ON `${TABLE_NAME}` (`sourceId`, `nodeId`)"
+          },
+          {
+            "name": "index_scan_rules_validTo",
+            "unique": false,
+            "columnNames": [
+              "validTo"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_rules_validTo` ON `${TABLE_NAME}` (`validTo`)"
+          },
+          {
+            "name": "index_scan_rules_validTo_ruleId",
+            "unique": false,
+            "columnNames": [
+              "validTo",
+              "ruleId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_scan_rules_validTo_ruleId` ON `${TABLE_NAME}` (`validTo`, `ruleId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "library_views",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`viewId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `revision` INTEGER NOT NULL, `totalCount` INTEGER NOT NULL, `fingerprint` TEXT NOT NULL, `owner` TEXT NOT NULL, `expiresElapsedMs` INTEGER NOT NULL, `sortRuleVersion` INTEGER NOT NULL, PRIMARY KEY(`viewId`))",
+        "fields": [
+          {
+            "fieldPath": "viewId",
+            "columnName": "viewId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sessionId",
+            "columnName": "sessionId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalCount",
+            "columnName": "totalCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fingerprint",
+            "columnName": "fingerprint",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "owner",
+            "columnName": "owner",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expiresElapsedMs",
+            "columnName": "expiresElapsedMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sortRuleVersion",
+            "columnName": "sortRuleVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "viewId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_library_views_revision",
+            "unique": false,
+            "columnNames": [
+              "revision"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_library_views_revision` ON `${TABLE_NAME}` (`revision`)"
+          }
+        ]
+      },
+      {
+        "tableName": "import_operations",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`operationId` TEXT NOT NULL, `sourceSpec` TEXT NOT NULL, `sourceCandidate` TEXT NOT NULL, `sourceIdentity` TEXT NOT NULL, `providerVersion` TEXT, `fileToken` TEXT NOT NULL, `phase` TEXT NOT NULL, `actualBytes` INTEGER NOT NULL, `sha256` TEXT, `metadata` TEXT, `issue` TEXT, `trackProviderId` TEXT, `trackId` TEXT, `ownedSourceId` TEXT, `ownedSpec` TEXT, `ownedGrant` TEXT, `ownedCandidate` TEXT, PRIMARY KEY(`operationId`), FOREIGN KEY(`trackId`) REFERENCES `local_tracks`(`trackId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceSpec",
+            "columnName": "sourceSpec",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceCandidate",
+            "columnName": "sourceCandidate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceIdentity",
+            "columnName": "sourceIdentity",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerVersion",
+            "columnName": "providerVersion",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "fileToken",
+            "columnName": "fileToken",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "phase",
+            "columnName": "phase",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actualBytes",
+            "columnName": "actualBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "metadata",
+            "columnName": "metadata",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "issue",
+            "columnName": "issue",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "trackProviderId",
+            "columnName": "trackProviderId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ownedSourceId",
+            "columnName": "ownedSourceId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ownedSpec",
+            "columnName": "ownedSpec",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ownedGrant",
+            "columnName": "ownedGrant",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "ownedCandidate",
+            "columnName": "ownedCandidate",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "operationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_import_operations_fileToken",
+            "unique": true,
+            "columnNames": [
+              "fileToken"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_import_operations_fileToken` ON `${TABLE_NAME}` (`fileToken`)"
+          },
+          {
+            "name": "index_import_operations_phase_operationId",
+            "unique": false,
+            "columnNames": [
+              "phase",
+              "operationId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_import_operations_phase_operationId` ON `${TABLE_NAME}` (`phase`, `operationId`)"
+          },
+          {
+            "name": "index_import_operations_ownedSourceId",
+            "unique": true,
+            "columnNames": [
+              "ownedSourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_import_operations_ownedSourceId` ON `${TABLE_NAME}` (`ownedSourceId`)"
+          },
+          {
+            "name": "index_import_operations_trackId",
+            "unique": false,
+            "columnNames": [
+              "trackId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_import_operations_trackId` ON `${TABLE_NAME}` (`trackId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "local_tracks",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "trackId"
+            ],
+            "referencedColumns": [
+              "trackId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "listening_meta",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `historyEpoch` INTEGER NOT NULL, `statisticsEpoch` INTEGER NOT NULL, `rulesVersion` INTEGER NOT NULL, `nextHistorySequence` INTEGER NOT NULL, `historyFloorSequence` INTEGER NOT NULL, `totalPlayCount` INTEGER NOT NULL, `totalListeningMs` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "historyEpoch",
+            "columnName": "historyEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "statisticsEpoch",
+            "columnName": "statisticsEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rulesVersion",
+            "columnName": "rulesVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextHistorySequence",
+            "columnName": "nextHistorySequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "historyFloorSequence",
+            "columnName": "historyFloorSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalPlayCount",
+            "columnName": "totalPlayCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalListeningMs",
+            "columnName": "totalListeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "listening_rounds",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`roundId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `displayName` TEXT, `historyEpoch` INTEGER NOT NULL, `statisticsEpoch` INTEGER NOT NULL, `rulesVersion` INTEGER NOT NULL, `firstProgressEpochMs` INTEGER NOT NULL, `firstProgressElapsedMs` INTEGER NOT NULL, `firstProgressZoneId` TEXT NOT NULL, `sampledEpochMs` INTEGER NOT NULL, `sampledElapsedMs` INTEGER NOT NULL, `sampledZoneId` TEXT NOT NULL, `lastProgressEpochMs` INTEGER NOT NULL, `totalListeningMs` INTEGER NOT NULL, `knownDurationMs` INTEGER, `playCounted` INTEGER NOT NULL, `countedLocalDate` TEXT, `countedZoneId` TEXT, `historyId` INTEGER, PRIMARY KEY(`roundId`))",
+        "fields": [
+          {
+            "fieldPath": "roundId",
+            "columnName": "roundId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "historyEpoch",
+            "columnName": "historyEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "statisticsEpoch",
+            "columnName": "statisticsEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rulesVersion",
+            "columnName": "rulesVersion",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstProgressEpochMs",
+            "columnName": "firstProgressEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstProgressElapsedMs",
+            "columnName": "firstProgressElapsedMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstProgressZoneId",
+            "columnName": "firstProgressZoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampledEpochMs",
+            "columnName": "sampledEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampledElapsedMs",
+            "columnName": "sampledElapsedMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sampledZoneId",
+            "columnName": "sampledZoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastProgressEpochMs",
+            "columnName": "lastProgressEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalListeningMs",
+            "columnName": "totalListeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "knownDurationMs",
+            "columnName": "knownDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "playCounted",
+            "columnName": "playCounted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "countedLocalDate",
+            "columnName": "countedLocalDate",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "countedZoneId",
+            "columnName": "countedZoneId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "historyId",
+            "columnName": "historyId",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "roundId"
+          ]
+        }
+      },
+      {
+        "tableName": "listening_round_segments",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`roundId` TEXT NOT NULL, `ordinal` INTEGER NOT NULL, `localDate` TEXT NOT NULL, `zoneId` TEXT NOT NULL, `listeningMs` INTEGER NOT NULL, PRIMARY KEY(`roundId`, `ordinal`), FOREIGN KEY(`roundId`) REFERENCES `listening_rounds`(`roundId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "roundId",
+            "columnName": "roundId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ordinal",
+            "columnName": "ordinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localDate",
+            "columnName": "localDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "zoneId",
+            "columnName": "zoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listeningMs",
+            "columnName": "listeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "roundId",
+            "ordinal"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "listening_rounds",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "roundId"
+            ],
+            "referencedColumns": [
+              "roundId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "listening_history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`historyEpoch` INTEGER NOT NULL, `historyId` INTEGER NOT NULL, `roundId` TEXT NOT NULL, `providerId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `displayName` TEXT, `firstProgressEpochMs` INTEGER NOT NULL, `firstProgressZoneId` TEXT NOT NULL, `lastProgressEpochMs` INTEGER NOT NULL, `listeningMs` INTEGER NOT NULL, `knownDurationMs` INTEGER, PRIMARY KEY(`historyEpoch`, `historyId`), FOREIGN KEY(`roundId`) REFERENCES `listening_rounds`(`roundId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "historyEpoch",
+            "columnName": "historyEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "historyId",
+            "columnName": "historyId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "roundId",
+            "columnName": "roundId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "firstProgressEpochMs",
+            "columnName": "firstProgressEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstProgressZoneId",
+            "columnName": "firstProgressZoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastProgressEpochMs",
+            "columnName": "lastProgressEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listeningMs",
+            "columnName": "listeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "knownDurationMs",
+            "columnName": "knownDurationMs",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "historyEpoch",
+            "historyId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_listening_history_roundId",
+            "unique": true,
+            "columnNames": [
+              "roundId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_listening_history_roundId` ON `${TABLE_NAME}` (`roundId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "listening_rounds",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "roundId"
+            ],
+            "referencedColumns": [
+              "roundId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "listening_track_totals",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`statisticsEpoch` INTEGER NOT NULL, `providerId` TEXT NOT NULL, `trackId` TEXT NOT NULL, `playCount` INTEGER NOT NULL, `listeningMs` INTEGER NOT NULL, `lastProgressEpochMs` INTEGER, `displayName` TEXT, PRIMARY KEY(`statisticsEpoch`, `providerId`, `trackId`))",
+        "fields": [
+          {
+            "fieldPath": "statisticsEpoch",
+            "columnName": "statisticsEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "providerId",
+            "columnName": "providerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackId",
+            "columnName": "trackId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playCount",
+            "columnName": "playCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listeningMs",
+            "columnName": "listeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastProgressEpochMs",
+            "columnName": "lastProgressEpochMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "statisticsEpoch",
+            "providerId",
+            "trackId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_listening_track_totals_epoch_time_key",
+            "unique": false,
+            "columnNames": [
+              "statisticsEpoch",
+              "listeningMs",
+              "providerId",
+              "trackId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_listening_track_totals_epoch_time_key` ON `${TABLE_NAME}` (`statisticsEpoch`, `listeningMs`, `providerId`, `trackId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "listening_day_totals",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`statisticsEpoch` INTEGER NOT NULL, `localDate` TEXT NOT NULL, `zoneId` TEXT NOT NULL, `playCount` INTEGER NOT NULL, `listeningMs` INTEGER NOT NULL, PRIMARY KEY(`statisticsEpoch`, `localDate`, `zoneId`))",
+        "fields": [
+          {
+            "fieldPath": "statisticsEpoch",
+            "columnName": "statisticsEpoch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localDate",
+            "columnName": "localDate",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "zoneId",
+            "columnName": "zoneId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "playCount",
+            "columnName": "playCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "listeningMs",
+            "columnName": "listeningMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "statisticsEpoch",
+            "localDate",
+            "zoneId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'f785aceb921839fb08cede7dd1eba81a')"
+    ]
+  }
+}

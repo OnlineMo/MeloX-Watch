@@ -99,7 +99,11 @@ fun WatchNowPlayingPage(
     val windowHeight = with(density) { windowSize.height.toDp().value }
     val leftInset = drawingInsets.calculateLeftPadding(layoutDirection).value
     val topInset = drawingInsets.calculateTopPadding().value
-    val round = configuration.isScreenRound || screenShape == ScreenShape.ROUND
+    val round = when (screenShape) {
+        ScreenShape.AUTO -> configuration.isScreenRound
+        ScreenShape.ROUND -> true
+        ScreenShape.RECTANGULAR -> false
+    }
     val titleStyle = MaterialTheme.typography.titleLarge
     val artistStyle = MaterialTheme.typography.bodyMedium
     val measurer = rememberTextMeasurer()

@@ -4,6 +4,9 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import androidx.room.withTransaction
+import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.db.SupportSQLiteOpenHelper
+import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import io.github.onlinemo.meloxwatch.data.library.LibraryLocationEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackEntity
@@ -23,10 +26,8 @@ import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
-import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
-import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -38,13 +39,39 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** The frozen old schema creates a native SQLite file; only the application opens it as Room v2. */
+/** Historical 1→2 structure and the application's complete 1→2→3 Room open are separate checks. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class RoomMigrationOneToTwoTest {
     @Test(timeout = 30000L)
-    fun applicationOpenMigratesASeededV1FileAndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
+    fun productionOneToTwoMigrationExactlyMatchesTheFrozenV2SchemaAndPreservesEveryOldCell() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val file = context.getDatabasePath(HISTORICAL_FILE_NAME)
+        assertFalse("The historical file must be created by this fixture", file.exists())
+        file.parentFile?.mkdirs()
+        try {
+            seedVersionOne(file)
+            val before = assertVersionOneFile(file)
+            val helper = openHistoricalVersionTwo(context)
+            try {
+                assertHistoricalVersionTwo(helper.writableDatabase, file, before)
+            } finally {
+                helper.close()
+            }
+            val reopened = openHistoricalVersionTwo(context)
+            try {
+                assertHistoricalVersionTwo(reopened.writableDatabase, file, before)
+            } finally {
+                reopened.close()
+            }
+        } finally {
+            context.deleteDatabase(HISTORICAL_FILE_NAME)
+        }
+    }
+
+    @Test(timeout = 30000L)
+    fun applicationOpenMigratesASeededV1FileThroughV2ToV3AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
         val context = RuntimeEnvironment.getApplication() as Context
         // Robolectric owns this application's database directory; the production filename and
         // applicationContext path are used so the test cannot bypass MeloXDatabase.open.
@@ -53,12 +80,12 @@ class RoomMigrationOneToTwoTest {
         file.parentFile?.mkdirs()
         try {
             seedVersionOne(file)
-            assertVersionOneFile(file)
+            val before = assertVersionOneFile(file)
 
             val migrated = MeloXDatabase.open(context)
-            try {
-                assertVersionTwoSchema(migrated, file)
-                assertLegacyQueueRows(migrated)
+            val identity = try {
+                val persistedIdentity = assertVersionThreeSchema(migrated, file)
+                assertLegacyQueueRows(migrated, before)
                 assertQueueRestoration(migrated)
                 assertEquals(initialLibraryMeta, migrated.libraryDao().meta())
                 assertEquals(initialListeningMeta, migrated.listeningDao().meta())
@@ -73,16 +100,17 @@ class RoomMigrationOneToTwoTest {
                     assertEquals(1, migrated.libraryDao().updateMeta(updatedLibraryMeta))
                 }
                 assertNewLibraryRows(migrated)
-                assertLegacyQueueRows(migrated)
-                assertVersionTwoSchema(migrated, file)
+                assertLegacyQueueRows(migrated, before)
+                assertVersionThreeSchema(migrated, file, persistedIdentity)
+                persistedIdentity
             } finally {
                 migrated.close()
             }
 
             val reopened = MeloXDatabase.open(context)
             try {
-                assertVersionTwoSchema(reopened, file)
-                assertLegacyQueueRows(reopened)
+                assertVersionThreeSchema(reopened, file, identity)
+                assertLegacyQueueRows(reopened, before)
                 assertQueueRestoration(reopened)
                 assertNewLibraryRows(reopened)
                 assertEquals(initialListeningMeta, reopened.listeningDao().meta())
@@ -95,33 +123,13 @@ class RoomMigrationOneToTwoTest {
     }
 
     private fun seedVersionOne(file: File) {
-        val bytes = javaClass.getResourceAsStream("/database/melox-schema-1.json")
-            ?.use { it.readBytes() } ?: throw AssertionError("The frozen v1 schema resource is required")
-        val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") {
-            (it.toInt() and 0xff).toString(16).padStart(2, '0')
-        }
-        assertEquals(SCHEMA_ONE_SHA256, hash)
-        val schema = JSONObject(String(bytes, Charsets.UTF_8)).getJSONObject("database")
-        assertEquals(1, schema.getInt("version"))
-        assertEquals(VERSION_ONE_IDENTITY, schema.getString("identityHash"))
-        val entities = schema.getJSONArray("entities")
-        assertEquals(3, entities.length())
+        assertEquals(VERSION_ONE_TABLES, schemaOne.tableNames)
 
         SQLiteDatabase.openOrCreateDatabase(file, null).use { legacy ->
             legacy.setForeignKeyConstraintsEnabled(true)
             legacy.beginTransaction()
             try {
-                for (index in 0 until entities.length()) {
-                    val entity = entities.getJSONObject(index)
-                    val table = entity.getString("tableName")
-                    legacy.execSQL(entity.getString("createSql").replace("\${TABLE_NAME}", table))
-                    val indices = entity.optJSONArray("indices")
-                    if (indices != null) for (ordinal in 0 until indices.length()) {
-                        legacy.execSQL(indices.getJSONObject(ordinal).getString("createSql").replace("\${TABLE_NAME}", table))
-                    }
-                }
-                val setup = schema.getJSONArray("setupQueries")
-                for (index in 0 until setup.length()) legacy.execSQL(setup.getString(index))
+                schemaOne.create(legacy)
                 legacy.execSQL("""
                     INSERT INTO queue_generations (
                         generationId, operationId, expectedGenerationId, expectedQueueRevision,
@@ -161,30 +169,95 @@ class RoomMigrationOneToTwoTest {
         }
     }
 
-    private fun assertVersionOneFile(file: File) {
+    private fun assertVersionOneFile(file: File): Map<String, FrozenTableRows> {
         assertTrue(file.isFile && file.length() > 0L)
-        SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { legacy ->
+        return SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { legacy ->
             assertEquals(1, legacy.version)
             assertEquals(VERSION_ONE_TABLES, applicationTables(legacy.rawQuery(TABLES_QUERY, null)))
             assertIdentity(legacy.rawQuery(IDENTITY_QUERY, null), VERSION_ONE_IDENTITY)
+            schemaOne.assertStructure { legacy.rawQuery(it, null) }
             assertNoForeignKeyViolations(legacy.rawQuery("PRAGMA foreign_key_check", null))
             assertIntegrity(legacy.rawQuery("PRAGMA integrity_check", null))
+            schemaOne.snapshotRows { legacy.rawQuery(it, null) }
         }
     }
 
-    private fun assertVersionTwoSchema(database: MeloXDatabase, file: File) {
-        // The first forced open runs the registered migration and Room's generated validation
-        // for all 30 entities. Later checks bind the same file to its persisted v2 identity.
-        val sqlite = database.openHelper.writableDatabase
+    private fun openHistoricalVersionTwo(context: Context): SupportSQLiteOpenHelper {
+        val callback = object : SupportSQLiteOpenHelper.Callback(2) {
+            override fun onConfigure(db: SupportSQLiteDatabase) {
+                db.setForeignKeyConstraintsEnabled(true)
+            }
+
+            override fun onCreate(db: SupportSQLiteDatabase) {
+                throw AssertionError("The helper must migrate the independently seeded v1 file")
+            }
+
+            override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) {
+                assertEquals(1, oldVersion)
+                assertEquals(2, newVersion)
+                MeloXDatabase.MIGRATION_1_2.migrate(db)
+                schemaTwo.assertStructure { db.query(it) }
+            }
+        }
+        return FrameworkSQLiteOpenHelperFactory().create(SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(HISTORICAL_FILE_NAME).callback(callback).build())
+    }
+
+    private fun assertHistoricalVersionTwo(sqlite: SupportSQLiteDatabase, file: File, before: Map<String, FrozenTableRows>) {
         assertEquals(file.canonicalPath, File(requireNotNull(sqlite.path)).canonicalPath)
         assertEquals(2, sqlite.version)
+        assertEquals(VERSION_TWO_TABLES, schemaTwo.tableNames)
         assertEquals(VERSION_TWO_TABLES, applicationTables(sqlite.query(TABLES_QUERY)))
-        assertIdentity(sqlite.query(IDENTITY_QUERY), VERSION_TWO_IDENTITY)
+        schemaTwo.assertStructure { sqlite.query(it) }
+        schemaOne.assertRowsPreserved(before) { sqlite.query(it) }
+        // This is direct production migration plus a frozen-schema structure check, not a
+        // compiled Room v2 open. Migration does not update Room's old master identity; the
+        // independent v2 identity source is checked in the pinned JSON, never written here.
+        assertIdentity(sqlite.query(IDENTITY_QUERY), VERSION_ONE_IDENTITY)
+        assertSingleIntegerRow(sqlite.query("SELECT * FROM library_meta"), longArrayOf(1, 0, 0, 1, 1, 0, 0))
+        assertSingleIntegerRow(sqlite.query("SELECT * FROM listening_meta"), longArrayOf(1, 0, 0, 1, 1, 1, 0, 0))
         assertNoForeignKeyViolations(sqlite.query("PRAGMA foreign_key_check"))
         assertIntegrity(sqlite.query("PRAGMA integrity_check"))
     }
 
-    private suspend fun assertLegacyQueueRows(database: MeloXDatabase) {
+    private fun assertVersionThreeSchema(database: MeloXDatabase, file: File, expectedIdentity: String? = null): String {
+        // Forcing the actual application open runs both registered migrations and Room's
+        // generated validation of the current 39 entities. The v3 identity is checked for
+        // persisted stability, not presented as a separately pinned historical v3 export.
+        val sqlite = database.openHelper.writableDatabase
+        assertEquals(file.canonicalPath, File(requireNotNull(sqlite.path)).canonicalPath)
+        assertEquals(3, sqlite.version)
+        assertEquals(VERSION_THREE_TABLES, applicationTables(sqlite.query(TABLES_QUERY)))
+        val identity = sqlite.query(IDENTITY_QUERY).use { rows ->
+            assertTrue(rows.moveToFirst())
+            val value = rows.getString(0)
+            assertTrue(Regex("[0-9a-f]{32}").matches(value))
+            assertFalse(value == VERSION_ONE_IDENTITY || value == VERSION_TWO_IDENTITY)
+            if (expectedIdentity != null) assertEquals(expectedIdentity, value)
+            assertFalse(rows.moveToNext())
+            value
+        }
+        sqlite.query("""
+            SELECT operationKind, operationFingerprint, expectedCurrentEntryId, orderPolicy
+            FROM queue_generations WHERE generationId = '$GENERATION_ID'
+        """.trimIndent()).use { rows ->
+            assertTrue(rows.moveToFirst())
+            assertEquals("REPLACE", rows.getString(0))
+            assertEquals("", rows.getString(1))
+            assertTrue(rows.isNull(2))
+            assertEquals("PRESERVE_SUPPLIED", rows.getString(3))
+            assertFalse(rows.moveToNext())
+        }
+        for (table in VERSION_THREE_TABLES - VERSION_TWO_TABLES) {
+            assertSingleIntegerRow(sqlite.query("SELECT COUNT(*) FROM `$table`"), longArrayOf(0))
+        }
+        assertNoForeignKeyViolations(sqlite.query("PRAGMA foreign_key_check"))
+        assertIntegrity(sqlite.query("PRAGMA integrity_check"))
+        return identity
+    }
+
+    private suspend fun assertLegacyQueueRows(database: MeloXDatabase, before: Map<String, FrozenTableRows>) {
+        schemaOne.assertRowsPreserved(before) { database.openHelper.writableDatabase.query(it) }
         val dao = database.queueDao()
         assertEquals(legacyGeneration, dao.generation(GENERATION_ID))
         assertEquals(legacyGeneration, dao.operation(legacyGeneration.operationId))
@@ -244,6 +317,23 @@ class RoomMigrationOneToTwoTest {
         assertTrue(rows.moveToFirst())
         assertEquals("ok", rows.getString(0))
         assertFalse(rows.moveToNext())
+    }
+
+    private fun assertSingleIntegerRow(cursor: Cursor, expected: LongArray) = cursor.use { rows ->
+        assertTrue(rows.moveToFirst())
+        assertEquals(expected.size, rows.columnCount)
+        for (index in expected.indices) {
+            assertEquals(Cursor.FIELD_TYPE_INTEGER, rows.getType(index))
+            assertEquals(expected[index], rows.getLong(index))
+        }
+        assertFalse(rows.moveToNext())
+    }
+
+    private val schemaOne by lazy {
+        FrozenRoomSchemaTestFixture.load("/database/melox-schema-1.json", 1, SCHEMA_ONE_SHA256, VERSION_ONE_IDENTITY)
+    }
+    private val schemaTwo by lazy {
+        FrozenRoomSchemaTestFixture.load("/database/melox-schema-2.json", 2, SCHEMA_TWO_SHA256, VERSION_TWO_IDENTITY)
     }
 
     private val repeatedTrack = TrackKey("local", "legacy-local-track")
@@ -314,7 +404,9 @@ class RoomMigrationOneToTwoTest {
 
     private companion object {
         const val GENERATION_ID = "legacy-generation"
+        const val HISTORICAL_FILE_NAME = "melox-history-1-to-2.db"
         const val SCHEMA_ONE_SHA256 = "3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79"
+        const val SCHEMA_TWO_SHA256 = "bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf"
         const val VERSION_ONE_IDENTITY = "b7264fee4b8a13461a12aed516b5dcaf"
         const val VERSION_TWO_IDENTITY = "f785aceb921839fb08cede7dd1eba81a"
         const val TABLES_QUERY = "SELECT name FROM sqlite_master WHERE type = 'table'"
@@ -327,6 +419,10 @@ class RoomMigrationOneToTwoTest {
             "scan_generations", "scan_seen", "scan_frontier", "scan_absence_candidates", "scan_rules", "library_views",
             "import_operations", "listening_meta", "listening_rounds", "listening_round_segments", "listening_history",
             "listening_track_totals", "listening_day_totals",
+        )
+        val VERSION_THREE_TABLES = VERSION_TWO_TABLES + setOf(
+            "playlist_meta", "playlist_heads", "playlist_generations", "playlist_members", "playlist_views", "playlist_receipts",
+            "playlist_exchange_previews", "playlist_exchange_rows", "playlist_export_receipts",
         )
     }
 }
