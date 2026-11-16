@@ -354,7 +354,8 @@ class PlaylistEntryViewModelTest {
         try {
             val view = fixture.ui.ports.library.view
             val lease = fixture.library.openQueueView(view.viewId)
-            val selected = LibraryPlaylistAddSelection(fixture.library, lease, "Complete view")
+            val selected = LibraryPlaylistAddSelection(fixture.library, lease, "Complete view",
+                closeLibraryView = fixture.library::closeView)
             selection = selected
             val first = selected.source.read(0L, 100)
             assertSame(first, selected.source.read(0L, 100))
@@ -367,7 +368,7 @@ class PlaylistEntryViewModelTest {
             while (total < selected.input.totalCount) {
                 val page = selected.source.read(total, 100)
                 total += page.references.size
-                assertEquals(total == selected.input.totalCount, page.endOfInput)
+                assertEquals(total == selected.input.totalCount, page.endReached)
             }
             assertEquals(20_005L, total)
             assertTrue(fixture.library.queueSizes.all { it <= 100 })
@@ -383,7 +384,8 @@ class PlaylistEntryViewModelTest {
         var selection: LibraryPlaylistAddSelection? = null
         try {
             val lease = fixture.library.openQueueView(fixture.ui.ports.library.view.viewId)
-            val selected = LibraryPlaylistAddSelection(fixture.library, lease, null)
+            val selected = LibraryPlaylistAddSelection(fixture.library, lease, null,
+                closeLibraryView = fixture.library::closeView)
             selection = selected
             fixture.library.pageTransform = { it.copy(view = FrozenQueueView("another-view", it.view.revision, it.view.totalCount)) }
             try { selected.source.read(0L, 100); error("Expected source mismatch") }
@@ -547,7 +549,7 @@ class PlaylistEntryViewModelTest {
                 it.copy(trackKey = fixture.library.track(2L).trackKey)
             }) }
             fixture.queues.state.value = original.copy(queueRevision = original.queueRevision + 1L)
-            fixture.await { it.queue?.queueRevision == original.queueRevision + 1L }
+            fixture.await { it.queue?.revision == original.queueRevision + 1L }
             assertNull(fixture.entry.uiState.value.playingTrack)
             release.complete(Unit)
             val resolved = fixture.await { it.favoriteReference?.trackKey == fixture.library.track(2L).trackKey && it.favorite != null }
