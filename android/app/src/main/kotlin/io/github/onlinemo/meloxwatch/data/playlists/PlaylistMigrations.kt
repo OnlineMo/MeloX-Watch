@@ -1,12 +1,22 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
+import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.execSQL
 
 /** The unaccepted v3 migration adds relationships without enrolling files or changing the active queue. */
 object PlaylistMigrations {
     fun applyV2ToV3(database: SupportSQLiteDatabase) {
-        for (statement in tables) database.execSQL(statement.trimIndent())
-        for (statement in indices) database.execSQL(statement)
+        applyV2ToV3 { database.execSQL(it) }
+    }
+
+    fun applyV2ToV3(connection: SQLiteConnection) {
+        applyV2ToV3 { connection.execSQL(it) }
+    }
+
+    private fun applyV2ToV3(execute: (String) -> Unit) {
+        for (statement in tables) execute(statement.trimIndent())
+        for (statement in indices) execute(statement)
     }
 
     private val tables = listOf(

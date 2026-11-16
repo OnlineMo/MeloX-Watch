@@ -1,6 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.library
 
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.room.useWriterConnection
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
@@ -144,28 +144,34 @@ class RoomFolderPlaylistMaintainer internal constructor(
         // Read at most 100 indexed heads, including ordinary/deleted ones. Filtering before LIMIT
         // could walk an arbitrarily large non-folder range in one transaction. Every actual folder
         // write still reads a fresh snapshot, without holding an expiring catalogue view.
-        database.query(SimpleSQLiteQuery("""
+        val sql = """
             SELECT h.playlistId, h.createdSequence, h.deleted, g.kind FROM playlist_heads h
             LEFT JOIN playlist_generations g ON g.generationId = h.activeGenerationId
             WHERE h.createdSequence > ? AND h.createdSequence < ?
             ORDER BY h.createdSequence LIMIT ?
-        """.trimIndent(), arrayOf<Any?>(afterSequence, ceiling, PlaylistLimits.PAGE_SIZE))).use { cursor ->
-            val page = ArrayList<Head>(PlaylistLimits.PAGE_SIZE)
-            var previous = afterSequence
-            while (cursor.moveToNext()) {
-                val id = cursor.getString(0)
-                val sequence = cursor.getLong(1)
-                val deleted = cursor.getInt(2)
-                val kind = if (cursor.isNull(3)) null else cursor.getString(3)
-                requirePlaylistIdentifier(id)
-                if (sequence <= previous || sequence >= ceiling || page.size == PlaylistLimits.PAGE_SIZE ||
-                    deleted !in 0..1 || deleted == 0 && kind == null) {
-                    fail(PlaylistIssue.RECOVERY_REQUIRED)
+        """.trimIndent()
+        database.useWriterConnection { writer ->
+            writer.usePrepared(sql) { statement ->
+                statement.bindLong(1, afterSequence)
+                statement.bindLong(2, ceiling)
+                statement.bindLong(3, PlaylistLimits.PAGE_SIZE.toLong())
+                val page = ArrayList<Head>(PlaylistLimits.PAGE_SIZE)
+                var previous = afterSequence
+                while (statement.step()) {
+                    val id = statement.getText(0)
+                    val sequence = statement.getLong(1)
+                    val deleted = statement.getInt(2)
+                    val kind = if (statement.isNull(3)) null else statement.getText(3)
+                    requirePlaylistIdentifier(id)
+                    if (sequence <= previous || sequence >= ceiling || page.size == PlaylistLimits.PAGE_SIZE ||
+                        deleted !in 0..1 || deleted == 0 && kind == null) {
+                        fail(PlaylistIssue.RECOVERY_REQUIRED)
+                    }
+                    page += Head(id, sequence, deleted == 0 && kind == PlaylistKind.FOLDER.name)
+                    previous = sequence
                 }
-                page += Head(id, sequence, deleted == 0 && kind == PlaylistKind.FOLDER.name)
-                previous = sequence
+                page
             }
-            page
         }
     }
 

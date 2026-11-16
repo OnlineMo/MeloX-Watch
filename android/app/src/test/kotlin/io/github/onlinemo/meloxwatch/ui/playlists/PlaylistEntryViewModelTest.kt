@@ -181,7 +181,7 @@ class PlaylistEntryViewModelTest {
             fixture.entry.browseFolder(fixture.library.root)
             fixture.await { it.folder == fixture.library.root && !it.loading }
             fixture.entry.selectFolder()
-            val request = checkNotNull(fixture.entry.uiState.value.documentRequest)
+            val request = checkNotNull(fixture.await { it.documentRequest != null && !it.loading }.documentRequest)
             assertEquals(PlaylistFolderBinding("tree", "indexed-root"), request.root?.binding)
             fixture.entry.takeDocumentRequest(request.requestId)
             val uri = Uri.parse("content://another-provider/unrelated/playlists/file.m3u8")
@@ -342,6 +342,7 @@ class PlaylistEntryViewModelTest {
             fixture.documents.discardFailures = 0
             fixture.entry.retryCleanup()
             awaitEntryCondition { fixture.documents.discarded.toSet() == setOf("document-1", "document-2") }
+            fixture.await { it.issue == null }
             fixture.entry.chooseImport(PlaylistTransferFormat.JSON, PlaylistTransferEncoding.UTF8)
             assertNotNull(fixture.entry.uiState.value.documentRequest)
         } finally { fixture.documents.discardFailures = 0; fixture.close() }

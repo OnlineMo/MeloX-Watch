@@ -6,6 +6,8 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CopyableThrowable
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -188,7 +190,7 @@ class CuePathMatcherTest {
         for (sameFailure in listOf(false, true)) {
             val failed = CueGraph()
             val primary = CueException(CueIssue.INCOMPLETE_ENUMERATION)
-            val retirement = if (sameFailure) primary else IOException("controlled retirement failure")
+            val retirement = if (sameFailure) primary else RetirementIOException("controlled retirement failure")
             failed.onBatch = { _, _ -> throw primary }
             failed.onClose = { _ -> throw retirement }
             val caught = expectCueIssue(CueIssue.INCOMPLETE_ENUMERATION) {
@@ -264,5 +266,11 @@ class CuePathMatcherTest {
         graph.children["root"] = listOf(graph.cue, bounded.copy(providerContentToken = bounded.providerContentToken.orEmpty() + "x"))
         expectCueIssue(CueIssue.LIMIT_EXCEEDED) { CuePathMatcher(graph).match(parsed, graph.scope()) }
         assertEquals(0, graph.activeCursors)
+    }
+
+    // Keep callback identity through stack recovery so the existing assertSame checks suppression ownership.
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class RetirementIOException(message: String) : IOException(message), CopyableThrowable<RetirementIOException> {
+        override fun createCopy(): RetirementIOException? = null
     }
 }

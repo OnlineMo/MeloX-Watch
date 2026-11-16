@@ -1,11 +1,11 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import android.database.sqlite.SQLiteConstraintException
-import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
 import android.os.SystemClock
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.SQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistCatalogFence
@@ -173,7 +173,7 @@ class RoomPlaylistRecoveryController(
                 alias.nodeId != selected.nodeId || alias.contentRevision != location.contentRevision || alias.readIssue != null) {
                 fail(PlaylistIssue.SOURCE_CHANGED)
             }
-            val related = dao.scalar(SimpleSQLiteQuery("""
+            val related = dao.scalar(LibrarySql.raw("""
                 SELECT EXISTS(SELECT 1 FROM local_track_locations
                     WHERE trackId = ? AND locationId = ? AND validTo IS NULL LIMIT 1)
             """.trimIndent(), arrayOf(selected.trackKey.trackId, location.locationId)))
@@ -229,9 +229,15 @@ class RoomPlaylistRecoveryController(
                 try { operation() }
                 catch (error: CancellationException) { throw error }
                 catch (error: PlaylistException) { throw error }
-                catch (error: SQLiteFullException) { throw PlaylistException(PlaylistIssue.STORAGE_FULL, error) }
-                catch (error: SQLiteConstraintException) { throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED, error) }
-                catch (error: SQLiteException) { throw PlaylistException(PlaylistIssue.STORAGE_UNAVAILABLE, error) }
+                catch (error: SQLiteException) {
+                    val failure = error.toPlatformSQLiteException()
+                    val issue = when (failure) {
+                        is SQLiteFullException -> PlaylistIssue.STORAGE_FULL
+                        is SQLiteConstraintException -> PlaylistIssue.RECOVERY_REQUIRED
+                        else -> PlaylistIssue.STORAGE_UNAVAILABLE
+                    }
+                    throw PlaylistException(issue, failure)
+                }
                 catch (error: IllegalArgumentException) { throw PlaylistException(PlaylistIssue.INVALID_INPUT, error) }
             }
         } finally { actions.unlock() }

@@ -42,7 +42,7 @@ class PlaylistCommandReceiptTest {
 
     @Test(timeout = 30_000L)
     fun aMatchingFailureKeepsTheServiceIssueButAnOlderFailureCannotReplaceIt() {
-        val extras = PlaybackCommands.operationReceiptArguments(OPERATION).apply { putString("code", "CONFLICT") }
+        val extras = PlaybackCommands.operationReceiptArguments(OPERATION).apply { putString(PlaybackCommands.FAILURE, "CONFLICT") }
         assertEquals(PlaylistUiIssue.CONFLICT,
             playlistCommandResultIssue(SessionResult(SessionError.ERROR_INVALID_STATE, extras), OPERATION))
         assertEquals(PlaylistUiIssue.SOURCE_CHANGED,
@@ -60,7 +60,7 @@ class PlaylistCommandReceiptTest {
     fun busyCancellationAndClosedReceiptsDoNotImplyThatTheOperationNeverCommitted() {
         for ((code, issue) in listOf("BUSY" to PlaylistUiIssue.BUSY, "CANCELLED" to PlaylistUiIssue.BUSY,
             "CLOSED" to PlaylistUiIssue.SOURCE_UNAVAILABLE)) {
-            val extras = PlaybackCommands.operationReceiptArguments(OPERATION).apply { putString("code", code) }
+            val extras = PlaybackCommands.operationReceiptArguments(OPERATION).apply { putString(PlaybackCommands.FAILURE, code) }
             assertEquals(issue, playlistCommandResultIssue(SessionResult(SessionError.ERROR_INVALID_STATE, extras), OPERATION))
         }
     }
@@ -68,7 +68,8 @@ class PlaylistCommandReceiptTest {
     @Test(timeout = 30_000L)
     fun missingWrongAndOversizedFailureCodesUseTheStableUnavailableIssue() {
         val mutations: List<Bundle.() -> Unit> = listOf(
-            {}, { putInt("code", 1) }, { putString("code", "x".repeat(129)) }, { putString("code", "UNKNOWN_ERROR") },
+            {}, { putInt(PlaybackCommands.FAILURE, 1) }, { putString(PlaybackCommands.FAILURE, "x".repeat(129)) },
+            { putString(PlaybackCommands.FAILURE, "UNKNOWN_ERROR") },
         )
         for (mutation in mutations) {
             val extras = PlaybackCommands.operationReceiptArguments(OPERATION).apply(mutation)

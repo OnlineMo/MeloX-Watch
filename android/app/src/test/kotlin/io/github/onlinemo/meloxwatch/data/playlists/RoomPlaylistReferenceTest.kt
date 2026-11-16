@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -131,7 +132,7 @@ class RoomPlaylistReferenceTest : PlaylistRoomFixture() {
                 val page = real.membersPage(generation, first, limit)
                 if (!triggered && generation == oldDataGeneration && first == 0L) {
                     triggered = true
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     winner = newRepository().apply(request("reference-cas-winner", old, PlaylistMutation.Rename("Winner"))).snapshot
                 }
                 return page
@@ -168,7 +169,7 @@ class RoomPlaylistReferenceTest : PlaylistRoomFixture() {
                 val page = real.membersPage(generation, first, limit)
                 if (!changed && generation == oldDataGeneration && first == 100L) {
                     changed = true
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     execute("UPDATE playlist_fixture_library SET rulesRevision = rulesRevision + 1")
                 }
                 return page

@@ -1,10 +1,33 @@
 package io.github.onlinemo.meloxwatch.data.library
 
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.room.RoomRawQuery
 import io.github.onlinemo.meloxwatch.model.TrackKey
 
 /** All ordering happens in SQLite over versioned rows. No OFFSET or in-memory library sort. */
 internal object LibrarySql {
+    fun raw(sql: String, arguments: Array<out Any?> = emptyArray()): RoomRawQuery {
+        // Query generation may continue after this call; bindings must remain those of this query.
+        val values = arguments.copyOf()
+        return RoomRawQuery(sql) { statement ->
+            values.forEachIndexed { index, value ->
+                val parameter = index + 1
+                when (value) {
+                    null -> statement.bindNull(parameter)
+                    is String -> statement.bindText(parameter, value)
+                    is ByteArray -> statement.bindBlob(parameter, value)
+                    is Boolean -> statement.bindLong(parameter, if (value) 1L else 0L)
+                    is Byte -> statement.bindLong(parameter, value.toLong())
+                    is Short -> statement.bindLong(parameter, value.toLong())
+                    is Int -> statement.bindLong(parameter, value.toLong())
+                    is Long -> statement.bindLong(parameter, value)
+                    is Float -> statement.bindDouble(parameter, value.toDouble())
+                    is Double -> statement.bindDouble(parameter, value)
+                    else -> throw IllegalArgumentException("Unsupported library SQL argument type")
+                }
+            }
+        }
+    }
+
     private fun valid(alias: String, revision: Long) = "$alias.validFrom <= $revision AND ($alias.validTo IS NULL OR $alias.validTo >= $revision)"
 
     private fun pathSegment(alias: String) = "$alias.pathName != '' AND $alias.pathName NOT IN ('.', '..') " +
@@ -157,34 +180,34 @@ internal object LibrarySql {
             (sortKey $primary ? OR (sortKey = ? AND (providerId $fixed ? OR (providerId = ? AND trackId $fixed ?))))))))"""
     }
 
-    fun count(view: LibraryViewToken): SimpleSQLiteQuery {
+    fun count(view: LibraryViewToken): RoomRawQuery {
         val (sql, args) = cte(view)
-        return SimpleSQLiteQuery("$sql SELECT COUNT(*) FROM ordered", args.toTypedArray())
+        return raw("$sql SELECT COUNT(*) FROM ordered", args.toTypedArray())
     }
-    fun availableCount(view: LibraryViewToken): SimpleSQLiteQuery {
+    fun availableCount(view: LibraryViewToken): RoomRawQuery {
         val (sql, args) = cte(view)
-        return SimpleSQLiteQuery("$sql SELECT COUNT(*) FROM ordered WHERE availabilityRank = 0", args.toTypedArray())
+        return raw("$sql SELECT COUNT(*) FROM ordered WHERE availabilityRank = 0", args.toTypedArray())
     }
-    fun playlistOverlap(view: LibraryViewToken, dataGenerationId: String): SimpleSQLiteQuery {
+    fun playlistOverlap(view: LibraryViewToken, dataGenerationId: String): RoomRawQuery {
         val (sql, args) = cte(view)
         args += dataGenerationId
-        return SimpleSQLiteQuery("""$sql SELECT COUNT(*) FROM ordered t WHERE EXISTS (
+        return raw("""$sql SELECT COUNT(*) FROM ordered t WHERE EXISTS (
             SELECT 1 FROM playlist_members member WHERE member.generationId = ?
                 AND member.providerId = t.providerId AND member.trackId = t.trackId)
         """.trimIndent(), args.toTypedArray())
     }
-    fun rows(view: LibraryViewToken, cursor: LibraryCursor?, limit: Int, before: Boolean = false): SimpleSQLiteQuery {
+    fun rows(view: LibraryViewToken, cursor: LibraryCursor?, limit: Int, before: Boolean = false): RoomRawQuery {
         val (sql, args) = cte(view)
         val where = if (cursor == null) "" else "WHERE ${boundary(view, cursor, before, args)}"
         args += limit
-        return SimpleSQLiteQuery("$sql SELECT * FROM ordered $where ORDER BY ${ordering(view, before)} LIMIT ?", args.toTypedArray())
+        return raw("$sql SELECT * FROM ordered $where ORDER BY ${ordering(view, before)} LIMIT ?", args.toTypedArray())
     }
-    fun row(view: LibraryViewToken, providerId: String, trackId: String): SimpleSQLiteQuery {
+    fun row(view: LibraryViewToken, providerId: String, trackId: String): RoomRawQuery {
         val (sql, args) = cte(view)
         args += providerId; args += trackId
-        return SimpleSQLiteQuery("$sql SELECT * FROM ordered WHERE providerId = ? AND trackId = ? LIMIT 1", args.toTypedArray())
+        return raw("$sql SELECT * FROM ordered WHERE providerId = ? AND trackId = ? LIMIT 1", args.toTypedArray())
     }
-    fun rowsForKeys(view: LibraryViewToken, keys: List<TrackKey>): SimpleSQLiteQuery {
+    fun rowsForKeys(view: LibraryViewToken, keys: List<TrackKey>): RoomRawQuery {
         require(keys.size <= LibraryLimits.PAGE_SIZE)
         val (sql, args) = cte(view)
         val predicate = keys.joinToString(" OR ") {
@@ -192,17 +215,17 @@ internal object LibrarySql {
             "(providerId = ? AND trackId = ?)"
         }.ifEmpty { "0" }
         args += keys.size + 1
-        return SimpleSQLiteQuery("$sql SELECT * FROM ordered WHERE ($predicate) LIMIT ?", args.toTypedArray())
+        return raw("$sql SELECT * FROM ordered WHERE ($predicate) LIMIT ?", args.toTypedArray())
     }
-    fun countBefore(view: LibraryViewToken, cursor: LibraryCursor): SimpleSQLiteQuery {
+    fun countBefore(view: LibraryViewToken, cursor: LibraryCursor): RoomRawQuery {
         val (sql, args) = cte(view)
-        return SimpleSQLiteQuery("$sql SELECT COUNT(*) FROM ordered WHERE ${boundary(view, cursor, true, args)}", args.toTypedArray())
+        return raw("$sql SELECT COUNT(*) FROM ordered WHERE ${boundary(view, cursor, true, args)}", args.toTypedArray())
     }
-    fun hasBeyond(view: LibraryViewToken, cursor: LibraryCursor, before: Boolean): SimpleSQLiteQuery {
+    fun hasBeyond(view: LibraryViewToken, cursor: LibraryCursor, before: Boolean): RoomRawQuery {
         val (sql, args) = cte(view)
-        return SimpleSQLiteQuery("$sql SELECT EXISTS (SELECT 1 FROM ordered WHERE ${boundary(view, cursor, before, args)} LIMIT 1)", args.toTypedArray())
+        return raw("$sql SELECT EXISTS (SELECT 1 FROM ordered WHERE ${boundary(view, cursor, before, args)} LIMIT 1)", args.toTypedArray())
     }
-    fun groups(view: LibraryViewToken, kind: LibraryGroupKind, after: String?, limit: Int): SimpleSQLiteQuery {
+    fun groups(view: LibraryViewToken, kind: LibraryGroupKind, after: String?, limit: Int): RoomRawQuery {
         val (sql, args) = cte(view)
         val group = when (kind) {
             LibraryGroupKind.ALBUM -> "SELECT albumKey AS groupKey, MIN(album) AS title, MIN(albumArtist) AS subtitle, COUNT(*) AS trackCount FROM ordered GROUP BY albumKey"
@@ -210,18 +233,18 @@ internal object LibrarySql {
         }
         val where = if (after == null) "" else "WHERE groupKey > ?".also { args += after }
         args += limit
-        return SimpleSQLiteQuery("$sql SELECT * FROM ($group) $where ORDER BY groupKey LIMIT ?", args.toTypedArray())
+        return raw("$sql SELECT * FROM ($group) $where ORDER BY groupKey LIMIT ?", args.toTypedArray())
     }
-    fun sections(view: LibraryViewToken): SimpleSQLiteQuery {
+    fun sections(view: LibraryViewToken): RoomRawQuery {
         val (sql, args) = cte(view)
-        return SimpleSQLiteQuery("$sql SELECT sectionKey, COUNT(*) AS trackCount FROM ordered WHERE sectionKey != '' GROUP BY sectionKey ORDER BY sectionKey", args.toTypedArray())
+        return raw("$sql SELECT sectionKey, COUNT(*) AS trackCount FROM ordered WHERE sectionKey != '' GROUP BY sectionKey ORDER BY sectionKey", args.toTypedArray())
     }
-    fun firstInSection(view: LibraryViewToken, section: String): SimpleSQLiteQuery {
+    fun firstInSection(view: LibraryViewToken, section: String): RoomRawQuery {
         val (sql, args) = cte(view)
         args += section
-        return SimpleSQLiteQuery("$sql SELECT * FROM ordered WHERE sectionKey = ? ORDER BY ${ordering(view)} LIMIT 1", args.toTypedArray())
+        return raw("$sql SELECT * FROM ordered WHERE sectionKey = ? ORDER BY ${ordering(view)} LIMIT 1", args.toTypedArray())
     }
-    fun folders(view: LibraryViewToken, parent: String?, after: String?, limit: Int, nodeId: String? = null): SimpleSQLiteQuery {
+    fun folders(view: LibraryViewToken, parent: String?, after: String?, limit: Int, nodeId: String? = null): RoomRawQuery {
         val args = mutableListOf<Any?>()
         val where = mutableListOf(valid("n", view.revision), "n.directory = 1", "sv.state != 'REMOVED'")
         view.query.sourceId?.let { where += "n.sourceId = ?"; args += it }
@@ -231,11 +254,11 @@ internal object LibrarySql {
         if (after != null) { where += "n.nodeId > ?"; args += after }
         if (!view.query.includeHidden) where += "NOT ${excluded("n.sourceId", "n.nodeId", view.revision)}"
         args += limit
-        return SimpleSQLiteQuery("SELECT n.* FROM local_node_versions n JOIN local_source_versions sv ON sv.sourceId = n.sourceId AND ${valid("sv", view.revision)} WHERE ${where.joinToString(" AND ")} ORDER BY n.nodeId LIMIT ?", args.toTypedArray())
+        return raw("SELECT n.* FROM local_node_versions n JOIN local_source_versions sv ON sv.sourceId = n.sourceId AND ${valid("sv", view.revision)} WHERE ${where.joinToString(" AND ")} ORDER BY n.nodeId LIMIT ?", args.toTypedArray())
     }
-    fun isExcluded(sourceId: String, nodeId: String?, parentNodeId: String?, revision: Long): SimpleSQLiteQuery {
-        val start = nodeId ?: parentNodeId ?: return SimpleSQLiteQuery("SELECT 0")
-        return SimpleSQLiteQuery("""
+    fun isExcluded(sourceId: String, nodeId: String?, parentNodeId: String?, revision: Long): RoomRawQuery {
+        val start = nodeId ?: parentNodeId ?: return raw("SELECT 0")
+        return raw("""
             WITH RECURSIVE ancestors(nodeId) AS (
                 SELECT ? UNION SELECT n.parentNodeId FROM local_node_versions n JOIN ancestors a ON n.nodeId = a.nodeId
                 WHERE n.parentNodeId IS NOT NULL AND ${valid("n", revision)}
@@ -244,12 +267,12 @@ internal object LibrarySql {
         """.trimIndent(), arrayOf(start, sourceId, nodeId.orEmpty()))
     }
 
-    fun relativePath(revision: Long, sourceId: String, nodeId: String): SimpleSQLiteQuery = SimpleSQLiteQuery(
+    fun relativePath(revision: Long, sourceId: String, nodeId: String): RoomRawQuery = raw(
         "WITH RECURSIVE ${relativePaths(revision, true)} SELECT relativePath FROM relative_paths WHERE sourceId = ? AND nodeId = ? LIMIT 1",
         arrayOf(sourceId, sourceId, nodeId),
     )
 
-    fun relativePathMatches(revision: Long, sourceId: String, path: String, limit: Int): SimpleSQLiteQuery = SimpleSQLiteQuery(
+    fun relativePathMatches(revision: Long, sourceId: String, path: String, limit: Int): RoomRawQuery = raw(
         """WITH RECURSIVE ${relativePaths(revision, true)}
             SELECT DISTINCT t.providerId, t.trackId FROM relative_paths p
             JOIN local_alias_versions av ON av.sourceId = p.sourceId AND av.nodeId = p.nodeId AND ${valid("av", revision)}
@@ -267,13 +290,13 @@ internal object LibrarySql {
     /** Walk only the chosen indexed root and the already validated literal components, at most 16 edges. */
     fun scopedRelativePathMatches(
         revision: Long, sourceId: String, rootNodeId: String, components: List<String>, limit: Int,
-    ): SimpleSQLiteQuery {
+    ): RoomRawQuery {
         require(components.size in 1..16 && limit in 1..LibraryLimits.PAGE_SIZE)
         val names = components.indices.joinToString(" ") { "WHEN $it THEN ?" }
         val args = mutableListOf<Any?>(rootNodeId, sourceId, sourceId)
         args.addAll(components)
         args += limit
-        return SimpleSQLiteQuery("""
+        return raw("""
             WITH RECURSIVE path_matches(nodeId, depth, directory) AS (
                 SELECT n.nodeId, 0, n.directory FROM local_node_versions n
                     WHERE n.nodeId = ? AND n.sourceId = ? AND n.directory = 1 AND ${valid("n", revision)}
@@ -291,10 +314,10 @@ internal object LibrarySql {
                 ORDER BY t.providerId, t.trackId LIMIT ?
         """.trimIndent(), args.toTypedArray())
     }
-    fun absentAliases(sourceId: String, scanId: String, after: String?, limit: Int): SimpleSQLiteQuery {
+    fun absentAliases(sourceId: String, scanId: String, after: String?, limit: Int): RoomRawQuery {
         val args = mutableListOf<Any?>(sourceId, scanId)
         val where = if (after == null) "" else "AND a.aliasId > ?".also { args += after }
         args += limit
-        return SimpleSQLiteQuery("SELECT a.* FROM local_access_aliases a WHERE a.sourceId = ? AND NOT EXISTS (SELECT 1 FROM scan_seen seen WHERE seen.scanId = ? AND seen.aliasId = a.aliasId) $where ORDER BY a.aliasId LIMIT ?", args.toTypedArray())
+        return raw("SELECT a.* FROM local_access_aliases a WHERE a.sourceId = ? AND NOT EXISTS (SELECT 1 FROM scan_seen seen WHERE seen.scanId = ? AND seen.aliasId = a.aliasId) $where ORDER BY a.aliasId LIMIT ?", args.toTypedArray())
     }
 }

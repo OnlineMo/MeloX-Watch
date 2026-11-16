@@ -86,7 +86,7 @@ class CueGroupValidatorTest {
         assertEquals("Renamed", second.segments.single().title)
     }
 
-    @Test fun aliasesWithTheSameDurablePhysicalTrackOrEntityProofAreRejected() = runBlocking {
+    @Test fun aliasesWithTheSameDurablePhysicalTrackOrEntityProofAreRejected(): Unit = runBlocking {
         val fixture = twoFileFixture()
         val aliased = fixture.facts.mapIndexed { index, facts ->
             if (index == 1) facts.copy(descriptor = facts.descriptor.copy(trackKey = fixture.facts[0].descriptor.trackKey)) else facts
@@ -102,7 +102,7 @@ class CueGroupValidatorTest {
         }
     }
 
-    @Test fun missingExtraOrRepeatedFileFactsCannotBecomeAPartialGroup() = runBlocking {
+    @Test fun missingExtraOrRepeatedFileFactsCannotBecomeAPartialGroup(): Unit = runBlocking {
         val fixture = twoFileFixture()
         expectCueIssue(CueIssue.MISSING_AUDIO) {
             CueGroupValidator.prepare(fixture.parsed, fixture.document, fixture.matched, fixture.facts.take(1))
@@ -120,7 +120,7 @@ class CueGroupValidatorTest {
         }
     }
 
-    @Test fun individuallyUnverifiedAudioCannotBeAuthorizedByTheCueTextOrFileType() = runBlocking {
+    @Test fun individuallyUnverifiedAudioCannotBeAuthorizedByTheCueTextOrFileType(): Unit = runBlocking {
         val fixture = fixture()
         val unknown = fixture.facts.map { it.copy(descriptor = it.descriptor.copy(contentValidation = LocalContentValidation.UNKNOWN)) }
         expectCueIssue(CueIssue.UNVERIFIED_CONTENT) {
@@ -169,7 +169,7 @@ class CueGroupValidatorTest {
         }
     }
 
-    @Test fun nonPositiveUnknownOrTooShortAudioEndCannotProduceEmptyOrOverlappingSegments() = runBlocking {
+    @Test fun nonPositiveUnknownOrTooShortAudioEndCannotProduceEmptyOrOverlappingSegments(): Unit = runBlocking {
         val fixture = fixture(cueText().replace("00:00:00", "00:00:01"))
         for (duration in listOf(0L, -1L)) {
             expectCueIssue(CueIssue.INVALID_AUDIO) {
@@ -221,7 +221,7 @@ class CueGroupValidatorTest {
         assertEquals(2, fixture.parsed.tracks.size)
     }
 
-    @Test fun groupBoundaryGuardRejectsAlteredParsedTimesBeforeCreatingLogicalTracks() = runBlocking {
+    @Test fun groupBoundaryGuardRejectsAlteredParsedTimesBeforeCreatingLogicalTracks(): Unit = runBlocking {
         val fixture = fixture(cueText().replace("00:00:00", "00:10:00") +
             "\nTRACK 02 AUDIO\nINDEX 00 00:19:00\nINDEX 01 00:20:00")
         val altered = fixture.parsed.copy(tracks = listOf(fixture.parsed.tracks[0],

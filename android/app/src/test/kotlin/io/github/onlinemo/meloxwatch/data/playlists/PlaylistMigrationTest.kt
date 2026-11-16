@@ -6,10 +6,14 @@ import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.util.Base64
 import androidx.room.Room
-import androidx.sqlite.db.SimpleSQLiteQuery
-import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.SQLiteStatement
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.TestDatabaseSql
+import io.github.onlinemo.meloxwatch.data.database.cursorStorageType
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.library.LibraryCodec
 import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
 import io.github.onlinemo.meloxwatch.data.library.LibrarySortKeys
@@ -53,11 +57,11 @@ class PlaylistMigrationTest {
         val database = open(file)
         val accepted = try {
             assertPreserved(database, before)
-            database.withPreservedTransaction {
+            database.withTestWriterTransaction {
                 assertEquals(LibraryMetaEntity(), database.libraryDao().meta())
                 assertEquals(ListeningMetaEntity(), database.listeningDao().meta())
                 for (table in listOf("local_sources", "local_tracks", "listening_rounds", "listening_history")) {
-                    assertEquals(0L, count(database.openHelper.writableDatabase, table))
+                    assertEquals(0L, count(this, table))
                 }
             }
             val result = exerciseAllPlaylistTables(database, "from-v1")
@@ -76,13 +80,11 @@ class PlaylistMigrationTest {
         val database = open(file)
         val accepted = try {
             assertPreserved(database, before)
-            database.withPreservedTransaction {
-                database.openHelper.writableDatabase.query(SimpleSQLiteQuery(
-                    "SELECT rootObjectId FROM local_source_versions WHERE sourceId = ? AND validTo IS NULL", arrayOf(SOURCE_ID),
-                )).use {
-                    assertTrue(it.moveToFirst())
-                    assertEquals(ROOT_OBJECT, it.getString(0))
-                    assertFalse(it.moveToNext())
+            database.withTestWriterTransaction {
+                query("SELECT rootObjectId FROM local_source_versions WHERE sourceId = ? AND validTo IS NULL", SOURCE_ID) {
+                    assertTrue(it.step())
+                    assertEquals(ROOT_OBJECT, it.getText(0))
+                    assertFalse(it.step())
                 }
                 val audio = checkNotNull(database.libraryDao().currentNode(AUDIO_NODE))
                 assertEquals(ORIGINAL_NAME, audio.name)
@@ -104,11 +106,11 @@ class PlaylistMigrationTest {
     }
 
     private suspend fun exerciseAllPlaylistTables(database: MeloXDatabase, suffix: String): PlaylistCommit {
-        database.withPreservedTransaction {
-            val sqlite = database.openHelper.writableDatabase
-            assertEquals(3, sqlite.version)
-            val names = sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'playlist_%' ORDER BY name").use { cursor ->
-                buildList { while (cursor.moveToNext()) add(cursor.getString(0)) }
+        database.withTestWriterTransaction {
+            val sqlite = this
+            assertEquals(3, sqlite.scalarLong("PRAGMA user_version").toInt())
+            val names = sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'playlist_%' ORDER BY name") { statement ->
+                buildList { while (statement.step()) add(statement.getText(0)) }
             }
             assertEquals(PLAYLIST_TABLES.sorted(), names)
             for (table in PLAYLIST_TABLES) assertEquals(0L, count(sqlite, table))
@@ -124,7 +126,7 @@ class PlaylistMigrationTest {
         val input = FrozenPlaylistInput("migration-input-$suffix", 10L, references.size.toLong())
         val request = request(suffix, input)
         val accepted = repository.apply(request, PlaylistPageSource { offset, limit ->
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             val end = minOf(references.size.toLong(), offset + limit).toInt()
             PlaylistInputPage(input, offset, references.subList(offset.toInt(), end), end.toLong() == input.totalCount)
         })
@@ -137,8 +139,8 @@ class PlaylistMigrationTest {
             assertEquals(references, page.members.map { it.reference })
             assertEquals(listOf(0L, 1L), page.members.map { it.ordinal })
             assertNull(page.nextOrdinal)
-            database.withPreservedTransaction {
-                val sqlite = database.openHelper.writableDatabase
+            database.withTestWriterTransaction {
+                val sqlite = this
                 assertEquals(1L, count(sqlite, "playlist_meta"))
                 assertEquals(2L, count(sqlite, "playlist_heads"))
                 assertEquals(2L, count(sqlite, "playlist_generations"))
@@ -198,6 +200,7 @@ class PlaylistMigrationTest {
 
     private fun open(file: File): MeloXDatabase = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
         MeloXDatabase::class.java, file.absolutePath)
+        .setDriver(BundledSQLiteDriver())
         .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3).build()
 
     private fun createOldDatabase(file: File, version: Int): List<TableRows> {
@@ -217,9 +220,11 @@ class PlaylistMigrationTest {
                         val name = entity.getString("tableName")
                         assertFalse("Historical schema already contains playlist tables", name.startsWith("playlist_"))
                         sqlite.execSQL(entity.getString("createSql").replace("$" + "{TABLE_NAME}", name))
-                        val indices = entity.getJSONArray("indices")
-                        for (position in 0 until indices.length()) {
-                            sqlite.execSQL(indices.getJSONObject(position).getString("createSql").replace("$" + "{TABLE_NAME}", name))
+                        val indices = if (entity.has("indices")) entity.getJSONArray("indices") else null
+                        if (indices != null) {
+                            for (position in 0 until indices.length()) {
+                                sqlite.execSQL(indices.getJSONObject(position).getString("createSql").replace("$" + "{TABLE_NAME}", name))
+                            }
                         }
                         val fields = entity.getJSONArray("fields")
                         val columns = List(fields.length()) { fields.getJSONObject(it).getString("columnName") }
@@ -239,15 +244,15 @@ class PlaylistMigrationTest {
         }
     }
 
-    private suspend fun assertPreserved(database: MeloXDatabase, before: List<TableRows>) = database.withPreservedTransaction {
-        // writableDatabase opens Room's real upgrade path and generated validation, with no destructive fallback.
-        val sqlite = database.openHelper.writableDatabase
-        assertEquals(3, sqlite.version)
-        for (table in before) sqlite.query(select(table)).use { assertEquals(table.name, table.rows, cells(it)) }
-        sqlite.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
-        sqlite.query("PRAGMA integrity_check").use {
-            assertTrue(it.moveToFirst())
-            assertEquals("ok", it.getString(0))
+    private suspend fun assertPreserved(database: MeloXDatabase, before: List<TableRows>) = database.withTestWriterTransaction {
+        // Acquiring the writer opens Room's real upgrade path and generated validation.
+        val sqlite = this
+        assertEquals(3, sqlite.scalarLong("PRAGMA user_version").toInt())
+        for (table in before) sqlite.query(select(table)) { assertEquals(table.name, table.rows, cells(it)) }
+        sqlite.query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
+        sqlite.query("PRAGMA integrity_check") {
+            assertTrue(it.step())
+            assertEquals("ok", it.getText(0))
         }
         val queue = checkNotNull(database.queueDao().operation("kept-queue-operation"))
         assertEquals("REPLACE", queue.operationKind)
@@ -275,9 +280,20 @@ class PlaylistMigrationTest {
         })
     }
 
-    private fun count(database: SupportSQLiteDatabase, table: String): Long =
-        database.query("SELECT COUNT(*) FROM " + identifier(table)).use {
-            assertTrue(it.moveToFirst())
+    private fun cells(statement: SQLiteStatement): List<List<Cell>> = buildList {
+        while (statement.step()) add(List(statement.getColumnCount()) { index ->
+            val type = statement.cursorStorageType(index)
+            Cell(type, when (type) {
+                Cursor.FIELD_TYPE_NULL -> null
+                Cursor.FIELD_TYPE_BLOB -> Base64.encodeToString(statement.getBlob(index), Base64.NO_WRAP)
+                else -> statement.getText(index)
+            })
+        })
+    }
+
+    private suspend fun count(database: TestDatabaseSql, table: String): Long =
+        database.query("SELECT COUNT(*) FROM " + identifier(table)) {
+            assertTrue(it.step())
             it.getLong(0)
         }
 

@@ -2,8 +2,11 @@ package io.github.onlinemo.meloxwatch.data.library
 
 import android.content.Context
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import java.io.File
@@ -50,6 +53,7 @@ class RoomPlaylistViewCloseTest {
             val file = File(temporaryFolder.root, "playlist-view-close.db")
             database = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
                 MeloXDatabase::class.java, file.absolutePath)
+                .setDriver(BundledSQLiteDriver())
                 .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3)
                 .build()
             library = RoomLocalLibraryRepository(database, { 1_000L }, { 1_794_787_200_000L })
@@ -303,11 +307,11 @@ class RoomPlaylistViewCloseTest {
         throw AssertionError("Expected BUSY with the original lease still retained")
     }
 
-    private suspend fun integrity() = database.withPreservedTransaction {
-        database.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
-        database.openHelper.writableDatabase.query("PRAGMA integrity_check").use {
-            assertTrue(it.moveToFirst())
-            assertEquals("ok", it.getString(0))
+    private suspend fun integrity() = database.withTestWriterTransaction {
+        query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
+        query("PRAGMA integrity_check") {
+            assertTrue(it.step())
+            assertEquals("ok", it.getText(0))
         }
     }
 
@@ -319,7 +323,7 @@ class RoomPlaylistViewCloseTest {
         val release = CompletableDeferred<Unit>()
 
         suspend fun hold(database: MeloXDatabase, viewId: String) {
-            check(database.inTransaction())
+            check(database.hasCurrentWriterTransaction())
             entered.complete(Unit)
             inspect.await()
             observed.complete(database.libraryDao().view(viewId))

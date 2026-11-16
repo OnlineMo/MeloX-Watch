@@ -1,6 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
-import androidx.room.withTransaction
+import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -199,7 +199,7 @@ class RoomPlaylistPagingTest : PlaylistRoomFixture() {
     fun folderBindingsPersistAndManualAddOrRemoveIsRejectedWithoutChangingTheSeededCompleteMembership() = runBlocking {
         // 这个fixture只核自动成员边界；真实FULL扫描同步由曲库集成测试核验。
         val binding = PlaylistFolderBinding("folder-source", "folder-node", true)
-        database.withTransaction {
+        database.withPreservedTransaction {
             val dao = database.playlistDao()
             val meta = checkNotNull(dao.meta())
             val global = meta.revision + 1L

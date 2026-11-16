@@ -2,6 +2,12 @@ package io.github.onlinemo.meloxwatch.data.database
 
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import androidx.sqlite.SQLITE_DATA_BLOB
+import androidx.sqlite.SQLITE_DATA_FLOAT
+import androidx.sqlite.SQLITE_DATA_INTEGER
+import androidx.sqlite.SQLITE_DATA_NULL
+import androidx.sqlite.SQLITE_DATA_TEXT
+import androidx.sqlite.SQLiteStatement
 import java.security.MessageDigest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -18,9 +24,12 @@ internal class FrozenRoomSchemaTestFixture private constructor(private val schem
             val entity = entities.getJSONObject(position)
             val table = entity.getString("tableName")
             database.execSQL(entity.getString("createSql").replace("\${TABLE_NAME}", table))
-            val indices = entity.getJSONArray("indices")
-            for (ordinal in 0 until indices.length()) {
-                database.execSQL(indices.getJSONObject(ordinal).getString("createSql").replace("\${TABLE_NAME}", table))
+            // Room omits empty index arrays; a present value must retain strict array validation.
+            val indices = if (entity.has("indices")) entity.getJSONArray("indices") else null
+            if (indices != null) {
+                for (ordinal in 0 until indices.length()) {
+                    database.execSQL(indices.getJSONObject(ordinal).getString("createSql").replace("\${TABLE_NAME}", table))
+                }
             }
         }
         val setup = schema.getJSONArray("setupQueries")
@@ -55,6 +64,92 @@ internal class FrozenRoomSchemaTestFixture private constructor(private val schem
             assertEquals("Every historical cell in $table must survive", saved.values,
                 readRows(query("SELECT $columns FROM ${identifier(table)} ORDER BY $order")))
         }
+    }
+
+    suspend fun assertStructure(database: TestDatabaseSql) {
+        SQLiteDatabase.create(null).use { expected ->
+            create(expected)
+            assertEquals(snapshotStructure { expected.rawQuery(it, null) }, snapshotStructure(database))
+        }
+    }
+
+    suspend fun snapshotRows(database: TestDatabaseSql): Map<String, FrozenTableRows> = buildMap {
+        for (position in 0 until entities.length()) {
+            val entity = entities.getJSONObject(position)
+            val table = entity.getString("tableName")
+            val keys = entity.getJSONObject("primaryKey").getJSONArray("columnNames")
+            val keyNames = (0 until keys.length()).map(keys::getString)
+            val order = keyNames.joinToString(", ", transform = ::identifier)
+            put(table, FrozenTableRows(keyNames, readRows(database,
+                "SELECT * FROM ${identifier(table)} ORDER BY $order")))
+        }
+    }
+
+    suspend fun assertRowsPreserved(before: Map<String, FrozenTableRows>, database: TestDatabaseSql) {
+        assertEquals(tableNames, before.keys)
+        for ((table, saved) in before) {
+            val columns = saved.values.columns.joinToString(", ", transform = ::identifier)
+            val order = saved.keys.joinToString(", ", transform = ::identifier)
+            assertEquals("Every historical cell in $table must survive", saved.values,
+                readRows(database, "SELECT $columns FROM ${identifier(table)} ORDER BY $order"))
+        }
+    }
+
+    private suspend fun snapshotStructure(database: TestDatabaseSql): SchemaStructure {
+        val objects = database.query("""
+            SELECT type, name, tbl_name, sql FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata')
+            ORDER BY type, name
+        """.trimIndent()) { statement ->
+            buildList {
+                while (statement.step()) add(DatabaseObject(
+                    statement.getText(0), statement.getText(1), statement.getText(2),
+                    if (statement.isNull(3)) null else canonicalSql(statement.getText(3)),
+                ))
+            }
+        }
+        val tables = objects.filter { it.type == "table" }.associate { table ->
+            // Close the catalog statement before querying each index; pooled statements cannot escape.
+            val headers = database.query("PRAGMA index_list(${identifier(table.name)})") { statement ->
+                fun column(name: String): Int = (0 until statement.getColumnCount())
+                    .first { statement.getColumnName(it) == name }
+                val nameColumn = column("name")
+                val uniqueColumn = column("unique")
+                val originColumn = column("origin")
+                val partialColumn = column("partial")
+                buildList {
+                    while (statement.step()) add(IndexHeader(
+                        statement.getText(nameColumn), statement.getLong(uniqueColumn).toInt(),
+                        statement.getText(originColumn), statement.getLong(partialColumn).toInt(),
+                    ))
+                }
+            }
+            val indexes = headers.map { header ->
+                IndexStructure(header.name, header.unique, header.origin, header.partial,
+                    readRows(database, "PRAGMA index_xinfo(${identifier(header.name)})"))
+            }.sortedBy { it.name }
+            table.name to TableStructure(
+                readRows(database, "PRAGMA table_info(${identifier(table.name)})"),
+                readRows(database, "PRAGMA foreign_key_list(${identifier(table.name)})"), indexes,
+            )
+        }
+        return SchemaStructure(objects, tables)
+    }
+
+    private suspend fun readRows(database: TestDatabaseSql, sql: String): FrozenCursorRows = database.query(sql) { statement ->
+        FrozenCursorRows((0 until statement.getColumnCount()).map(statement::getColumnName), buildList {
+            while (statement.step()) add((0 until statement.getColumnCount()).map { index ->
+                val type = statement.cursorStorageType(index)
+                val value = when (type) {
+                    Cursor.FIELD_TYPE_NULL -> null
+                    Cursor.FIELD_TYPE_BLOB -> statement.getBlob(index).joinToString("") { byte ->
+                        (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+                    }
+                    else -> statement.getText(index)
+                }
+                FrozenCell(type, value)
+            })
+        })
     }
 
     private fun snapshotStructure(query: (String) -> Cursor): SchemaStructure {
@@ -134,6 +229,7 @@ internal class FrozenRoomSchemaTestFixture private constructor(private val schem
     private data class SchemaStructure(val objects: List<DatabaseObject>, val tables: Map<String, TableStructure>)
     private data class TableStructure(val columns: FrozenCursorRows, val foreignKeys: FrozenCursorRows, val indexes: List<IndexStructure>)
     private data class IndexStructure(val name: String, val unique: Int, val origin: String, val partial: Int, val columns: FrozenCursorRows)
+    private data class IndexHeader(val name: String, val unique: Int, val origin: String, val partial: Int)
 
     companion object {
         fun load(resource: String, version: Int, sha256: String, identity: String): FrozenRoomSchemaTestFixture {
@@ -154,3 +250,13 @@ internal class FrozenRoomSchemaTestFixture private constructor(private val schem
 internal data class FrozenTableRows(val keys: List<String>, val values: FrozenCursorRows)
 internal data class FrozenCursorRows(val columns: List<String>, val rows: List<List<FrozenCell>>)
 internal data class FrozenCell(val storageType: Int, val value: String?)
+
+/** SQLite's NULL is 5, while the historical Android Cursor oracle records NULL as 0. */
+internal fun SQLiteStatement.cursorStorageType(index: Int): Int = when (getColumnType(index)) {
+    SQLITE_DATA_INTEGER -> Cursor.FIELD_TYPE_INTEGER
+    SQLITE_DATA_FLOAT -> Cursor.FIELD_TYPE_FLOAT
+    SQLITE_DATA_TEXT -> Cursor.FIELD_TYPE_STRING
+    SQLITE_DATA_BLOB -> Cursor.FIELD_TYPE_BLOB
+    SQLITE_DATA_NULL -> Cursor.FIELD_TYPE_NULL
+    else -> throw AssertionError("Unknown native SQLite column storage type")
+}

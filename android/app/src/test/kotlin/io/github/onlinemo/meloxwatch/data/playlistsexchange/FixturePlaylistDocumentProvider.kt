@@ -52,7 +52,7 @@ class FixturePlaylistDocumentProvider : DocumentsProvider() {
                 catch (_: IOException) { true }
                 catch (_: IllegalStateException) { true }
             }
-        }
+        } && PlaylistDocumentFixtureOsShadow.allKnownDescriptorsClosed()
 
     override fun onCreate(): Boolean = true
 
@@ -105,14 +105,24 @@ class FixturePlaylistDocumentProvider : DocumentsProvider() {
         beforeOpen?.invoke()
         signal?.throwIfCanceled()
         openFailure?.let { throw it }
-        if (documentId != DOCUMENT_ID || !document.isFile) throw FileNotFoundException("Fixture document unavailable")
+        val openedFile = document
+        if (documentId != DOCUMENT_ID || !openedFile.isFile) throw FileNotFoundException("Fixture document unavailable")
         if (mode == "rw" && !writable) throw SecurityException("Fixture write access denied")
         val flags = when (mode) {
             "r" -> ParcelFileDescriptor.MODE_READ_ONLY
             "rw" -> ParcelFileDescriptor.MODE_READ_WRITE
             else -> throw IllegalArgumentException("Unexpected fixture mode")
         }
-        return ParcelFileDescriptor.open(document, flags).also { descriptors.add(it) }
+        val descriptor = ParcelFileDescriptor.open(openedFile, flags)
+        var delivered = false
+        try {
+            PlaylistDocumentFixtureOsShadow.register(descriptor, writable = mode == "rw")
+            descriptors.add(descriptor)
+            delivered = true
+            return descriptor
+        } finally {
+            if (!delivered) descriptor.close()
+        }
     }
 
     override fun deleteDocument(documentId: String) {

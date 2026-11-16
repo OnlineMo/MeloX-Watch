@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -67,7 +68,7 @@ class RoomPlaylistLibraryFenceTest : PlaylistRoomFixture() {
                 var reads = 0
                 expectIssue(PlaylistIssue.SOURCE_CHANGED) {
                     repository.apply(operation, PlaylistPageSource { offset, limit ->
-                        assertFalse(database.inTransaction())
+                        assertFalse(database.hasCurrentWriterTransaction())
                         reads += 1
                         val count = minOf(limit.toLong(), input.totalCount - offset).toInt()
                         val references = if (mode == 2) List(count) { reference(99) } else List(count) { reference(offset + it) }
@@ -136,7 +137,7 @@ class RoomPlaylistLibraryFenceTest : PlaylistRoomFixture() {
             override suspend fun insertGeneration(generation: PlaylistGenerationEntity) {
                 real.insertGeneration(generation)
                 if (generation.operationId == operationId) {
-                    assertTrue(database.inTransaction())
+                    assertTrue(database.hasCurrentWriterTransaction())
                     database.fenceDao().putLibrary(PlaylistFenceLibraryEntity(
                         catalogRevision = revision.catalogRevision + 1L, rulesRevision = revision.rulesRevision))
                 }
@@ -235,7 +236,7 @@ class RoomPlaylistLibraryFenceTest : PlaylistRoomFixture() {
                 var reads = 0
                 expectIssue(change.second) {
                     repository.apply(operation, PlaylistPageSource { offset, limit ->
-                        assertFalse(database.inTransaction())
+                        assertFalse(database.hasCurrentWriterTransaction())
                         reads += 1
                         val count = minOf(limit.toLong(), input.totalCount - offset).toInt()
                         val references = if (mode == 2) List(count) { reference(99) } else List(count) { reference(offset + it) }

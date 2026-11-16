@@ -2,8 +2,9 @@ package io.github.onlinemo.meloxwatch.data.listening
 
 import android.content.Context
 import androidx.room.Room
-import androidx.room.withTransaction
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.library.LibrarySort
 import io.github.onlinemo.meloxwatch.data.library.LibrarySortField
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
@@ -394,8 +395,8 @@ class RoomListeningRepositoryTest {
     @Test(timeout = 30000L)
     fun sqlFailureRollsBackRoundHistoryDayTrackAndLibraryProjectionTogether() = runBlocking {
         val key = seedTrack()
-        database.withTransaction {
-            database.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_listening_track BEFORE INSERT ON listening_track_totals BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END")
+        database.withTestWriterTransaction {
+            execute("CREATE TRIGGER reject_listening_track BEFORE INSERT ON listening_track_totals BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END")
         }
         val update = update(key, 30_000L)
         expectIssue(ListeningIssue.INVALID_INPUT) { listening.submit(update) }
@@ -406,7 +407,7 @@ class RoomListeningRepositoryTest {
         val before = library.openView()
         assertEquals(0L, library.page(before).tracks.single().playCount)
         library.closeView(before.viewId)
-        database.withTransaction { database.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_listening_track") }
+        database.withTestWriterTransaction { execute("DROP TRIGGER reject_listening_track") }
         listening.submit(update)
         assertEquals(1L, listening.summary().totalPlayCount)
         assertEquals(1L, listening.summary().historyCount)
@@ -419,14 +420,14 @@ class RoomListeningRepositoryTest {
         listening.submit(update(key, 30_000L))
         val before = listening.summary()
         val revision = library.overview().revision
-        database.withTransaction {
-            database.openHelper.writableDatabase.execSQL("CREATE TRIGGER reject_statistics_clear BEFORE UPDATE ON listening_meta WHEN NEW.statisticsEpoch != OLD.statisticsEpoch BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END")
+        database.withTestWriterTransaction {
+            execute("CREATE TRIGGER reject_statistics_clear BEFORE UPDATE ON listening_meta WHEN NEW.statisticsEpoch != OLD.statisticsEpoch BEGIN SELECT RAISE(ABORT, 'fixture rejection'); END")
         }
         expectIssue(ListeningIssue.INVALID_INPUT) { listening.clearStatistics(0L) }
         assertEquals(before, listening.summary())
         assertEquals(revision, library.overview().revision)
         assertEquals(0L, database.libraryDao().meta()?.statisticsEpoch)
-        database.withTransaction { database.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_statistics_clear") }
+        database.withTestWriterTransaction { execute("DROP TRIGGER reject_statistics_clear") }
         val one = async(Dispatchers.Default) { runCatching { listening.clearStatistics(0L) } }
         val two = async(Dispatchers.Default) { runCatching { listening.clearStatistics(0L) } }
         val outcomes = listOf(one.await(), two.await())
@@ -451,7 +452,8 @@ class RoomListeningRepositoryTest {
     }
 
     private fun open() = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
-        MeloXDatabase::class.java, file.absolutePath).addMigrations(MeloXDatabase.MIGRATION_1_2).build()
+        MeloXDatabase::class.java, file.absolutePath).setDriver(BundledSQLiteDriver())
+        .addMigrations(MeloXDatabase.MIGRATION_1_2).build()
     private suspend fun reopen() {
         database.close()
         database = open()

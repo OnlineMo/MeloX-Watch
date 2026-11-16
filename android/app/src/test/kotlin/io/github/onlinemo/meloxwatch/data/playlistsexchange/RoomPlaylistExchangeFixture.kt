@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.DocumentsContract
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.library.PlaylistRecoveryRoomFixture
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.playlists.FrozenPlaylistInput
@@ -22,8 +23,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 
 /** Production Room/index/core plus a real file-backed DocumentsProvider; system grants remain a device gate. */
+@Config(shadows = [PlaylistDocumentFixtureOsShadow::class, PlaylistDocumentFixtureParcelShadow::class])
 abstract class RoomPlaylistExchangeFixture : PlaylistRecoveryRoomFixture() {
     protected lateinit var context: Context
     protected lateinit var documentFile: File
@@ -75,7 +78,7 @@ abstract class RoomPlaylistExchangeFixture : PlaylistRecoveryRoomFixture() {
         val frozen = FrozenPlaylistInput("input-$id", 0L, references.size.toLong())
         return checkNotNull(playlists.apply(PlaylistMutationRequest("create-$id", id, 0L,
             PlaylistMutation.Create("Manual playlist", frozen)), PlaylistPageSource { offset, limit ->
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 val end = minOf(references.size.toLong(), offset + limit).toInt()
                 PlaylistInputPage(frozen, offset, references.subList(offset.toInt(), end).toList(), end.toLong() == frozen.totalCount)
             }).snapshot)

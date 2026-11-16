@@ -1,26 +1,38 @@
 package io.github.onlinemo.meloxwatch.data.database
 
 import androidx.room.RoomDatabase
-import androidx.room.withTransaction
+import androidx.room.immediateTransaction
+import androidx.room.useWriterConnection
+import androidx.sqlite.SQLiteException
 
 /**
- * Compatibility transaction cleanup may fail after SQLite has already rolled back a failed write.
- * Keep the block failure for typed classification, and retain cleanup failure as suppressed evidence.
+ * Finish the writer lease before returning a result, including rollback of a failed native COMMIT.
+ * Keep a block failure when transaction cleanup also fails, with cleanup retained as evidence.
  */
 internal suspend fun <T> RoomDatabase.withPreservedTransaction(block: suspend () -> T): T {
     var blockFailure: Throwable? = null
     try {
-        return withTransaction {
-            try {
-                block()
-            } catch (error: Throwable) {
-                blockFailure = error
-                throw error
+        return useWriterConnection { writer ->
+            writer.immediateTransaction {
+                try {
+                    block()
+                } catch (error: Throwable) {
+                    blockFailure = error
+                    throw error
+                }
             }
         }
     } catch (error: Throwable) {
-        val original = blockFailure ?: throw error
-        if (original !== error) original.addSuppressed(error)
-        throw original
+        val original = blockFailure ?: error
+        if (original !== error) {
+            // A previously typed block failure keeps identity, so type newly attached SQL cleanup too.
+            val cleanup = if (error is SQLiteException) error.toPlatformSQLiteException() else error
+            original.addSuppressed(cleanup)
+        }
+        throw if (original is SQLiteException) original.toPlatformSQLiteException() else original
     }
 }
+
+/** Reuses the coroutine's confined writer; Room's legacy helper cannot inspect a native driver. */
+internal suspend fun RoomDatabase.hasCurrentWriterTransaction(): Boolean =
+    useWriterConnection { it.inTransaction() }

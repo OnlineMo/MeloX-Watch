@@ -1,6 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.library
 
-import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistCatalogView
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
@@ -249,7 +249,7 @@ class PlaylistPreviewLeasesRoomTest : PlaylistRecoveryRoomFixture() {
 
     private suspend fun allowLibraryClose() = execute("DROP TRIGGER reject_helper_library_close")
 
-    private suspend fun execute(sql: String) = database.withPreservedTransaction {
-        database.openHelper.writableDatabase.execSQL(sql)
+    private suspend fun execute(sql: String) = database.withTestWriterTransaction {
+        this.execute(sql)
     }
 }

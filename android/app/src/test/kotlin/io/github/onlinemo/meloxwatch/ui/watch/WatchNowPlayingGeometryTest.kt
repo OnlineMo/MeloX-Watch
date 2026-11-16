@@ -28,6 +28,7 @@ class WatchNowPlayingGeometryTest {
 
         assertTrue(geometry.title.top >= geometry.transportTop + geometry.centerSize + 6f - TOLERANCE)
         assertNull(geometry.artwork)
+        assertNotNull(geometry.artist)
         assertSafe(window, geometry)
     }
 
@@ -35,6 +36,17 @@ class WatchNowPlayingGeometryTest {
     fun largeMeasuredTextSelectsTheScrollingPathWhenItCannotFit() {
         assertNull(layout(Window(192f, 192f, round = true), titleHeight = 48f, artistHeight = 40f))
         assertNull(layout(Window(240f, 240f, round = true), titleHeight = 128f, artistHeight = 80f))
+    }
+
+    @Test
+    fun aTitleThatNeedsAnotherPlacementCannotDiscardItsArtist() {
+        val window = Window(240f, 240f, round = true)
+        val geometry = checkNotNull(layout(window, titleHeight = 36f, artistHeight = 20f))
+
+        assertNotNull(geometry.artist)
+        assertEquals(36f, geometry.title.height, TOLERANCE)
+        assertEquals(20f, checkNotNull(geometry.artist).height, TOLERANCE)
+        assertSafe(window, geometry)
     }
 
     @Test
@@ -105,8 +117,11 @@ class WatchNowPlayingGeometryTest {
             Window(240f, 152f, 240f, 240f, 0f, 80f, round = true),
         )
         for (window in windows) {
-            for ((titleHeight, artistHeight) in listOf(24f to 20f, 31f to 23f, 48f to 40f, 24f to null)) {
-                layout(window, titleHeight, artistHeight)?.let { assertSafe(window, it) }
+            for ((titleHeight, artistHeight) in listOf(24f to 20f, 31f to 23f, 36f to 20f, 48f to 40f, 24f to null)) {
+                layout(window, titleHeight, artistHeight)?.let {
+                    if (artistHeight != null) assertNotNull(it.artist)
+                    assertSafe(window, it)
+                }
             }
         }
     }

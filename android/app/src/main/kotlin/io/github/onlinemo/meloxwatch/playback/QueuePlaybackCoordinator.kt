@@ -1469,6 +1469,9 @@ class QueuePlaybackCoordinator(
                 if (!captureIsCurrent(captured) || active.generationId != captured.generationId || active.queueRevision != captured.queueRevision ||
                     active.currentEntryId != captured.checkpoint.queueEntryId
                 ) continue
+                // Pause/prepare callbacks can repeat an already durable clock. Advancing its
+                // revision would turn read-only previews and the next real CAS into conflicts.
+                if (active.checkpoint == captured.checkpoint) continue
                 val written = queueStore.saveCheckpoint(active.generationId, active.checkpointRevision, captured.checkpoint)
                 if (captureIsCurrent(captured)) publishCheckpoint(written)
             } catch (error: CancellationException) {

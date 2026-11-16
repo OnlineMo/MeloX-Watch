@@ -10,8 +10,10 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
-import androidx.room.withTransaction
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
 import kotlinx.coroutines.runBlocking
@@ -91,7 +93,7 @@ class PlaylistRoomFenceVerifier(private val database: PlaylistTestDatabase) :
         private set
 
     override suspend fun verify(revision: PlaylistLibraryRevision) {
-        assertTrue(database.inTransaction())
+        assertTrue(database.hasCurrentWriterTransaction())
         libraryChecks += 1
         val actual = database.fenceDao().library() ?: throw PlaylistException(PlaylistIssue.SOURCE_UNAVAILABLE)
         if (actual.catalogRevision != revision.catalogRevision || actual.rulesRevision != revision.rulesRevision) {
@@ -100,7 +102,7 @@ class PlaylistRoomFenceVerifier(private val database: PlaylistTestDatabase) :
     }
 
     override suspend fun verify(fence: PlaylistCatalogFence) {
-        assertTrue(database.inTransaction())
+        assertTrue(database.hasCurrentWriterTransaction())
         folderChecks += 1
         val dao = database.fenceDao()
         val library = dao.library() ?: throw PlaylistException(PlaylistIssue.SOURCE_UNAVAILABLE)
@@ -163,7 +165,7 @@ abstract class PlaylistRoomFixture {
         rulesRevision: Long = 3L,
         sourceRevision: Long = 4L,
         authEpoch: Long = 2L,
-    ): PlaylistCatalogFence = database.withTransaction {
+    ): PlaylistCatalogFence = database.withPreservedTransaction {
         val dao = database.fenceDao()
         dao.putLibrary(PlaylistFenceLibraryEntity(catalogRevision = catalogRevision, rulesRevision = rulesRevision))
         dao.putSource(PlaylistFenceSourceEntity(sourceId, sourceRevision, authEpoch))
@@ -207,7 +209,7 @@ abstract class PlaylistRoomFixture {
     protected fun listSource(input: FrozenPlaylistInput, references: List<PlaylistReference>): PlaylistPageSource {
         val frozen = references.toList()
         return PlaylistPageSource { offset, limit ->
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             assertTrue(limit in 1..PlaylistLimits.PAGE_SIZE)
             val end = minOf(frozen.size.toLong(), offset + limit).toInt()
             PlaylistInputPage(input, offset, frozen.subList(offset.toInt(), end).toList(), end.toLong() == input.totalCount)
@@ -215,7 +217,7 @@ abstract class PlaylistRoomFixture {
     }
 
     protected fun generatedSource(input: FrozenPlaylistInput): PlaylistPageSource = PlaylistPageSource { offset, limit ->
-        assertFalse(database.inTransaction())
+        assertFalse(database.hasCurrentWriterTransaction())
         assertTrue(limit in 1..PlaylistLimits.PAGE_SIZE)
         val count = minOf(limit.toLong(), input.totalCount - offset).toInt()
         PlaylistInputPage(input, offset, List(count) { reference(offset + it) }, offset + count == input.totalCount)
@@ -240,22 +242,19 @@ abstract class PlaylistRoomFixture {
         return members
     }
 
-    protected suspend fun scalar(sql: String, vararg args: Any): Long = database.withTransaction {
-        database.openHelper.writableDatabase.query(SimpleSQLiteQuery(sql, args)).use { cursor ->
-            check(cursor.moveToFirst())
-            cursor.getLong(0)
-        }
+    protected suspend fun scalar(sql: String, vararg args: Any): Long = database.withTestWriterTransaction {
+        scalarLong(sql, *args)
     }
 
-    protected suspend fun execute(sql: String) = database.withTransaction {
-        database.openHelper.writableDatabase.execSQL(sql)
+    protected suspend fun execute(sql: String) = database.withTestWriterTransaction {
+        execute(sql)
     }
 
-    protected suspend fun integrity() = database.withTransaction {
-        database.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
-        database.openHelper.writableDatabase.query("PRAGMA integrity_check").use {
-            assertTrue(it.moveToFirst())
-            assertEquals("ok", it.getString(0))
+    protected suspend fun integrity() = database.withTestWriterTransaction {
+        query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
+        query("PRAGMA integrity_check") {
+            assertTrue(it.step())
+            assertEquals("ok", it.getText(0))
         }
     }
 
@@ -265,5 +264,5 @@ abstract class PlaylistRoomFixture {
     }
 
     private fun connect() = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
-        PlaylistTestDatabase::class.java, file.absolutePath).build()
+        PlaylistTestDatabase::class.java, file.absolutePath).setDriver(BundledSQLiteDriver()).build()
 }

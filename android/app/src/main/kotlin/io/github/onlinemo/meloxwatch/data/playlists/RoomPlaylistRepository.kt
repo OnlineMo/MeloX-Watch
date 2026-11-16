@@ -1,10 +1,12 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
 import android.database.sqlite.SQLiteConstraintException
-import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
 import android.os.SystemClock
 import androidx.room.RoomDatabase
+import androidx.sqlite.SQLiteException
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.UUID
@@ -672,7 +674,7 @@ class RoomPlaylistRepository(
 
     /** 位于head CAS的同一短事务；中途扫描、撤权或规则变化不能被调用前boolean掩盖。 */
     private suspend fun verifyTransactionFences(request: PlaylistMutationRequest) {
-        check(database.inTransaction())
+        check(database.hasCurrentWriterTransaction())
         request.expectedLibraryRevision?.let {
             val verifier = libraryFenceVerifier ?: throw PlaylistException(PlaylistIssue.SOURCE_UNAVAILABLE)
             verifier.verify(it)
@@ -808,12 +810,14 @@ class RoomPlaylistRepository(
             throw error
         } catch (error: PlaylistException) {
             throw error
-        } catch (error: SQLiteFullException) {
-            throw PlaylistException(PlaylistIssue.STORAGE_FULL, error)
-        } catch (error: SQLiteConstraintException) {
-            throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED, error)
         } catch (error: SQLiteException) {
-            throw PlaylistException(PlaylistIssue.STORAGE_UNAVAILABLE, error)
+            val failure = error.toPlatformSQLiteException()
+            val issue = when (failure) {
+                is SQLiteFullException -> PlaylistIssue.STORAGE_FULL
+                is SQLiteConstraintException -> PlaylistIssue.RECOVERY_REQUIRED
+                else -> PlaylistIssue.STORAGE_UNAVAILABLE
+            }
+            throw PlaylistException(issue, failure)
         } catch (error: IllegalArgumentException) {
             throw PlaylistException(PlaylistIssue.INVALID_INPUT, error)
         }

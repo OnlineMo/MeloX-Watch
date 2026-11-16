@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.Process
 import android.provider.DocumentsContract
@@ -192,7 +193,8 @@ class PlaylistDocumentRegistry(context: Context, private val io: LocalProviderIo
     private fun queryFacts(uri: Uri, signal: CancellationSignal): Facts {
         val requestedId = DocumentsContract.getDocumentId(uri)
         requireText(requestedId, LocalInputLimits.URI_CHARACTERS)
-        return resolver.query(uri, COLUMNS, null, null, null, signal)?.use { cursor ->
+        // API 26 起文档 Provider 使用 Bundle 查询路由，与系统传输的入口一致。
+        return resolver.query(uri, COLUMNS, Bundle.EMPTY, signal)?.use { cursor ->
             signal.throwIfCanceled()
             if (!cursor.moveToFirst()) fail(PlaylistIssue.SOURCE_UNAVAILABLE)
             val id = cursor.requiredText(DocumentsContract.Document.COLUMN_DOCUMENT_ID, LocalInputLimits.URI_CHARACTERS)

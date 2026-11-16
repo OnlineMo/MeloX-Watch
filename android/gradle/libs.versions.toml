@@ -8,6 +8,7 @@ media3 = "1.8.0"
 coroutines = "1.10.2"
 junit = "4.13.2"
 room = "2.8.5"
+sqlite = "2.6.2"
 datastore = "1.1.7"
 ksp = "2.2.21-2.0.5"
 robolectric = "4.16.1"
@@ -31,6 +32,8 @@ coroutines-android = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-androi
 junit = { module = "junit:junit", version.ref = "junit" }
 room-runtime = { module = "androidx.room:room-runtime", version.ref = "room" }
 room-compiler = { module = "androidx.room:room-compiler", version.ref = "room" }
+sqlite-bundled = { module = "androidx.sqlite:sqlite-bundled", version.ref = "sqlite" }
+sqlite-bundled-host = { module = "androidx.sqlite:sqlite-bundled-jvm", version.ref = "sqlite" }
 datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 robolectric-test = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
 robolectric-sdk = { module = "org.robolectric:android-all-instrumented", version.ref = "robolectric-sdk" }

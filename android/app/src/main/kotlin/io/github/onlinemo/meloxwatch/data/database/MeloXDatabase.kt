@@ -5,7 +5,9 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
+import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.library.LibraryAbsenceEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasVersionEntity
@@ -91,12 +93,19 @@ abstract class MeloXDatabase : RoomDatabase() {
                 PlaylistMigrations.applyV2ToV3(db)
                 PlaylistExchangeMigrations.applyV2ToV3(db)
             }
+
+            override fun migrate(connection: SQLiteConnection) {
+                QueueMigrations.applyV2ToV3(connection)
+                LibraryPathMigrations.applyV2ToV3(connection)
+                PlaylistMigrations.applyV2ToV3(connection)
+                PlaylistExchangeMigrations.applyV2ToV3(connection)
+            }
         }
 
         fun open(context: Context): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
     }
 }

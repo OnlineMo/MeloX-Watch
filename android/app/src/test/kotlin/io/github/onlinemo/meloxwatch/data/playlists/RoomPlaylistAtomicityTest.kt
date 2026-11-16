@@ -1,7 +1,9 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
 import android.database.sqlite.SQLiteFullException
-import androidx.room.withTransaction
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
@@ -36,7 +38,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
         for ((mode, issue) in modes.withIndex()) {
             var calls = 0
             val source = PlaylistPageSource { offset, limit ->
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 calls += 1
                 val page = normal.read(offset, limit)
                 if (offset == 0L) page else when (mode) {
@@ -66,7 +68,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
         val empty = FrozenPlaylistInput("empty-input", 0L, 0L)
         var calls = 0
         val source = PlaylistPageSource { offset, limit ->
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             assertEquals(0L, offset)
             assertEquals(1, limit)
             calls += 1
@@ -142,7 +144,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
         val job = launch {
             repository.apply(operation, PlaylistPageSource { offset, limit ->
                 withContext(NonCancellable) {
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     reached.complete(Unit)
                     release.await()
                     generatedSource(input).read(offset, limit)
@@ -178,7 +180,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
         var winner: PlaylistSnapshot? = null
         expectIssue(PlaylistIssue.CONFLICT) {
             repository.apply(operation, PlaylistPageSource { offset, limit ->
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 winner = newRepository().apply(request("accepted-rename", old, PlaylistMutation.Rename("Winner"))).snapshot
                 generatedSource(input).read(offset, limit)
             })
@@ -266,7 +268,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
         val old = create("full-storage", references = List(205) { reference(it.toLong()).copy(titleHint = "x".repeat(4096)) })
         val original = allMembers(old)
         val operation = request("move-on-full-storage", old, PlaylistMutation.Move(original.last().memberId, 0L))
-        val maximum = database.withTransaction {
+        val maximum = database.withPreservedTransaction {
             val previous = writerPragma("max_page_count")
             val cap = writerPragma("page_count") + 8L
             assertEquals(cap, writerPragma("max_page_count = " + cap))
@@ -281,7 +283,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
             assertEquals(old, repository.snapshot(old.playlistId))
             assertNull(database.playlistDao().receipt(operation.operationId))
         } finally {
-            database.withTransaction { writerPragma("max_page_count = " + maximum) }
+            database.withPreservedTransaction { writerPragma("max_page_count = " + maximum) }
         }
         reopen()
         assertEquals(original, allMembers(old))
@@ -308,7 +310,7 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
     @Test(timeout = 30000L)
     fun revisionExhaustionRollsBackTheProspectiveRenameAndLeavesNoAcceptedReceipt() = runBlocking {
         val old = create("exhausted", references = listOf(reference(1)))
-        database.withTransaction {
+        database.withPreservedTransaction {
             val meta = checkNotNull(database.playlistDao().meta())
             database.playlistDao().updateMeta(meta.copy(revision = Long.MAX_VALUE))
         }
@@ -321,8 +323,5 @@ class RoomPlaylistAtomicityTest : PlaylistRoomFixture() {
         integrity()
     }
 
-    private fun writerPragma(value: String): Long = database.openHelper.writableDatabase.query("PRAGMA $value").use {
-        check(it.moveToFirst())
-        it.getLong(0)
-    }
+    private suspend fun writerPragma(value: String): Long = database.withTestWriterSql { scalarLong("PRAGMA $value") }
 }

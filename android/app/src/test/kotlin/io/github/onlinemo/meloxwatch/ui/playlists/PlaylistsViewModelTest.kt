@@ -543,7 +543,7 @@ class PlaylistsViewModelTest {
     }
 
     @Test(timeout = 30_000L)
-    fun aCancelledLateInitializationCannotReplaceTheCurrentGenerationLibraryRevision() = runBlocking {
+    fun aCancelledLateInitializationCannotReplaceTheCurrentGenerationLibraryRevision(): Unit = runBlocking {
         val fixture = PlaylistUiTestFixture(this)
         val firstJob = CompletableDeferred<Job>()
         val release = CompletableDeferred<Unit>()

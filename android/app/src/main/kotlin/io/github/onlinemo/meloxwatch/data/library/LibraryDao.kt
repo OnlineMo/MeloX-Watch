@@ -8,7 +8,7 @@ import androidx.room.Query
 import androidx.room.RawQuery
 import androidx.room.Update
 import androidx.room.Upsert
-import androidx.sqlite.db.SupportSQLiteQuery
+import androidx.room.RoomRawQuery
 import kotlinx.coroutines.flow.Flow
 
 data class LibraryRowRecord(
@@ -112,14 +112,14 @@ interface LibraryDao {
     @Query("UPDATE library_views SET expiresElapsedMs = :expiry WHERE viewId = :id") suspend fun renewView(id: String, expiry: Long)
     @Query("DELETE FROM library_views WHERE viewId = :id") suspend fun deleteView(id: String)
     @Query("DELETE FROM library_views WHERE sessionId != :session OR expiresElapsedMs <= :now") suspend fun expireViews(session: String, now: Long)
-    @RawQuery suspend fun rows(query: SupportSQLiteQuery): List<LibraryRowRecord>
-    @RawQuery suspend fun scalar(query: SupportSQLiteQuery): Long
-    @RawQuery suspend fun groupRows(query: SupportSQLiteQuery): List<LibraryGroupRecord>
-    @RawQuery suspend fun sectionRows(query: SupportSQLiteQuery): List<LibrarySectionRecord>
-    @RawQuery suspend fun nodeRows(query: SupportSQLiteQuery): List<LibraryNodeVersionEntity>
-    @RawQuery suspend fun aliasRows(query: SupportSQLiteQuery): List<LibraryAliasEntity>
-    @RawQuery suspend fun text(query: SupportSQLiteQuery): String?
-    @RawQuery suspend fun trackKeys(query: SupportSQLiteQuery): List<LibraryTrackKeyRecord>
+    @RawQuery suspend fun rows(query: RoomRawQuery): List<LibraryRowRecord>
+    @RawQuery suspend fun scalar(query: RoomRawQuery): Long
+    @RawQuery suspend fun groupRows(query: RoomRawQuery): List<LibraryGroupRecord>
+    @RawQuery suspend fun sectionRows(query: RoomRawQuery): List<LibrarySectionRecord>
+    @RawQuery suspend fun nodeRows(query: RoomRawQuery): List<LibraryNodeVersionEntity>
+    @RawQuery suspend fun aliasRows(query: RoomRawQuery): List<LibraryAliasEntity>
+    @RawQuery suspend fun text(query: RoomRawQuery): String?
+    @RawQuery suspend fun trackKeys(query: RoomRawQuery): List<LibraryTrackKeyRecord>
     @Query("SELECT * FROM import_operations WHERE operationId = :id") suspend fun importRecord(id: String): LibraryImportEntity?
     @Query("SELECT * FROM import_operations WHERE ownedSourceId = :sourceId AND phase = 'COMMITTED'") suspend fun ownedImport(sourceId: String): LibraryImportEntity?
     @Insert suspend fun insertImport(value: LibraryImportEntity)

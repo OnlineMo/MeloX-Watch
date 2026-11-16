@@ -989,7 +989,12 @@ internal fun playlistCommandResultIssue(result: SessionResult, operationId: Stri
         if (PlaybackCommands.readReceiptOperation(result.extras) != operationId) PlaylistUiIssue.SOURCE_CHANGED
         else if (result.resultCode == SessionResult.RESULT_SUCCESS) null
         else if (result.resultCode == SessionError.ERROR_BAD_VALUE) PlaylistUiIssue.INVALID_INPUT
-        else playlistCommandIssue(PlaybackCommands.readFailureCode(result.extras))
+        else {
+            // A malformed issue on a matching receipt does not identify another operation.
+            val code = try { PlaybackCommands.readFailureCode(result.extras) }
+            catch (_: RuntimeException) { null }
+            playlistCommandIssue(code)
+        }
     } catch (_: RuntimeException) {
         PlaylistUiIssue.SOURCE_CHANGED
     }

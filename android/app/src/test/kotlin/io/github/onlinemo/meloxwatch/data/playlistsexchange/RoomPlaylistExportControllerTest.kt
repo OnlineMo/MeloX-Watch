@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.playlistsexchange
 
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistPage
@@ -176,9 +178,9 @@ class RoomPlaylistExportControllerTest : RoomPlaylistExchangeFixture() {
     fun anActualSqlitePageCeilingPreventsAReceiptAndClearsOnlyThisUncommittedOutput() = runBlocking {
         val original = createOrdinary()
         val view = playlists.openView(original.playlistId)
-        database.withPreservedTransaction {
-            database.openHelper.writableDatabase.execSQL("CREATE TABLE exchange_full_probe(bytes BLOB)")
-            database.openHelper.writableDatabase.execSQL("CREATE TRIGGER exchange_receipt_full BEFORE INSERT ON playlist_export_receipts " +
+        database.withTestWriterTransaction {
+            execute("CREATE TABLE exchange_full_probe(bytes BLOB)")
+            execute("CREATE TRIGGER exchange_receipt_full BEFORE INSERT ON playlist_export_receipts " +
                 "BEGIN INSERT INTO exchange_full_probe(bytes) VALUES(zeroblob(1048576)); END")
         }
         var previousMaximum: Long? = null
@@ -205,10 +207,10 @@ class RoomPlaylistExportControllerTest : RoomPlaylistExchangeFixture() {
             assertNull(database.playlistExchangeDao().exportReceipt("full-storage-export"))
             assertEquals(original, playlists.snapshot(original.playlistId))
         } finally {
-            database.withPreservedTransaction {
+            database.withTestWriterTransaction {
                 previousMaximum?.let { writerPragma("max_page_count = $it") }
-                database.openHelper.writableDatabase.execSQL("DROP TRIGGER exchange_receipt_full")
-                database.openHelper.writableDatabase.execSQL("DROP TABLE exchange_full_probe")
+                execute("DROP TRIGGER exchange_receipt_full")
+                execute("DROP TABLE exchange_full_probe")
             }
         }
         exchange.closePreview("retry-after-page-ceiling")
@@ -221,8 +223,10 @@ class RoomPlaylistExportControllerTest : RoomPlaylistExchangeFixture() {
         integrity()
     }
 
-    private fun writerPragma(expression: String): Long = database.openHelper.writableDatabase.query("PRAGMA $expression").use {
-        assertTrue(it.moveToFirst())
-        it.getLong(0)
+    private suspend fun writerPragma(expression: String): Long = database.withTestWriterSql {
+        query("PRAGMA $expression") {
+            assertTrue(it.step())
+            it.getLong(0)
+        }
     }
 }

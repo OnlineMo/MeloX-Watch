@@ -103,12 +103,43 @@ val prepareRobolectricSdk by tasks.registering(Sync::class) {
     from(robolectricSdk30)
     into(robolectricSdkDirectory)
 }
+
+// Android's loader accepts a verified host JNI path; JVM classes never enter the test classpath.
+val bundledSqliteHost by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+val bundledSqliteHostPlatform = run {
+    val systemName = System.getProperty("os.name").lowercase(java.util.Locale.ROOT)
+    val architecture = System.getProperty("os.arch").lowercase(java.util.Locale.ROOT)
+    val arm64 = architecture == "aarch64" || architecture == "arm64"
+    val x64 = architecture == "amd64" || architecture == "x86_64"
+    when {
+        systemName.contains("linux") && x64 -> "linux_x64" to "libsqliteJni.so"
+        systemName.contains("linux") && arm64 -> "linux_arm64" to "libsqliteJni.so"
+        systemName.contains("mac") && x64 -> "osx_x64" to "libsqliteJni.dylib"
+        systemName.contains("mac") && arm64 -> "osx_arm64" to "libsqliteJni.dylib"
+        systemName.contains("windows") && x64 -> "windows_x64" to "sqliteJni.dll"
+        else -> error("No pinned SQLite host native for $systemName/$architecture")
+    }
+}
+val bundledSqliteHostDirectory = layout.buildDirectory.dir("sqlite-host")
+val prepareBundledSqliteHost by tasks.registering(Sync::class) {
+    from(provider { zipTree(bundledSqliteHost.singleFile) })
+    include("natives/${bundledSqliteHostPlatform.first}/${bundledSqliteHostPlatform.second}")
+    into(bundledSqliteHostDirectory)
+}
 tasks.withType<Test>().configureEach {
     dependsOn(prepareRobolectricSdk)
+    dependsOn(prepareBundledSqliteHost)
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.usePreinstrumentedJars", "true")
     systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
     systemProperty("robolectric.enabledSdks", "26,30")
+    systemProperty("androidx.sqlite.driver.bundled.path",
+        bundledSqliteHostDirectory.get().dir("natives/${bundledSqliteHostPlatform.first}").asFile.absolutePath)
+    systemProperty("androidx.sqlite.driver.bundled.name", bundledSqliteHostPlatform.second)
     maxParallelForks = 1
 }
 
@@ -144,6 +175,7 @@ dependencies {
     implementation(libs.lifecycle.viewmodel.ktx)
     implementation(libs.lifecycle.viewmodel.savedstate)
     implementation(libs.room.runtime)
+    implementation(libs.sqlite.bundled)
     implementation(libs.datastore.preferences)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
@@ -154,4 +186,5 @@ dependencies {
     ksp(libs.room.compiler)
     add(robolectricSdk.name, libs.robolectric.sdk)
     add(robolectricSdk30.name, libs.robolectric.sdk30)
+    add(bundledSqliteHost.name, libs.sqlite.bundled.host)
 }

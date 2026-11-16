@@ -1,11 +1,11 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import android.database.sqlite.SQLiteConstraintException
-import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
 import android.os.SystemClock
 import androidx.core.net.toUri
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.SQLiteException
+import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
@@ -739,7 +739,7 @@ class RoomLocalLibraryRepository(
         val visible = internalView(current)
         val all = internalView(current, LibraryQuery(includeHidden = true))
         return LibraryOverview(current.revision, current.rulesRevision, dao.scalar(LibrarySql.count(all)), dao.scalar(LibrarySql.count(visible)),
-            dao.scalar(LibrarySql.availableCount(visible)), dao.scalar(SimpleSQLiteQuery("SELECT COUNT(*) FROM local_sources WHERE state != 'REMOVED'")), current.shortAudioFilter)
+            dao.scalar(LibrarySql.availableCount(visible)), dao.scalar(LibrarySql.raw("SELECT COUNT(*) FROM local_sources WHERE state != 'REMOVED'")), current.shortAudioFilter)
     }
     private fun internalView(meta: LibraryMetaEntity, query: LibraryQuery = LibraryQuery()) = LibraryViewToken("internal", meta.revision, meta.rulesRevision,
         0L, query, LibrarySort(), meta.shortAudioFilter, LibraryViewOwner.UI, statisticsEpoch = meta.statisticsEpoch)
@@ -864,7 +864,7 @@ class RoomLocalLibraryRepository(
         }
         // An existing placeholder may already have children; only a newly inserted identity cannot form a cycle.
         if (parent != null && existingNode != null) {
-            val cycle = dao.scalar(SimpleSQLiteQuery("""
+            val cycle = dao.scalar(LibrarySql.raw("""
                 WITH RECURSIVE parents(nodeId) AS (SELECT ? UNION SELECT n.parentNodeId
                     FROM local_node_versions n JOIN parents p ON n.nodeId = p.nodeId
                     WHERE n.validTo IS NULL AND n.parentNodeId IS NOT NULL)
@@ -1003,9 +1003,15 @@ class RoomLocalLibraryRepository(
             try { action() }
             catch (error: CancellationException) { throw error }
             catch (error: LibraryException) { throw error }
-            catch (error: SQLiteFullException) { throw LibraryException(LibraryIssue.STORAGE_FULL, error) }
-            catch (error: SQLiteConstraintException) { throw LibraryException(LibraryIssue.INVALID_INPUT, error) }
-            catch (error: SQLiteException) { throw LibraryException(LibraryIssue.STORAGE_UNAVAILABLE, error) }
+            catch (error: SQLiteException) {
+                val failure = error.toPlatformSQLiteException()
+                val issue = when (failure) {
+                    is SQLiteFullException -> LibraryIssue.STORAGE_FULL
+                    is SQLiteConstraintException -> LibraryIssue.INVALID_INPUT
+                    else -> LibraryIssue.STORAGE_UNAVAILABLE
+                }
+                throw LibraryException(issue, failure)
+            }
             catch (error: IllegalStateException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
             catch (error: JSONException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
             catch (error: IllegalArgumentException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }

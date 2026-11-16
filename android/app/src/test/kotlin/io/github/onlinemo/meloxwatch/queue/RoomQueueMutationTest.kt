@@ -4,8 +4,11 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteFullException
 import androidx.room.Room
-import androidx.room.withTransaction
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
 import io.github.onlinemo.meloxwatch.data.queue.QueuePhase
@@ -57,7 +60,7 @@ class RoomQueueMutationTest {
     private lateinit var store: RoomQueueStore
     private var randomCalls = 0
 
-    @Before fun open() = runBlocking {
+    @Before fun open(): Unit = runBlocking {
         file = File(folder.root, "mutations.db")
         database = connect()
         store = newStore()
@@ -124,7 +127,7 @@ class RoomQueueMutationTest {
         old = store.saveCheckpoint(old.generationId, old.checkpointRevision, QueueCheckpoint(old.currentEntryId, 1234L, 6))
         val request = edit("move", old, QueueMutation.Move("entry-4", 1L))
         val changed = store.mutate(request) { candidate ->
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             assertTrue(candidate.keepsCurrent)
             assertEquals(old.generationId, store.snapshot()?.generationId)
             store.saveCheckpoint(old.generationId, old.checkpointRevision, QueueCheckpoint(old.currentEntryId, 5678L, 7))
@@ -373,7 +376,7 @@ class RoomQueueMutationTest {
             },
         ).snapshot
         val request = edit("copy-on-full-disk", old, QueueMutation.SetMode(QueueMode(repeat = QueueRepeatMode.LIST)))
-        val maximum = database.withTransaction {
+        val maximum = database.withPreservedTransaction {
             val previous = writerPragma("max_page_count")
             val cap = writerPragma("page_count") + 8L
             assertEquals(cap, writerPragma("max_page_count = " + cap))
@@ -387,7 +390,7 @@ class RoomQueueMutationTest {
             }
             assertEquals(old, store.snapshot())
         } finally {
-            database.withTransaction { writerPragma("max_page_count = " + maximum) }
+            database.withPreservedTransaction { writerPragma("max_page_count = " + maximum) }
         }
         reopen()
         assertEquals(old, store.snapshot())
@@ -400,7 +403,7 @@ class RoomQueueMutationTest {
 
     private fun newStore() = RoomQueueStore(database, shuffleIndex = { randomCalls += 1; 1L })
     private fun connect() = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
-        MeloXDatabase::class.java, file.absolutePath).build()
+        MeloXDatabase::class.java, file.absolutePath).setDriver(BundledSQLiteDriver()).build()
 
     private suspend fun reopen() {
         database.close()
@@ -461,8 +464,10 @@ class RoomQueueMutationTest {
         }
     }
 
-    private fun writerPragma(expression: String): Long = database.openHelper.writableDatabase.query("PRAGMA " + expression).use {
-        assertTrue(it.moveToFirst())
-        it.getLong(0)
+    private suspend fun writerPragma(expression: String): Long = database.withTestWriterSql {
+        query("PRAGMA " + expression) {
+            assertTrue(it.step())
+            it.getLong(0)
+        }
     }
 }

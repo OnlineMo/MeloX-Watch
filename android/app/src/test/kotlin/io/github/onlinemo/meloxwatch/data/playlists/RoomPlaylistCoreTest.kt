@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
 import kotlinx.coroutines.async
@@ -190,7 +191,7 @@ class RoomPlaylistCoreTest : PlaylistRoomFixture() {
         val input = FrozenPlaylistInput("only-existing", 3L, 205L)
         var calls = 0
         val source = PlaylistPageSource { offset, limit ->
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             calls += 1
             val count = minOf(limit.toLong(), input.totalCount - offset).toInt()
             PlaylistInputPage(input, offset, List(count) { reference(1L + (offset + it) % 2L) },

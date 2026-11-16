@@ -5,8 +5,11 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
 import androidx.room.Room
-import androidx.room.withTransaction
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
@@ -356,12 +359,12 @@ class RoomQueueStoreTest {
         var guarded = false
         val committed = store.replace(next, QueuePageSource { offset, limit ->
             assertEquals("A frozen producer cannot seek or restart", nextOffset, offset)
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             offsets.add(offset)
             producer.read(offset, limit).also { nextOffset += it.entries.size }
         }) { candidate ->
             guarded = true
-            assertFalse("Resource validation cannot hold a SQLite transaction", database.inTransaction())
+            assertFalse("Resource validation cannot hold a SQLite transaction", database.hasCurrentWriterTransaction())
             assertEquals(205L, nextOffset)
             val staged = database.queueDao().operation(next.operationId) ?: throw AssertionError("Sealed journal required")
             assertEquals(QueuePhase.SEALED, staged.phase)
@@ -416,7 +419,7 @@ class RoomQueueStoreTest {
                         page.copy(entries = page.entries.map { if (it.originalOrder == 155L) selected else it })
                     }
                 }) { candidate ->
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     val journal = database.queueDao().operation(next.operationId) ?: throw AssertionError("Sealed journal required")
                     assertEquals(QueuePhase.SEALED, journal.phase)
                     assertEquals(descriptor.location, requireNotNull(candidate).current.location)
@@ -460,7 +463,7 @@ class RoomQueueStoreTest {
                 val current = requireNotNull(candidate).current
                 assertEquals(0L, current.location?.contentRevision)
                 assertEquals(old, store.snapshot())
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 provider.openDenied = true
                 sources.verifyTransientRead(requireNotNull(current.location))
             }
@@ -501,7 +504,7 @@ class RoomQueueStoreTest {
                 }
             }) { candidate ->
                 assertEquals(descriptor.location, requireNotNull(candidate).current.location)
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 sources.validateRead(descriptor)
             }
         }
@@ -539,7 +542,7 @@ class RoomQueueStoreTest {
         val staleResult = async {
             expectIssue(QueueStoreIssue.CONFLICT) {
                 store.replace(stale, source(stale.view)) { candidate ->
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     assertEquals("entry-155", requireNotNull(candidate).current.queueEntryId)
                     val journal = database.queueDao().operation(stale.operationId) ?: throw AssertionError("Sealed journal required")
                     assertEquals(QueuePhase.SEALED, journal.phase)
@@ -600,7 +603,7 @@ class RoomQueueStoreTest {
         val cleared = store.replace(empty.copy(operationId = "confirmed-clear", allowEmpty = true), neverRead) { candidate ->
             guarded = true
             assertNull(candidate)
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             assertEquals(old, store.snapshot())
         }.snapshot
         assertTrue(guarded)
@@ -617,7 +620,7 @@ class RoomQueueStoreTest {
         val oldRequest = request("old", 3L)
         val old = store.replace(oldRequest, source(oldRequest.view)).snapshot
         val abandoned = request("interrupted", 205L)
-        database.withTransaction {
+        database.withPreservedTransaction {
             database.queueDao().insertGeneration(abandoned.record("interrupted-generation"))
             database.queueDao().insertEntries((0L until 100L).map { entry(it, 205L).record("interrupted-generation") })
             assertEquals(1, database.queueDao().advanceStaging("interrupted-generation", 0L, 100L))
@@ -636,7 +639,7 @@ class RoomQueueStoreTest {
         val request = request("rollback", 3L)
         val committed = store.replace(request, source(request.view)).snapshot
         try {
-            database.withTransaction {
+            database.withPreservedTransaction {
                 assertEquals(1, database.queueDao().checkpoint(committed.generationId, 0L, 1L, "entry-1", 9000L, 1))
                 throw IOException("abort after a real SQL mutation")
             }
@@ -654,7 +657,7 @@ class RoomQueueStoreTest {
         val oldRequest = request("old", 3L)
         val old = store.replace(oldRequest, source(oldRequest.view)).snapshot
         // WAL 查询可走reader；连接级页上限必须在Room持有writer时设置和恢复。
-        val previousMaximum = database.withTransaction {
+        val previousMaximum = database.withPreservedTransaction {
             val previous = writerPragmaLong("max_page_count")
             val cap = writerPragmaLong("page_count") + 8L
             assertEquals(cap, writerPragmaLong("max_page_count = $cap"))
@@ -671,7 +674,7 @@ class RoomQueueStoreTest {
                 requireNotNull(failure.cause).suppressed.any { it is SQLiteException && it !is SQLiteFullException })
             assertEquals(old, store.snapshot())
         } finally {
-            database.withTransaction { writerPragmaLong("max_page_count = $previousMaximum") }
+            database.withPreservedTransaction { writerPragmaLong("max_page_count = $previousMaximum") }
         }
         reopen()
         assertEquals(old, store.snapshot())
@@ -709,7 +712,7 @@ class RoomQueueStoreTest {
         val request = request("missing-row", 3L)
         store.replace(request, source(request.view))
         withContext(Dispatchers.IO) {
-            database.openHelper.writableDatabase.execSQL("DELETE FROM queue_entries WHERE queueEntryId = 'entry-2'")
+            database.withTestWriterSql { execute("DELETE FROM queue_entries WHERE queueEntryId = 'entry-2'") }
         }
         database.close()
         database = open(file)
@@ -740,7 +743,7 @@ class RoomQueueStoreTest {
         RuntimeEnvironment.getApplication() as Context,
         MeloXDatabase::class.java,
         file.absolutePath,
-    ).build()
+    ).setDriver(BundledSQLiteDriver()).build()
 
     private suspend fun reopen() {
         database.close()
@@ -807,11 +810,13 @@ class RoomQueueStoreTest {
         assertEquals(active.entryCount, database.queueDao().orderStats(active.generationId).entryCount)
     }
 
-    private fun writerPragmaLong(pragma: String): Long {
-        assertTrue(database.inTransaction())
-        return database.openHelper.writableDatabase.query("PRAGMA $pragma").use { cursor ->
-            assertTrue(cursor.moveToFirst())
-            cursor.getLong(0)
+    private suspend fun writerPragmaLong(pragma: String): Long {
+        assertTrue(database.hasCurrentWriterTransaction())
+        return database.withTestWriterSql {
+            query("PRAGMA $pragma") { statement ->
+                assertTrue(statement.step())
+                statement.getLong(0)
+            }
         }
     }
 
@@ -821,7 +826,7 @@ class RoomQueueStoreTest {
                 assertTrue(cursor.moveToFirst())
                 assertEquals("ok", cursor.getString(0))
             }
-            assertEquals(2, independent.version)
+            assertEquals(3, independent.version)
             independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals(expectedEntries, cursor.getLong(0))

@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.library
 
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMutation
@@ -48,7 +49,7 @@ class RoomFolderPlaylistMaintenanceTest : FolderPlaylistMaintenanceRoomFixture()
         val frozen = FrozenQueueView("accepted-folder-before-refresh", moved.revision, entries.size.toLong())
         val installed = queue.replace(QueueReplacementRequest("install-original-folder", null, 0L, frozen),
             QueuePageSource { offset, limit ->
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 val end = minOf(entries.size.toLong(), offset + limit).toInt()
                 QueueInputPage(frozen, offset, entries.subList(offset.toInt(), end).toList())
             }).snapshot

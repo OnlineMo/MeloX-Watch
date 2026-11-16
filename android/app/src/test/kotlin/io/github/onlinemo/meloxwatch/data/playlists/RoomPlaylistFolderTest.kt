@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import java.io.IOException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
@@ -226,7 +227,7 @@ class RoomPlaylistFolderTest : PlaylistRoomFixture() {
                 PlaylistMutation.SynchronizeFolder(PlaylistFolderSynchronization(binding, fence, input)))
             expectIssue(change.second) {
                 repository.apply(operation, PlaylistPageSource { offset, limit ->
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     assertEquals(0L, offset)
                     assertEquals(1, limit)
                     execute(change.first)

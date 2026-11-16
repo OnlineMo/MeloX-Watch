@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.library
 
-import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistCommit
@@ -14,6 +15,8 @@ import io.github.onlinemo.meloxwatch.ui.playlists.KeywordPlaylistCreateRequest
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistFolderChoice
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CopyableThrowable
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -22,6 +25,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -195,10 +199,10 @@ class RoomAutomaticPlaylistLeaseTest : PlaylistRecoveryRoomFixture() {
         expectIssue(PlaylistIssue.RECOVERY_REQUIRED) { folder.preview(choice, base) }
         assertEquals(0, database.libraryDao().views().size)
         assertEquals(1L, scalar("SELECT COUNT(*) FROM playlist_views"))
-        val original = database.withPreservedTransaction {
-            database.openHelper.writableDatabase.query("SELECT viewId FROM playlist_views").use {
-                assertTrue(it.moveToFirst())
-                it.getString(0)
+        val original = database.withTestWriterTransaction {
+            query("SELECT viewId FROM playlist_views") {
+                assertTrue(it.step())
+                it.getText(0)
             }
         }
         expectIssue(PlaylistIssue.RECOVERY_REQUIRED) { folder.preview(choice, base) }
@@ -225,7 +229,7 @@ class RoomAutomaticPlaylistLeaseTest : PlaylistRecoveryRoomFixture() {
         val gated = object : LocalPlaylistRepository by real {
             override suspend fun apply(request: PlaylistMutationRequest, source: PlaylistPageSource?): PlaylistCommit =
                 real.apply(request, source?.let { input -> PlaylistPageSource { offset, limit ->
-                    assertFalse(database.inTransaction())
+                    assertFalse(database.hasCurrentWriterTransaction())
                     entered.complete(Unit)
                     release.await()
                     input.read(offset, limit)
@@ -236,6 +240,7 @@ class RoomAutomaticPlaylistLeaseTest : PlaylistRecoveryRoomFixture() {
         val request = keywordRequest(preview.previewId)
         val original = database.libraryDao().views().single().viewId
         rejectLibraryClose()
+        val requestedCancellation = KeywordCopyCancellation("Controlled keyword copy cancellation")
         var cancellation: CancellationException? = null
         val job = launch {
             try { keyword.create(request) }
@@ -244,11 +249,16 @@ class RoomAutomaticPlaylistLeaseTest : PlaylistRecoveryRoomFixture() {
         try {
             withTimeout(10_000L) { entered.await() }
             expectIssue(PlaylistIssue.BUSY) { keyword.preview(".mp3") }
-            withTimeout(10_000L) { job.cancelAndJoin() }
+            withTimeout(10_000L) {
+                job.cancel(requestedCancellation)
+                job.join()
+            }
         } finally {
             release.complete(Unit)
             withTimeout(10_000L) { job.cancelAndJoin() }
         }
+        assertSame(requestedCancellation, cancellation)
+        assertTrue(job.isCancelled)
         assertTrue(checkNotNull(cancellation).suppressed.any { it is LibraryException && it.issue == LibraryIssue.INVALID_INPUT })
         assertNull(database.playlistDao().receipt(request.operationId))
         assertNull(playlists.snapshot(request.playlistId))
@@ -285,7 +295,13 @@ class RoomAutomaticPlaylistLeaseTest : PlaylistRecoveryRoomFixture() {
 
     private suspend fun stopCorruptingNewPreview() = execute("DROP TRIGGER corrupt_automatic_preview")
 
-    private suspend fun execute(sql: String) = database.withPreservedTransaction {
-        database.openHelper.writableDatabase.execSQL(sql)
+    private suspend fun execute(sql: String) = database.withTestWriterTransaction {
+        execute(sql)
+    }
+
+    // Stack recovery copies omit suppressed errors; retain this exact cancellation to inspect real cleanup.
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class KeywordCopyCancellation(message: String) : CancellationException(message), CopyableThrowable<KeywordCopyCancellation> {
+        override fun createCopy(): KeywordCopyCancellation? = null
     }
 }

@@ -1,7 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.library
 
-import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
+import androidx.sqlite.SQLiteException
+import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import kotlinx.coroutines.CancellationException
@@ -33,10 +34,10 @@ internal suspend fun <T> playlistControllerAccess(block: suspend () -> T): T = w
             else -> PlaylistIssue.SOURCE_UNAVAILABLE
         }
         throw PlaylistException(issue, error)
-    } catch (error: SQLiteFullException) {
-        throw PlaylistException(PlaylistIssue.STORAGE_FULL, error)
     } catch (error: SQLiteException) {
-        throw PlaylistException(PlaylistIssue.STORAGE_UNAVAILABLE, error)
+        val failure = error.toPlatformSQLiteException()
+        val issue = if (failure is SQLiteFullException) PlaylistIssue.STORAGE_FULL else PlaylistIssue.STORAGE_UNAVAILABLE
+        throw PlaylistException(issue, failure)
     } catch (error: IllegalArgumentException) {
         throw PlaylistException(PlaylistIssue.INVALID_INPUT, error)
     }

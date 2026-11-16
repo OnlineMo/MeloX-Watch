@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.library
 
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistDao
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
@@ -147,7 +149,7 @@ class RoomPlaylistRecoveryControllerTest : PlaylistRecoveryRoomFixture() {
         val gated = object : PlaylistDao by realDao {
             override suspend fun membersPage(generation: String, first: Long, limit: Int): List<PlaylistMemberEntity> {
                 val rows = realDao.membersPage(generation, first, limit)
-                if (armed && !database.inTransaction()) {
+                if (armed && !database.hasCurrentWriterTransaction()) {
                     armed = false
                     renamed = checkNotNull(repository().apply(PlaylistMutationRequest("winning-rename", old.playlistId,
                         old.revision, PlaylistMutation.Rename("Later accepted name"))).snapshot)
@@ -186,7 +188,7 @@ class RoomPlaylistRecoveryControllerTest : PlaylistRecoveryRoomFixture() {
             FenceChange(PlaylistIssue.SOURCE_CHANGED) { dao.putSource(baselineSource.copy(activeScanId = "active-new-scan")) },
             FenceChange(PlaylistIssue.SOURCE_CHANGED) { dao.putSource(baselineSource.copy(latestScanId = "later-complete-scan")) },
             FenceChange(PlaylistIssue.SOURCE_UNAVAILABLE) {
-                database.openHelper.writableDatabase.execSQL("UPDATE local_grants SET readCapability = 'UNAVAILABLE'")
+                database.withTestWriterSql { execute("UPDATE local_grants SET readCapability = 'UNAVAILABLE'") }
             },
             FenceChange(PlaylistIssue.INCOMPLETE) { dao.updateScan(baselineScan.copy(mode = ScanMode.INCREMENTAL.name)); Unit },
             FenceChange(PlaylistIssue.INCOMPLETE) { dao.updateScan(baselineScan.copy(phase = ScanPhase.FAILED.name)); Unit },
@@ -201,7 +203,7 @@ class RoomPlaylistRecoveryControllerTest : PlaylistRecoveryRoomFixture() {
             val gated = object : PlaylistDao by realPlaylistDao {
                 override suspend fun membersPage(generation: String, first: Long, limit: Int): List<PlaylistMemberEntity> {
                     val rows = realPlaylistDao.membersPage(generation, first, limit)
-                    if (armed && !database.inTransaction()) {
+                    if (armed && !database.hasCurrentWriterTransaction()) {
                         armed = false
                         database.withPreservedTransaction { change.mutate() }
                     }
@@ -222,7 +224,7 @@ class RoomPlaylistRecoveryControllerTest : PlaylistRecoveryRoomFixture() {
                 dao.updateMeta(baselineMeta)
                 dao.putSource(baselineSource)
                 dao.updateScan(baselineScan)
-                database.openHelper.writableDatabase.execSQL("UPDATE local_grants SET readCapability = 'AVAILABLE'")
+                database.withTestWriterSql { execute("UPDATE local_grants SET readCapability = 'AVAILABLE'") }
             }
         }
         assertEquals(0L, scalar("SELECT COUNT(*) FROM playlist_generations WHERE state != 'PUBLISHED'"))
@@ -253,7 +255,7 @@ class RoomPlaylistRecoveryControllerTest : PlaylistRecoveryRoomFixture() {
         val gated = object : PlaylistDao by realDao {
             override suspend fun membersPage(generation: String, first: Long, limit: Int): List<PlaylistMemberEntity> {
                 val rows = realDao.membersPage(generation, first, limit)
-                if (armed && !database.inTransaction()) {
+                if (armed && !database.hasCurrentWriterTransaction()) {
                     armed = false
                     entered.complete(Unit)
                     release.await()

@@ -47,7 +47,11 @@ import org.robolectric.annotation.Config
  * Robolectric 4.16.1 lacks system URI-grant enforcement; real grant/revoke acceptance is device work.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 30], manifest = Config.NONE)
+@Config(
+    sdk = [26, 30],
+    manifest = Config.NONE,
+    shadows = [PlaylistDocumentFixtureOsShadow::class, PlaylistDocumentFixtureParcelShadow::class],
+)
 class PlaylistDocumentRegistryTest {
     @Rule @JvmField val temporary = TemporaryFolder()
 

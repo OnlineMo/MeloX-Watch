@@ -3,7 +3,7 @@ package io.github.onlinemo.meloxwatch.data.database
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
-import androidx.room.withTransaction
+import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
 import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
@@ -93,7 +93,7 @@ class RoomMigrationOneToTwoTest {
                 assertNull(migrated.libraryDao().track(repeatedTrack.trackId))
                 assertNull(migrated.libraryDao().location(persistedLocation.locationId))
                 assertNull(migrated.libraryDao().location(temporaryLocation.locationId))
-                migrated.withTransaction {
+                migrated.withPreservedTransaction {
                     migrated.libraryDao().insertTrack(newTrack)
                     migrated.libraryDao().putLocation(newLocation)
                     migrated.libraryDao().insertRelation(newRelation)
@@ -220,44 +220,51 @@ class RoomMigrationOneToTwoTest {
         assertIntegrity(sqlite.query("PRAGMA integrity_check"))
     }
 
-    private fun assertVersionThreeSchema(database: MeloXDatabase, file: File, expectedIdentity: String? = null): String {
-        // Forcing the actual application open runs both registered migrations and Room's
-        // generated validation of the current 39 entities. The v3 identity is checked for
-        // persisted stability, not presented as a separately pinned historical v3 export.
-        val sqlite = database.openHelper.writableDatabase
-        assertEquals(file.canonicalPath, File(requireNotNull(sqlite.path)).canonicalPath)
-        assertEquals(3, sqlite.version)
-        assertEquals(VERSION_THREE_TABLES, applicationTables(sqlite.query(TABLES_QUERY)))
-        val identity = sqlite.query(IDENTITY_QUERY).use { rows ->
-            assertTrue(rows.moveToFirst())
-            val value = rows.getString(0)
-            assertTrue(Regex("[0-9a-f]{32}").matches(value))
-            assertFalse(value == VERSION_ONE_IDENTITY || value == VERSION_TWO_IDENTITY)
-            if (expectedIdentity != null) assertEquals(expectedIdentity, value)
-            assertFalse(rows.moveToNext())
-            value
+    private suspend fun assertVersionThreeSchema(database: MeloXDatabase, file: File, expectedIdentity: String? = null): String =
+        database.withTestWriterSql {
+            // Forcing the actual application open runs both registered migrations and Room's
+            // generated validation of the current 39 entities. The v3 identity is checked for
+            // persisted stability, not presented as a separately pinned historical v3 export.
+            val mainPath = query("PRAGMA database_list") { rows ->
+                var path: String? = null
+                while (rows.step()) {
+                    if (rows.getText(1) == "main") path = rows.getText(2)
+                }
+                requireNotNull(path)
+            }
+            assertEquals(file.canonicalPath, File(mainPath).canonicalPath)
+            assertEquals(3L, scalarLong("PRAGMA user_version"))
+            assertEquals(VERSION_THREE_TABLES, query(TABLES_QUERY, block = ::applicationTables))
+            val identity = query(IDENTITY_QUERY) { rows ->
+                assertTrue(rows.step())
+                val value = rows.getText(0)
+                assertTrue(Regex("[0-9a-f]{32}").matches(value))
+                assertFalse(value == VERSION_ONE_IDENTITY || value == VERSION_TWO_IDENTITY)
+                if (expectedIdentity != null) assertEquals(expectedIdentity, value)
+                assertFalse(rows.step())
+                value
+            }
+            query("""
+                SELECT operationKind, operationFingerprint, expectedCurrentEntryId, orderPolicy
+                FROM queue_generations WHERE generationId = '$GENERATION_ID'
+            """.trimIndent()) { rows ->
+                assertTrue(rows.step())
+                assertEquals("REPLACE", rows.getText(0))
+                assertEquals("", rows.getText(1))
+                assertTrue(rows.isNull(2))
+                assertEquals("PRESERVE_SUPPLIED", rows.getText(3))
+                assertFalse(rows.step())
+            }
+            for (table in VERSION_THREE_TABLES - VERSION_TWO_TABLES) {
+                query("SELECT COUNT(*) FROM `$table`") { assertSingleIntegerRow(it, longArrayOf(0)) }
+            }
+            query("PRAGMA foreign_key_check", block = ::assertNoForeignKeyViolations)
+            query("PRAGMA integrity_check", block = ::assertIntegrity)
+            identity
         }
-        sqlite.query("""
-            SELECT operationKind, operationFingerprint, expectedCurrentEntryId, orderPolicy
-            FROM queue_generations WHERE generationId = '$GENERATION_ID'
-        """.trimIndent()).use { rows ->
-            assertTrue(rows.moveToFirst())
-            assertEquals("REPLACE", rows.getString(0))
-            assertEquals("", rows.getString(1))
-            assertTrue(rows.isNull(2))
-            assertEquals("PRESERVE_SUPPLIED", rows.getString(3))
-            assertFalse(rows.moveToNext())
-        }
-        for (table in VERSION_THREE_TABLES - VERSION_TWO_TABLES) {
-            assertSingleIntegerRow(sqlite.query("SELECT COUNT(*) FROM `$table`"), longArrayOf(0))
-        }
-        assertNoForeignKeyViolations(sqlite.query("PRAGMA foreign_key_check"))
-        assertIntegrity(sqlite.query("PRAGMA integrity_check"))
-        return identity
-    }
 
     private suspend fun assertLegacyQueueRows(database: MeloXDatabase, before: Map<String, FrozenTableRows>) {
-        schemaOne.assertRowsPreserved(before) { database.openHelper.writableDatabase.query(it) }
+        database.withTestReaderSql { schemaOne.assertRowsPreserved(before, this) }
         val dao = database.queueDao()
         assertEquals(legacyGeneration, dao.generation(GENERATION_ID))
         assertEquals(legacyGeneration, dao.operation(legacyGeneration.operationId))
@@ -327,6 +334,35 @@ class RoomMigrationOneToTwoTest {
             assertEquals(expected[index], rows.getLong(index))
         }
         assertFalse(rows.moveToNext())
+    }
+
+    private fun applicationTables(rows: SQLiteStatement): Set<String> {
+        val names = mutableSetOf<String>()
+        while (rows.step()) {
+            val name = rows.getText(0)
+            if (!name.startsWith("sqlite_") && name != "room_master_table" && name != "android_metadata") names.add(name)
+        }
+        return names
+    }
+
+    private fun assertNoForeignKeyViolations(rows: SQLiteStatement) {
+        assertFalse("All stored parent references must resolve", rows.step())
+    }
+
+    private fun assertIntegrity(rows: SQLiteStatement) {
+        assertTrue(rows.step())
+        assertEquals("ok", rows.getText(0))
+        assertFalse(rows.step())
+    }
+
+    private fun assertSingleIntegerRow(rows: SQLiteStatement, expected: LongArray) {
+        assertTrue(rows.step())
+        assertEquals(expected.size, rows.getColumnCount())
+        for (index in expected.indices) {
+            assertEquals(Cursor.FIELD_TYPE_INTEGER, rows.cursorStorageType(index))
+            assertEquals(expected[index], rows.getLong(index))
+        }
+        assertFalse(rows.step())
     }
 
     private val schemaOne by lazy {

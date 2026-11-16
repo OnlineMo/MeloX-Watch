@@ -1,8 +1,9 @@
 package io.github.onlinemo.meloxwatch.data.queue
 
 import android.database.sqlite.SQLiteConstraintException
-import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
+import androidx.sqlite.SQLiteException
+import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
@@ -650,12 +651,14 @@ class RoomQueueStore(
         throw error
     } catch (error: QueueStoreException) {
         throw error
-    } catch (error: SQLiteFullException) {
-        throw QueueStoreException(QueueStoreIssue.STORAGE_FULL, error)
-    } catch (error: SQLiteConstraintException) {
-        throw QueueStoreException(if (inputRows) QueueStoreIssue.INVALID_INPUT else QueueStoreIssue.RECOVERY_REQUIRED, error)
     } catch (error: SQLiteException) {
-        throw QueueStoreException(QueueStoreIssue.STORAGE_UNAVAILABLE, error)
+        val failure = error.toPlatformSQLiteException()
+        val issue = when (failure) {
+            is SQLiteFullException -> QueueStoreIssue.STORAGE_FULL
+            is SQLiteConstraintException -> if (inputRows) QueueStoreIssue.INVALID_INPUT else QueueStoreIssue.RECOVERY_REQUIRED
+            else -> QueueStoreIssue.STORAGE_UNAVAILABLE
+        }
+        throw QueueStoreException(issue, failure)
     } catch (error: IllegalStateException) {
         // 缺迁移、关闭的连接或损坏结构都不能通过 destructive fallback 丢弃旧队列。
         throw QueueStoreException(QueueStoreIssue.RECOVERY_REQUIRED, error)

@@ -1,7 +1,9 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -140,14 +142,14 @@ abstract class FolderPlaylistMaintenanceRoomFixture : PlaylistRecoveryRoomFixtur
         var onPage: suspend (LibraryViewToken, LibraryPage) -> Unit = { _, _ -> }
 
         override suspend fun openView(query: LibraryQuery, sort: LibrarySort, owner: LibraryViewOwner): LibraryViewToken {
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             opened++
             onOpen()
             return actual.openView(query, sort, owner)
         }
 
         override suspend fun page(view: LibraryViewToken, after: LibraryCursor?, limit: Int): LibraryPage {
-            assertFalse(database.inTransaction())
+            assertFalse(database.hasCurrentWriterTransaction())
             read++
             largestLimit = maxOf(largestLimit, limit)
             val page = actual.page(view, after, limit)
@@ -163,7 +165,7 @@ abstract class FolderPlaylistMaintenanceRoomFixture : PlaylistRecoveryRoomFixtur
     protected suspend fun synchronizedReceipts(): Long = scalar(
         "SELECT COUNT(*) FROM playlist_receipts WHERE operationId LIKE 'folder-scan-v1-%' AND result = 'SYNCHRONIZED'")
 
-    protected suspend fun execute(sql: String) = database.withPreservedTransaction {
-        database.openHelper.writableDatabase.execSQL(sql)
+    protected suspend fun execute(sql: String) = database.withTestWriterTransaction {
+        this.execute(sql)
     }
 }

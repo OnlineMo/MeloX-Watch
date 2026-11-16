@@ -2,9 +2,10 @@ package io.github.onlinemo.meloxwatch.data.library
 
 import android.content.Context
 import androidx.room.Room
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
-import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -131,7 +132,7 @@ abstract class PlaylistRecoveryRoomFixture {
         val input = FrozenPlaylistInput("input-$id", 0L, references.size.toLong())
         val snapshot = checkNotNull(playlists.apply(PlaylistMutationRequest("create-$id", id, 0L,
             PlaylistMutation.Create("Manual playlist", input)), PlaylistPageSource { offset, limit ->
-                assertFalse(database.inTransaction())
+                assertFalse(database.hasCurrentWriterTransaction())
                 val end = minOf(references.size.toLong(), offset + limit).toInt()
                 PlaylistInputPage(input, offset, references.subList(offset.toInt(), end).toList(), end.toLong() == input.totalCount)
             }).snapshot)
@@ -171,15 +172,15 @@ abstract class PlaylistRecoveryRoomFixture {
         controller = recovery()
     }
 
-    protected suspend fun scalar(sql: String): Long = database.withPreservedTransaction {
-        database.libraryDao().scalar(SimpleSQLiteQuery(sql))
+    protected suspend fun scalar(sql: String): Long = database.withTestWriterTransaction {
+        scalarLong(sql)
     }
 
-    protected suspend fun integrity() = database.withPreservedTransaction {
-        database.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
-        database.openHelper.writableDatabase.query("PRAGMA integrity_check").use {
-            assertTrue(it.moveToFirst())
-            assertEquals("ok", it.getString(0))
+    protected suspend fun integrity() = database.withTestWriterTransaction {
+        query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
+        query("PRAGMA integrity_check") {
+            assertTrue(it.step())
+            assertEquals("ok", it.getText(0))
         }
     }
 
@@ -193,5 +194,6 @@ abstract class PlaylistRecoveryRoomFixture {
     }
 
     private fun open(): MeloXDatabase = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
-        MeloXDatabase::class.java, file.absolutePath).addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3).build()
+        MeloXDatabase::class.java, file.absolutePath).setDriver(BundledSQLiteDriver())
+        .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3).build()
 }

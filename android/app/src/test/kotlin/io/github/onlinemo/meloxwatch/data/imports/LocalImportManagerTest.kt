@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.CancellationSignal
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.RoomImportLedger
@@ -166,10 +168,12 @@ class LocalImportManagerTest {
     }
 
     @Test fun installationSurvivesDatabasePublicationRollbackAndRecoversWithoutRecopy() = runBlocking {
-        database.openHelper.writableDatabase.execSQL(
-            "CREATE TRIGGER reject_import_publication BEFORE UPDATE OF phase ON import_operations " +
-                "WHEN NEW.phase = 'COMMITTED' BEGIN SELECT RAISE(ABORT, 'controlled commit failure'); END",
-        )
+        database.withTestWriterSql {
+            execute(
+                "CREATE TRIGGER reject_import_publication BEFORE UPDATE OF phase ON import_operations " +
+                    "WHEN NEW.phase = 'COMMITTED' BEGIN SELECT RAISE(ABORT, 'controlled commit failure'); END",
+            )
+        }
         val manager = manager()
         val preview = manager.prepare(source)
         val installed = manager.confirmCopy(preview)
@@ -180,7 +184,7 @@ class LocalImportManagerTest {
         assertNull(installed.trackKey)
         val installedBytes = OwnedAudioProvider.finalFile(context, installed.intent.fileToken).readBytes()
         val copyOpenings = openings
-        database.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_import_publication")
+        database.withTestWriterSql { execute("DROP TRIGGER reject_import_publication") }
         reopenDatabase()
         assertEquals(ImportPhase.INSTALLED, ledger.record(installed.intent.operationId)?.phase)
         assertEquals(ImportRecoverySummary(1, 0, 0), manager().recover())
@@ -359,7 +363,8 @@ class LocalImportManagerTest {
         readMetadata = read, openInput = open, freeBytes = free, syncDirectory = { })
 
     private suspend fun openDatabase() {
-        database = Room.databaseBuilder(context, MeloXDatabase::class.java, databaseFile.absolutePath).build()
+        database = Room.databaseBuilder(context, MeloXDatabase::class.java, databaseFile.absolutePath)
+            .setDriver(BundledSQLiteDriver()).build()
         library = RoomLocalLibraryRepository(database)
         library.initialize()
         ledger = RoomImportLedger(library, OwnedAudioProvider.authority(context))

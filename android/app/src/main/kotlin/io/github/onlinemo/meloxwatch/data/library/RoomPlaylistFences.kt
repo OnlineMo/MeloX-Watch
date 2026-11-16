@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistCatalogFence
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
@@ -16,7 +17,7 @@ class RoomPlaylistFences(private val database: MeloXDatabase) :
     private val dao = database.libraryDao()
 
     override suspend fun verify(revision: PlaylistLibraryRevision) {
-        if (!database.inTransaction()) fail(PlaylistIssue.RECOVERY_REQUIRED)
+        if (!database.hasCurrentWriterTransaction()) fail(PlaylistIssue.RECOVERY_REQUIRED)
         val actual = dao.meta() ?: fail(PlaylistIssue.SOURCE_UNAVAILABLE)
         if (actual.revision != revision.catalogRevision || actual.rulesRevision != revision.rulesRevision) {
             fail(PlaylistIssue.SOURCE_CHANGED)

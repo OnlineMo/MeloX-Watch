@@ -81,9 +81,11 @@ class QueueMigrationTest {
                 for (index in 0 until entities.length()) {
                     val entity = entities.getJSONObject(index)
                     old.execSQL(entity.getString("createSql").replace("$" + "{TABLE_NAME}", entity.getString("tableName")))
-                    val indices = entity.getJSONArray("indices")
-                    for (position in 0 until indices.length()) {
-                        old.execSQL(indices.getJSONObject(position).getString("createSql").replace("$" + "{TABLE_NAME}", entity.getString("tableName")))
+                    val indices = if (entity.has("indices")) entity.getJSONArray("indices") else null
+                    if (indices != null) {
+                        for (position in 0 until indices.length()) {
+                            old.execSQL(indices.getJSONObject(position).getString("createSql").replace("$" + "{TABLE_NAME}", entity.getString("tableName")))
+                        }
                     }
                 }
                 val setup = schema.getJSONArray("setupQueries")
