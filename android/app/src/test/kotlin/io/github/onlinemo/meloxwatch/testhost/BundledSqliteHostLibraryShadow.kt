@@ -40,7 +40,16 @@ class BundledSqliteHostLibraryShadow {
             try {
                 Files.copy(original, copy)
                 copy.toFile().deleteOnExit()
-                check(Files.mismatch(original, copy) == -1L) { "The sandbox JNI copy must retain the verified bytes" }
+                Files.newInputStream(original).buffered(8192).use { source ->
+                    Files.newInputStream(copy).buffered(8192).use { duplicate ->
+                        while (true) {
+                            val expected = source.read()
+                            val actual = duplicate.read()
+                            check(expected == actual) { "The sandbox JNI copy must retain the verified bytes" }
+                            if (expected == -1) break
+                        }
+                    }
+                }
                 return copy
             } catch (error: Throwable) {
                 try { Files.deleteIfExists(copy) } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
