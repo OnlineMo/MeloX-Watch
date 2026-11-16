@@ -19,6 +19,8 @@ LP-05 无缝、APE 和 DSD 不以设置项或“不支持”提示算实现完�
 
 当前数据库迁移使用固定 Room 2.8.5 与 Bundled SQLite 2.6.2 的公开 writer API。真正的 COMMIT 失败由 Room 在归还连接前检查并回滚；不关闭重开数据库，不改用私有反射或较弱的故障触发器。生产 RawQuery、迁移和 Room 测试使用同一驱动，历史平台 schema 及 1→2 检查保留；主机 JNI 只从精确 JVM 制品提取，不重复加载 JVM 数据库类。修复的交叉审阅与下一轮云端编译、单测、lint、依赖/schema 资料验证分别进行，目前没有新的通过结果。
 
+该修复提交 `9e425b20b23f5e00fec8dbcf0d593be17ac92c0d` 的第六轮[run43914527409](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43914527409)/attempt1在Gradle脚本配置编译失败：两处`lowercase(java.util.Locale.ROOT)`无法解析`util`，应用任务与后续阶段未启动。这里只显式导入`Locale`并保留两处`Locale.ROOT`调用，不变更依赖或降低检查；原失败归档和独立诊断保留，精确build、job、artifact/hash见[13](../13-仓库状态.md)。配置修正仍须新云验，不证明数据库迁移或当前界面通过。
+
 ## 清理与生命周期契约
 
 歌单视图清理保留原 token，实际成功后才放弃所有权；超时呈现可重试 `BUSY`，真正调用方取消继续传播。具体库 closer 在 `NonCancellable` 内部设置期限，覆盖 mutex 和排队的 Room 事务。应用共享 closer 使用 2500ms；文件夹维护器独立使用 5000ms，前台 owner 退出还可能重试清理。这些期限不证明已开始的原生 SQLite 调用可被硬中断，也不构成 STOP 的物理耗时上界。

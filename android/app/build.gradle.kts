@@ -1,3 +1,4 @@
+import java.util.Locale
 import java.util.Properties
 import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.testing.Test
@@ -111,8 +112,8 @@ val bundledSqliteHost by configurations.creating {
     isTransitive = false
 }
 val bundledSqliteHostPlatform = run {
-    val systemName = System.getProperty("os.name").lowercase(java.util.Locale.ROOT)
-    val architecture = System.getProperty("os.arch").lowercase(java.util.Locale.ROOT)
+    val systemName = System.getProperty("os.name").lowercase(Locale.ROOT)
+    val architecture = System.getProperty("os.arch").lowercase(Locale.ROOT)
     val arm64 = architecture == "aarch64" || architecture == "arm64"
     val x64 = architecture == "amd64" || architecture == "x86_64"
     when {
