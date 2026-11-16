@@ -1,10 +1,10 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中；最新五阶段资料中Debug/Release/Diagnostic各226项实际通过，生成输入已独立审查并按原字节导入。该bootstrap运行按合同拒绝，正常严格APK构建、真实数据库升级与设备AC仍待验证。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中；五阶段生成输入已独立审查并按原字节导入，随后普通严格PR运行的Debug226项、lint及原APK核验通过。新增真实seeded数据库升级回归尚待云测，稳定签名覆盖升级、设备行为与256个原AC仍未验收。
 
 ## 数据身份、迁移与完整列表
 
-`MeloXApplication`共享一个`melox.db`和一个物理provider IO通道。Room从v1的三张队列表显式迁移到v2，新增27张实际使用的来源、授权、位置/版本、曲目/关系、扫描、视图、导入和聆听表及44个索引；不重建队列表，不使用破坏性fallback。schema1及schema2现取自完整五阶段云端原资料，经字段、约束与DDL独审后导入；失败的部分资料仍不作基线。CI按实际数据库版本要求两份schema，真实seeded 1→2迁移测试与设备覆盖升级仍待验证。
+`MeloXApplication`共享一个`melox.db`和一个物理provider IO通道。Room从v1的三张队列表显式迁移到v2，新增27张实际使用的来源、授权、位置/版本、曲目/关系、扫描、视图、导入和聆听表及44个索引；不重建队列表，不使用破坏性fallback。schema1及schema2现取自完整五阶段云端原资料，经字段、约束与DDL独审后导入；失败的部分资料仍不作基线。CI按实际数据库版本要求两份schema；新增回归从原schema1字节创建真实旧SQLite文件，使用生产`MeloXDatabase.open`迁移、核验旧队列并写入/重开新库数据，尚未执行；设备覆盖升级另验。
 
 TrackKey、位置、来源对象、授权与每次入队实例分开；同名不是实体证据。扫描先提交本代次已见对象，再提交解析成功或错误，保留首次加入时间和稳定插入序。来源/授权/规则/代次在每次写入重核；只有完整成功范围才能激活分批准备的缺失结论。取消、撤权、坏文件、排除和部分子树失败不会清空旧库或用户关系。旧库先打开，私有副本恢复作为独立可重试工作，失败不阻止已有可用音乐播放。
 
@@ -44,7 +44,7 @@ Library、Sources、Listening页面和中英资源已接入。列表/网格偏�
 
 ## 验证与未完成证据
 
-当前24个测试文件定义218个应用`@Test`（原214项保留，新增4项游标生命周期回归）：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。这是测试定义数量；首轮云编译在这些测试执行前失败，没有JUnit/lint/APK通过证据，本地没有运行Gradle、Kotlin/Java编译或Android测试。文本审查及同伴审阅不算AC通过。
+以下记录早期24个测试文件/218个应用`@Test`阶段（原214项保留，新增4项游标生命周期回归）：沿用并扩展P1存储/会话/协议，新增实际Room库及聆听、真实provider授权/替换、复制恢复、扫描代次/部分失败、真实图像缓存与物理IO取消、标签与完整摘要、有效聆听及服务观察器回归。本续轮还覆盖sealed队列的forward-only生产者、事务外预检/竞争CAS、真实provider拒绝/同大小替换/不合作取消、当前优先与有界邻项、历史receipt、提交后暂停/输出错误及旧URI清除，实际SourcesViewModel预览/取消/重授/长标题和通知Intent/Unicode边界。该阶段首轮云编译在测试执行前失败；后续真实结果逐轮记录，最新226项普通严格结果及新增第227项迁移定义见文末。本地没有运行Gradle、Kotlin/Java编译、Android测试或迁移SQL，文本审查及同伴审阅不算AC通过。
 
 PR #29的[run `43743042161`](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43743042161)/attempt1绑定source `162c24d9ccf23ea2796608821ed1bfc4ee018011`、实际checkout `0b7c00d9f06ca832180fc346652935676236c2d5`、compile job `132900247397`。verification阶段3分02秒失败，39项任务中36执行/3缓存；Debug/Diagnostic均报告`LocalImportManager`引用非公共`OsConstants.O_DIRECTORY`及`LibraryRecords`缺少`ScanMode`导入。修正使用公共`O_RDONLY | O_NOFOLLOW`，打开后以`S_ISDIR(Os.fstat(fd).st_mode)`核验同一descriptor再fsync/close，保持防止目录符号链接替换的要求；并补齐类型导入。公共API26声明已按AOSP固定提交`97e5130234bcdc1c4a705be4e548302934499bd4`独立核对，签名文件SHA-256 `f37327b7713d170a7c59d8c1d2ac7ed6ad2b90f5cb4ca92ec6362a2fa0d31c5b`。修正没有本地编译，下一轮云结果才可确认。
 
@@ -104,4 +104,12 @@ P0同版本`androidx.compose.runtime:runtime-android:1.9.3`实际直依赖在run
 
 上文为历史轮次。[run43792499334](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43792499334)/attempt1现在提供本主题完整五阶段原资料，source `e2971ee4688c1a34626d8fe2cb70ca3f78c15a26`与实际checkout `60f0b36378a53da2400ca3ded82badd5ab349c8b`的tree相同。Debug/Release/Diagnostic各26套226项真实通过，完整列表10000/10001项及保旧队列/重开路径保留原180000ms timeout。每变体lint为2条Hint，Fatal/Error/Warning为0。
 
-工作流最终按bootstrap合同拒绝，没有可接受APK。原XML、lock、schema1/2经独立资格审查后仅按原ZIP字节导入，细节及全部SHA见[依赖记录](DEV-104-dependencies.md#library完整云资料与sdk30基线导入)。普通严格PR构建、真实seeded schema1→2、覆盖升级与256原AC仍待验证；LP-04/05/07/08/09并行WIP未进入这个冻结源码。
+工作流最终按bootstrap合同拒绝，没有可接受APK。原XML、lock、schema1/2经独立资格审查后仅按原ZIP字节导入，细节及全部SHA见[依赖记录](DEV-104-dependencies.md#library完整云资料与sdk30基线导入)。下面记录其后的普通严格PR结果；真实seeded schema1→2、覆盖升级与256原AC仍待验证，LP-04/05/07/08/09并行WIP未进入这个冻结源码。
+
+## 普通严格PR与真实迁移回归
+
+[run43800615907](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43800615907)/attempt1绑定source `71d380bf703cd006fea97015479c0bc62cd4bbea`、原日志checkout `9d7c6ab0b796af05727578df7d114dc1b4185782`、compile job `133079783429`。source是checkout的合并父提交且完整tree相同，tree为`45191eca07770335e8bccd3f1aaca33845b7bff3`；普通严格构建及cloud-gate成功，PR稳定签名job按合同跳过。Debug26套226个唯一用例通过，failure/error/skipped为0；完整列表10000/10001及到期保旧队列、重开路径通过，76.562秒，原180000ms期限保持。本轮不执行Release/Diagnostic，不能套用bootstrap三变体结果。lint实为2条Hint/SimilarGradleDependency，Fatal/Error/Warning为0，不记为lint0。
+
+原reports artifact `14196128947`，APK artifact `14196675761` ZIP SHA-256 `6f62f689725cd2e6ca69e397da56427acabe079ba8bcff7b5dc00df3f4e2998d`。原APK为15988511字节，SHA-256 `503053e0d0ee49eafc2b04ddc990c42fbb78e9c3b12c92ebdbf24b43bd16b9f9`，包`io.github.onlinemo.meloxwatch.dev`、0.0.1/1；manifest、单证书签名和16KiB/4B alignment独立核验。临时PR证书`168a1db603a9ca3ca3a6de00fa26588c0617f51b3dbad7baf859d7449ace0cc3`与稳定Debug证书不同，不能覆盖VM现有安装，未安装/卸载/擦数据。独审记录SHA-256 `d5bdc028bd4aee7b8f14d490a7b69419bb33d6199edd25bbd9e9cb9d0fdd9a4a`，原材料只留ignored本地；本轮不证明设备性能、出声或任何原AC。
+
+新增`RoomMigrationOneToTwoTest`只定义一项原生SQLite/Room回归，原226项及应用/依赖输入保持。夹具资源与原schema1完整字节相等，SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`；测试源码SHA-256 `4293bd07cf26a1e154d0e1a7c8b02aee542fb93867442084269d7f3e251fc731`，独立静态审查SHA-256 `5ea3b669ac2a1fd6dc3736e190de748665adc4392aaa533e2699e097c83a97c6`。旧三表种入乱序/重复逻辑曲目的不同实例、授权位置及在线账号引用、54321ms位置、checkpoint revision7与cycles2；生产open强制迁移及Room验证，逐字段和有界窗口核验，再写真实library实体并reopen。当前共27套227个测试定义，新回归/新快照云构建尚未运行，稳定签名覆盖升级和256原AC仍未验收。
