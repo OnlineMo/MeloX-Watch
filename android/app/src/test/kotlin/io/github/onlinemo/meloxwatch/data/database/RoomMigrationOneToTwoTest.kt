@@ -176,7 +176,7 @@ class RoomMigrationOneToTwoTest {
         // The first forced open runs the registered migration and Room's generated validation
         // for all 30 entities. Later checks bind the same file to its persisted v2 identity.
         val sqlite = database.openHelper.writableDatabase
-        assertEquals(file.canonicalPath, File(sqlite.path).canonicalPath)
+        assertEquals(file.canonicalPath, File(requireNotNull(sqlite.path)).canonicalPath)
         assertEquals(2, sqlite.version)
         assertEquals(VERSION_TWO_TABLES, applicationTables(sqlite.query(TABLES_QUERY)))
         assertIdentity(sqlite.query(IDENTITY_QUERY), VERSION_TWO_IDENTITY)

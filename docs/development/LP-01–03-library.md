@@ -1,6 +1,6 @@
 # LP-01～03 文件接入、音乐库与聆听记录
 
-本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中；五阶段生成输入已独立审查并按原字节导入，随后普通严格PR运行的Debug226项、lint及原APK核验通过。新增真实seeded数据库升级回归尚待云测，稳定签名覆盖升级、设备行为与256个原AC仍未验收。
+本主题在DEV-104同一Android工程内建设LP-01～03，并集成LP-00设置、LP-04完整列表播放与LP-12列表外观的部分行为。用户已恢复并委托中间开发与审阅；首个预发布版仍包含128项本地需求、256个原AC、网易云、默认关闭且由用户配置的Meting和真实Android手机伴侣。当前是实现中；五阶段生成输入已独立审查并按原字节导入，随后普通严格PR运行的Debug226项、lint及原APK核验通过。新增真实seeded数据库升级回归首轮在云端测试编译失败，已修正可空数据库路径，运行与新快照验证仍待完成；稳定签名覆盖升级、设备行为与256个原AC仍未验收。
 
 ## 数据身份、迁移与完整列表
 
@@ -112,4 +112,8 @@ P0同版本`androidx.compose.runtime:runtime-android:1.9.3`实际直依赖在run
 
 原reports artifact `14196128947`，APK artifact `14196675761` ZIP SHA-256 `6f62f689725cd2e6ca69e397da56427acabe079ba8bcff7b5dc00df3f4e2998d`。原APK为15988511字节，SHA-256 `503053e0d0ee49eafc2b04ddc990c42fbb78e9c3b12c92ebdbf24b43bd16b9f9`，包`io.github.onlinemo.meloxwatch.dev`、0.0.1/1；manifest、单证书签名和16KiB/4B alignment独立核验。临时PR证书`168a1db603a9ca3ca3a6de00fa26588c0617f51b3dbad7baf859d7449ace0cc3`与稳定Debug证书不同，不能覆盖VM现有安装，未安装/卸载/擦数据。独审记录SHA-256 `d5bdc028bd4aee7b8f14d490a7b69419bb33d6199edd25bbd9e9cb9d0fdd9a4a`，原材料只留ignored本地；本轮不证明设备性能、出声或任何原AC。
 
-新增`RoomMigrationOneToTwoTest`只定义一项原生SQLite/Room回归，原226项及应用/依赖输入保持。夹具资源与原schema1完整字节相等，SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`；测试源码SHA-256 `4293bd07cf26a1e154d0e1a7c8b02aee542fb93867442084269d7f3e251fc731`，独立静态审查SHA-256 `5ea3b669ac2a1fd6dc3736e190de748665adc4392aaa533e2699e097c83a97c6`。旧三表种入乱序/重复逻辑曲目的不同实例、授权位置及在线账号引用、54321ms位置、checkpoint revision7与cycles2；生产open强制迁移及Room验证，逐字段和有界窗口核验，再写真实library实体并reopen。当前共27套227个测试定义，新回归/新快照云构建尚未运行，稳定签名覆盖升级和256原AC仍未验收。
+新增`RoomMigrationOneToTwoTest`只定义一项原生SQLite/Room回归，原226项及应用/依赖输入保持。夹具资源与原schema1完整字节相等，SHA-256 `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79`；初次测试源码SHA-256 `4293bd07cf26a1e154d0e1a7c8b02aee542fb93867442084269d7f3e251fc731`，初次独立静态审查SHA-256 `5ea3b669ac2a1fd6dc3736e190de748665adc4392aaa533e2699e097c83a97c6`。旧三表种入乱序/重复逻辑曲目的不同实例、授权位置及在线账号引用、54321ms位置、checkpoint revision7与cycles2；生产open强制迁移及Room验证，逐字段和有界窗口核验，再写真实library实体并reopen。当前共27套227个测试定义，首轮失败及修正见下；稳定签名覆盖升级和256原AC仍未验收。
+
+[run43805805052](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43805805052)/attempt1绑定source `ef56f06592fa016e745a6a8343546861689cf0cc`、原日志checkout `e6c46f0c8af18e4a28c12cbb95acccf91d870fb4`、compile job `133096243034`；完整tree相同，tree为`a688ff2b17eb41f85bd6237387b38029a0729add`。严格Debug测试Kotlin编译在`File(sqlite.path)`失败：实际路径类型为`String?`，Java构造器要求非空，`-Werror`按合同拒绝该警告。该轮没有运行227项测试、没有JUnit/lint报告或APK，稳定签名跳过。原日志SHA-256 `230dca27c462080c77539bee10a6d73ed18148d789cb3a734e1c73a441b70e67`，失败独审SHA-256 `16972fe994f996d9ce72e054d021bd191dfbdcae41ab91afb6d5fd76f756c56f`；不沿用旧226项结果作为本轮通过。
+
+修正只以`requireNotNull(sqlite.path)`要求真实文件路径，保留canonicalPath同文件断言、旧字段与reopen验证，不放宽编译或改生产迁移。修正后测试源码SHA-256 `4b7a828f2494a1679795a780c1f2ad9794084d0a4e7384fef869904648ce8611`；资源、原226项及生产/依赖输入保持原字节。新快照仍待云端验证；本地未执行Android/Kotlin/Java编译、迁移SQL或应用测试，readiness及256原AC保持未通过。
