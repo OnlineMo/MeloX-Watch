@@ -61,6 +61,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 
@@ -176,11 +177,18 @@ class QueuePlaybackCoordinatorTest {
 
     @Test
     fun closeRetriesTheCapturedFinalCheckpointWhenItsWriterIsCancelled() = runBlocking {
+        // An already durable position is deduplicated; exercise cancellation with a dirty clock.
+        val restored = queues.snapshot()
+        queues.saveCheckpoint(restored.generationId, restored.checkpointRevision, restored.checkpoint.copy(positionMs = 0L))
         coordinator.initialize()
         val gate = Gate(ignoreCancellation = false)
         queues.checkpointGate = gate
         val before = queues.completedWrites
+        backend.seekTo(1234L)
+        assertEquals(0L, queues.snapshot().positionMs)
+        assertEquals(1234L, backend.currentPosition)
         coordinator.requestCheckpoint()
+        shadowOf(Looper.getMainLooper()).idle()
         assertTrue(gate.entered.isCompleted)
         coordinator.detach()
         backend.release()
