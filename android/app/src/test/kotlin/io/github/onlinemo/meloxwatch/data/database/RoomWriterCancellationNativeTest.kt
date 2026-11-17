@@ -387,7 +387,9 @@ class RoomWriterCancellationNativeTest {
                                 }
                                 assertEquals(3L, marker())
                                 playlists.closeView(view.viewId)
-                                assertNull(database.playlistDao().view(view.viewId))
+                                withRoomCallerCancellation {
+                                    assertNull(database.playlistDao().view(view.viewId))
+                                }
                                 cleanupCommitted.set(true)
                             }
                         }
