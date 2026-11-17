@@ -64,9 +64,11 @@ import io.github.onlinemo.meloxwatch.playback.QueuePlaybackFailure
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CopyableThrowable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -1042,13 +1044,15 @@ class QueueCoordinatorIntegrationTest {
     fun failingInitialSwitchRefreshIsSurfacedAndDoesNotLeaveTheCoordinatorBusy() = onMain {
         seed()
         coordinator.sessionPlayer.play()
-        val failure = IllegalStateException("Backend command read failed")
+        val failure = BackendCommandReadFailure()
         backend.availableCommandsFailure = failure
+        // The initial getter fails once; pause and queued onEvents observe recovery.
+        backend.availableCommandsFailureRemaining = 1
         try {
             coordinator.freezeForBackendSwitch()
             throw AssertionError("The state read failure must be surfaced")
         } catch (error: IllegalStateException) { assertSame(failure, error) }
-        backend.availableCommandsFailure = null
+        finally { backend.availableCommandsFailure = null }
         assertFalse(backend.playWhenReady)
         val checkpoint = coordinator.freezeForBackendSwitch()
         coordinator.cancelBackendSwitch(checkpoint)
@@ -1340,6 +1344,13 @@ class QueueCoordinatorIntegrationTest {
         val checked = CheckedPlayer(raw)
         backends.add(checked)
         return checked to ControlledOperations(checked, raw)
+    }
+
+    /** Keep the fault identity across coroutine stack recovery for the original-error assertion. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class BackendCommandReadFailure : IllegalStateException("Backend command read failed"),
+        CopyableThrowable<BackendCommandReadFailure> {
+        override fun createCopy(): BackendCommandReadFailure? = null
     }
 
     private class FixedPreferences : UserPreferencesRepository {
