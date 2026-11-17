@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 import build
+from build_process import BuildTimeout
 
 SOURCE = 'a' * 40
 ENV = {
@@ -49,7 +50,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             with self.subTest(event=event, mode=mode), patch.dict(os.environ, {
                 'GITHUB_EVENT_NAME': event, 'GITHUB_REF': 'refs/heads/main',
                 'CANDIDATE_OPERATION': 'prepare-candidate',
-            }), patch.object(build.subprocess, 'run') as process, patch.object(build, 'inspect_apk') as inspect:
+            }), patch.object(build, 'run_gradle') as process, patch.object(build, 'inspect_apk') as inspect:
                 with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
                     build.build(mode)
                 process.assert_not_called()
@@ -58,17 +59,21 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
 
     def test_optimized_pr_modes_cannot_enter_bootstrap(self):
         for mode in ('release', 'diagnostic'):
-            with self.subTest(mode=mode), patch.object(build.subprocess, 'run') as process:
+            with self.subTest(mode=mode), patch.object(build, 'run_gradle') as process:
                 with self.assertRaisesRegex(ValueError, 'PR builds only temporary Debug'):
                     build.build(mode)
                 process.assert_not_called()
 
     def test_bootstrap_resolves_all_variants_unsigned_without_tokens_and_exports_no_apk(self):
         phases = []
+        deadlines = []
 
         def generated(command, **kwargs):
             phase = len(phases)
             phases.append(command)
+            deadlines.append(kwargs['total_deadline'])
+            self.assertEqual(kwargs['phase'], build.DEPENDENCY_DIAGNOSTIC_PHASES[phase])
+            self.assertEqual(kwargs['build_sha'], SOURCE)
             self.assertIn('--dependency-verification=strict', command)
             if phase == 0:
                 self.assertIn('--write-locks', command)
@@ -102,11 +107,12 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         with patch.dict(os.environ, {name: 'unlogged-test-marker' for name in
                                    ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN',
                                     'ACTIONS_ID_TOKEN_REQUEST_TOKEN', 'CI_DEPENDENCY_DIAGNOSTIC_PHASE')}), \
-                patch.object(build.subprocess, 'run', side_effect=generated) as process, \
+                patch.object(build, 'run_gradle', side_effect=generated) as process, \
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
             self.assertEqual(process.call_count, 5)
+            self.assertEqual(len(set(deadlines)), 1)
             inspect.assert_not_called()
         manifest = self.manifest()
         self.assertEqual(manifest['status'], 'generated-unreviewed')
@@ -159,7 +165,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             else:
                 self.assertEqual(lock.read_text(encoding='utf-8'), 'normal task graph\n')
 
-        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
             inspect.assert_not_called()
@@ -176,7 +182,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 raise subprocess.CalledProcessError(1, command)
             self.write_inputs(build.DEPENDENCY_REPORT_FILES)
 
-        with patch.object(build.subprocess, 'run', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaises(subprocess.CalledProcessError):
                 build.build('debug')
             self.assertEqual(process.call_count, 2)
@@ -200,7 +206,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             else:
                 raise subprocess.CalledProcessError(1, command)
 
-        with patch.object(build.subprocess, 'run', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaises(subprocess.CalledProcessError):
                 build.build('debug')
             self.assertEqual(process.call_count, 3)
@@ -219,7 +225,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             else:
                 (self.android / 'app/gradle.lockfile').write_text('unreviewed drift\n', encoding='utf-8')
 
-        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'changed dependency input bytes'):
                 build.build('debug')
             inspect.assert_not_called()
@@ -233,7 +239,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             self.write_inputs(('gradle/verification-metadata.xml',))
             raise subprocess.CalledProcessError(1, command)
 
-        with patch.object(build.subprocess, 'run', side_effect=failed), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=failed), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaises(subprocess.CalledProcessError):
                 build.build('debug')
             inspect.assert_not_called()
@@ -241,6 +247,24 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['status'], 'failed-partial')
         self.assertEqual(manifest['missing_outputs'], ['app/gradle.lockfile'])
         self.assertFalse(manifest['accepted'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_gradle_timeout_preserves_partial_reports_without_accepting_inputs_or_exporting_apk(self):
+        def timed_out(command, **kwargs):
+            self.write_inputs(('gradle/verification-metadata.xml',))
+            raise BuildTimeout(command, kwargs['phase'], 'active test deadline including setup/cleanup', 240)
+
+        with patch.object(build, 'run_gradle', side_effect=timed_out) as process, \
+                patch.object(build, 'inspect_apk') as inspect:
+            with self.assertRaises(BuildTimeout):
+                build.build('debug')
+            process.assert_called_once()
+            inspect.assert_not_called()
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'failed-partial')
+        self.assertEqual(manifest['missing_outputs'], ['app/gradle.lockfile'])
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse(manifest['apk_exported'])
         self.assertFalse((self.root / 'artifacts').exists())
 
     def test_report_copy_drift_after_last_strict_pass_is_rejected_and_marked_partial(self):
@@ -251,7 +275,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 source.write_text('changed after strict validation\n', encoding='utf-8')
             return original_copy(source, target)
 
-        with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs: self.write_inputs()), \
+        with patch.object(build, 'run_gradle', side_effect=lambda *args, **kwargs: self.write_inputs()), \
                 patch.object(build.shutil, 'copyfile', side_effect=copy_with_drift), \
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'strict input bytes in reports'):
@@ -273,7 +297,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             return SOURCE
 
         with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/contribution'}), \
-                patch.object(build, 'git', side_effect=git_command), patch.object(build.subprocess, 'run') as process:
+                patch.object(build, 'git', side_effect=git_command), patch.object(build, 'run_gradle') as process:
             with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
                 build.build('debug')
             process.assert_not_called()
@@ -281,7 +305,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
     def test_complete_committed_inputs_use_strict_build_without_generation(self):
         self.write_inputs()
         with patch.dict(os.environ, {'CI_DEPENDENCY_DIAGNOSTIC_PHASE': 'strict-debug'}), \
-                patch.object(build.subprocess, 'run', side_effect=RuntimeError('mock stops before APK validation')) as process:
+                patch.object(build, 'run_gradle', side_effect=RuntimeError('mock stops before APK validation')) as process:
             with self.assertRaisesRegex(RuntimeError, 'mock stops'):
                 build.build('debug')
         command = process.call_args.args[0]
@@ -296,7 +320,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         (self.android / 'app/src/androidTest').mkdir(parents=True)
         self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('diagnostic'))
         self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', build.gradle_tasks('debug'))
-        with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs: self.write_inputs()) as process:
+        with patch.object(build, 'run_gradle', side_effect=lambda *args, **kwargs: self.write_inputs()) as process:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
         commands = [call.args[0] for call in process.call_args_list]
@@ -317,7 +341,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         def generated(command, **kwargs):
             self.write_inputs((*build.DEPENDENCY_REPORT_FILES, schema))
 
-        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
             inspect.assert_not_called()
@@ -342,7 +366,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             else:
                 (self.android / schema).write_text('different generated schema\n', encoding='utf-8')
 
-        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'changed dependency input bytes'):
                 build.build('debug')
             inspect.assert_not_called()
@@ -357,7 +381,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text('@Database(version = 1, exportSchema = true)\n', encoding='utf-8')
         self.write_inputs()
-        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build.subprocess, 'run') as process:
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build, 'run_gradle') as process:
             with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
                 build.build('debug')
             process.assert_not_called()
@@ -372,7 +396,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         def changed(command, **kwargs):
             schema.write_text('changed schema fixture\n', encoding='utf-8')
 
-        with patch.object(build.subprocess, 'run', side_effect=changed), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=changed), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'changed the reviewed Room schema'):
                 build.build('debug')
             inspect.assert_not_called()
@@ -386,7 +410,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             schema.parent.mkdir(parents=True)
             schema.write_text('new schema fixture\n', encoding='utf-8')
 
-        with patch.object(build.subprocess, 'run', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
+        with patch.object(build, 'run_gradle', side_effect=generated), patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'changed the reviewed Room schema'):
                 build.build('debug')
             inspect.assert_not_called()
@@ -399,7 +423,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         initial = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
         current = build.ROOM_SCHEMA_DIRECTORY + '/2.json'
         self.write_inputs((*build.DEPENDENCY_INPUTS, initial))
-        with patch.object(build.subprocess, 'run', side_effect=lambda *args, **kwargs:
+        with patch.object(build, 'run_gradle', side_effect=lambda *args, **kwargs:
                           self.write_inputs((*build.DEPENDENCY_REPORT_FILES, current))) as process, \
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
@@ -419,7 +443,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text('@Database(version = 2, exportSchema = true)', encoding='utf-8')
         self.write_inputs((*build.DEPENDENCY_INPUTS, build.ROOM_SCHEMA_DIRECTORY + '/1.json'))
-        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build.subprocess, 'run') as process:
+        with patch.dict(os.environ, {'GITHUB_EVENT_NAME': 'push'}), patch.object(build, 'run_gradle') as process:
             with self.assertRaisesRegex(ValueError, 'Committed strict dependency inputs'):
                 build.build('debug')
             process.assert_not_called()

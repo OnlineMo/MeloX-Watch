@@ -114,7 +114,7 @@ class ArtifactBoundaryTests(unittest.TestCase):
     def test_secret_injection_stops_before_preflight_or_gradle(self):
         for name in ('SIGNING_KEY_B64', 'SIGNING_PASSWORD', 'RELEASE_KEYSTORE_B64', 'CI_DEBUG_STORE_PASSWORD'):
             with self.subTest(name=name), patch.dict(os.environ, ENV | {name: 'test-marker'}, clear=True), \
-                    patch.object(build, 'check') as preflight, patch.object(build.subprocess, 'run') as process:
+                    patch.object(build, 'check') as preflight, patch.object(build, 'run_gradle') as process:
                 with self.assertRaisesRegex(ValueError, 'must not receive'):
                     build.build('debug')
                 preflight.assert_not_called()

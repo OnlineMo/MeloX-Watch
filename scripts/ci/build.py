@@ -4,9 +4,10 @@ import json
 import os
 import re
 import shutil
-import subprocess
+import time
 
 from apk_verify import build_tools, certificate, inspect_apk, require_unsigned
+from build_process import run_gradle, TOTAL_BUILD_SECONDS
 from check import check
 from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secrets,
                        properties, require, run_tool, sha256, write_checksums, write_json)
@@ -101,9 +102,10 @@ def generated_input_hashes():
     return files
 
 
-def bootstrap_dependencies(build_sha, missing):
+def bootstrap_dependencies(build_sha, missing, total_deadline=None):
     """PR-only资料采集；无论生成成功与否，都不能导出可验收APK。"""
     android = ROOT / 'android'
+    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
     tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in gradle_tasks(mode)]
     phases = [
         {'name': 'verification-collection', 'command': gradle_command(tasks) +
@@ -119,8 +121,8 @@ def bootstrap_dependencies(build_sha, missing):
         for phase in phases:
             phase['status'] = 'started'
             # verification writer 会额外解析全配置；最终锁须来自独立的正常任务解析。
-            subprocess.run(phase['command'], cwd=android,
-                           env=gradle_environment(unsigned=True, diagnostic_phase=phase['name']), check=True)
+            run_gradle(phase['command'], cwd=android, phase=phase['name'], build_sha=build_sha, total_deadline=total_deadline,
+                       env=gradle_environment(unsigned=True, diagnostic_phase=phase['name']))
             if phase['name'] == 'normal-lock-collection':
                 strict_input_hashes = generated_input_hashes()
                 require(all(name in strict_input_hashes for name in required_build_inputs()),
@@ -174,17 +176,18 @@ def build(mode):
     if mode != 'debug':
         require(os.environ.get('CANDIDATE_OPERATION') == 'prepare-candidate', 'Use candidate preparation for optimized builds')
     tasks = gradle_tasks(mode)
+    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS
     has_instrumentation = mode == 'diagnostic' and (ROOT / 'android/app/src/androidTest').is_dir()
     missing = missing_dependency_inputs()
     if missing:
         require(is_pr and mode == 'debug',
                 'Committed strict dependency inputs are missing: ' + ', '.join(missing) + '. '
                 'Only a temporary Debug PR may bootstrap dependency reports; trusted builds cannot.')
-        bootstrap_dependencies(build_sha, missing)
+        bootstrap_dependencies(build_sha, missing, total_deadline)
     schemas_before = room_schema_hashes()
     environment = gradle_environment(unsigned=not is_pr)
-    subprocess.run(gradle_command(tasks),
-                   cwd=ROOT / 'android', env=environment, check=True)
+    run_gradle(gradle_command(tasks), cwd=ROOT / 'android', env=environment,
+               phase=mode + '-build', build_sha=build_sha, total_deadline=total_deadline)
     require(properties(ROOT / 'version.properties') == version, 'Build modified version metadata')
     require(room_schema_hashes() == schemas_before,
             'Build changed the reviewed Room schema. Collect and review schema changes in a PR bootstrap.')

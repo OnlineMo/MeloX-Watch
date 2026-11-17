@@ -8,6 +8,7 @@ import androidx.sqlite.SQLiteException
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.withRoomCallerCancellation
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -237,7 +238,7 @@ class RoomPlaylistRepository(
 
     override suspend fun closeView(viewId: String) = storage {
         requirePlaylistIdentifier(viewId)
-        dao.deleteView(viewId)
+        withRoomCallerCancellation { dao.deleteView(viewId) }
         Unit
     }
 

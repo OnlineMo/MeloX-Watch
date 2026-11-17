@@ -1,7 +1,11 @@
+import groovy.json.JsonOutput
 import java.util.Locale
 import java.util.Properties
 import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.testing.Test
+import org.gradle.api.tasks.testing.TestDescriptor
+import org.gradle.api.tasks.testing.TestListener
+import org.gradle.api.tasks.testing.TestResult
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
@@ -143,6 +147,27 @@ tasks.withType<Test>().configureEach {
         bundledSqliteHostDirectory.get().dir("natives/${bundledSqliteHostPlatform.first}").asFile.absolutePath)
     systemProperty("androidx.sqlite.driver.bundled.name", bundledSqliteHostPlatform.second)
     maxParallelForks = 1
+    failFast = true
+    val testTaskPath = path
+    addTestListener(object : TestListener {
+        override fun beforeSuite(suite: TestDescriptor) = Unit
+        override fun afterSuite(suite: TestDescriptor, result: TestResult) = Unit
+
+        override fun beforeTest(test: TestDescriptor) {
+            logger.lifecycle("MELOX_CI_TEST " + JsonOutput.toJson(mapOf(
+                "event" to "start", "task" to testTaskPath,
+                "className" to (test.className ?: test.parent?.className ?: "UnknownTestClass"), "name" to test.name,
+            )))
+        }
+
+        override fun afterTest(test: TestDescriptor, result: TestResult) {
+            logger.lifecycle("MELOX_CI_TEST " + JsonOutput.toJson(mapOf(
+                "event" to "end", "task" to testTaskPath,
+                "className" to (test.className ?: test.parent?.className ?: "UnknownTestClass"), "name" to test.name,
+                "result" to result.resultType.name,
+            )))
+        }
+    })
     testLogging {
         // A cancelled cloud test can lack JUnit XML; retain the native loader's full cause in its log.
         exceptionFormat = TestExceptionFormat.FULL

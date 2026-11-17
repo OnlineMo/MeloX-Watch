@@ -49,8 +49,11 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -484,7 +487,33 @@ class RoomPlaylistExchangeController(
     }
 
     private suspend fun <T> boundedCleanup(block: suspend () -> T): T = try {
-        withContext(NonCancellable) { withTimeout(cleanupTimeoutMs) { block() } }
+        withContext(NonCancellable) {
+            // The deadline limits awaiting this owned worker. Room treats every TCE as a
+            // connection timeout, so its queue must receive an ordinary cancellation instead.
+            // The shared writer helper must preserve this worker's Job through acquisition.
+            supervisorScope {
+                val cleanup = async { block() }
+                var failure: Throwable? = null
+                try {
+                    withTimeout(cleanupTimeoutMs) { cleanup.await() }
+                } catch (error: Throwable) {
+                    failure = error
+                    try { cleanup.cancel(CancellationException("Playlist exchange cleanup did not complete", error)) }
+                    catch (closing: Throwable) {
+                        if (closing !== error) error.addSuppressed(closing)
+                    }
+                    throw error
+                } finally {
+                    // Retain controller/lease ownership until queued work has really stopped.
+                    try { cleanup.cancelAndJoin() }
+                    catch (closing: Throwable) {
+                        val original = failure
+                        if (original == null) throw closing
+                        if (closing !== original) original.addSuppressed(closing)
+                    }
+                }
+            }
+        }
     } catch (_: TimeoutCancellationException) {
         fail(PlaylistIssue.BUSY)
     }
