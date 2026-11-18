@@ -45,6 +45,34 @@ class TestProgressTests(unittest.TestCase):
         self.assertTrue(progress.overdue(11, 10))
         self.assertEqual(progress.snapshot(11)['active'][0]['observed_seconds'], 10)
 
+    def test_two_worker_classes_keep_independent_240_second_deadlines_for_the_same_method_name(self):
+        progress = monitor.TestProgress()
+
+        def worker_event(kind, class_name, result=None):
+            fields = {'event': kind, 'task': ':app:testWatchAndroidDebugUnitTest',
+                      'className': class_name, 'name': 'sharedMethod[26]'}
+            if result is not None:
+                fields['result'] = result
+            return monitor.TEST_EVENT_PREFIX + json.dumps(fields)
+
+        self.assertTrue(progress.consume(worker_event('start', 'FirstWorkerClass'), 5))
+        self.assertTrue(progress.consume(worker_event('start', 'SecondWorkerClass'), 10))
+        self.assertEqual(len(progress.active), 2)
+        self.assertFalse(progress.overdue(244.999, 240))
+        self.assertTrue(progress.consume(worker_event('end', 'SecondWorkerClass', 'SUCCESS'), 244.999))
+        self.assertEqual(len(progress.active), 1)
+        self.assertFalse(progress.consume('Unrelated second-worker and Gradle output', 244.999))
+        self.assertTrue(progress.overdue(245, 240))
+        active = progress.snapshot(245)['active']
+        self.assertEqual(active, [{'task': ':app:testWatchAndroidDebugUnitTest',
+                                   'className': 'FirstWorkerClass', 'name': 'sharedMethod[26]',
+                                   'observed_seconds': 240}])
+        self.assertTrue(progress.consume(worker_event('end', 'FirstWorkerClass', 'SUCCESS'), 245.1))
+        self.assertEqual(progress.active, {})
+        self.assertEqual(progress.completed, 2)
+        self.assertEqual(progress.invalid_events, 0)
+        self.assertTrue(progress.overdue(245.1, 240))
+
     def test_duplicate_start_does_not_replace_the_original_deadline(self):
         progress = monitor.TestProgress()
         progress.consume(event('start'), 1)

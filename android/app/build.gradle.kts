@@ -1,6 +1,8 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
 import java.util.Locale
 import java.util.Properties
+import java.util.concurrent.TimeUnit
 import org.gradle.api.tasks.Sync
 import org.gradle.api.tasks.testing.Test
 import org.gradle.api.tasks.testing.TestDescriptor
@@ -147,6 +149,113 @@ tasks.withType<Test>().configureEach {
         bundledSqliteHostDirectory.get().dir("natives/${bundledSqliteHostPlatform.first}").asFile.absolutePath)
     systemProperty("androidx.sqlite.driver.bundled.name", bundledSqliteHostPlatform.second)
     maxParallelForks = 1
+    // One Gradle task owns the workers; two test forks have an explicit combined 1 GiB heap budget.
+    maxHeapSize = "512m"
+    doFirst {
+        maxParallelForks = 1
+        val workerLimit = gradle.startParameter.maxWorkerCount
+        val eligible = System.getenv("GITHUB_ACTIONS") == "true" &&
+            System.getenv("CI_UNSIGNED_APK") == "true" && System.getenv("GITHUB_EVENT_NAME") == "pull_request"
+        var probeStatus = if (eligible) "unavailable" else "not-requested"
+        var resources: Map<*, *>? = null
+        var interrupted: InterruptedException? = null
+        var process: Process? = null
+        if (eligible) {
+            try {
+                process = ProcessBuilder("python3", rootProject.file("../scripts/ci/probe_ci_resources.py").absolutePath,
+                    "--worker-limit", workerLimit.toString()).redirectError(ProcessBuilder.Redirect.DISCARD).start()
+                val ownedProbe = checkNotNull(process)
+                if (!ownedProbe.waitFor(3, TimeUnit.SECONDS)) {
+                    probeStatus = "timed-out"
+                } else if (ownedProbe.exitValue() != 0) {
+                    probeStatus = "failed"
+                } else {
+                    val bytes = ownedProbe.inputStream.use { it.readNBytes(4097) }
+                    if (bytes.size > 4096) {
+                        probeStatus = "oversized"
+                    } else {
+                        resources = JsonSlurper().parseText(String(bytes, Charsets.UTF_8)) as? Map<*, *>
+                        probeStatus = if (resources == null) "invalid" else "parsed"
+                    }
+                }
+            } catch (error: InterruptedException) {
+                interrupted = error
+            } catch (_: Exception) {
+                probeStatus = "unavailable"
+            } finally {
+                // The helper never spawns children. Only its returned handle may be stopped and reaped.
+                try {
+                    process?.let { ownedProbe ->
+                        if (ownedProbe.isAlive) ownedProbe.destroy()
+                        val cleanupDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300)
+                        while (ownedProbe.isAlive && System.nanoTime() < cleanupDeadline) {
+                            try {
+                                ownedProbe.waitFor(50, TimeUnit.MILLISECONDS)
+                            } catch (error: InterruptedException) {
+                                if (interrupted == null) interrupted = error else interrupted?.addSuppressed(error)
+                            }
+                            if (ownedProbe.isAlive) ownedProbe.destroyForcibly()
+                        }
+                        check(!ownedProbe.isAlive) { "Owned CI resource probe did not terminate" }
+                        try {
+                            ownedProbe.inputStream.close()
+                        } finally {
+                            try { ownedProbe.outputStream.close() } finally { ownedProbe.errorStream.close() }
+                        }
+                    }
+                } finally {
+                    if (interrupted != null) Thread.currentThread().interrupt()
+                }
+            }
+        }
+        interrupted?.let { error -> throw error }
+        fun measuredInteger(key: String): Long? = when (val value = resources?.get(key)) {
+            is Int -> value.toLong().takeIf { it >= 0L }
+            is Long -> value.takeIf { it >= 0L }
+            else -> null
+        }
+        fun measuredCpu(key: String): Double? = (resources?.get(key) as? Number)?.toDouble()
+            ?.takeIf { it.isFinite() && it >= 0.0 && it <= 262144.0 }
+        val schemaMatches = measuredInteger("schema_version") == 1L &&
+            measuredInteger("worker_limit") == workerLimit.toLong()
+        val cpu = measuredCpu("effective_cpu_count")
+        val total = measuredInteger("effective_memory_total_bytes")
+        val available = measuredInteger("effective_memory_available_bytes")
+        val complete = schemaMatches && resources?.get("measurement_complete") == true &&
+            resources?.get("cgroup_namespace_initial_verified") == true &&
+            cpu != null && cpu > 0.0 && total != null && total > 0L &&
+            available != null && available <= total
+        // A single Test task does not run application compilation in parallel. Before forking,
+        // 3 GiB available reserves 1 GiB for two 512 MiB heaps and 2 GiB for native/system growth.
+        // Native and daemon PSS are not hard bounded; resource usage, OOM and elapsed time need cloud measurement.
+        // Unknown cgroup/ancestor constraints keep one fork; this is a trial, not a speed guarantee.
+        if (complete && workerLimit >= 2 && checkNotNull(cpu) >= 2.0 &&
+            checkNotNull(total) >= 6L * 1024 * 1024 * 1024 &&
+            checkNotNull(available) >= 3L * 1024 * 1024 * 1024 &&
+            measuredInteger("max_parallel_forks") == 2L) {
+            maxParallelForks = 2
+        }
+        if (probeStatus == "parsed") probeStatus = if (complete) "measured" else "incomplete"
+        val report = linkedMapOf<String, Any?>(
+            "schema_version" to 1, "task" to path, "worker_limit" to workerLimit,
+            "probe_status" to probeStatus, "measurement_complete" to complete,
+            "max_parallel_forks" to maxParallelForks, "test_heap_limit_bytes" to 512L * 1024 * 1024,
+        )
+        report["effective_cpu_count"] = measuredCpu("effective_cpu_count")
+        report["cgroup_quota_cpu_count"] = measuredCpu("cgroup_quota_cpu_count")
+        for (key in listOf("logical_cpu_count", "affinity_cpu_count",
+            "cgroup_cpuset_cpu_count", "effective_memory_total_bytes",
+            "effective_memory_available_bytes", "physical_memory_total_bytes", "physical_memory_available_bytes",
+            "cgroup_memory_limit_bytes", "cgroup_memory_available_bytes")) report[key] = measuredInteger(key)
+        val initialCgroupNamespace = resources?.get("cgroup_namespace_initial_verified")
+        report["cgroup_namespace_initial_verified"] = if (initialCgroupNamespace is Boolean) initialCgroupNamespace else null
+        val cgroupVersion = resources?.get("cgroup_version")
+        report["cgroup_version"] = when (cgroupVersion) {
+            "v1", "v2", "hybrid", "none", "unavailable" -> cgroupVersion
+            else -> null
+        }
+        logger.lifecycle("MELOX_CI_TEST_RESOURCES " + JsonOutput.toJson(report))
+    }
     failFast = true
     val testTaskPath = path
     addTestListener(object : TestListener {

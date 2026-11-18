@@ -77,6 +77,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             self.assertEqual(kwargs['phase'], EXPECTED_PHASES[phase])
             self.assertEqual(kwargs['build_sha'], SOURCE)
             self.assertIn('--dependency-verification=strict', command)
+            self.assertEqual('--info' in command, phase >= 4)
             if phase < 3:
                 self.assertIn('--write-locks', command)
                 self.assertEqual(command[command.index('--write-verification-metadata') + 1], 'sha256')
@@ -135,6 +136,26 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
         self.assertTrue(manifest['report_matches_strict_inputs'])
         self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_strict_bootstrap_info_only_adds_diagnostics_without_changing_task_or_flag_contracts(self):
+        with patch.object(build, 'run_gradle', side_effect=lambda *args, **kwargs: self.write_inputs()) as process:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.bootstrap_dependencies(SOURCE, list(build.DEPENDENCY_INPUTS), total_deadline=12345)
+        calls = process.call_args_list
+        self.assertEqual(len(calls), 7)
+        for index, mode in enumerate(('debug', 'release', 'diagnostic')):
+            self.assertEqual(calls[index].args[0], build.gradle_command(build.gradle_tasks(mode)) +
+                             ['--write-verification-metadata', 'sha256', '--write-locks'])
+            self.assertEqual(calls[index + 4].args[0], build.gradle_command(build.gradle_tasks(mode)) + ['--info'])
+        all_tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in build.gradle_tasks(mode)]
+        self.assertEqual(calls[3].args[0], build.gradle_command([*all_tasks, build.LOCK_COLLECTION_TASK]) + ['--write-locks'])
+        for call in calls:
+            self.assertEqual(call.kwargs['total_deadline'], 12345)
+            self.assertEqual(call.kwargs['env']['CI_UNSIGNED_APK'], 'true')
+            self.assertEqual(call.kwargs['env']['GITHUB_EVENT_NAME'], 'pull_request')
+        self.assertNotIn('--info', build.gradle_command(build.gradle_tasks('debug')))
+        self.assertNotIn('--info', build.gradle_command(build.gradle_tasks('release')))
+        self.assertNotIn('--info', build.gradle_command(build.gradle_tasks('diagnostic')))
 
     def test_each_variant_writer_failure_stops_before_normal_and_strict_even_with_complete_outputs(self):
         for index, failed_phase in enumerate(EXPECTED_PHASES[:3]):
@@ -445,6 +466,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 build.build('debug')
         command = process.call_args.args[0]
         self.assertIn('--dependency-verification=strict', command)
+        self.assertNotIn('--info', command)
         self.assertNotIn('--write-verification-metadata', command)
         self.assertNotIn('--write-locks', command)
         self.assertEqual(process.call_args.kwargs['env']['CI_UNSIGNED_APK'], 'false')

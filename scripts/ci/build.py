@@ -116,7 +116,8 @@ def bootstrap_dependencies(build_sha, missing, total_deadline=None):
           for mode in ('debug', 'release', 'diagnostic')),
         # 真实任务先消费正常图；末尾补齐配置，避免采集任务提前固定消费者的图。
         {'name': 'normal-lock-collection', 'command': gradle_command([*tasks, LOCK_COLLECTION_TASK]) + ['--write-locks']},
-        *({'name': 'strict-' + mode, 'command': gradle_command(gradle_tasks(mode))}
+        # Task cache reasons are limited to unsigned strict bootstrap calls and bounded capture.
+        *({'name': 'strict-' + mode, 'command': gradle_command(gradle_tasks(mode)) + ['--info']}
           for mode in ('debug', 'release', 'diagnostic')),
     ]
     completed = False
