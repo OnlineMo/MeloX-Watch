@@ -66,13 +66,59 @@ def inputConsumers = new ArrayList(writerTasks)
     }
 }
 def optionalInputs = ['Debug', 'Release', 'Diagnostic'].collect { ":app:lintAnalyzeWatchAndroid${it}AndroidTest".toString() }
+def archiveConsumers = [:]
+(inputConsumers + optionalInputs).each { id -> archiveConsumers[id] = 'task-input-archives' }
+['Debug', 'Release', 'Diagnostic'].each { variant ->
+    archiveConsumers[":app:testWatchAndroid${variant}UnitTest".toString()] = 'test-classpath-archives'
+}
+['bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'].each { name ->
+    archiveConsumers[":app:${name}".toString()] = 'configuration-artifacts'
+}
+[':buildscript:classpath', ':app:buildscript:classpath'].each { id -> archiveConsumers[id] = 'buildscript-artifacts' }
+def archiveRejection = { id, kind, file, path, regularFile, safeName ->
+    // This observes the first refusal without reading it or exporting a path/name; it never permits the input.
+    def approved = archiveConsumers.containsKey(id) && archiveConsumers[id] == kind
+    def scope = path.startsWith(androidRoot.resolve('build')) || path.startsWith(androidRoot.resolve('app/build')) ?
+        'project-build-output' : path.startsWith(androidRoot) ? 'project-input' :
+        path.startsWith(gradle.gradleUserHomeDir.toPath().toAbsolutePath().normalize()) ? 'gradle-user-home' : 'outside-project'
+    def directory = Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+    def state = directory ? 'directory' : regularFile ? 'regular-file' :
+        Files.exists(path, LinkOption.NOFOLLOW_LINKS) ? 'other' : 'not-observed'
+    def name = file.name
+    def nameHash = name.length() <= 1024 ?
+        MessageDigest.getInstance('SHA-256').digest(name.getBytes('UTF-8')).encodeHex().toString() : null
+    def line = 'CI_DEPENDENCY_ARCHIVE_REJECTION ' + groovy.json.JsonOutput.toJson([
+        schema_version: 1, kind: 'dependency-archive-rejection',
+        consumer_id: approved ? id : 'unapproved-consumer', consumer_kind: approved ? kind : 'unapproved-kind',
+        input_scope: scope, regular_file_at_gate: regularFile, archive_name_safe_at_gate: safeName,
+        directory: directory, observed_state: state,
+        archive_suffix: name.endsWith('.jar') ? 'jar' : name.endsWith('.aar') ? 'aar' : 'other',
+        basename_sha256: nameHash,
+    ])
+    requireMigration(line.getBytes('UTF-8').length <= 1024, 'Dependency acquisition archive rejection diagnostic exceeds its bound')
+    gradle.rootProject.logger.lifecycle(line)
+}
 def hashedFiles = [:]
 long reservedBytes = 0
-def archiveBytes = { file ->
+def archiveBytes = { file, id, kind ->
     def path = file.toPath().toAbsolutePath().normalize()
     safeParents(path)
-    requireMigration(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) &&
-        file.name ==~ /[A-Za-z0-9_.+\-]{1,200}\.(jar|aar)/, 'Dependency acquisition archive is missing or unsafe')
+    def regularFile = Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+    def safeName = file.name ==~ /[A-Za-z0-9_.+\-]{1,200}\.(jar|aar)/
+    try {
+        requireMigration(regularFile && safeName, 'Dependency acquisition archive is missing or unsafe')
+    } catch (GradleException failure) {
+        try {
+            archiveRejection(id, kind, file, path, regularFile, safeName)
+        } catch (Throwable ignored) {
+            try {
+                failure.addSuppressed(new GradleException('Dependency acquisition archive rejection diagnostic is unavailable'))
+            } catch (Throwable ignoredSuppression) {
+                // Diagnostic allocation/linkage failures cannot replace the original archive refusal.
+            }
+        }
+        throw failure
+    }
     def before = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
     requireMigration(before.size() > 0 && before.size() <= 256L * 1024 * 1024, 'Dependency acquisition archive exceeds its bound')
     def cached = hashedFiles[path]
@@ -114,7 +160,7 @@ def fileCollectionRecord = { id, kind, collection ->
         def path = file.toPath().toAbsolutePath().normalize()
         safeParents(path)
         if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
-            record.files.add(archiveBytes(file))
+            record.files.add(archiveBytes(file, id, kind))
         } else if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
             record.directory_count++
         } else if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
@@ -138,7 +184,7 @@ def moduleArtifactsRecord = { id, kind, configuration ->
         requireMigration(component instanceof ModuleComponentIdentifier, 'Dependency acquisition requires Maven module artifacts')
         def parts = [component.group, component.module, component.version]
         requireMigration(parts.every { it ==~ /[A-Za-z0-9_.+\-]{1,120}/ }, 'Dependency acquisition module coordinate is unsafe')
-        archiveBytes(artifact.file) + [component: parts]
+        archiveBytes(artifact.file, id, kind) + [component: parts]
     }.sort { a, b -> groovy.json.JsonOutput.toJson(a) <=> groovy.json.JsonOutput.toJson(b) }
     [id: id, kind: kind, files: files]
 }
@@ -155,6 +201,13 @@ gradle.projectsEvaluated {
     def acquire = root.tasks.register('ciAcquireDependencyFiles') { task ->
         task.notCompatibleWithConfigurationCache('Dependency acquisition reads exact consumer files')
         task.mustRunAfter(inputConsumers)
+        // Runtime classpath outputs need their own producers before file acquisition.
+        ['Debug', 'Release', 'Diagnostic'].each { variant ->
+            def id = ":app:testWatchAndroid${variant}UnitTest".toString()
+            def test = root.tasks.getByPath(id)
+            requireMigration(test instanceof Test, 'Dependency acquisition test classpath is unavailable')
+            task.dependsOn(test.classpath.buildDependencies)
+        }
         task.doLast {
             (inputConsumers + optionalInputs.findAll { gradle.taskGraph.hasTask(it) }).each { id ->
                 def consumer = root.tasks.getByPath(id)
