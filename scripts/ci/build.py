@@ -7,6 +7,7 @@ from pathlib import PurePosixPath
 import re
 import shutil
 import time
+import xml.etree.ElementTree as ET
 
 from apk_verify import build_tools, certificate, inspect_apk, require_unsigned
 from build_process import run_gradle, TOTAL_BUILD_SECONDS
@@ -27,6 +28,19 @@ ROOM_SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database
 ROOM_SCHEMA_COLLECTION_KIND = 'room-schema-strict-variants'
 ROOM_SCHEMA_COLLECTION_PHASES = ('strict-debug', 'strict-release', 'strict-diagnostic')
 ROOM_SCHEMA_REPORT_DIRECTORY = 'app/build/reports/dependency-bootstrap'
+DEPENDENCY_MIGRATION_REQUEST = '.ci/dependency-migration-request.json'
+DEPENDENCY_MIGRATION_KIND = 'owner-pr-dependency-acquire-strict'
+DEPENDENCY_MIGRATION_PHASES = ('migration-acquire', *ROOM_SCHEMA_COLLECTION_PHASES)
+DEPENDENCY_ACQUISITION_FILE = 'dependency-acquisition.json'
+DEPENDENCY_ACQUISITION_TASK = ':ciAcquireDependencyFiles'
+MIGRATION_FROZEN_INPUTS = (
+    '.ci/toolchain.properties', 'version.properties', 'android/settings.gradle.kts',
+    'android/build.gradle.kts', 'android/app/build.gradle.kts', 'android/gradle.properties',
+    'android/gradle/libs.versions.toml', 'android/gradlew', 'android/gradlew.bat',
+    'android/gradle/wrapper/gradle-wrapper.properties', 'android/gradle/wrapper/gradle-wrapper.jar',
+    'android/' + ROOM_DATABASE_SOURCE, 'scripts/ci/enforce.gradle', 'scripts/ci/build_process.py',
+)
+MIGRATION_TOOLS = ('scripts/ci/build.py', 'scripts/ci/dependency-acquire.gradle')
 
 
 def required_build_inputs():
@@ -300,6 +314,443 @@ def bootstrap_room_schema(build_sha, missing, total_deadline=None):
             'generated Room schema from dependency-bootstrap reports, then rebuild strictly.')
 
 
+def migration_json(data):
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            require(key not in value, 'Dependency migration JSON has duplicate keys')
+            value[key] = item
+        return value
+    require(len(data) <= 4 * 1024 * 1024, 'Dependency migration JSON exceeds its bound')
+    return json.loads(data, object_pairs_hook=unique,
+                      parse_constant=lambda _: require(False, 'Dependency migration JSON must be finite'))
+
+
+def migration_repo_file(relative):
+    require(type(relative) is str, 'Dependency migration paths must be canonical')
+    name = PurePosixPath(relative)
+    require(not name.is_absolute() and name.as_posix() == relative and
+            '\\' not in relative and all(part not in ('', '.', '..') for part in name.parts),
+            'Dependency migration paths must be canonical')
+    path = ROOT.joinpath(*name.parts)
+    require(not ROOT.is_symlink() and path.is_file() and not path.is_symlink() and
+            path.resolve().is_relative_to(ROOT.resolve()) and
+            not any(parent.is_symlink() for parent in path.parents if parent.is_relative_to(ROOT)),
+            'Dependency migration inputs must be regular files without linked parents')
+    return path
+
+
+def migration_committed_hash(relative, revision='HEAD'):
+    data = migration_repo_file(relative).read_bytes()
+    blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+    require(git('rev-parse', '--verify', revision + ':' + relative, cwd=ROOT) == blob,
+            'Dependency migration preimages must match the committed source bytes')
+    return hashlib.sha256(data).hexdigest()
+
+
+def migration_build_hashes():
+    return {name: migration_committed_hash(name) for name in (*MIGRATION_FROZEN_INPUTS, *MIGRATION_TOOLS,
+                                                            DEPENDENCY_MIGRATION_REQUEST)}
+
+
+def dependency_acquire_tasks(diagnostic_android_test):
+    tasks = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost']
+    for variant in ('Debug', 'Release', 'Diagnostic'):
+        tasks.extend(f':app:compileWatchAndroid{variant}{suffix}' for suffix in
+                     ('Kotlin', 'JavaWithJavac', 'UnitTestKotlin', 'UnitTestJavaWithJavac'))
+        tasks.append(f':app:lintWatchAndroid{variant}')
+    if diagnostic_android_test:
+        tasks.extend(':app:compileWatchAndroidDiagnosticAndroidTest' + suffix
+                     for suffix in ('Kotlin', 'JavaWithJavac'))
+    return tasks
+
+
+def dependency_acquire_consumers(diagnostic_android_test):
+    consumers = {name: 'task-input-archives' for name in dependency_acquire_tasks(diagnostic_android_test)}
+    for variant in ('Debug', 'Release', 'Diagnostic'):
+        for prefix, suffix in (('lintAnalyze', ''), ('lintAnalyze', 'UnitTest'), ('lintReport', '')):
+            consumers[f':app:{prefix}WatchAndroid{variant}{suffix}'] = 'task-input-archives'
+        consumers[f':app:testWatchAndroid{variant}UnitTest'] = 'test-classpath-archives'
+    consumers.update({':app:' + name: 'configuration-artifacts' for name in
+                      ('bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30')})
+    consumers.update({name: 'buildscript-artifacts' for name in
+                      (':buildscript:classpath', ':app:buildscript:classpath')})
+    return consumers
+
+
+def dependency_migration_request(build_sha, mode, missing):
+    cloud_only()
+    no_signing_secrets()
+    require(mode == 'debug' and os.environ.get('GITHUB_EVENT_NAME') == 'pull_request' and
+            not os.environ.get('CANDIDATE_OPERATION'), 'Dependency migration requires an unsigned owner PR')
+    for key, value in {'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch', 'GITHUB_ACTOR': 'OnlineMo',
+                       'GITHUB_ACTOR_ID': '143324986', 'GITHUB_TRIGGERING_ACTOR': 'OnlineMo'}.items():
+        require(os.environ.get(key) == value, 'Dependency migration requires the repository owner')
+    source_sha = os.environ.get('SOURCE_SHA', '')
+    require(re.fullmatch(r'[0-9a-f]{40}', source_sha) and re.fullmatch(r'[0-9a-f]{40}', build_sha) and
+            os.environ.get('GITHUB_SHA') == build_sha and git('rev-parse', 'HEAD') == build_sha,
+            'Dependency migration source/build binding is invalid')
+    require(re.fullmatch(r'refs/pull/[1-9][0-9]*/merge', os.environ.get('GITHUB_REF', '')),
+            'Dependency migration requires the PR merge ref')
+    for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
+        require(re.fullmatch(r'[1-9][0-9]{0,19}', os.environ.get(key, '')),
+                'Dependency migration run identity is invalid')
+    request_path = migration_repo_file(DEPENDENCY_MIGRATION_REQUEST)
+    request_digest = migration_committed_hash(DEPENDENCY_MIGRATION_REQUEST)
+    request = migration_json(request_path.read_bytes())
+    require(type(request) is dict and set(request) == {
+        'schema_version', 'kind', 'owner_login', 'owner_id', 'base_source_sha', 'current_schema',
+        'diagnostic_android_test', 'reviewed_input_hashes', 'frozen_input_hashes', 'migration_tool_hashes',
+        'allowed_dependency_outputs', 'runtime_components',
+    } and type(request['schema_version']) is int and request['schema_version'] == 1 and
+        request['kind'] == DEPENDENCY_MIGRATION_KIND and request['owner_login'] == 'OnlineMo' and
+        type(request['owner_id']) is int and request['owner_id'] == 143324986,
+        'Dependency migration needs an explicit valid owner request')
+    base = request['base_source_sha']
+    require(type(base) is str and re.fullmatch(r'[0-9a-f]{40}', base), 'Dependency migration base SHA is invalid')
+    git('merge-base', '--is-ancestor', base, source_sha, cwd=ROOT)
+    git('merge-base', '--is-ancestor', source_sha, build_sha, cwd=ROOT)
+    current = current_room_schema()
+    require(type(current) is str and request['current_schema'] == current and
+            git('ls-tree', '--name-only', '--full-tree', base, '--', 'android/' + current, cwd=ROOT) == '',
+            'Dependency migration requires a genuinely absent current schema at the base')
+    reviewed = reviewed_schema_inputs(current, missing)
+    for key, names in (('reviewed_input_hashes', reviewed), ('frozen_input_hashes', MIGRATION_FROZEN_INPUTS),
+                       ('migration_tool_hashes', MIGRATION_TOOLS)):
+        values = request[key]
+        require(type(values) is dict and set(values) == set(names) and
+                all(type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) for value in values.values()),
+                'Dependency migration request input hashes are invalid')
+    require(request['reviewed_input_hashes'] == reviewed and
+            request['allowed_dependency_outputs'] == list(DEPENDENCY_REPORT_FILES),
+            'Dependency migration request preimages or output scope differ from the frozen source')
+    for name, digest in reviewed.items():
+        require(migration_committed_hash('android/' + name, base) == digest,
+                'Dependency migration reviewed preimages differ from the base')
+    for name, digest in request['frozen_input_hashes'].items():
+        require(migration_committed_hash(name, base) == migration_committed_hash(name) == digest,
+                'Dependency migration build inputs differ from the frozen base')
+    for name, digest in request['migration_tool_hashes'].items():
+        require(migration_committed_hash(name) == digest, 'Dependency migration tools differ from the owner request')
+    instrumentation = schema_project_path('app/src/androidTest')
+    require(type(request['diagnostic_android_test']) is bool and
+            request['diagnostic_android_test'] == instrumentation.is_dir(),
+            'Dependency migration instrumentation scope differs from the frozen source')
+    runtime = request['runtime_components']
+    require(type(runtime) is dict and set(runtime) == {'bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'} and
+            all(type(parts) is list and len(parts) == 3 and all(type(part) is str and
+                re.fullmatch(r'[A-Za-z0-9_.+\-]{1,120}', part) for part in parts) for parts in runtime.values()),
+            'Dependency migration runtime coordinates are invalid')
+    binding = {'source_sha': source_sha, 'build_sha': build_sha,
+               'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+               'event': 'pull_request', 'ref': os.environ['GITHUB_REF']}
+    return request, request_digest, reviewed, binding
+
+
+def verification_snapshot(data):
+    require(len(data) <= 4 * 1024 * 1024 and b'<!' not in data, 'Dependency verification XML is unsafe or over bound')
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as error:
+        raise ValueError('Dependency verification XML is malformed') from error
+    namespace = '{https://schema.gradle.org/dependency-verification}'
+    require(root.tag == namespace + 'verification-metadata' and
+            [element.tag for element in root] == [namespace + 'configuration', namespace + 'components'],
+            'Dependency verification XML structure differs from the reviewed contract')
+    def tree(element):
+        return element.tag, sorted(element.attrib.items()), (element.text or '').strip(), [tree(child) for child in element]
+    configuration = root[0]
+    require([element.tag for element in configuration] == [namespace + 'verify-metadata', namespace + 'verify-signatures'] and
+            [(element.text or '').strip() for element in configuration] == ['true', 'false'],
+            'Dependency verification cannot add a trust bypass or disable metadata checks')
+    pins = {}
+    for component in root[1]:
+        require(component.tag == namespace + 'component' and set(component.attrib) == {'group', 'name', 'version'},
+                'Dependency verification component is invalid')
+        for artifact in component:
+            require(artifact.tag == namespace + 'artifact' and set(artifact.attrib) == {'name'} and len(artifact) == 1 and
+                    artifact[0].tag == namespace + 'sha256' and len(artifact[0]) == 0 and
+                    re.fullmatch(r'[0-9a-f]{64}', artifact[0].get('value', '')),
+                    'Dependency verification requires exactly one SHA-256 per artifact')
+            key = (*(component.get(name) for name in ('group', 'name', 'version')), artifact.get('name'))
+            require(key not in pins, 'Dependency verification has duplicate artifact pins')
+            pins[key] = tree(artifact)
+    require(pins, 'Dependency verification has no artifact pins')
+    return tree(configuration), pins
+
+
+def dependency_lock_snapshot(data):
+    require(len(data) <= 4 * 1024 * 1024, 'Dependency lock exceeds its bound')
+    configurations = {}
+    for line in data.decode('utf-8').splitlines():
+        if not line or line.startswith('#'):
+            continue
+        coordinate, separator, names = line.partition('=')
+        require(separator and (coordinate == 'empty' or re.fullmatch(
+            r'[A-Za-z0-9_.+\-]+:[A-Za-z0-9_.+\-]+:[A-Za-z0-9_.+\-]+', coordinate)),
+            'Dependency lock coordinate is invalid')
+        for name in names.split(','):
+            require(re.fullmatch(r'[A-Za-z0-9_.\-]{1,200}', name), 'Dependency lock configuration is invalid')
+            entries = configurations.setdefault(name, {})
+            if coordinate != 'empty':
+                module, version = coordinate.rsplit(':', 1)
+                require(module not in entries, 'Dependency lock has duplicate module bindings')
+                entries[module] = version
+    require(configurations, 'Dependency lock has no configuration bindings')
+    return configurations
+
+
+def validate_dependency_acquisition(record, binding, request, locks):
+    require(type(record) is dict and set(record) == {
+        'schema_version', 'kind', 'phase', *binding, 'writer_tasks', 'test_task_count', 'consumers', 'lock_capture',
+    } and type(record['schema_version']) is int and record['schema_version'] == 1 and
+        record['kind'] == 'dependency-file-acquisition' and record['phase'] == 'migration-acquire' and
+        type(record['test_task_count']) is int and record['test_task_count'] == 0,
+        'Dependency acquisition must prove real files without running business tests')
+    require(all(type(record[key]) is type(value) and record[key] == value for key, value in binding.items()),
+            'Dependency acquisition source/run binding differs from this run')
+    instrumentation = request['diagnostic_android_test']
+    expected = dependency_acquire_consumers(instrumentation)
+    optional = {f':app:lintAnalyzeWatchAndroid{variant}AndroidTest': 'task-input-archives'
+                for variant in ('Debug', 'Release', 'Diagnostic')}
+    require(record['writer_tasks'] == dependency_acquire_tasks(instrumentation), 'Dependency acquisition writer tasks differ')
+    consumers = record['consumers']
+    require(type(consumers) is list and len(consumers) <= 64 and
+            all(type(value) is dict and type(value.get('id')) is str for value in consumers),
+            'Dependency acquisition consumer records are invalid')
+    observed = {value['id']: value for value in consumers}
+    require(len(observed) == len(consumers) and set(expected) <= set(observed) <= set(expected) | set(optional),
+            'Dependency acquisition has missing, duplicate or unapproved consumers')
+    for name, value in observed.items():
+        kind = (expected | optional)[name]
+        fields = {'id', 'kind', 'files'}
+        if kind in ('task-input-archives', 'test-classpath-archives'):
+            fields |= {'file_count', 'directory_count', 'excluded_file_count', 'missing_non_archive_count'}
+        if kind == 'task-input-archives':
+            fields.add('outcome')
+            outcome = value.get('outcome')
+            require(outcome == 'executed' or
+                    (outcome == 'no-source' and (name.endswith('JavaWithJavac') or name in optional)) or
+                    (outcome == 'up-to-date' and name.startswith(':app:lintWatchAndroid')),
+                    'Dependency acquisition did not execute the required compile or lint consumer')
+        require(set(value) == fields and value['kind'] == kind and type(value['files']) is list and
+                len(value['files']) <= 4096, 'Dependency acquisition file record shape is invalid')
+        for item in value['files']:
+            file_fields = {'name', 'size', 'sha256'}
+            if kind in ('configuration-artifacts', 'buildscript-artifacts'):
+                file_fields.add('component')
+                parts = item.get('component') if type(item) is dict else None
+                require(type(parts) is list and len(parts) == 3 and all(type(part) is str and
+                        re.fullmatch(r'[A-Za-z0-9_.+\-]{1,120}', part) for part in parts),
+                        'Dependency acquisition requires public Maven component identities')
+            require(type(item) is dict and set(item) == file_fields and type(item['name']) is str and
+                    re.fullmatch(r'[A-Za-z0-9_.+\-]{1,200}\.(jar|aar)', item['name']) and
+                    type(item['size']) is int and 0 < item['size'] <= 256 * 1024 * 1024 and
+                    type(item['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', item['sha256']),
+                    'Dependency acquisition requires bounded hashes of actual archive bytes')
+        if kind in ('task-input-archives', 'test-classpath-archives'):
+            counts = [value[key] for key in ('file_count', 'directory_count', 'excluded_file_count', 'missing_non_archive_count')]
+            require(all(type(count) is int and 0 <= count <= 4096 for count in counts) and
+                    counts[0] == len(value['files']) + sum(counts[1:]), 'Dependency acquisition file counts differ')
+            require(not (kind == 'test-classpath-archives' or name.endswith('Kotlin')) or value['files'],
+                    'Dependency acquisition did not fetch compile or test runtime archives')
+        if kind == 'configuration-artifacts':
+            require(len(value['files']) == 1 and value['files'][0]['component'] ==
+                    request['runtime_components'][name.removeprefix(':app:')],
+                    'Dependency acquisition runtime bytes differ from the requested coordinates')
+    require(observed[':buildscript:classpath']['files'], 'Dependency acquisition did not fetch plugin archives')
+    capture = record['lock_capture']
+    require(type(capture) is dict and set(capture) == {'kind', 'task', 'status', 'configuration_count',
+                                                    'unresolved_dependency_count', 'project_configurations'} and
+            capture['kind'] == 'all-resolvable-configuration-graphs' and capture['task'] == LOCK_COLLECTION_TASK and
+            capture['status'] == 'completed' and type(capture['unresolved_dependency_count']) is int and
+            capture['unresolved_dependency_count'] == 0 and type(capture['configuration_count']) is int and
+            0 < capture['configuration_count'] <= 8192 and type(capture['project_configurations']) is dict and
+            set(capture['project_configurations']) == {':', ':app'}, 'Dependency acquisition lock capture is incomplete')
+    count = 0
+    for project, names in capture['project_configurations'].items():
+        require(type(names) is list and len(names) <= 4096 and
+                all(type(name) is str and re.fullmatch(r'[A-Za-z0-9_.\-]{1,200}', name) for name in names) and
+                names == sorted(set(names)), 'Dependency acquisition configuration inventory is invalid')
+        count += len(names)
+        if names:
+            require(project in locks and set(names) <= dependency_lock_snapshot(locks[project]).keys(),
+                    'Dependency acquisition did not preserve every resolved configuration lock')
+    require(count == capture['configuration_count'], 'Dependency acquisition lock configuration count differs')
+
+
+def preserve_migration_bytes(relative, data):
+    target = schema_report_path(relative)
+    require(not target.exists(), 'Dependency migration report destinations cannot be overwritten')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target = schema_report_path(relative)
+    with target.open('xb') as stream:
+        stream.write(data)
+    require(sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + relative)) == hashlib.sha256(data).hexdigest(),
+            'Dependency migration report bytes changed while preserving the original')
+    return {'file': relative, 'sha256': hashlib.sha256(data).hexdigest()}
+
+
+def bootstrap_dependency_migration(build_sha, mode, missing, total_deadline=None):
+    """One explicit writer acquires files; three strict calls and external review still gate every input."""
+    request, request_digest, reviewed, binding = dependency_migration_request(build_sha, mode, missing)
+    frozen = migration_build_hashes()
+    current = request['current_schema']
+    android = ROOT / 'android'
+    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
+    writer_tasks = dependency_acquire_tasks(request['diagnostic_android_test'])
+    tasks = [task for variant in ('debug', 'release', 'diagnostic') for task in gradle_tasks(variant)]
+    phases = [{'name': 'migration-acquire', 'command': gradle_command(
+        [*writer_tasks, DEPENDENCY_ACQUISITION_TASK, LOCK_COLLECTION_TASK]) + [
+            '--init-script', '../scripts/ci/dependency-acquire.gradle', '--write-verification-metadata', 'sha256',
+            '--write-locks', '--rerun-tasks', '--no-build-cache'], 'status': 'pending'},
+        *({'name': name, 'command': gradle_command(gradle_tasks(variant)) + ['--info'], 'status': 'pending'}
+          for variant, name in zip(('debug', 'release', 'diagnostic'), ROOM_SCHEMA_COLLECTION_PHASES))]
+    report = schema_report_path()
+    require(not report.exists() or not any(report.iterdir()), 'Dependency migration report directory must be empty')
+    report.mkdir(parents=True, exist_ok=True)
+    schema_report_path()
+    completed, primary_failure = False, None
+    acquired, strict_inputs, acquisition, writer_export = None, None, None, None
+    exports, preimages = {}, {}
+    before_bytes = {name: schema_input_path(name).read_bytes() for name in reviewed}
+    try:
+        preserve_migration_bytes('dependency-migration-request.json', migration_repo_file(DEPENDENCY_MIGRATION_REQUEST).read_bytes())
+        for name, data in before_bytes.items():
+            require(hashlib.sha256(data).hexdigest() == reviewed[name], 'Dependency migration preimage changed')
+            preimages[name] = preserve_migration_bytes('reviewed-inputs/' + name, data)
+        for phase in phases:
+            schema_report_path()
+            require(migration_build_hashes() == frozen, 'Dependency migration build/request inputs changed between calls')
+            if acquired is None:
+                require(schema_checked_input_hashes() == reviewed, 'Dependency migration reviewed input set changed before the writer')
+            else:
+                expected = strict_inputs if strict_inputs is not None else acquired
+                if writer_export is not None and strict_inputs is None:
+                    expected = {**acquired, current: writer_export['sha256']}
+                require(schema_checked_input_hashes() == expected, 'Dependency migration inputs changed between strict variants')
+                if current in expected:
+                    # Only an export created by this successful run is removed, after the complete checkpoint.
+                    schema_input_path(current).unlink()
+                require(schema_checked_input_hashes() == acquired, 'Dependency migration acquired inputs changed')
+                require(sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + DEPENDENCY_ACQUISITION_FILE)) ==
+                        acquisition['sha256'], 'Dependency migration acquisition original changed')
+            phase['status'] = 'started'
+            run_gradle(phase['command'], cwd=android, phase=phase['name'], build_sha=build_sha,
+                       total_deadline=total_deadline, env=gradle_environment(unsigned=True,
+                       diagnostic_phase=phase['name'] if phase['name'] != 'migration-acquire' else None))
+            require(migration_build_hashes() == frozen, 'Dependency migration build/request inputs changed during a call')
+            if acquisition is not None:
+                require(sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + DEPENDENCY_ACQUISITION_FILE)) ==
+                        acquisition['sha256'], 'Dependency migration acquisition original changed during a strict call')
+            after = schema_checked_input_hashes()
+            require(all(name in after for name in required_build_inputs() if name != current) and
+                    set(after) <= set(reviewed) | set(DEPENDENCY_REPORT_FILES) | {current} and
+                    all(after.get(name) == digest for name, digest in reviewed.items() if name not in DEPENDENCY_REPORT_FILES),
+                    'Dependency migration changed old schemas or added unrequested inputs')
+            if phase['name'] == 'migration-acquire':
+                witness = schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + DEPENDENCY_ACQUISITION_FILE)
+                witness_bytes = witness.read_bytes()
+                record = migration_json(witness_bytes)
+                locks = {project: schema_input_path(name).read_bytes() for project, name in
+                         ((':app', 'app/gradle.lockfile'), (':', 'gradle.lockfile')) if name in after}
+                validate_dependency_acquisition(record, binding, request, locks)
+                old_configuration, old_pins = verification_snapshot(before_bytes[DEPENDENCY_INPUTS[0]])
+                new_configuration, new_pins = verification_snapshot(schema_input_path(DEPENDENCY_INPUTS[0]).read_bytes())
+                require(old_configuration == new_configuration and all(new_pins.get(key) == value for key, value in old_pins.items()),
+                        'Dependency migration removed or changed an existing verification pin')
+                for name in ('app/gradle.lockfile', 'gradle.lockfile'):
+                    if name in before_bytes:
+                        previous = dependency_lock_snapshot(before_bytes[name])
+                        updated = dependency_lock_snapshot(schema_input_path(name).read_bytes())
+                        require(all(updated.get(key) == value for key, value in previous.items()),
+                                'Dependency migration changed an existing configuration lock binding')
+                acquired = {name: digest for name, digest in after.items() if name != current}
+                require(sha256(witness) == hashlib.sha256(witness_bytes).hexdigest(),
+                        'Dependency migration acquisition original changed while validating its bytes')
+                acquisition = {'file': DEPENDENCY_ACQUISITION_FILE, 'sha256': hashlib.sha256(witness_bytes).hexdigest()}
+                if current in after:
+                    writer_export = preserve_migration_bytes('schema-exports/migration-acquire/' + current.rsplit('/', 1)[-1],
+                                                            schema_input_path(current).read_bytes())
+                    require(writer_export['sha256'] == after[current], 'Dependency migration writer export changed while preserving its bytes')
+            else:
+                require(current in after and {name: digest for name, digest in after.items() if name != current} == acquired,
+                        'Dependency migration strict validation changed dependency inputs or omitted the current schema')
+                if strict_inputs is None:
+                    strict_inputs = after
+                require(after == strict_inputs and (writer_export is None or writer_export['sha256'] == after[current]),
+                        'Dependency migration variants exported different current schema bytes')
+                exports[phase['name']] = preserve_migration_bytes('schema-exports/' + phase['name'] + '/' + current.rsplit('/', 1)[-1],
+                                                                schema_input_path(current).read_bytes())
+                require(exports[phase['name']]['sha256'] == after[current],
+                        'Dependency migration strict export changed while preserving its bytes')
+            require(schema_checked_input_hashes() == after and migration_build_hashes() == frozen,
+                    'Dependency migration inputs changed while preserving a phase original')
+            phase['status'] = 'completed'
+        completed = True
+    except BaseException as error:
+        primary_failure = error
+        raise
+    finally:
+        try:
+            schema_report_path()
+            files, errors = {}, []
+            try:
+                observed = schema_checked_input_hashes()
+            except (ValueError, OSError):
+                observed = {}
+                errors.append('unsafe-or-unreadable-migration-inputs')
+            for name in observed:
+                try:
+                    copy = preserve_migration_bytes(name, schema_input_path(name).read_bytes())
+                    files[name] = copy['sha256']
+                except (ValueError, OSError):
+                    errors.append('migration-input-report-copy-failed')
+            matches = files == strict_inputs if strict_inputs is not None else None
+            originals_match = False
+            try:
+                originals_match = (sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/dependency-migration-request.json')) ==
+                    request_digest and set(preimages) == set(reviewed) and
+                    all(sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + entry['file'])) == entry['sha256'] == reviewed[name]
+                        for name, entry in preimages.items()) and acquisition is not None and
+                    sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + acquisition['file'])) == acquisition['sha256'])
+                exports_match = (strict_inputs is not None and set(exports) == set(ROOM_SCHEMA_COLLECTION_PHASES) and
+                    all(sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + entry['file'])) ==
+                        entry['sha256'] == strict_inputs[current] for entry in exports.values()) and
+                    (writer_export is None or sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + writer_export['file'])) ==
+                        writer_export['sha256'] == strict_inputs[current]))
+            except (ValueError, OSError):
+                exports_match = False
+                errors.append('migration-original-or-export-check-failed')
+            checkpoint_matches = False
+            try:
+                checkpoint_matches = migration_build_hashes() == frozen and schema_checked_input_hashes() == strict_inputs
+            except (ValueError, OSError):
+                errors.append('migration-final-input-checkpoint-failed')
+            if completed and (not matches or not originals_match or not exports_match or errors or not checkpoint_matches):
+                completed = False
+            write_json(schema_report_path('bootstrap-manifest.json'), {
+                'schema_version': 4, 'collection_kind': DEPENDENCY_MIGRATION_KIND, **binding,
+                'base_source_sha': request['base_source_sha'], 'request_sha256': request_digest,
+                'frozen_input_hashes': request['frozen_input_hashes'], 'migration_tool_hashes': request['migration_tool_hashes'],
+                'tasks': tasks, 'writer_tasks': writer_tasks, 'phases': phases, 'current_schema': current,
+                'reviewed_input_hashes': reviewed, 'reviewed_preimages': preimages, 'acquisition': acquisition,
+                'acquired_input_hashes': acquired, 'writer_schema_export': writer_export, 'schema_exports': exports,
+                'schema_exports_match': exports_match, 'strict_input_hashes': strict_inputs,
+                'report_matches_strict_inputs': matches, 'originals_match': originals_match, 'report_errors': errors,
+                'status': 'generated-unreviewed' if completed else 'failed-partial', 'missing_inputs_at_start': missing,
+                'missing_outputs': [name for name in required_build_inputs() if name not in files],
+                'files': files, 'accepted': False, 'apk_exported': False,
+            })
+        except Exception:
+            if primary_failure is None:
+                raise
+            primary_failure.add_note('Dependency migration report preservation failed')
+    require(completed, 'Dependency migration did not preserve complete strict inputs and originals')
+    require(False, 'Dependency migration is not an accepted build. Independently review and commit the original '
+            'dependency inputs and Room schema, remove the explicit request, then rebuild strictly.')
+
+
 def bootstrap_dependencies(build_sha, missing, total_deadline=None):
     """PR-only资料采集；无论生成成功与否，都不能导出可验收APK。"""
     android = ROOT / 'android'
@@ -369,6 +820,11 @@ def bootstrap_dependencies(build_sha, missing, total_deadline=None):
 def build(mode):
     cloud_only()
     no_signing_secrets()
+    request_path = ROOT / DEPENDENCY_MIGRATION_REQUEST
+    has_migration_request = request_path.exists() or request_path.is_symlink()
+    if has_migration_request:
+        require(mode == 'debug' and os.environ.get('GITHUB_EVENT_NAME') == 'pull_request' and
+                not os.environ.get('CANDIDATE_OPERATION'), 'Dependency migration requires an unsigned owner PR')
     check(require_android=True, release_snapshot=mode != 'debug')
     lock = properties(ROOT / '.ci/toolchain.properties')
     version = properties(ROOT / 'version.properties')
@@ -381,6 +837,8 @@ def build(mode):
     total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS
     has_instrumentation = mode == 'diagnostic' and (ROOT / 'android/app/src/androidTest').is_dir()
     missing = missing_dependency_inputs()
+    if has_migration_request:
+        bootstrap_dependency_migration(build_sha, mode, missing, total_deadline)
     if missing:
         require(is_pr and mode == 'debug',
                 'Committed strict dependency inputs are missing: ' + ', '.join(missing) + '. '

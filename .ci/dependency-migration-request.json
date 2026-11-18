@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "kind": "owner-pr-dependency-acquire-strict",
+  "owner_login": "OnlineMo",
+  "owner_id": 143324986,
+  "base_source_sha": "c39a762dc1dad86c065d2160e12dc12d19eed874",
+  "current_schema": "app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase/3.json",
+  "diagnostic_android_test": false,
+  "reviewed_input_hashes": {
+    "gradle/verification-metadata.xml": "8423aa796640770d1a7d4cb69bbb599a050afc03748bd9a9afccb69f3f48cc84",
+    "app/gradle.lockfile": "2100eb17daf61415d8d7dcfb3fe40f8f200f86bb75845f3913dcf4d1a0b4aa83",
+    "app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase/1.json": "3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79",
+    "app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase/2.json": "bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf"
+  },
+  "frozen_input_hashes": {
+    ".ci/toolchain.properties": "4b00fc85046d7ddb66e24db150fa3737dcf32712507f93b9bbd026aebde0f0ca",
+    "version.properties": "16889bce1e333e1a73c0c6a758595775c7f829599da4c21d3d9ab8031598982b",
+    "android/settings.gradle.kts": "a39006ecc0a171ba8863ec317b777cf947b4539fcf06445b2a5e26e7d1e09257",
+    "android/build.gradle.kts": "376d6719db8532baf81e9e9591eb02a1794f2f7f994cbb2e8e95e4d8318aadee",
+    "android/app/build.gradle.kts": "4d53e80c6767e7b17f07b27c1c7d0a9317961cda6e5ba0b133901336f270d867",
+    "android/gradle.properties": "1b91f2cc8134ea6f229a4f08273f85685cb4336cd0eeb39883eb4bb1840c0c44",
+    "android/gradle/libs.versions.toml": "05f5102be0a389ad4cda3e3f959242225799f84a7bbe4bda0b94fc3e6dbb085f",
+    "android/gradlew": "734b3879d3501dce471cf0522d3bcbafe76873d9fc5129345b67fb43bd15e933",
+    "android/gradlew.bat": "2209f919a22528af59a2af2ad97e8d056cca18e39f7d87aa3fd549a73b180150",
+    "android/gradle/wrapper/gradle-wrapper.properties": "c040b6ef2fb893ff5beea5a281614f2848f1c3996a7886f650b713f8240656a2",
+    "android/gradle/wrapper/gradle-wrapper.jar": "81a82aaea5abcc8ff68b3dfcb58b3c3c429378efd98e7433460610fecd7ae45f",
+    "android/app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/database/MeloXDatabase.kt": "3ddb604fd74807f0106f78a514f9b3996590ad7ac0329ee5c1bf7691bed786a3",
+    "scripts/ci/enforce.gradle": "58cf68ebb0a431fd0dbe6b53e61fd0a4476621698322eef0c942345a27b49f92",
+    "scripts/ci/build_process.py": "65eca46733a14c24b6eec662478e312b18d56f41dd9267c65f39be89efd740bf"
+  },
+  "migration_tool_hashes": {
+    "scripts/ci/build.py": "49c1b738a05da4089689d6a697d2347876f8abd7a6527ad54a354076652c6fd4",
+    "scripts/ci/dependency-acquire.gradle": "754e70299071cf8ebe6956fc780d23f530592f091418016e266ee50e3fc8d8df"
+  },
+  "allowed_dependency_outputs": [
+    "gradle/verification-metadata.xml",
+    "app/gradle.lockfile",
+    "gradle.lockfile"
+  ],
+  "runtime_components": {
+    "bundledSqliteHost": [
+      "androidx.sqlite",
+      "sqlite-bundled-jvm",
+      "2.6.2"
+    ],
+    "robolectricSdk": [
+      "org.robolectric",
+      "android-all-instrumented",
+      "8.0.0_r4-robolectric-r1-i7"
+    ],
+    "robolectricSdk30": [
+      "org.robolectric",
+      "android-all-instrumented",
+      "11-robolectric-6757853-i7"
+    ]
+  }
+}
