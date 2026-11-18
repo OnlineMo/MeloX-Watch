@@ -44,7 +44,10 @@ internal class PlaylistUiTestFixture(val scope: CoroutineScope, count: Long = 20
     suspend fun close(vararg additional: PlaylistsViewModel) {
         model.onHidden()
         additional.forEach { it.onHidden() }
-        withTimeout(5_000L) { scope.coroutineContext[Job]?.children?.toList()?.joinAll() }
+        // Capture before the timeout becomes a child of the shared runBlocking scope.
+        // Enumerating inside its block would make cleanup join its own deadline job.
+        val pending = scope.coroutineContext[Job]?.children?.toList().orEmpty()
+        withTimeout(5_000L) { pending.joinAll() }
     }
 
     fun revision(): PlaylistPreviewRevision = PlaylistPreviewRevision(ports.library.overviewState.value.revision,
