@@ -862,7 +862,7 @@ private fun NowPlayingArtwork(track: LibraryTrack?, path: ArtworkReadPath, artwo
     if (track == null) {
         Box(Modifier.size(size).clip(RoundedCornerShape(12.dp)).background(WatchPalette.Raised),
             contentAlignment = Alignment.Center) { Text("♪", color = PrimaryText, fontSize = 32.sp) }
-    } else TrackArtwork(track, path, artworkRevision, size, visible = visible)
+    } else TrackArtwork(track, path, revision = artworkRevision, size = size, visible = visible)
 }
 
 @Composable
@@ -874,16 +874,16 @@ private fun WatchTransport(state: ProbeUiState, viewModel: ProbeViewModel,
     val centerLabel = stringResource(if (playback.isPlaying) R.string.probe_pause else R.string.probe_play)
     val center: @Composable () -> Unit = {
         WatchCircleButton(centerLabel, if (playback.isPlaying) WatchGlyph.PAUSE else WatchGlyph.PLAY,
-            playback.isConnected && playback.hasMedia && (!state.playbackCommandPending || playback.isPlaying),
-            centerSize, emphasized = true) { if (playback.isPlaying) viewModel.pause() else viewModel.resumeCurrent() }
+            enabled = playback.isConnected && playback.hasMedia && (!state.playbackCommandPending || playback.isPlaying),
+            size = centerSize, emphasized = true) { if (playback.isPlaying) viewModel.pause() else viewModel.resumeCurrent() }
     }
     val previous: @Composable () -> Unit = {
         WatchCircleButton(previousLabel, WatchGlyph.PREVIOUS,
-            playback.isConnected && playback.hasPrevious && !state.playbackCommandPending, onClick = viewModel::previous)
+            enabled = playback.isConnected && playback.hasPrevious && !state.playbackCommandPending, onClick = viewModel::previous)
     }
     val next: @Composable () -> Unit = {
         WatchCircleButton(nextLabel, WatchGlyph.NEXT,
-            playback.isConnected && playback.hasNext && !state.playbackCommandPending, onClick = viewModel::next)
+            enabled = playback.isConnected && playback.hasNext && !state.playbackCommandPending, onClick = viewModel::next)
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val sideControlsFitRow = maxWidth >= 104.dp

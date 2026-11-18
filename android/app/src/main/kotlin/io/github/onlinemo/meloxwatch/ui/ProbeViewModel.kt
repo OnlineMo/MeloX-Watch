@@ -984,6 +984,7 @@ class ProbeViewModel(
     private data class PendingPlaylistCommand(val operationId: String, val onResult: (PlaylistUiIssue?) -> Unit)
 }
 
+@androidx.annotation.OptIn(UnstableApi::class)
 internal fun playlistCommandResultIssue(result: SessionResult, operationId: String): PlaylistUiIssue? {
     return try {
         if (PlaybackCommands.readReceiptOperation(result.extras) != operationId) PlaylistUiIssue.SOURCE_CHANGED

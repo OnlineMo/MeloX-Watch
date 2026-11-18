@@ -12,7 +12,6 @@
     <string name="playback_gapless_fallback">已请求连续播放；当前组合使用普通切歌。</string>
     <string name="playback_seek_failed">无法跳转到所选位置。重试前请核对当前进度。</string>
     <string name="playback_seek_open">选择播放位置</string>
-    <string name="playback_seek_scope">拖动或使用按钮预览目标，确认后才跳转；取消会保留当前实际播放位置。</string>
     <string name="playback_seek_start">预览本曲起点</string>
     <string name="playback_speed_actual">请求速度 %1$.1f× · 实际 %2$.2f× · 音高 %3$.2f×</string>
     <string name="playback_speed_pending">已保存速度，将在当前后端可接受时应用。</string>

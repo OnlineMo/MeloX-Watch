@@ -56,9 +56,7 @@
     <string name="probe_position">%1$s / %2$s</string>
     <string name="probe_unknown_duration">Unknown duration</string>
     <string name="probe_seek_unavailable">A seekable timeline is not available yet.</string>
-    <string name="probe_seek_label">Playback position preview</string>
     <string name="probe_seek_preview">Preview position: %1$s</string>
-    <string name="probe_seek_commit">Jump to this position</string>
     <string name="probe_seek_back">Back 10 seconds</string>
     <string name="probe_seek_forward">Forward 10 seconds</string>
     <string name="probe_input_explanation">Enter a music title and an HTTPS address to check editing and submission. The address is only checked for syntax.</string>

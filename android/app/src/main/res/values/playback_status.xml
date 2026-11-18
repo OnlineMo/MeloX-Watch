@@ -12,7 +12,6 @@
     <string name="playback_gapless_fallback">Continuous playback was requested. This combination uses regular track transitions.</string>
     <string name="playback_seek_failed">The audio could not move to the selected position. Check the current position before retrying.</string>
     <string name="playback_seek_open">Choose playback position</string>
-    <string name="playback_seek_scope">Drag or use the buttons to preview a target. Confirm to seek; cancel keeps the current playback position.</string>
     <string name="playback_seek_start">Preview the start of this song</string>
     <string name="playback_speed_actual">Requested speed %1$.1f× · actual %2$.2f× · pitch %3$.2f×</string>
     <string name="playback_speed_pending">The saved speed will be applied when this engine can accept it.</string>

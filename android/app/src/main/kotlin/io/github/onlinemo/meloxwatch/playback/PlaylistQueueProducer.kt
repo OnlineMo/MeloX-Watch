@@ -139,6 +139,7 @@ internal class PlaylistQueueProducer(
         }
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     suspend fun commit(coordinator: QueuePlaybackCoordinator): QueueCommit {
         if (command.action == PlaylistQueueAction.REPLACE_COMPLETE_LIST) {
             return coordinator.replace(

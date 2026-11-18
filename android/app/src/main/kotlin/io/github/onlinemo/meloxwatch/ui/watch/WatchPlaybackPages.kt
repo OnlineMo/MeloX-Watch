@@ -24,8 +24,10 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -128,7 +130,11 @@ fun WatchNowPlayingPage(
         val contentWidth = detailsWidth.coerceIn(minOf(48.dp, maxWidth), maxWidth)
         val geometry = nowPlayingGeometry(maxWidth.value, maxHeight.value, windowWidth, windowHeight,
             leftInset, topInset, round, titleHeight, artistHeight)
-        val listHasPriority = geometry == null || listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0
+        val listHasPriority by remember(listState, geometry != null) {
+            derivedStateOf {
+                geometry == null || listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0
+            }
+        }
         LaunchedEffect(listState, visible, geometry != null) {
             if (visible) snapshotFlow { geometry == null || listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0 }
                 .distinctUntilChanged().collect { currentPriorityCallback(it) }

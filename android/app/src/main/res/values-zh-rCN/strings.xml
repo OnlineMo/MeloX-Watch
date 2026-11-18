@@ -52,9 +52,7 @@
     <string name="probe_position">%1$s / %2$s</string>
     <string name="probe_unknown_duration">时长未知</string>
     <string name="probe_seek_unavailable">当前尚无可跳转的时间轴。</string>
-    <string name="probe_seek_label">播放位置预览</string>
     <string name="probe_seek_preview">预览位置：%1$s</string>
-    <string name="probe_seek_commit">跳转到此位置</string>
     <string name="probe_seek_back">后退 10 秒</string>
     <string name="probe_seek_forward">前进 10 秒</string>
     <string name="probe_input_explanation">输入曲名和 HTTPS 地址，检查编辑与提交；地址仅用于语法检查。</string>
