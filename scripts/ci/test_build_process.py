@@ -6,11 +6,13 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import build_process as monitor
@@ -21,6 +23,358 @@ def event(kind, name='queued-close', task=':app:testWatchAndroidDebugUnitTest', 
     if result is not None:
         fields['result'] = result
     return monitor.TEST_EVENT_PREFIX + json.dumps(fields, ensure_ascii=False)
+
+
+def native_crash_fixture(native=None, java=None, after=''):
+    native = ['C  [libc.so.6+0x45d20]', 'V  [libjvm.so+0x1234]'] if native is None else native
+    java = ['j  androidx.sqlite.driver.bundled.BundledSQLiteConnection.nativeOpen(Ljava/lang/String;I)J+0',
+            'J 42 c2 java.lang.Thread.run()V (12 bytes) @ 0x1234'] if java is None else java
+    return ('# A fatal error has been detected by the Java Runtime Environment:\n'
+            '# SIGBUS (0x7) at pc=0x1234, pid=123, tid=456\n'
+            '# Problematic frame:\n'
+            '# C  [/fixture-private-path/libc.so.6+0x45d20] private-symbol\n'
+            '# VM Arguments: private-arguments\n'
+            '---------------  T H R E A D  ---------------\n'
+            'Current thread (0x1234): JavaThread "fixture-private-thread" [_thread_in_native, id=456]\n'
+            'Stack: [0x1000,0x2000], sp=0x1500\n'
+            'Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)\n' +
+            '\n'.join(native) + '\n\n'
+            'Java frames: (J=compiled Java code, j=interpreted, Vv=VM code)\n' +
+            '\n'.join(java) + '\n\n' + after).encode('ascii')
+
+
+class NativeCrashPolicyTests(unittest.TestCase):
+    def observed(self, **changes):
+        values = {'st_dev': 1, 'st_ino': 2, 'st_mode': stat.S_IFREG | 0o600, 'st_nlink': 1,
+                  'st_size': 100, 'st_mtime_ns': 20, 'st_ctime_ns': 20}
+        values.update(changes)
+        return SimpleNamespace(**values)
+
+    def test_leaf_names_and_directory_components_cannot_escape_the_fixed_roots(self):
+        self.assertIsNotNone(monitor._NATIVE_CRASH_NAME.fullmatch('hs_err_pid123.log'))
+        for name in ('../hs_err_pid123.log', '/hs_err_pid123.log', 'hs_err_pid123.log.tmp',
+                     'hs_err_pid0.log', 'hs_err_pid123.log\n', 'core.123', 'hs_err_pid123.log/child'):
+            with self.subTest(name=name):
+                self.assertIsNone(monitor._NATIVE_CRASH_NAME.fullmatch(name))
+        for part in ('..', '.', '/tmp', 'app/child', 'app\\child', ''):
+            with self.subTest(part=part), self.assertRaises(ValueError):
+                with monitor._native_crash_directory('.', (part,), []):
+                    self.fail('Invalid path reached an OS open')
+        for phase in ('../phase', '', 'phase/private', 'Phase', 'phase\n'):
+            with self.subTest(phase=phase), self.assertRaises(ValueError):
+                monitor.snapshot_native_crashes('.', phase)
+
+    def test_symlink_directory_fifo_and_hardlink_are_ineligible_before_read(self):
+        for mode in (stat.S_IFLNK, stat.S_IFDIR, stat.S_IFIFO, stat.S_IFSOCK):
+            with self.subTest(mode=mode):
+                self.assertEqual(monitor._native_crash_eligibility(self.observed(st_mode=mode), 10, 30, 1000),
+                                 'non_regular')
+        self.assertEqual(monitor._native_crash_eligibility(self.observed(st_nlink=2), 10, 30, 1000), 'linked_file')
+        self.assertIsNone(monitor._native_crash_eligibility(self.observed(), 10, 30, 1000))
+
+    def test_both_timestamps_and_the_complete_read_budget_are_required(self):
+        for field in ('st_mtime_ns', 'st_ctime_ns'):
+            for value in (9, 31):
+                with self.subTest(field=field, value=value):
+                    self.assertEqual(monitor._native_crash_eligibility(self.observed(**{field: value}), 10, 30, 1000),
+                                     'outside_phase')
+        for size, available in ((0, 1000), (101, 100), (monitor.MAX_NATIVE_CRASH_FILE_BYTES + 1,
+                                                       monitor.MAX_NATIVE_CRASH_TOTAL_BYTES)):
+            with self.subTest(size=size, available=available):
+                self.assertEqual(monitor._native_crash_eligibility(self.observed(st_size=size), 10, 30, available),
+                                 'size_limit')
+
+    def test_cross_phase_and_success_capture_are_rejected_before_any_io(self):
+        snapshot = monitor._NativeCrashSnapshot('debug-build', 10, ())
+        with patch.object(monitor, '_native_crash_directory') as directory:
+            for binding, reason in (({'phase': 'release-build'}, 'timeout'),
+                                    ({'phase': 'debug-build'}, 'completed')):
+                with self.subTest(binding=binding, reason=reason), self.assertRaises(ValueError):
+                    monitor.collect_native_crashes('.', Path('.'), snapshot, binding, reason)
+            directory.assert_not_called()
+
+
+class NativeCrashParserTests(unittest.TestCase):
+    def test_fatal_kind_and_current_native_java_frames_have_only_whitelisted_fields(self):
+        result = monitor.parse_native_crash(native_crash_fixture())
+        self.assertEqual(result['fatal_kind'], 'SIGBUS')
+        self.assertEqual(result['current_thread_kind'], 'JavaThread')
+        self.assertEqual(result['problematic_frame'], {'kind': 'C', 'module': 'libc.so.6', 'offset': '0x45d20'})
+        self.assertEqual(result['native_frames'], [{'kind': 'C', 'module': 'libc.so.6', 'offset': '0x45d20'},
+                                                 {'kind': 'V', 'module': 'libjvm.so', 'offset': '0x1234'}])
+        self.assertEqual(result['java_frames'], [
+            {'kind': 'j', 'class': 'androidx.sqlite.driver.bundled.BundledSQLiteConnection', 'method': 'nativeOpen'},
+            {'kind': 'J', 'class': 'java.lang.Thread', 'method': 'run'}])
+        serialized = json.dumps(result)
+        for marker in ('fixture-private', 'private-symbol', 'private-arguments', 'Ljava/lang', 'pid=', 'tid=',
+                       'sp=', '@ 0x'):
+            self.assertNotIn(marker, serialized)
+
+    def test_arguments_environment_properties_urls_addresses_and_other_thread_stacks_are_not_copied(self):
+        address = '.'.join(str(number) for number in (203, 0, 113, 7))
+        private = ('---------------  P R O C E S S  ---------------\n'
+                   'VM Arguments: password=fixture-secret\n'
+                   'Command Line: -Dprivate.property=fixture-secret\n'
+                   'Environment Variables: PRIVATE=fixture-secret\n'
+                   'URL=https://fixture.invalid/private\n' + 'host=' + address + '\n'
+                   'Current thread (0x1234): JavaThread "another-thread"\n'
+                   'Java frames: (J=compiled Java code, j=interpreted, Vv=VM code)\n'
+                   'j  java.lang.Thread.otherThread()V\n')
+        result = monitor.parse_native_crash(native_crash_fixture(after=private))
+        self.assertEqual(len(result['java_frames']), 2)
+        serialized = json.dumps(result)
+        for marker in ('fixture-secret', 'private.property', 'PRIVATE', 'fixture.invalid', address,
+                       'another-thread', 'otherThread'):
+            self.assertNotIn(marker, serialized)
+
+    def test_unknown_modules_packages_and_bad_frame_shapes_are_filtered(self):
+        result = monitor.parse_native_crash(native_crash_fixture(
+            native=['C  [private-library.so+0x1234]', 'C  [libc.so.6+0x' + 'a' * 20 + ']'],
+            java=['j  private.package.Person.name()V', 'j  java.lang.Thread.bad/name()V',
+                  'j  java.lang.Thread.<init>()V']))
+        self.assertEqual(result['native_frames'], [])
+        self.assertEqual(result['java_frames'], [{'kind': 'j', 'class': 'java.lang.Thread', 'method': '<init>'}])
+        self.assertEqual(result['filtered_frame_lines'], 4)
+        self.assertNotIn('private-library', json.dumps(result))
+        self.assertNotIn('private.package', json.dumps(result))
+
+    def test_free_form_suffixes_descriptors_and_native_symbols_are_never_serialized(self):
+        result = monitor.parse_native_crash(native_crash_fixture(
+            native=['C  [/fixture-private-path/libc.so.6+0x1234] secret@fixture.invalid + private=fixture-secret'],
+            java=['j  java.lang.Thread.run(Lprivate/type;)V+0 private=fixture-secret']))
+        self.assertEqual(result['native_frames'], [{'kind': 'C', 'module': 'libc.so.6', 'offset': '0x1234'}])
+        self.assertEqual(result['java_frames'], [{'kind': 'j', 'class': 'java.lang.Thread', 'method': 'run'}])
+        for marker in ('fixture', 'secret', 'private', '@'):
+            self.assertNotIn(marker, json.dumps(result))
+
+    def test_stacks_require_the_first_current_thread_section_and_stop_at_other_content(self):
+        raw = native_crash_fixture().replace(b'Current thread (0x1234):', b'Unrecognized thread (0x1234):')
+        result = monitor.parse_native_crash(raw)
+        self.assertIsNone(result['current_thread_kind'])
+        self.assertEqual(result['native_frames'], [])
+        self.assertEqual(result['java_frames'], [])
+        result = monitor.parse_native_crash(native_crash_fixture(native=['Command Line: private'],
+                                                                 java=['j  java.lang.Thread.unrelated()V']))
+        self.assertEqual(result['java_frames'], [])
+
+    def test_repeated_stack_heading_cannot_append_a_second_thread_stack(self):
+        after = ('Java frames: (J=compiled Java code, j=interpreted, Vv=VM code)\n'
+                 'j  java.lang.Thread.unrelated()V\n')
+        result = monitor.parse_native_crash(native_crash_fixture(after=after))
+        self.assertEqual(len(result['java_frames']), 2)
+        self.assertNotIn('unrelated', json.dumps(result))
+
+    def test_line_frame_and_raw_limits_do_not_export_prefixes_of_oversized_lines(self):
+        raw = native_crash_fixture(native=['C  [libc.so.6+0x1111] ' + 'x' * monitor.MAX_NATIVE_CRASH_LINE_BYTES,
+                                          'C  [libc.so.6+0x2222]'])
+        result = monitor.parse_native_crash(raw)
+        self.assertEqual(result['native_frames'], [{'kind': 'C', 'module': 'libc.so.6', 'offset': '0x2222'}])
+        self.assertEqual(result['filtered_frame_lines'], 1)
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_FRAMES', 1):
+            result = monitor.parse_native_crash(native_crash_fixture())
+        self.assertEqual(len(result['native_frames']), 1)
+        self.assertEqual(len(result['java_frames']), 1)
+        self.assertTrue(result['frame_limit_reached'])
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_LINES', 4):
+            result = monitor.parse_native_crash(native_crash_fixture())
+        self.assertTrue(result['line_limit_reached'])
+        self.assertEqual(result['java_frames'], [])
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_FILE_BYTES', 4), self.assertRaises(monitor._NativeCrashLimit):
+            monitor.parse_native_crash(b'12345')
+
+    def test_non_ascii_frames_and_files_without_a_valid_fatal_header_are_not_relabelled(self):
+        self.assertIsNone(monitor.parse_native_crash(b'Environment Variables: fixture-private\n'))
+        self.assertIsNone(monitor.parse_native_crash(native_crash_fixture().replace(b'# SIGBUS', b'# UNKNOWN')))
+        raw = native_crash_fixture(native=['C  [libc.so.6+0x1234]']).replace(b'0x1234]\n', b'0x1234] \xff\n')
+        result = monitor.parse_native_crash(raw)
+        self.assertEqual(result['native_frames'], [])
+        self.assertEqual(result['filtered_frame_lines'], 1)
+
+    def test_parser_respects_the_shared_capture_deadline(self):
+        with self.assertRaises(monitor._NativeCrashLimit) as failure:
+            monitor.parse_native_crash(native_crash_fixture(), deadline=time.monotonic() - 1)
+        self.assertEqual(str(failure.exception), 'capture_deadline')
+
+
+@unittest.skipUnless(sys.platform.startswith('linux') and Path('/proc').is_dir(),
+                     'Linux no-follow/dirfd native crash checks run in cloud; no local Android execution')
+class NativeCrashFilesTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.phase = 'debug-build'
+        self.report = self.root / 'app/build/reports/ci-process' / self.phase
+        self.report.mkdir(parents=True)
+        self.raw_directory = self.root / 'app/build/ci-native-crash' / self.phase
+        self.binding = {'phase': self.phase, 'source_sha': 'a' * 40, 'build_sha': 'b' * 40,
+                        'run_id': '123', 'run_attempt': '2'}
+
+    def capture(self, snapshot=None, binding=None):
+        return monitor.collect_native_crashes(self.root, self.report, snapshot or self.snapshot,
+                                             binding or self.binding, 'natural-nonzero-exit')
+
+    def new_crash(self, directory=None, name='hs_err_pid123.log', raw=None):
+        directory = self.raw_directory if directory is None else directory
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_bytes(native_crash_fixture() if raw is None else raw)
+        return path
+
+    def test_new_phase_raw_file_stays_outside_reports_and_summary_binds_exact_bytes(self):
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        raw = self.new_crash()
+        result = self.capture()
+        self.assertEqual(result['status'], 'COLLECTED')
+        self.assertFalse(result['raw_uploaded'])
+        self.assertEqual(len(result['files']), 1)
+        item = result['files'][0]
+        summary = (self.report / item['summary_file']).read_bytes()
+        self.assertEqual(monitor.hashlib.sha256(summary).hexdigest(), item['summary_sha256'])
+        self.assertEqual(monitor.hashlib.sha256(raw.read_bytes()).hexdigest(), item['raw_sha256'])
+        parsed = json.loads(summary)
+        for key, value in self.binding.items():
+            self.assertEqual(parsed[key], value)
+        self.assertNotIn('fixture-private', summary.decode())
+        self.assertEqual(list(self.report.glob('hs_err*')), [])
+        self.assertEqual(len(list(self.report.iterdir())), 1)
+        self.assertTrue(raw.is_file())
+
+    def test_old_filename_even_if_rewritten_and_old_timestamp_under_new_name_are_excluded(self):
+        old = self.new_crash()
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        old.write_bytes(native_crash_fixture(java=['j  java.lang.Thread.rewritten()V']))
+        stale = self.new_crash(name='hs_err_pid124.log')
+        os.utime(stale, ns=(self.snapshot.started_ns - 1000000, self.snapshot.started_ns - 1000000))
+        result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['omitted']['old_file'], 1)
+        self.assertEqual(result['omitted']['outside_phase'], 1)
+        self.assertEqual(list(self.report.iterdir()), [])
+
+    def test_symlink_leaf_hardlink_fifo_and_symlink_parent_are_never_read(self):
+        self.raw_directory.mkdir(parents=True)
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        original = self.new_crash(name='original.txt')
+        (self.raw_directory / 'hs_err_pid123.log').symlink_to(original)
+        os.link(original, self.raw_directory / 'hs_err_pid124.log')
+        os.mkfifo(self.raw_directory / 'hs_err_pid125.log')
+        result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['omitted']['non_regular'], 2)
+        self.assertEqual(result['omitted']['linked_file'], 1)
+        self.assertEqual(list(self.report.iterdir()), [])
+        for path in self.raw_directory.iterdir():
+            path.unlink()
+        self.raw_directory.rmdir()
+        outside = self.root / 'outside'
+        outside.mkdir()
+        self.raw_directory.symlink_to(outside, target_is_directory=True)
+        self.new_crash(directory=outside)
+        result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('directory_unavailable', result['omitted'])
+
+    def test_replaced_existing_root_and_changed_file_are_not_exported(self):
+        self.raw_directory.mkdir(parents=True)
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        self.raw_directory.rename(self.root / 'retired-raw')
+        self.new_crash()
+        result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['omitted']['directory_changed'], 1)
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        candidate = self.new_crash(name='hs_err_pid124.log')
+        original = monitor._read_native_crash
+        def changing(descriptor, name, initial, deadline):
+            candidate.write_bytes(candidate.read_bytes() + b'changed\n')
+            return original(descriptor, name, initial, deadline)
+        with patch.object(monitor, '_read_native_crash', side_effect=changing):
+            result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['omitted']['file_changed'], 1)
+
+    def test_scan_file_total_byte_and_summary_budgets_fail_closed(self):
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        for number in range(5):
+            self.new_crash(name=f'hs_err_pid{number + 123}.log', raw=native_crash_fixture(
+                java=[f'j  java.lang.Thread.method{number}()V']))
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_FILES', 2):
+            result = self.capture()
+        self.assertEqual(len(result['files']), 2)
+        self.assertIn('capture_limit', result['omitted'])
+        for path in self.report.iterdir():
+            path.unlink()
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_TOTAL_BYTES', 1):
+            result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('size_limit', result['omitted'])
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_DIRECTORY_ENTRIES', 1):
+            result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('directory_unavailable', result['omitted'])
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_SUMMARY_BYTES', 1):
+            result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('summary_limit', result['omitted'])
+
+    def test_partial_old_baseline_and_other_phase_files_cannot_gain_fresh_attribution(self):
+        self.new_crash()
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_DIRECTORY_ENTRIES', 1):
+            self.new_crash(name='hs_err_pid124.log')
+            self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        self.new_crash(name='hs_err_pid125.log')
+        self.new_crash(directory=self.root / 'app/build/ci-native-crash/release-build')
+        result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('baseline_unavailable', result['omitted'])
+
+    def test_changed_reads_still_consume_total_byte_budget_including_the_growth_probe(self):
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        payload = native_crash_fixture()
+        for number in range(3):
+            self.new_crash(name=f'hs_err_pid{number + 123}.log', raw=payload)
+        with patch.object(monitor, 'MAX_NATIVE_CRASH_TOTAL_BYTES', 2 * (len(payload) + 1)), \
+                patch.object(monitor, '_read_native_crash', side_effect=monitor._NativeCrashLimit('file_changed')) as read:
+            result = self.capture()
+        self.assertEqual(read.call_count, 2)
+        self.assertEqual(result['omitted']['file_changed'], 2)
+        self.assertEqual(result['omitted']['size_limit'], 1)
+        self.assertEqual(result['files'], [])
+
+    def test_capture_deadline_and_unknown_error_messages_do_not_expose_raw_values(self):
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        self.new_crash()
+        with patch.object(monitor, 'NATIVE_CRASH_CAPTURE_SECONDS', 0):
+            result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('directory_unavailable', result['omitted'])
+        with patch.object(monitor, '_read_native_crash', side_effect=monitor._NativeCrashLimit('fixture-private')):
+            result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertEqual(result['omitted']['diagnostic_unavailable'], 1)
+        self.assertNotIn('fixture-private', json.dumps(result))
+
+    def test_unsafe_binding_values_and_summary_destination_symlinks_are_not_exported(self):
+        self.snapshot = monitor.snapshot_native_crashes(self.root, self.phase)
+        self.new_crash()
+        private = dict(self.binding, source_sha='fixture-private', build_sha='fixture-private',
+                       run_id='fixture-private', run_attempt='fixture-private')
+        result = self.capture(binding=private)
+        parsed = json.loads((self.report / result['files'][0]['summary_file']).read_bytes())
+        for key in ('source_sha', 'build_sha', 'run_id', 'run_attempt'):
+            self.assertIsNone(parsed[key])
+        self.assertNotIn('fixture-private', json.dumps(parsed))
+        for path in self.report.iterdir():
+            path.unlink()
+        self.report.rmdir()
+        outside = self.root / 'outside-reports'
+        outside.mkdir()
+        self.report.symlink_to(outside, target_is_directory=True)
+        result = self.capture()
+        self.assertEqual(result['files'], [])
+        self.assertIn('file_unavailable', result['omitted'])
+        self.assertEqual(list(outside.iterdir()), [])
 
 
 class TestProgressTests(unittest.TestCase):
@@ -365,6 +719,79 @@ class LinuxBuildProcessTests(unittest.TestCase):
         self.assertEqual(report['exit_code'], 7)
         self.assertIn('real fixture error', self.output.getvalue())
         self.assert_stopped(report)
+
+    def test_natural_failure_captures_only_a_new_raw_file_and_keeps_original_exit(self):
+        payload = native_crash_fixture()
+        script = ('import os,pathlib,sys\n'
+                  'phase=os.environ["MELOX_CI_BUILD_PHASE"]\n'
+                  'folder=pathlib.Path("app/build/ci-native-crash") / phase\n'
+                  'folder.mkdir(parents=True)\n'
+                  f'(folder / "hs_err_pid123.log").write_bytes({payload!r})\n'
+                  'sys.exit(7)')
+        with self.assertRaises(subprocess.CalledProcessError) as failure:
+            self.run_script(script)
+        self.assertEqual(failure.exception.returncode, 7)
+        report = self.report()
+        self.assertEqual(report['status'], 'failed')
+        self.assertEqual(report['native_crashes']['status'], 'COLLECTED')
+        self.assertEqual(report['native_crashes']['reason'], 'natural-nonzero-exit')
+        self.assertEqual(len(report['native_crashes']['files']), 1)
+        self.assertNotIn('fixture-private', json.dumps(report))
+        self.assert_stopped(report)
+
+    def test_optional_native_capture_failure_preserves_the_exact_primary_exit_or_timeout(self):
+        original_exit, original_timeout = subprocess.CalledProcessError, monitor.BuildTimeout
+        created = []
+        class CapturedExit(original_exit):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+        class CapturedTimeout(original_timeout):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                created.append(self)
+        unavailable = PermissionError('fixture-private-path')
+        with patch.object(monitor, 'collect_native_crashes', side_effect=unavailable), \
+                patch.object(monitor.subprocess, 'CalledProcessError', CapturedExit), \
+                self.assertRaises(original_exit) as failure:
+            self.run_script('import sys; sys.exit(7)')
+        self.assertIs(failure.exception, created[0])
+        self.assertEqual(failure.exception.returncode, 7)
+        self.assertEqual(self.report()['native_crashes']['reason'], 'CAPTURE_FAILED')
+        self.assertNotIn('fixture-private', json.dumps(self.report()))
+        limits = monitor.BuildLimits(phase_seconds=3, silent_seconds=0.25, test_seconds=2,
+                                      termination_seconds=0.2, heartbeat_seconds=0.05)
+        with patch.object(monitor, 'collect_native_crashes', side_effect=unavailable), \
+                patch.object(monitor, 'BuildTimeout', CapturedTimeout), self.assertRaises(original_timeout) as failure:
+            self.run_script('import time; print("ready"); time.sleep(10)', phase='release-build', limits=limits)
+        self.assertIs(failure.exception, created[1])
+        self.assertEqual(failure.exception.reason, 'no build output')
+        report = self.report('release-build')
+        self.assertEqual(report['status'], 'timed-out')
+        self.assertEqual(report['native_crashes']['reason'], 'CAPTURE_FAILED')
+        self.assert_stopped(report)
+
+    def test_timeout_collects_after_owned_cleanup_and_does_not_scan_successful_phases(self):
+        actual = monitor.collect_native_crashes
+        seen = []
+        def after_cleanup(cwd, report, snapshot, binding, reason):
+            self.assertTrue(binding['ownership']['subreaper_restored'])
+            self.assert_stopped(binding)
+            seen.append(reason)
+            return actual(cwd, report, snapshot, binding, reason)
+        limits = monitor.BuildLimits(phase_seconds=3, silent_seconds=0.25, test_seconds=2,
+                                      termination_seconds=0.2, heartbeat_seconds=0.05)
+        with patch.object(monitor, 'collect_native_crashes', side_effect=after_cleanup), \
+                self.assertRaises(monitor.BuildTimeout):
+            self.run_script('import pathlib,time\n'
+                            f'pathlib.Path("hs_err_pid123.log").write_bytes({native_crash_fixture()!r})\n'
+                            'print("ready"); time.sleep(10)', limits=limits)
+        self.assertEqual(seen, ['timeout'])
+        self.assertEqual(self.report()['native_crashes']['status'], 'COLLECTED')
+        with patch.object(monitor, 'collect_native_crashes') as capture:
+            self.run_script('print("completed")', phase='success-build')
+            capture.assert_not_called()
+        self.assertNotIn('native_crashes', self.report('success-build'))
 
     def test_heartbeats_do_not_extend_silent_build_timeout_and_diagnostics_precede_stop(self):
         def diagnostics(process, *_):

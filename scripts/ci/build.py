@@ -1,7 +1,9 @@
 """云端无秘密编译；稳定证书只由另一台 runner 的 sign.py 使用。"""
 import argparse
+import hashlib
 import json
 import os
+from pathlib import PurePosixPath
 import re
 import shutil
 import time
@@ -22,6 +24,9 @@ DEPENDENCY_DIAGNOSTIC_PHASES = ('verification-collection', 'verification-debug',
                                'strict-debug', 'strict-release', 'strict-diagnostic')
 ROOM_DATABASE_SOURCE = 'app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/database/MeloXDatabase.kt'
 ROOM_SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase'
+ROOM_SCHEMA_COLLECTION_KIND = 'room-schema-strict-variants'
+ROOM_SCHEMA_COLLECTION_PHASES = ('strict-debug', 'strict-release', 'strict-diagnostic')
+ROOM_SCHEMA_REPORT_DIRECTORY = 'app/build/reports/dependency-bootstrap'
 
 
 def required_build_inputs():
@@ -102,6 +107,197 @@ def generated_input_hashes():
             files[relative] = sha256(source)
     files.update(room_schema_hashes())
     return files
+
+
+def current_room_schema():
+    inputs = required_build_inputs()
+    return inputs[-1] if len(inputs) > len(DEPENDENCY_INPUTS) else None
+
+
+def schema_project_path(relative):
+    require(isinstance(relative, str), 'Schema-only paths must be canonical relative paths')
+    name = PurePosixPath(relative)
+    require(not name.is_absolute() and name.as_posix() == relative and '\\' not in relative and
+            all(part not in ('', '.', '..') for part in name.parts),
+            'Schema-only paths must be canonical relative paths')
+    require(not (ROOT / 'android').is_symlink(), 'Schema-only Android root must not be a symbolic link')
+    android = ROOT / 'android'
+    source = android.joinpath(*name.parts)
+    require(source.resolve().is_relative_to(android.resolve()) and not source.is_symlink() and
+            not any(parent.is_symlink() for parent in source.parents if parent.is_relative_to(android)),
+            'Schema-only paths must stay within the project without symbolic links')
+    return source
+
+
+def schema_input_path(relative):
+    source = schema_project_path(relative)
+    require(source.is_file(), 'Schema-only inputs must be regular files within the Android project')
+    return source
+
+
+def schema_report_path(relative=None):
+    report = schema_project_path(ROOM_SCHEMA_REPORT_DIRECTORY)
+    require(not report.exists() or report.is_dir(), 'Schema-only report root must be a directory')
+    if relative is None:
+        return report
+    target = schema_project_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + relative)
+    require(target.is_relative_to(report) and (not target.exists() or target.is_file()),
+            'Schema-only report destination must be a regular file within the report')
+    return target
+
+
+def schema_checked_input_hashes():
+    # Validate every parent before hashing, then recheck the complete set at each strict boundary.
+    directory = schema_project_path(ROOM_SCHEMA_DIRECTORY)
+    require(not directory.exists() or directory.is_dir(), 'Schema-only schema root must be a directory')
+    for relative in DEPENDENCY_REPORT_FILES:
+        candidate = schema_project_path(relative)
+        if candidate.exists():
+            schema_input_path(relative)
+    files = generated_input_hashes()
+    for relative, digest in files.items():
+        data = schema_input_path(relative).read_bytes()
+        require(hashlib.sha256(data).hexdigest() == digest,
+                'Schema-only input bytes changed during the path checkpoint')
+    return files
+
+
+def reviewed_schema_inputs(current, missing):
+    require(current is not None and missing == [current],
+            'Schema-only collection requires exactly the missing current Room schema')
+    path = schema_project_path(current)
+    require(not path.exists(),
+            'Schema-only collection cannot consume an existing unreviewed current schema')
+    files = schema_checked_input_hashes()
+    require(all(name in files for name in required_build_inputs() if name != current),
+            'Schema-only collection requires the committed dependency inputs and old Room schemas')
+    # Optional root locks and every old schema are part of the frozen set, including symlink/error cases.
+    for relative in dict.fromkeys((*DEPENDENCY_REPORT_FILES, *files)):
+        candidate = ROOT / 'android' / relative
+        if not candidate.exists() and not candidate.is_symlink():
+            continue
+        source = schema_input_path(relative)
+        data = source.read_bytes()
+        require(hashlib.sha256(data).hexdigest() == files.get(relative),
+                'Schema-only inputs changed before collection')
+        blob = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+        require(git('rev-parse', '--verify', 'HEAD:android/' + relative, cwd=ROOT) == blob,
+                'Schema-only inputs must match the committed HEAD bytes')
+    return files
+
+
+def bootstrap_room_schema(build_sha, missing, total_deadline=None):
+    """Only a new schema is generated; strict dependency failures never enter a writer."""
+    require(os.environ.get('GITHUB_EVENT_NAME') == 'pull_request',
+            'Schema-only collection requires an unsigned PR bootstrap')
+    no_signing_secrets()
+    android = ROOT / 'android'
+    current = current_room_schema()
+    reviewed = reviewed_schema_inputs(current, missing)
+    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
+    tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in gradle_tasks(mode)]
+    phases = [{'name': name, 'command': gradle_command(gradle_tasks(mode)) + ['--info']}
+              for mode, name in zip(('debug', 'release', 'diagnostic'), ROOM_SCHEMA_COLLECTION_PHASES)]
+    report = schema_report_path()
+    require(not report.exists() or not any(report.iterdir()), 'Schema-only report directory must be empty')
+    report.mkdir(parents=True, exist_ok=True)
+    schema_report_path()
+    strict_input_hashes, exports, completed = None, {}, False
+    primary_failure = None
+    try:
+        for phase in phases:
+            phase['status'] = 'started'
+            schema_report_path()
+            if strict_input_hashes is not None:
+                require(schema_checked_input_hashes() == strict_input_hashes,
+                        'Schema-only inputs changed between strict variants')
+                # Only this run's new, unreviewed export is removed. Each variant must export its own bytes.
+                schema_input_path(current).unlink()
+            require(schema_checked_input_hashes() == reviewed,
+                    'Schema-only collection changed reviewed dependency or old schema bytes')
+            run_gradle(phase['command'], cwd=android, phase=phase['name'], build_sha=build_sha,
+                       total_deadline=total_deadline,
+                       env=gradle_environment(unsigned=True, diagnostic_phase=phase['name']))
+            after = schema_checked_input_hashes()
+            require(all(name in after for name in required_build_inputs()),
+                    'Schema-only strict variant did not export the required current schema')
+            require({name: digest for name, digest in after.items() if name != current} == reviewed,
+                    'Schema-only strict validation changed reviewed dependency or old schema bytes')
+            if strict_input_hashes is None:
+                strict_input_hashes = after
+            require(after == strict_input_hashes, 'Strict variants exported different current Room schema bytes')
+            export_path = 'schema-exports/' + phase['name'] + '/' + current.rsplit('/', 1)[-1]
+            target = schema_report_path(export_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target = schema_report_path(export_path)
+            data = schema_input_path(current).read_bytes()
+            require(hashlib.sha256(data).hexdigest() == after[current],
+                    'Current schema changed while preserving a strict variant export')
+            with target.open('xb') as stream:
+                stream.write(data)
+            exports[phase['name']] = {'file': export_path, 'sha256': sha256(target)}
+            phase['status'] = 'completed'
+        completed = True
+    except BaseException as error:
+        primary_failure = error
+        raise
+    finally:
+        # A failed call can leave files. They remain failure evidence; no fallback or import is attempted.
+        try:
+            schema_report_path()
+            files, report_errors = {}, []
+            try:
+                names = (*DEPENDENCY_REPORT_FILES, *room_schema_hashes())
+            except (ValueError, OSError):
+                names = tuple(dict.fromkeys((*DEPENDENCY_REPORT_FILES, *reviewed, current)))
+                report_errors.append('unsafe-or-unreadable-schema-output')
+            for relative in names:
+                source = android / relative
+                if not source.exists() and not source.is_symlink():
+                    continue
+                try:
+                    source = schema_input_path(relative)
+                    target = schema_report_path(relative)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target = schema_report_path(relative)
+                    shutil.copyfile(source, target)
+                    files[relative] = sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' + relative))
+                except (ValueError, OSError):
+                    report_errors.append('input-report-copy-failed')
+            report_matches = files == strict_input_hashes if strict_input_hashes is not None else None
+            exports_match = False
+            if strict_input_hashes is not None and exports.keys() == set(ROOM_SCHEMA_COLLECTION_PHASES):
+                try:
+                    exports_match = all(sha256(schema_input_path(ROOM_SCHEMA_REPORT_DIRECTORY + '/' +
+                                                                export['file'])) ==
+                                        export['sha256'] == strict_input_hashes[current]
+                                        for export in exports.values())
+                except (ValueError, OSError):
+                    report_errors.append('variant-export-check-failed')
+            if completed and (not report_matches or not exports_match or report_errors):
+                completed = False
+            write_json(schema_report_path('bootstrap-manifest.json'), {
+                'schema_version': 3, 'collection_kind': ROOM_SCHEMA_COLLECTION_KIND,
+                'source_sha': os.environ.get('SOURCE_SHA', build_sha), 'build_sha': build_sha,
+                'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                'event': os.environ['GITHUB_EVENT_NAME'], 'ref': os.environ['GITHUB_REF'], 'tasks': tasks,
+                'phases': phases, 'current_schema': current, 'reviewed_input_hashes': reviewed,
+                'schema_exports': exports, 'schema_exports_match': exports_match,
+                'strict_input_hashes': strict_input_hashes,
+                'report_matches_strict_inputs': report_matches, 'report_errors': report_errors,
+                'status': 'generated-unreviewed' if completed else 'failed-partial',
+                'missing_inputs_at_start': missing,
+                'missing_outputs': [name for name in required_build_inputs() if name not in files],
+                'files': files, 'accepted': False, 'apk_exported': False,
+            })
+        except Exception:
+            if primary_failure is None:
+                raise
+            # Report availability is secondary to the exact natural failure or timeout already observed.
+            primary_failure.add_note('Schema-only bootstrap report preservation failed')
+    require(completed, 'Schema-only collection did not preserve complete strict input bytes in reports')
+    require(False, 'Schema-only bootstrap is not an accepted build. Independently review and commit the '
+            'generated Room schema from dependency-bootstrap reports, then rebuild strictly.')
 
 
 def bootstrap_dependencies(build_sha, missing, total_deadline=None):
@@ -189,7 +385,10 @@ def build(mode):
         require(is_pr and mode == 'debug',
                 'Committed strict dependency inputs are missing: ' + ', '.join(missing) + '. '
                 'Only a temporary Debug PR may bootstrap dependency reports; trusted builds cannot.')
-        bootstrap_dependencies(build_sha, missing, total_deadline)
+        if missing == [current_room_schema()]:
+            bootstrap_room_schema(build_sha, missing, total_deadline)
+        else:
+            bootstrap_dependencies(build_sha, missing, total_deadline)
     schemas_before = room_schema_hashes()
     environment = gradle_environment(unsigned=not is_pr)
     run_gradle(gradle_command(tasks), cwd=ROOT / 'android', env=environment,

@@ -141,6 +141,13 @@ val prepareBundledSqliteHost by tasks.registering(Sync::class) {
 tasks.withType<Test>().configureEach {
     dependsOn(prepareRobolectricSdk)
     dependsOn(prepareBundledSqliteHost)
+    val nativeCrashPhase = System.getenv("MELOX_CI_BUILD_PHASE")
+        ?.takeIf { it.matches(Regex("[a-z][a-z0-9-]{0,80}")) } ?: "unmonitored"
+    val nativeCrashDirectory = layout.buildDirectory.dir("ci-native-crash/$nativeCrashPhase")
+    // Raw hs_err files stay outside automatic reports; the monitor exports only bounded stack summaries.
+    // Core dumps can grow far beyond the test heap, so a fatal worker must not create one.
+    jvmArgs("-XX:-CreateCoredumpOnCrash",
+        "-XX:ErrorFile=${nativeCrashDirectory.get().asFile.absolutePath}/hs_err_pid%p.log")
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.usePreinstrumentedJars", "true")
     systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
@@ -152,6 +159,7 @@ tasks.withType<Test>().configureEach {
     // One Gradle task owns the workers; two test forks have an explicit combined 1 GiB heap budget.
     maxHeapSize = "512m"
     doFirst {
+        nativeCrashDirectory.get().asFile.mkdirs()
         maxParallelForks = 1
         val workerLimit = gradle.startParameter.maxWorkerCount
         val eligible = System.getenv("GITHUB_ACTIONS") == "true" &&

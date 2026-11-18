@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import ctypes
 import errno
+import hashlib
 import io
 import json
 import math
@@ -26,8 +27,25 @@ MAX_LOG_BYTES = 8 * 1024 * 1024
 MAX_DUMP_BYTES = 2 * 1024 * 1024
 MAX_ACTIVE_TESTS = 64
 MAX_PENDING_OUTPUT_BYTES = 64 * 1024
+MAX_NATIVE_CRASH_DIRECTORY_ENTRIES = 256
+MAX_NATIVE_CRASH_FILES = 4
+MAX_NATIVE_CRASH_FILE_BYTES = 2 * 1024 * 1024
+MAX_NATIVE_CRASH_TOTAL_BYTES = 4 * 1024 * 1024
+MAX_NATIVE_CRASH_LINES = 8192
+MAX_NATIVE_CRASH_LINE_BYTES = 4096
+MAX_NATIVE_CRASH_FRAMES = 64
+MAX_NATIVE_CRASH_SUMMARY_BYTES = 64 * 1024
+NATIVE_CRASH_CAPTURE_SECONDS = 2
 TOTAL_BUILD_SECONDS = 45 * 60
 _OWNERSHIP_LOCK = threading.Lock()
+_NATIVE_CRASH_NAME = re.compile(r'hs_err_pid[1-9][0-9]{0,9}\.log\Z')
+_NATIVE_CRASH_MODULES = frozenset(('libc.so.6', 'libjvm.so', 'libjava.so', 'libjli.so', 'libnet.so',
+    'libnio.so', 'libzip.so', 'libverify.so', 'libinstrument.so', 'libjsig.so', 'libpthread.so.0',
+    'libdl.so.2', 'librt.so.1', 'libm.so.6', 'libstdc++.so.6', 'libgcc_s.so.1',
+    'ld-linux-x86-64.so.2', 'ld-linux-aarch64.so.1', 'libsqliteJni.so'))
+_NATIVE_CRASH_JAVA_PREFIXES = ('java.', 'javax.', 'jdk.', 'sun.', 'com.sun.', 'android.', 'androidx.',
+    'com.android.', 'com.google.', 'org.gradle.', 'org.robolectric.', 'org.junit.', 'junit.',
+    'org.jetbrains.', 'kotlin.', 'kotlinx.', 'io.github.onlinemo.meloxwatch.')
 
 
 @dataclass(frozen=True)
@@ -667,6 +685,347 @@ def collect_jvm_diagnostics(process, directory, environment, interrupted):
     return result
 
 
+@dataclass(frozen=True)
+class _NativeCrashRoot:
+    label: str
+    parts: tuple
+    chain: tuple
+    status: str
+    existing: frozenset
+
+
+@dataclass(frozen=True)
+class _NativeCrashSnapshot:
+    phase: str
+    started_ns: int
+    roots: tuple
+
+
+class _NativeCrashLimit(ValueError):
+    pass
+
+
+@contextmanager
+def _native_crash_directory(cwd, parts, chain):
+    """Open known relative directories with no symlink traversal inside the checkout."""
+    if any(not isinstance(part, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,80}', part) for part in parts):
+        raise ValueError('Invalid native crash directory component')
+    descriptors, primary = [], None
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        descriptors.append(os.open(cwd, flags))
+        chain.append((os.fstat(descriptors[-1]).st_dev, os.fstat(descriptors[-1]).st_ino))
+        for part in parts:
+            descriptors.append(os.open(part, flags, dir_fd=descriptors[-1]))
+            observed = os.fstat(descriptors[-1])
+            chain.append((observed.st_dev, observed.st_ino))
+        yield descriptors[-1]
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        closing = None
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if closing is None:
+                    closing = error
+                else:
+                    _note_failure(closing, 'Closing native crash directory', error)
+        if closing is not None:
+            if primary is not None:
+                _note_failure(primary, 'Closing native crash directories', closing)
+            else:
+                raise closing
+
+
+def _native_crash_names(descriptor, deadline):
+    names = []
+    with os.scandir(descriptor) as entries:
+        for count, entry in enumerate(entries, 1):
+            if count > MAX_NATIVE_CRASH_DIRECTORY_ENTRIES or time.monotonic() >= deadline:
+                raise _NativeCrashLimit('directory_limit')
+            if _NATIVE_CRASH_NAME.fullmatch(entry.name):
+                names.append(entry.name)
+    return frozenset(names)
+
+
+def snapshot_native_crashes(cwd, phase):
+    """A partial baseline cannot establish freshness; do not attribute its files to this phase."""
+    if not isinstance(phase, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,80}', phase):
+        raise ValueError('Invalid native crash phase')
+    started_ns, deadline, roots = time.time_ns(), time.monotonic() + NATIVE_CRASH_CAPTURE_SECONDS, []
+    paths = (('test-jvm', ('app', 'build', 'ci-native-crash', phase)),
+             ('android-root', ()), ('app-root', ('app',)))
+    for label, parts in paths:
+        chain, status, existing = [], 'ok', frozenset()
+        try:
+            with _native_crash_directory(cwd, parts, chain) as descriptor:
+                existing = _native_crash_names(descriptor, deadline)
+        except FileNotFoundError:
+            status = 'missing' if parts and chain else 'unavailable'
+        except _NativeCrashLimit:
+            status = 'directory_limit'
+        except OSError:
+            status = 'unavailable'
+        roots.append(_NativeCrashRoot(label, parts, tuple(chain), status, existing))
+    return _NativeCrashSnapshot(phase, started_ns, tuple(roots))
+
+
+def _native_crash_identity(observed):
+    return (observed.st_dev, observed.st_ino, observed.st_mode, observed.st_nlink, observed.st_size,
+            observed.st_mtime_ns, observed.st_ctime_ns)
+
+
+def _native_crash_eligibility(observed, started_ns, ended_ns, available_bytes):
+    if not stat.S_ISREG(observed.st_mode):
+        return 'non_regular'
+    if observed.st_nlink != 1:
+        return 'linked_file'
+    if not started_ns <= observed.st_mtime_ns <= ended_ns or not started_ns <= observed.st_ctime_ns <= ended_ns:
+        return 'outside_phase'
+    if observed.st_size <= 0 or observed.st_size > min(MAX_NATIVE_CRASH_FILE_BYTES, available_bytes):
+        return 'size_limit'
+    return None
+
+
+def _read_native_crash(descriptor, name, initial, deadline):
+    handle = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=descriptor)
+    with os.fdopen(handle, 'rb', buffering=0) as stream:
+        if _native_crash_identity(os.fstat(stream.fileno())) != _native_crash_identity(initial):
+            raise _NativeCrashLimit('file_changed')
+        raw = bytearray()
+        while len(raw) <= initial.st_size:
+            if time.monotonic() >= deadline:
+                raise _NativeCrashLimit('capture_deadline')
+            chunk = stream.read(min(64 * 1024, initial.st_size + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        final = os.fstat(stream.fileno())
+        current = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if (len(raw) != initial.st_size or _native_crash_identity(final) != _native_crash_identity(initial) or
+                _native_crash_identity(current) != _native_crash_identity(initial)):
+            raise _NativeCrashLimit('file_changed')
+    return bytes(raw)
+
+
+def _native_crash_frame(line):
+    # Only module offsets and known code identifiers leave the raw file. Symbols, descriptors,
+    # thread names, native source paths, program counters and free-form frame suffixes do not.
+    native = re.match(r'^([CVv])\s+\[([^\]\r\n]{1,512})\+0x([0-9a-fA-F]{1,16})\]', line)
+    if native is not None:
+        kind, module, offset = native.groups()
+        module = module.rsplit('/', 1)[-1]
+        if module not in _NATIVE_CRASH_MODULES:
+            return None
+        return {'kind': kind, 'module': module, 'offset': '0x' + offset.lower()}
+    java = re.match(r'^([jJ])\s+(?:[0-9]{1,8}\s+(?:c1|c2|aot)\s+)?'
+        r'((?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*)\.'
+        r'(<init>|<clinit>|[A-Za-z_$][A-Za-z0-9_$]*)\(', line)
+    if java is not None:
+        kind, owner, member = java.groups()
+        if len(owner) <= 240 and len(member) <= 80 and owner.startswith(_NATIVE_CRASH_JAVA_PREFIXES):
+            return {'kind': kind, 'class': owner, 'method': member}
+    if line in ('v  ~StubRoutines::call_stub', 'v  ~StubRoutines::forward_exception_stub',
+                'v  ~StubRoutines::catch_exception_stub'):
+        return {'kind': 'v', 'stub': line[3:]}
+    return None
+
+
+def parse_native_crash(raw, *, deadline=None):
+    """Whitelist the fatal header and first current-thread stack, never copy or redact full raw text."""
+    if len(raw) > MAX_NATIVE_CRASH_FILE_BYTES:
+        raise _NativeCrashLimit('size_limit')
+    result = {'fatal_banner': None, 'fatal_kind': None, 'problematic_frame': None,
+              'current_thread_kind': None, 'native_frames': [], 'java_frames': [],
+              'filtered_frame_lines': 0, 'line_limit_reached': False, 'frame_limit_reached': False}
+    thread_seen, in_thread, section, problematic, seen_stacks = False, False, None, False, set()
+    raw_lines = raw.split(b'\n')
+    result['line_limit_reached'] = len(raw_lines) > MAX_NATIVE_CRASH_LINES
+    for index, original in enumerate(raw_lines[:MAX_NATIVE_CRASH_LINES]):
+        if deadline is not None and time.monotonic() >= deadline:
+            raise _NativeCrashLimit('capture_deadline')
+        if len(original) > MAX_NATIVE_CRASH_LINE_BYTES:
+            if section is not None:
+                result['filtered_frame_lines'] += 1
+            problematic = False
+            continue
+        try:
+            line = original.rstrip(b'\r').decode('ascii').strip()
+        except UnicodeDecodeError:
+            if section is not None:
+                result['filtered_frame_lines'] += 1
+            problematic = False
+            continue
+        if index < 128 and not thread_seen:
+            if line == '# A fatal error has been detected by the Java Runtime Environment:':
+                result['fatal_banner'] = 'A fatal error has been detected by the Java Runtime Environment'
+            signal_match = re.match(r'^#\s+(SIGBUS|SIGSEGV|SIGILL|SIGABRT|SIGFPE|SIGTRAP|'
+                                    r'EXCEPTION_ACCESS_VIOLATION|EXCEPTION_ILLEGAL_INSTRUCTION)\s+\(0x[0-9a-fA-F]{1,8}\)', line)
+            if signal_match is not None:
+                result['fatal_kind'] = signal_match[1]
+            elif re.match(r'^#\s+Internal Error\s+\(', line):
+                result['fatal_kind'] = 'INTERNAL_ERROR'
+            if problematic:
+                result['problematic_frame'] = _native_crash_frame(line.lstrip('#').strip())
+                problematic = False
+            elif line == '# Problematic frame:':
+                problematic = True
+        if re.fullmatch(r'-{10,}\s+T H R E A D\s+-{10,}', line) and not thread_seen:
+            thread_seen, in_thread, section = True, True, None
+        elif line.startswith('----------'):
+            in_thread, section = False, None
+        elif in_thread and result['current_thread_kind'] is None:
+            current = re.match(r'^Current thread \(0x[0-9a-fA-F]{1,16}\):\s+'
+                               r'(JavaThread|VMThread|WatcherThread|CompilerThread)\b', line)
+            if current is not None:
+                result['current_thread_kind'] = current[1]
+        elif in_thread:
+            if line == 'Native frames: (J=compiled Java code, j=interpreted, Vv=VM code, C=native code)':
+                if 'native_frames' in seen_stacks:
+                    in_thread, section = False, None
+                else:
+                    section = 'native_frames'
+                    seen_stacks.add(section)
+            elif line == 'Java frames: (J=compiled Java code, j=interpreted, Vv=VM code)':
+                if 'java_frames' in seen_stacks:
+                    in_thread, section = False, None
+                else:
+                    section = 'java_frames'
+                    seen_stacks.add(section)
+            elif section is not None:
+                if not line:
+                    section = None
+                    continue
+                if not re.match(r'^[CVvjJ]\s', line):
+                    in_thread, section = False, None
+                    continue
+                frame = _native_crash_frame(line)
+                if frame is None:
+                    result['filtered_frame_lines'] += 1
+                elif len(result[section]) >= MAX_NATIVE_CRASH_FRAMES:
+                    result['frame_limit_reached'] = True
+                else:
+                    result[section].append(frame)
+            elif seen_stacks and line:
+                in_thread = False
+    if result['fatal_banner'] is None or result['fatal_kind'] is None:
+        return None
+    return result
+
+
+def _write_native_crash_summary(cwd, report, phase, number, encoded):
+    parts = ('app', 'build', 'reports', 'ci-process', phase)
+    if Path(report) != Path(cwd).joinpath(*parts):
+        raise ValueError('Native crash summary destination must be the current phase report')
+    name, chain = f'native-crash-{number:02d}.json', []
+    with _native_crash_directory(cwd, parts, chain) as descriptor:
+        handle = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         0o600, dir_fd=descriptor)
+        with os.fdopen(handle, 'wb') as output:
+            output.write(encoded)
+    return name
+
+
+def collect_native_crashes(cwd, report, snapshot, binding, reason):
+    if (not isinstance(snapshot.phase, str) or not re.fullmatch(r'[a-z][a-z0-9-]{0,80}', snapshot.phase) or
+            binding.get('phase') != snapshot.phase):
+        raise ValueError('Native crash baseline must belong to the same phase')
+    if reason not in ('natural-nonzero-exit', 'timeout'):
+        raise ValueError('Native crash capture requires a failed phase')
+    ended_ns, deadline = time.time_ns(), time.monotonic() + NATIVE_CRASH_CAPTURE_SECONDS
+    result = {'schema_version': 1, 'status': 'NOT_FOUND', 'reason': reason, 'files': [], 'omitted': {},
+              'raw_uploaded': False, 'bounds': {'directory_entries': MAX_NATIVE_CRASH_DIRECTORY_ENTRIES,
+              'files': MAX_NATIVE_CRASH_FILES, 'file_bytes': MAX_NATIVE_CRASH_FILE_BYTES,
+              'total_bytes': MAX_NATIVE_CRASH_TOTAL_BYTES, 'read_probe_bytes_per_file': 1, 'lines': MAX_NATIVE_CRASH_LINES,
+              'line_bytes': MAX_NATIVE_CRASH_LINE_BYTES, 'frames_per_stack': MAX_NATIVE_CRASH_FRAMES,
+              'summary_bytes': MAX_NATIVE_CRASH_SUMMARY_BYTES, 'capture_seconds': NATIVE_CRASH_CAPTURE_SECONDS}}
+    used_bytes, attempted_files, hashes = 0, 0, set()
+    safe_binding = {'phase': binding['phase'], 'source_sha': None, 'build_sha': None,
+                    'run_id': None, 'run_attempt': None}
+    for key in ('source_sha', 'build_sha'):
+        value = binding.get(key)
+        if isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40}', value):
+            safe_binding[key] = value
+    for key in ('run_id', 'run_attempt'):
+        value = binding.get(key)
+        if isinstance(value, str) and re.fullmatch(r'[1-9][0-9]{0,19}', value):
+            safe_binding[key] = value
+
+    def omit(classification):
+        if classification not in ('baseline_unavailable', 'directory_changed', 'old_file', 'capture_limit',
+                'non_regular', 'linked_file', 'outside_phase', 'size_limit', 'duplicate_bytes',
+                'no_allowed_fatal_content', 'summary_limit', 'file_changed', 'capture_deadline',
+                'directory_limit', 'file_unavailable', 'directory_unavailable'):
+            classification = 'diagnostic_unavailable'
+        result['omitted'][classification] = result['omitted'].get(classification, 0) + 1
+
+    for root in snapshot.roots:
+        if root.status not in ('ok', 'missing'):
+            omit('baseline_unavailable')
+            continue
+        chain = []
+        try:
+            with _native_crash_directory(cwd, root.parts, chain) as descriptor:
+                if tuple(chain[:len(root.chain)]) != root.chain:
+                    omit('directory_changed')
+                    continue
+                for name in sorted(_native_crash_names(descriptor, deadline)):
+                    if name in root.existing:
+                        omit('old_file')
+                        continue
+                    if attempted_files >= MAX_NATIVE_CRASH_FILES or time.monotonic() >= deadline:
+                        omit('capture_limit')
+                        break
+                    try:
+                        initial = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                        rejection = _native_crash_eligibility(initial, snapshot.started_ns, ended_ns,
+                                                             MAX_NATIVE_CRASH_TOTAL_BYTES - used_bytes - 1)
+                        if rejection is not None:
+                            omit(rejection)
+                            continue
+                        attempted_files += 1
+                        # Failed or changing reads still consume their reservation, including the growth probe.
+                        used_bytes += initial.st_size + 1
+                        raw = _read_native_crash(descriptor, name, initial, deadline)
+                        raw_hash = hashlib.sha256(raw).hexdigest()
+                        if raw_hash in hashes:
+                            omit('duplicate_bytes')
+                            continue
+                        hashes.add(raw_hash)
+                        parsed = parse_native_crash(raw, deadline=deadline)
+                        if parsed is None:
+                            omit('no_allowed_fatal_content')
+                            continue
+                        summary = {'schema_version': 1, **safe_binding, 'root': root.label,
+                                   'raw_bytes': len(raw), 'raw_sha256': raw_hash, 'raw_uploaded': False,
+                                   'content': parsed}
+                        encoded = (json.dumps(summary, ensure_ascii=True, indent=2) + '\n').encode('ascii')
+                        if len(encoded) > MAX_NATIVE_CRASH_SUMMARY_BYTES:
+                            omit('summary_limit')
+                            continue
+                        name = _write_native_crash_summary(cwd, report, snapshot.phase, len(result['files']) + 1, encoded)
+                        result['files'].append({'summary_file': name, 'summary_bytes': len(encoded),
+                                                'summary_sha256': hashlib.sha256(encoded).hexdigest(),
+                                                'raw_bytes': len(raw), 'raw_sha256': raw_hash, 'root': root.label})
+                    except _NativeCrashLimit as error:
+                        omit(str(error))
+                    except OSError:
+                        omit('file_unavailable')
+        except FileNotFoundError:
+            pass
+        except (_NativeCrashLimit, OSError):
+            omit('directory_unavailable')
+    if result['files']:
+        result['status'] = 'COLLECTED'
+    incomplete = set(result['omitted']) - {'old_file', 'duplicate_bytes'}
+    if incomplete:
+        result['status'] = 'PARTIAL' if result['files'] else 'UNAVAILABLE'
+    return result
+
+
 def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None, limits=BuildLimits(),
                output=None, diagnostics=collect_jvm_diagnostics):
     """The caller validates cloud authorization and strips tokens; Linux ownership is mandatory."""
@@ -692,6 +1051,7 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
               'source_sha': env.get('SOURCE_SHA'), 'build_sha': build_sha, 'run_id': env.get('GITHUB_RUN_ID'),
               'run_attempt': env.get('GITHUB_RUN_ATTEMPT'), 'apk_exported': False}
     process, selector, log, failure, cleanup_failure = None, None, None, None, None
+    crash_snapshot, crash_reason = None, None
     owner, sink = _LinuxProcessOwner(), _OutputSink(output)
     log_bytes, output_bytes = 0, 0
 
@@ -722,9 +1082,15 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
     with _interrupts() as interrupted:
         try:
             owner.activate()
+            try:
+                crash_snapshot = snapshot_native_crashes(cwd, phase)
+            except Exception:
+                # Diagnostics are optional; losing a freshness baseline must not alter build execution.
+                crash_snapshot = None
             sink.activate()
             log = (report / 'process-output.log').open('wb')
-            process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
+            process_environment = dict(env, MELOX_CI_BUILD_PHASE=phase)
+            process = subprocess.Popen(command, cwd=cwd, env=process_environment, stdout=subprocess.PIPE,
                                        stderr=subprocess.STDOUT, start_new_session=True)
             owner.register(process)
             selector = _open_pipe(process)
@@ -759,6 +1125,7 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
                 if process.returncode is not None:
                     record['exit_code'] = process.returncode
                     if process.returncode:
+                        crash_reason = 'natural-nonzero-exit'
                         raise subprocess.CalledProcessError(process.returncode, command)
                 if progress.invalid_events:
                     raise ValueError('Invalid or unmatched test progress event')
@@ -773,6 +1140,7 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
                 elif not completed and now - last_output >= limits.silent_seconds:
                     reason = ('no build output', limits.silent_seconds)
                 if reason is not None:
+                    crash_reason = 'timeout'
                     timeout_failure = BuildTimeout(command, phase, *reason)
                     record.update(status='timed-out', timeout_reason=reason[0])
                     preserve_report(timeout_failure, 'Writing pre-termination report')
@@ -839,6 +1207,23 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
                                    'preexisting_zombies': owner.baseline_zombies,
                                    'preexisting_live_descendants': owner.baseline_live_descendants,
                                    'subreaper_restored': owner.restored}
+            if crash_reason is not None:
+                termination = record.get('termination', {})
+                if crash_snapshot is None:
+                    record['native_crashes'] = {'status': 'UNAVAILABLE', 'reason': 'BASELINE_UNAVAILABLE',
+                                               'raw_uploaded': False}
+                elif (not termination.get('ownership_verified') or not termination.get('parent_reaped') or
+                      termination.get('remaining_live_owned_processes') or termination.get('remaining_owned_zombies')):
+                    record['native_crashes'] = {'status': 'UNAVAILABLE', 'reason': 'PROCESS_CLOSURE_UNVERIFIED',
+                                               'raw_uploaded': False}
+                else:
+                    try:
+                        record['native_crashes'] = collect_native_crashes(cwd, report, crash_snapshot, record, crash_reason)
+                    except Exception as error:
+                        record['native_crashes'] = {'status': 'UNAVAILABLE', 'reason': 'CAPTURE_FAILED',
+                                                   'error_type': type(error).__name__, 'raw_uploaded': False}
+                        if failure is not None:
+                            _note_failure(failure, 'Collecting native crash summary', error)
             if interrupted() is not None:
                 record['interrupted_signal'] = interrupted()
                 record['status'] = 'interrupted'

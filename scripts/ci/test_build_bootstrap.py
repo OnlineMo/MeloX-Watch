@@ -1,4 +1,5 @@
 """Dependency bootstrap trust/failure boundaries; Gradle is never executed by these tests."""
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -580,12 +581,23 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         initial = build.ROOM_SCHEMA_DIRECTORY + '/1.json'
         current = build.ROOM_SCHEMA_DIRECTORY + '/2.json'
         self.write_inputs((*build.DEPENDENCY_INPUTS, initial))
+        committed = {}
+        for relative in (*build.DEPENDENCY_INPUTS, initial):
+            data = (self.android / relative).read_bytes()
+            committed[relative] = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+
+        def git_command(*args, **kwargs):
+            if args[:2] == ('rev-parse', '--verify'):
+                return committed[args[2].removeprefix('HEAD:android/')]
+            return SOURCE
+
         with patch.object(build, 'run_gradle', side_effect=lambda *args, **kwargs:
-                          self.write_inputs((*build.DEPENDENCY_REPORT_FILES, current))) as process, \
+                          self.write_inputs((current,))) as process, \
+                patch.object(build, 'git', side_effect=git_command), \
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
-            self.assertEqual(process.call_count, 7)
+            self.assertEqual(process.call_count, 3)
             inspect.assert_not_called()
         manifest = self.manifest()
         self.assertEqual(manifest['missing_inputs_at_start'], [current])
