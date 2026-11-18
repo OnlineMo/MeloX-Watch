@@ -254,6 +254,25 @@ tasks.withType<Test>().configureEach {
             "v1", "v2", "hybrid", "none", "unavailable" -> cgroupVersion
             else -> null
         }
+        // Only fixed classifications and bounded counts leave the probe. An incomplete
+        // measurement must retain its cause without exposing kernel paths or identifiers.
+        report["measurement_status"] = when (val status = resources?.get("measurement_status")) {
+            "ok", "worker_limit", "low_resources", "invalid_arguments", "unsupported_platform",
+            "read_unavailable", "input_too_large", "invalid_measurement", "cgroup_conflict",
+            "cgroup_mapping_unavailable", "hidden_cgroup_ancestors", "probe_timeout", "internal_error",
+            "unknown" -> status
+            else -> null
+        }
+        for (key in listOf("cgroup_cpu_quota_status", "cgroup_cpuset_status", "cgroup_memory_status")) {
+            report[key] = when (val status = resources?.get(key)) {
+                "finite", "unlimited", "none", "unknown" -> status
+                else -> null
+            }
+        }
+        for (key in listOf("cgroup_cpu_ancestor_count", "cgroup_cpuset_ancestor_count",
+            "cgroup_memory_ancestor_count", "cgroup_memory_limit_sample_count")) {
+            report[key] = measuredInteger(key)?.takeIf { it <= 32L }
+        }
         logger.lifecycle("MELOX_CI_TEST_RESOURCES " + JsonOutput.toJson(report))
     }
     failFast = true
