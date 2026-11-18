@@ -68,6 +68,7 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -326,7 +327,9 @@ class QueueSleepTimerIntegrationTest {
         val endingCheckpoint = QueueCheckpoint(ending.queueEntryId, DURATION_MS, 2)
         gatedStore.conflictNextCheckpoint = { it == endingCheckpoint }
 
-        val freezing = asyncCommand { coordinator.freezeForBackendSwitch() }
+        val freezing = asyncCommand(start = CoroutineStart.UNDISPATCHED) {
+            coordinator.freezeForBackendSwitch()
+        }
         assertFalse(freezing.isCompleted)
         gate.release()
         val failure = runCatching { freezing.await() }.exceptionOrNull()
@@ -401,7 +404,9 @@ class QueueSleepTimerIntegrationTest {
         assertEquals(initialRounds, rounds)
         assertEquals(plays, old.playCalls)
 
-        val freezing = asyncCommand { coordinator.freezeForBackendSwitch() }
+        val freezing = asyncCommand(start = CoroutineStart.UNDISPATCHED) {
+            coordinator.freezeForBackendSwitch()
+        }
         assertFalse(freezing.isCompleted)
         gate.release()
         val checkpoint = freezing.await()
@@ -876,7 +881,9 @@ class QueueSleepTimerIntegrationTest {
             assertEquals(ending, timer.state.value.timer.active?.waitingFor)
         }
 
-        val freezing = asyncCommand { coordinator.freezeForBackendSwitch() }
+        val freezing = asyncCommand(start = CoroutineStart.UNDISPATCHED) {
+            coordinator.freezeForBackendSwitch()
+        }
         assertFalse(freezing.isCompleted)
         assertFalse(coordinator.acceptsSessionCommands())
         assertFalse(gate.exited.isCompleted)
@@ -1077,7 +1084,12 @@ class QueueSleepTimerIntegrationTest {
         checkpointGates.add(it)
         gatedStore.nextGate = it
     }
-    private fun <T> asyncCommand(block: suspend () -> T): Deferred<T> = scope.async { block() }.also { testCommands.add(it) }
+    // Freeze tests inspect the reservation before releasing the Room receipt. Main.immediate
+    // can queue a nested DEFAULT start while that receipt resumes the test.
+    private fun <T> asyncCommand(
+        start: CoroutineStart = CoroutineStart.DEFAULT,
+        block: suspend () -> T,
+    ): Deferred<T> = scope.async(start = start) { block() }.also { testCommands.add(it) }
     private fun edit(operation: String, saved: QueueSnapshot, mutation: QueueMutation) =
         QueueMutationRequest(operation, saved.generationId, saved.queueRevision, saved.currentEntryId, mutation)
 
