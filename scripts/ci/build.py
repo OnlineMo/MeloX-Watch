@@ -16,7 +16,9 @@ from ci_common import (ROOT, cloud_only, expected_identity, git, no_signing_secr
 DEPENDENCY_INPUTS = ('gradle/verification-metadata.xml', 'app/gradle.lockfile')
 DEPENDENCY_REPORT_FILES = (*DEPENDENCY_INPUTS, 'gradle.lockfile')
 LOCK_COLLECTION_TASK = ':ciResolveAndLockAll'
-DEPENDENCY_DIAGNOSTIC_PHASES = ('verification-collection', 'normal-lock-collection',
+# Keep the previous tag available for historical diagnostic tooling; new writers identify their variant.
+DEPENDENCY_DIAGNOSTIC_PHASES = ('verification-collection', 'verification-debug', 'verification-release',
+                               'verification-diagnostic', 'normal-lock-collection',
                                'strict-debug', 'strict-release', 'strict-diagnostic')
 ROOM_DATABASE_SOURCE = 'app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/database/MeloXDatabase.kt'
 ROOM_SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase'
@@ -108,8 +110,10 @@ def bootstrap_dependencies(build_sha, missing, total_deadline=None):
     total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
     tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in gradle_tasks(mode)]
     phases = [
-        {'name': 'verification-collection', 'command': gradle_command(tasks) +
-         ['--write-verification-metadata', 'sha256', '--write-locks']},
+        # Each cold variant has its own phase budget while all calls share the overall deadline.
+        *({'name': 'verification-' + mode, 'command': gradle_command(gradle_tasks(mode)) +
+           ['--write-verification-metadata', 'sha256', '--write-locks']}
+          for mode in ('debug', 'release', 'diagnostic')),
         # 真实任务先消费正常图；末尾补齐配置，避免采集任务提前固定消费者的图。
         {'name': 'normal-lock-collection', 'command': gradle_command([*tasks, LOCK_COLLECTION_TASK]) + ['--write-locks']},
         *({'name': 'strict-' + mode, 'command': gradle_command(gradle_tasks(mode))}
@@ -148,7 +152,8 @@ def bootstrap_dependencies(build_sha, missing, total_deadline=None):
         if completed and not report_matches_strict_inputs:
             completed = False
         write_json(report / 'bootstrap-manifest.json', {
-            'schema_version': 1, 'source_sha': os.environ.get('SOURCE_SHA', build_sha), 'build_sha': build_sha,
+            'schema_version': 2, 'collection_kind': 'variant-verification-normal-lock-strict',
+            'source_sha': os.environ.get('SOURCE_SHA', build_sha), 'build_sha': build_sha,
             'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
             'event': os.environ['GITHUB_EVENT_NAME'], 'ref': os.environ['GITHUB_REF'], 'tasks': tasks,
             'phases': phases, 'strict_input_hashes': strict_input_hashes,

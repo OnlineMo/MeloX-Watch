@@ -17,6 +17,8 @@ ENV = {
     'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2', 'SOURCE_SHA': SOURCE,
 }
 VERSION = {'versionName': '0.0.0', 'versionCode': '0'}
+EXPECTED_PHASES = ('verification-debug', 'verification-release', 'verification-diagnostic',
+                   'normal-lock-collection', 'strict-debug', 'strict-release', 'strict-diagnostic')
 
 
 class BuildDependencyBootstrapTests(unittest.TestCase):
@@ -72,14 +74,18 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             phase = len(phases)
             phases.append(command)
             deadlines.append(kwargs['total_deadline'])
-            self.assertEqual(kwargs['phase'], build.DEPENDENCY_DIAGNOSTIC_PHASES[phase])
+            self.assertEqual(kwargs['phase'], EXPECTED_PHASES[phase])
             self.assertEqual(kwargs['build_sha'], SOURCE)
             self.assertIn('--dependency-verification=strict', command)
-            if phase == 0:
+            if phase < 3:
                 self.assertIn('--write-locks', command)
                 self.assertEqual(command[command.index('--write-verification-metadata') + 1], 'sha256')
                 self.assertNotIn(build.LOCK_COLLECTION_TASK, command)
-            elif phase == 1:
+                variant = ('Debug', 'Release', 'Diagnostic')[phase]
+                self.assertEqual([argument for argument in command if argument.startswith(':')],
+                                 [f':app:testWatchAndroid{variant}UnitTest',
+                                  f':app:lintWatchAndroid{variant}', f':app:assembleWatchAndroid{variant}'])
+            elif phase == 3:
                 self.assertIn('--write-locks', command)
                 self.assertNotIn('--write-verification-metadata', command)
                 expected_consumers = [f':app:{task}WatchAndroid{variant}{suffix}'
@@ -91,14 +97,15 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 self.assertNotIn('--write-locks', command)
                 self.assertNotIn('--write-verification-metadata', command)
                 self.assertNotIn(build.LOCK_COLLECTION_TASK, command)
-            variants = ('Debug', 'Release', 'Diagnostic') if phase < 2 else (('Debug', 'Release', 'Diagnostic')[phase - 2],)
+            variants = ('Debug', 'Release', 'Diagnostic') if phase == 3 else (
+                ('Debug', 'Release', 'Diagnostic')[phase if phase < 3 else phase - 4],)
             for variant in variants:
                 self.assertIn(f':app:testWatchAndroid{variant}UnitTest', command)
                 self.assertIn(f':app:lintWatchAndroid{variant}', command)
                 self.assertIn(f':app:assembleWatchAndroid{variant}', command)
             self.assertEqual(kwargs['env']['CI_UNSIGNED_APK'], 'true')
             self.assertEqual(kwargs['env']['CI_DEPENDENCY_DIAGNOSTIC_PHASE'],
-                             build.DEPENDENCY_DIAGNOSTIC_PHASES[phase])
+                             EXPECTED_PHASES[phase])
             for token in ('GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_RUNTIME_TOKEN', 'ACTIONS_ID_TOKEN_REQUEST_TOKEN'):
                 self.assertNotIn(token, kwargs['env'])
             self.assertEqual(kwargs['cwd'], self.android)
@@ -111,19 +118,100 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
-            self.assertEqual(process.call_count, 5)
+            self.assertEqual(process.call_count, 7)
             self.assertEqual(len(set(deadlines)), 1)
             inspect.assert_not_called()
         manifest = self.manifest()
+        self.assertEqual(manifest['schema_version'], 2)
+        self.assertEqual(manifest['collection_kind'], 'variant-verification-normal-lock-strict')
         self.assertEqual(manifest['status'], 'generated-unreviewed')
         self.assertEqual(manifest['files'].keys(), set(build.DEPENDENCY_REPORT_FILES))
         self.assertEqual(manifest['missing_outputs'], [])
         self.assertEqual(manifest['source_sha'], SOURCE)
         self.assertFalse(manifest['accepted'])
         self.assertFalse(manifest['apk_exported'])
+        self.assertEqual([phase['name'] for phase in manifest['phases']], list(EXPECTED_PHASES))
         self.assertTrue(all(phase['status'] == 'completed' for phase in manifest['phases']))
         self.assertEqual(manifest['strict_input_hashes'], manifest['files'])
         self.assertTrue(manifest['report_matches_strict_inputs'])
+        self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_each_variant_writer_failure_stops_before_normal_and_strict_even_with_complete_outputs(self):
+        for index, failed_phase in enumerate(EXPECTED_PHASES[:3]):
+            with self.subTest(phase=failed_phase):
+                calls = []
+
+                def failed(command, **kwargs):
+                    calls.append(kwargs['phase'])
+                    self.write_inputs(build.DEPENDENCY_REPORT_FILES)
+                    if kwargs['phase'] == failed_phase:
+                        raise subprocess.CalledProcessError(13, command)
+
+                with patch.object(build, 'run_gradle', side_effect=failed), \
+                        patch.object(build, 'inspect_apk') as inspect:
+                    with self.assertRaises(subprocess.CalledProcessError) as failure:
+                        build.bootstrap_dependencies(SOURCE, list(build.DEPENDENCY_INPUTS), total_deadline=12345)
+                    self.assertEqual(failure.exception.returncode, 13)
+                    inspect.assert_not_called()
+                self.assertEqual(calls, list(EXPECTED_PHASES[:index + 1]))
+                manifest = self.manifest()
+                self.assertEqual(manifest['schema_version'], 2)
+                self.assertEqual(manifest['collection_kind'], 'variant-verification-normal-lock-strict')
+                self.assertEqual(manifest['missing_outputs'], [])
+                self.assertEqual(manifest['status'], 'failed-partial')
+                self.assertEqual([phase.get('status') for phase in manifest['phases']],
+                                 ['completed'] * index + ['started'] + [None] * (6 - index))
+                self.assertIsNone(manifest['strict_input_hashes'])
+                self.assertIsNone(manifest['report_matches_strict_inputs'])
+                self.assertFalse(manifest['accepted'])
+                self.assertFalse(manifest['apk_exported'])
+                self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_every_writer_timeout_retains_its_deadline_and_failed_partial_disposition(self):
+        for index, failed_phase in enumerate(EXPECTED_PHASES[:3]):
+            for reason, seconds in (('phase deadline', 1200), ('no build output', 300),
+                                    ('active test deadline including setup/cleanup', 240)):
+                with self.subTest(phase=failed_phase, reason=reason):
+                    calls = []
+
+                    def timed_out(command, **kwargs):
+                        calls.append(kwargs['phase'])
+                        self.write_inputs(build.DEPENDENCY_REPORT_FILES)
+                        if kwargs['phase'] == failed_phase:
+                            raise BuildTimeout(command, kwargs['phase'], reason, seconds)
+
+                    with patch.object(build, 'run_gradle', side_effect=timed_out), \
+                            patch.object(build, 'inspect_apk') as inspect:
+                        with self.assertRaises(BuildTimeout) as failure:
+                            build.bootstrap_dependencies(SOURCE, list(build.DEPENDENCY_INPUTS), total_deadline=12345)
+                        self.assertEqual(failure.exception.phase, failed_phase)
+                        self.assertEqual(failure.exception.reason, reason)
+                        self.assertEqual(failure.exception.timeout, seconds)
+                        inspect.assert_not_called()
+                    self.assertEqual(calls, list(EXPECTED_PHASES[:index + 1]))
+                    manifest = self.manifest()
+                    self.assertEqual(manifest['status'], 'failed-partial')
+                    self.assertEqual([phase.get('status') for phase in manifest['phases']],
+                                     ['completed'] * index + ['started'] + [None] * (6 - index))
+                    self.assertIsNone(manifest['strict_input_hashes'])
+                    self.assertIsNone(manifest['report_matches_strict_inputs'])
+                    self.assertFalse(manifest['accepted'])
+                    self.assertFalse(manifest['apk_exported'])
+                    self.assertFalse((self.root / 'artifacts').exists())
+
+    def test_all_seven_calls_reuse_the_supplied_overall_deadline_without_resetting_it(self):
+        supplied_deadline = 12345.678
+        with patch.object(build.time, 'monotonic', side_effect=AssertionError('overall deadline reset')), \
+                patch.object(build, 'run_gradle', side_effect=lambda *args, **kwargs: self.write_inputs()) as process:
+            with self.assertRaisesRegex(ValueError, 'not an accepted build'):
+                build.bootstrap_dependencies(SOURCE, list(build.DEPENDENCY_INPUTS), total_deadline=supplied_deadline)
+        self.assertEqual(process.call_count, 7)
+        self.assertEqual([call.kwargs['total_deadline'] for call in process.call_args_list], [supplied_deadline] * 7)
+        self.assertEqual([call.kwargs['phase'] for call in process.call_args_list], list(EXPECTED_PHASES))
+        manifest = self.manifest()
+        self.assertEqual(manifest['status'], 'generated-unreviewed')
+        self.assertFalse(manifest['accepted'])
+        self.assertFalse(manifest['apk_exported'])
         self.assertFalse((self.root / 'artifacts').exists())
 
     def test_inherited_diagnostics_are_removed_from_ordinary_gradle_environments(self):
@@ -151,6 +239,19 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'unsigned PR bootstrap phase'):
                     build.gradle_environment(unsigned, diagnostic_phase=phase)
 
+    def test_new_writer_diagnostics_keep_the_unsigned_pr_boundary(self):
+        for phase in EXPECTED_PHASES[:3]:
+            for event, unsigned in (('pull_request', False), ('push', True), ('workflow_dispatch', True)):
+                with self.subTest(event=event, unsigned=unsigned, phase=phase), \
+                        patch.dict(os.environ, {'GITHUB_EVENT_NAME': event}):
+                    with self.assertRaisesRegex(ValueError, 'unsigned PR bootstrap phase'):
+                        build.gradle_environment(unsigned, diagnostic_phase=phase)
+
+    def test_legacy_writer_diagnostic_tag_remains_available_only_to_unsigned_pr_tooling(self):
+        environment = build.gradle_environment(True, diagnostic_phase='verification-collection')
+        self.assertEqual(environment['CI_DEPENDENCY_DIAGNOSTIC_PHASE'], 'verification-collection')
+        self.assertEqual(environment['CI_UNSIGNED_APK'], 'true')
+
     def test_normal_resolution_lock_replaces_writer_graph_before_independent_verification(self):
         calls = []
         lock = self.android / 'app/gradle.lockfile'
@@ -170,7 +271,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 build.build('debug')
             inspect.assert_not_called()
         manifest = self.manifest()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 7)
         copied = self.android / 'app/build/reports/dependency-bootstrap/app/gradle.lockfile'
         self.assertEqual(copied.read_text(encoding='utf-8'), 'normal task graph\n')
         self.assertEqual(manifest['strict_input_hashes']['app/gradle.lockfile'], build.sha256(copied))
@@ -185,14 +286,14 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         with patch.object(build, 'run_gradle', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaises(subprocess.CalledProcessError):
                 build.build('debug')
-            self.assertEqual(process.call_count, 2)
+            self.assertEqual(process.call_count, 4)
             inspect.assert_not_called()
         manifest = self.manifest()
         self.assertEqual(manifest['missing_outputs'], [])
         self.assertEqual(manifest['files'].keys(), set(build.DEPENDENCY_REPORT_FILES))
         self.assertEqual(manifest['status'], 'failed-partial')
         self.assertEqual([phase.get('status') for phase in manifest['phases']],
-                         ['completed', 'started', None, None, None])
+                         ['completed', 'completed', 'completed', 'started', None, None, None])
         self.assertIsNone(manifest['strict_input_hashes'])
         self.assertIsNone(manifest['report_matches_strict_inputs'])
         self.assertFalse(manifest['accepted'])
@@ -209,12 +310,12 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         with patch.object(build, 'run_gradle', side_effect=generated) as process, patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaises(subprocess.CalledProcessError):
                 build.build('debug')
-            self.assertEqual(process.call_count, 3)
+            self.assertEqual(process.call_count, 5)
             inspect.assert_not_called()
         manifest = self.manifest()
         self.assertEqual(manifest['status'], 'failed-partial')
         self.assertEqual([phase.get('status') for phase in manifest['phases']],
-                         ['completed', 'completed', 'started', None, None])
+                         ['completed', 'completed', 'completed', 'completed', 'started', None, None])
         self.assertFalse(manifest['accepted'])
         self.assertFalse((self.root / 'artifacts').exists())
 
@@ -233,6 +334,40 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
         self.assertEqual(manifest['status'], 'failed-partial')
         self.assertFalse(manifest['accepted'])
         self.assertFalse(manifest['apk_exported'])
+
+    def test_each_strict_variant_rejects_xml_lock_and_schema_drift_without_running_later_phases(self):
+        source = self.android / build.ROOM_DATABASE_SOURCE
+        source.parent.mkdir(parents=True)
+        source.write_text('@Database(version = 2, exportSchema = true)\n', encoding='utf-8')
+        schema_names = tuple(build.ROOM_SCHEMA_DIRECTORY + f'/{version}.json' for version in (1, 2))
+        inputs = (*build.DEPENDENCY_REPORT_FILES, *schema_names)
+        for phase_index, failed_phase in enumerate(EXPECTED_PHASES[4:], 4):
+            for changed_input in inputs:
+                with self.subTest(phase=failed_phase, input=changed_input):
+                    calls = []
+
+                    def changed(command, **kwargs):
+                        calls.append(kwargs['phase'])
+                        if '--write-locks' in command:
+                            self.write_inputs(inputs)
+                        elif kwargs['phase'] == failed_phase:
+                            (self.android / changed_input).write_text('unreviewed strict drift\n', encoding='utf-8')
+
+                    with patch.object(build, 'run_gradle', side_effect=changed), \
+                            patch.object(build, 'inspect_apk') as inspect:
+                        with self.assertRaisesRegex(ValueError, 'changed dependency input bytes'):
+                            build.bootstrap_dependencies(SOURCE, list(inputs), total_deadline=12345)
+                        inspect.assert_not_called()
+                    self.assertEqual(calls, list(EXPECTED_PHASES[:phase_index + 1]))
+                    manifest = self.manifest()
+                    self.assertEqual(manifest['status'], 'failed-partial')
+                    self.assertEqual([phase.get('status') for phase in manifest['phases']],
+                                     ['completed'] * phase_index + ['started'] + [None] * (6 - phase_index))
+                    self.assertIsNotNone(manifest['strict_input_hashes'])
+                    self.assertFalse(manifest['report_matches_strict_inputs'])
+                    self.assertFalse(manifest['accepted'])
+                    self.assertFalse(manifest['apk_exported'])
+                    self.assertFalse((self.root / 'artifacts').exists())
 
     def test_gradle_failure_preserves_partial_reports_and_remains_failed(self):
         def failed(command, **kwargs):
@@ -324,12 +459,12 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
         commands = [call.args[0] for call in process.call_args_list]
-        normal_tasks = [argument for argument in commands[1] if argument.startswith(':')]
+        normal_tasks = [argument for argument in commands[3] if argument.startswith(':')]
         self.assertEqual(normal_tasks[-2:],
                          [':app:assembleWatchAndroidDiagnosticAndroidTest', build.LOCK_COLLECTION_TASK])
-        for phase in (0, 4):
+        for phase in (2, 6):
             self.assertIn(':app:assembleWatchAndroidDiagnosticAndroidTest', commands[phase])
-        for phase in (2, 3):
+        for phase in (0, 1, 4, 5):
             self.assertNotIn(':app:assembleWatchAndroidDiagnosticAndroidTest', commands[phase])
 
     def test_room_schema_bootstrap_preserves_generated_version_and_still_exports_no_apk(self):
@@ -428,7 +563,7 @@ class BuildDependencyBootstrapTests(unittest.TestCase):
                 patch.object(build, 'inspect_apk') as inspect:
             with self.assertRaisesRegex(ValueError, 'not an accepted build'):
                 build.build('debug')
-            self.assertEqual(process.call_count, 5)
+            self.assertEqual(process.call_count, 7)
             inspect.assert_not_called()
         manifest = self.manifest()
         self.assertEqual(manifest['missing_inputs_at_start'], [current])

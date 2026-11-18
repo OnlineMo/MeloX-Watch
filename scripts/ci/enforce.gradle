@@ -10,10 +10,11 @@ new File(repositoryRoot, 'version.properties').withInputStream { releaseVersion.
 if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
     throw new GradleException('Gradle version differs from the cloud toolchain lock')
 }
-// 仅缺锁的无秘密PR五阶段开启；普通构建不安装监听器，也不额外解析图。
+// 仅缺依赖/Room输入的无秘密PR采集开启；普通构建不安装监听器，也不额外解析图。
 def dependencyDiagnosticPhase = System.getenv('CI_DEPENDENCY_DIAGNOSTIC_PHASE')
 def dependencyDiagnosticEnabled = System.getenv('GITHUB_EVENT_NAME') == 'pull_request' &&
-    ['verification-collection', 'normal-lock-collection', 'strict-debug', 'strict-release',
+    ['verification-collection', 'verification-debug', 'verification-release', 'verification-diagnostic',
+     'normal-lock-collection', 'strict-debug', 'strict-release',
      'strict-diagnostic'].contains(dependencyDiagnosticPhase)
 def diagnosticConfigurations = (['implementationDependenciesMetadata'] +
     ['Debug', 'Release', 'Diagnostic'].collectMany { variant ->
