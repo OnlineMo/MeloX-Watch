@@ -30,7 +30,7 @@
   },
   "migration_tool_hashes": {
     "scripts/ci/build.py": "9f95582181404f152a2b81157bd4e4bc26cb6d62e08bd6081945b96c904e26ef",
-    "scripts/ci/dependency-acquire-variants.gradle": "9ada90c87c3412b8b7191196bd788965009b39ae5fe7869c5927130a807ed602"
+    "scripts/ci/dependency-acquire-variants.gradle": "b5cfeea2af62bf11a2614180e03ea899d0072379a9a5d038b602e547e5ba9517"
   },
   "allowed_dependency_outputs": [
     "gradle/verification-metadata.xml",

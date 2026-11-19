@@ -6,6 +6,7 @@ import java.security.MessageDigest
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.UnresolvedDependencyResult
 import org.gradle.api.tasks.testing.Test
+import org.gradle.api.internal.project.ProjectInternal
 
 def requireMigration = { condition, message ->
     if (!condition) throw new GradleException(message)
@@ -410,6 +411,15 @@ def acquisitionDone = false
 def currentPin = null
 def classpathProducers = []
 def selectedTest = null
+
+// Gradle 8.13 requires the owning project lock even when only resolving FileCollection producers.
+// Global configuration/graph callbacks and this root task are outside :app; fromMutableState
+// acquires/replaces the proper lock and restores prior locks without bypassing Gradle's checks.
+def readClasspathProducers = { ->
+    (selectedTest.project as ProjectInternal).owner.fromMutableState({ project ->
+        selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+    } as java.util.function.Function)
+}
 gradle.taskGraph.whenReady { graph ->
     // Disabled/skipped Test tasks are still forbidden; all producer states below belong to this graph only.
     requireMigration(!graph.allTasks.any { it instanceof Test }, 'Variant dependency acquisition cannot execute business JUnit')
@@ -418,7 +428,7 @@ gradle.taskGraph.whenReady { graph ->
     requireMigration(graph.allTasks.every { task ->
         !['Debug', 'Release', 'Diagnostic'].findAll { it != variant }.any { task.path.contains('WatchAndroid' + it) }
     }, 'Variant dependency acquisition graph contains another variant')
-    def actualProducers = selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+    def actualProducers = readClasspathProducers()
     requireMigration(actualProducers.collect { it.path } == classpathProducers.collect { it.path } &&
         classpathProducers.every { !(it instanceof Test) && graph.hasTask(it.path) },
         'Variant dependency acquisition classpath producer graph changed')
@@ -428,7 +438,7 @@ gradle.projectsEvaluated {
     requireMigration(root.allprojects.collect { it.path }.sort() == [':', ':app'], 'Variant dependency acquisition project scope differs')
     selectedTest = root.tasks.getByPath(testId)
     requireMigration(selectedTest instanceof Test, 'Variant dependency acquisition Test.classpath is unavailable')
-    classpathProducers = selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+    classpathProducers = readClasspathProducers()
     requireMigration(!classpathProducers.isEmpty() && classpathProducers.size() <= 4096 &&
         classpathProducers.every { !(it instanceof Test) }, 'Variant dependency acquisition has no Test-free classpath producers')
     def acquire = root.tasks.register('ciAcquireVariantDependencyFiles') { task ->
@@ -438,7 +448,7 @@ gradle.projectsEvaluated {
         task.dependsOn(selectedTest.classpath.buildDependencies)
         task.doLast {
             requireMigration(!gradle.taskGraph.hasTask(testId), 'Variant dependency acquisition Test task entered the graph')
-            def actualProducers = selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+            def actualProducers = readClasspathProducers()
             requireMigration(actualProducers.collect { it.path } == classpathProducers.collect { it.path },
                 'Variant dependency acquisition classpath producers changed before file capture')
             def producerRecords = classpathProducers.collect { [id: it.path, outcome: completedOutcome(it)] }
