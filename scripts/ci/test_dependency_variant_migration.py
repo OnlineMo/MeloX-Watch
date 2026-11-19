@@ -136,7 +136,10 @@ class DependencyVariantMigrationPolicies(unittest.TestCase):
             if phase == ACQUIRE[0]:
                 for name, parts in self.request['runtime_components'].items():
                     lock += (':'.join(parts) + '=' + name + '\n').encode()
-            lock += ('fixture:' + mode + ':1=new' + mode.title() + '\n').encode()
+            if phase == ACQUIRE[0]:
+                lock = lock.replace(b'empty=lintChecks\n', b'')
+            lock += ('fixture:' + mode + ':1=new' + mode.title() + ',oldCompile' +
+                     (',lintChecks' if phase == ACQUIRE[0] else '') + '\n').encode()
             self.write('android/app/gradle.lockfile', lock)
             record = self.witness(mode, kwargs['env'])
             raw = (json.dumps(record, sort_keys=True) + '\n').encode()
@@ -354,6 +357,79 @@ class DependencyVariantMigrationPolicies(unittest.TestCase):
         self.assertIn('task.mustRunAfter(acquire)', source)
         self.assertNotIn('enabled = false', source)
         self.assertNotIn('onlyIf { false', source)
+
+
+    def test_all_six_calls_preserve_old_bindings_while_adding_modules_to_old_configurations(self):
+        self.complete()
+        for phase in ACQUIRE:
+            relative = 'writer-checkpoints/' + phase + '/app/gradle.lockfile'
+            captured = build.dependency_lock_snapshot((self.android / build.ROOM_SCHEMA_REPORT_DIRECTORY / relative).read_bytes())
+            self.assertEqual(captured['oldCompile']['fixture:library'], '1')
+            self.assertEqual(captured['oldCompile']['fixture:debug'], '1')
+            self.assertEqual(captured['lintChecks']['fixture:debug'], '1')
+
+    def test_removing_a_captured_configuration_module_or_changing_its_version_is_rejected(self):
+        xml = (self.android / 'gradle/verification-metadata.xml').read_bytes()
+        before = {'gradle/verification-metadata.xml': xml, 'app/gradle.lockfile': b'fixture:library:1=oldCompile\nempty=oldEmpty\n'}
+        for lock in (b'fixture:library:1=otherCompile\nempty=oldEmpty\n',
+                     b'fixture:replacement:1=oldCompile\nempty=oldEmpty\n',
+                     b'fixture:library:2=oldCompile\nempty=oldEmpty\n',
+                     b'fixture:library:1=oldCompile\n'):
+            with self.subTest(lock=lock), self.assertRaisesRegex(ValueError, 'previously captured configuration lock binding'):
+                build.validate_dependency_variant_accumulation(before, {**before, 'app/gradle.lockfile': lock})
+
+    def test_an_empty_captured_configuration_can_gain_modules_but_duplicate_versions_are_rejected(self):
+        xml = (self.android / 'gradle/verification-metadata.xml').read_bytes()
+        before = {'gradle/verification-metadata.xml': xml, 'app/gradle.lockfile': b'empty=oldEmpty\n'}
+        build.validate_dependency_variant_accumulation(before, {**before, 'app/gradle.lockfile': b'fixture:library:1=oldEmpty\n'})
+        with self.assertRaisesRegex(ValueError, 'duplicate module bindings'):
+            build.validate_dependency_variant_accumulation(before, {**before, 'app/gradle.lockfile': b'fixture:library:1=oldEmpty\nfixture:library:2=oldEmpty\n'})
+
+    def test_archive_byte_limits_remain_two_gib_per_stage_and_four_gib_cumulative(self):
+        check_acquisition_byte_limits(self, self, build)
+
+
+
+def check_acquisition_byte_limits(case, fixture, validator):
+    previous = {}
+    for mode in MODES:
+        phase = 'migration-acquire-' + mode
+        predecessors = {name: 'a' * 64 for name in previous}
+        fixture.records = previous
+        record = fixture.witness(mode, {'CI_DEPENDENCY_VARIANT_PREDECESSORS': json.dumps(predecessors)})
+        index = 0
+        for consumer in record['consumers']:
+            if consumer['kind'] in ('task-input-archives', 'test-classpath-archives'):
+                consumer['files'] = [{'name': 'synthetic-' + str(index) + '.jar', 'size': 128 * 1024 * 1024,
+                                      'sha256': format(index, '064x')}]
+                consumer['file_count'] = 1
+                index += 1
+        archives = {(item['name'], item['size'], item['sha256']) for consumer in record['consumers'] for item in consumer['files']}
+        record['archive_budget']['unique_archive_count'] = len(archives)
+        record['archive_budget']['unique_archive_bytes'] = sum(item[1] for item in archives)
+        record['archive_budget'].update(validator.dependency_variant_budget({**previous, phase: record}))
+        binding = {key: record[key] for key in ('source_sha', 'build_sha', 'run_id', 'run_attempt', 'event', 'ref')}
+        arguments = (record, binding, fixture.request, fixture.hash(build.DEPENDENCY_MIGRATION_REQUEST), phase, predecessors, previous)
+        if mode == 'diagnostic':
+            case.assertGreater(record['archive_budget']['cumulative_archive_bytes'], 4 * 1024 * 1024 * 1024)
+            with case.assertRaisesRegex(ValueError, 'shared archive or consumer reservation'):
+                validator.validate_dependency_variant_acquisition(*arguments)
+        else:
+            validator.validate_dependency_variant_acquisition(*arguments)
+            if mode == 'release':
+                case.assertGreater(record['archive_budget']['cumulative_archive_bytes'], 2 * 1024 * 1024 * 1024)
+            if mode == 'debug':
+                too_large = copy.deepcopy(record)
+                for consumer in too_large['consumers']:
+                    if consumer['kind'] in ('task-input-archives', 'test-classpath-archives'):
+                        consumer['files'][0]['size'] = 256 * 1024 * 1024
+                values = {(item['name'], item['size'], item['sha256']) for consumer in too_large['consumers'] for item in consumer['files']}
+                too_large['archive_budget']['unique_archive_bytes'] = sum(item[1] for item in values)
+                too_large['archive_budget'].update(validator.dependency_variant_budget({phase: too_large}))
+                case.assertGreater(too_large['archive_budget']['unique_archive_bytes'], 2 * 1024 * 1024 * 1024)
+                with case.assertRaisesRegex(ValueError, 'archive reservation is inconsistent'):
+                    validator.validate_dependency_variant_acquisition(too_large, *arguments[1:])
+        previous[phase] = record
 
 
 def phase_failure_test(phase, timeout):

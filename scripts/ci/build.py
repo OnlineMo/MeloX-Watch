@@ -750,7 +750,7 @@ def validate_dependency_variant_acquisition(record, binding, request, request_di
             'Dependency variant acquisition archive reservation is inconsistent')
     cumulative = dependency_variant_budget({**previous, phase: record})
     require(all(budget[key] == value for key, value in cumulative.items()) and
-            cumulative['cumulative_archive_count'] <= 4096 and cumulative['cumulative_archive_bytes'] <= 2 * 1024 * 1024 * 1024 and
+            cumulative['cumulative_archive_count'] <= 4096 and cumulative['cumulative_archive_bytes'] <= 4 * 1024 * 1024 * 1024 and
             cumulative['cumulative_consumer_count'] <= 64,
             'Dependency variant acquisition exceeded the shared archive or consumer reservation')
 
@@ -818,7 +818,10 @@ def validate_dependency_variant_accumulation(previous, updated):
         if name in ('app/gradle.lockfile', 'gradle.lockfile'):
             before = dependency_lock_snapshot(data)
             after = dependency_lock_snapshot(updated[name])
-            require(all(after.get(key) == value for key, value in before.items()),
+            # Keep even empty configurations, and every old module/version binding inside them.
+            # An acquired dependency may add a module to an existing configuration.
+            require(all(key in after and all(after[key].get(module) == version for module, version in modules.items())
+                        for key, modules in before.items()),
                     'Dependency variant writer changed a previously captured configuration lock binding')
         elif name not in DEPENDENCY_REPORT_FILES:
             require(updated[name] == data, 'Dependency variant writer changed an old schema')

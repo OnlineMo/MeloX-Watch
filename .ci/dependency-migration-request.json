@@ -29,8 +29,8 @@
     "scripts/ci/build_process.py": "65eca46733a14c24b6eec662478e312b18d56f41dd9267c65f39be89efd740bf"
   },
   "migration_tool_hashes": {
-    "scripts/ci/build.py": "9f95582181404f152a2b81157bd4e4bc26cb6d62e08bd6081945b96c904e26ef",
-    "scripts/ci/dependency-acquire-variants.gradle": "b5cfeea2af62bf11a2614180e03ea899d0072379a9a5d038b602e547e5ba9517"
+    "scripts/ci/build.py": "707e968a5442ffdc89c2dcc449eaf1b36a27d12dc0ab728188afc2ea4858eaf1",
+    "scripts/ci/dependency-acquire-variants.gradle": "4fa3666a9f4f96334af5f80a6d4afd8a7a77bc3783012acaffb105519d9d6c39"
   },
   "allowed_dependency_outputs": [
     "gradle/verification-metadata.xml",

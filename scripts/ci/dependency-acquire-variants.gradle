@@ -187,7 +187,8 @@ def archiveBytes = { file, id, kind ->
             'Dependency acquisition archive changed after hashing')
         return new LinkedHashMap(cached.record)
     }
-    requireMigration(priorArchiveCount + hashedFiles.size() < 4096 && priorArchiveBytes + reservedBytes + before.size() <= 2L * 1024 * 1024 * 1024,
+    requireMigration(priorArchiveCount + hashedFiles.size() < 4096 && reservedBytes + before.size() <= 2L * 1024 * 1024 * 1024 &&
+        priorArchiveBytes + reservedBytes + before.size() <= 4L * 1024 * 1024 * 1024,
         'Dependency acquisition total archive bound exceeded')
     reservedBytes += before.size()
     def digest = MessageDigest.getInstance('SHA-256')
@@ -349,7 +350,7 @@ def validateRecord = { record, capturePhase, expectedPins, earlierRecords ->
         'Variant acquisition original archive reservation is inconsistent')
     def cumulative = archiveBudget(earlierRecords + [(capturePhase): record])
     requireMigration(cumulative.every { key, value -> budget[key] == value } && cumulative.cumulative_archive_count <= 4096 &&
-        cumulative.cumulative_archive_bytes <= 2L * 1024 * 1024 * 1024 && cumulative.cumulative_consumer_count <= 64,
+        cumulative.cumulative_archive_bytes <= 4L * 1024 * 1024 * 1024 && cumulative.cumulative_consumer_count <= 64,
         'Variant acquisition original exceeds the shared archive or consumer reservation')
 }
 def mergeConsumers = { records ->
