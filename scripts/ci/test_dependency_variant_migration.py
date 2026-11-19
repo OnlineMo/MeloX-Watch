@@ -388,6 +388,45 @@ class DependencyVariantMigrationPolicies(unittest.TestCase):
     def test_archive_byte_limits_remain_two_gib_per_stage_and_four_gib_cumulative(self):
         check_acquisition_byte_limits(self, self, build)
 
+    def test_reparsed_repeated_consumer_bytes_above_signed32_preserve_the_physical_reservation(self):
+        phase = ACQUIRE[0]
+        record = self.witness('debug', {'CI_DEPENDENCY_VARIANT_PREDECESSORS': '{}'})
+        for consumer in record['consumers']:
+            if consumer['kind'] in ('task-input-archives', 'test-classpath-archives'):
+                consumer['files'] = [{'name': 'synthetic-shared.jar', 'size': 256 * 1024 * 1024, 'sha256': 'd' * 64}]
+                consumer['file_count'] = 1
+        archives = [(item['name'], item['size'], item['sha256'])
+                    for consumer in record['consumers'] for item in consumer['files']]
+        signatures = set(archives)
+        record['archive_budget']['unique_archive_count'] = len(signatures)
+        record['archive_budget']['unique_archive_bytes'] = sum(item[1] for item in signatures)
+        record['archive_budget'].update(build.dependency_variant_budget({phase: record}))
+        record = json.loads(json.dumps(record))
+        binding = {key: record[key] for key in ('source_sha', 'build_sha', 'run_id', 'run_attempt', 'event', 'ref')}
+        self.assertGreater(sum(item[1] for item in archives), 2**31 - 1)
+        self.assertLess(record['archive_budget']['unique_archive_bytes'], 2**31 - 1)
+        build.validate_dependency_variant_acquisition(record, binding, self.request,
+            self.hash(build.DEPENDENCY_MIGRATION_REQUEST), phase, {}, {})
+        wrong = copy.deepcopy(record)
+        wrong['archive_budget']['unique_archive_bytes'] = sum(item[1] for item in archives)
+        wrong['archive_budget'].update(build.dependency_variant_budget({phase: wrong}))
+        with self.assertRaisesRegex(ValueError, 'archive reservation is inconsistent'):
+            build.validate_dependency_variant_acquisition(wrong, binding, self.request,
+                self.hash(build.DEPENDENCY_MIGRATION_REQUEST), phase, {}, {})
+
+    def test_reparsed_three_phase_byte_total_crosses_signed32_without_negative_or_folded_reservations(self):
+        records = json.loads(json.dumps({phase: {
+            'archive_budget': {'unique_archive_count': 489, 'unique_archive_bytes': 997005237},
+            'consumers': [{}] * 17,
+        } for phase in ACQUIRE}))
+        self.assertEqual(build.dependency_variant_budget(records), {
+            'cumulative_archive_count': 1467, 'cumulative_archive_bytes': 2991015711,
+            'cumulative_consumer_count': 51,
+        })
+        self.assertEqual(build.dependency_variant_budget({}), {
+            'cumulative_archive_count': 0, 'cumulative_archive_bytes': 0, 'cumulative_consumer_count': 0,
+        })
+
 
 
 def check_acquisition_byte_limits(case, fixture, validator):

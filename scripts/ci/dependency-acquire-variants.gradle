@@ -252,7 +252,8 @@ def moduleArtifactsRecord = { id, kind, configuration ->
 
 def archiveBudget = { records ->
     [cumulative_archive_count: records.values().sum { it.archive_budget.unique_archive_count } ?: 0,
-        cumulative_archive_bytes: records.values().sum { it.archive_budget.unique_archive_bytes } ?: 0,
+        // JsonSlurper reparses bounded byte values as Integer; a Long seed keeps totals from wrapping.
+        cumulative_archive_bytes: records.values().sum(0L) { it.archive_budget.unique_archive_bytes.longValue() },
         cumulative_consumer_count: records.values().sum { it.consumers.size() } ?: 0]
 }
 def validateRecord = { record, capturePhase, expectedPins, earlierRecords ->
@@ -345,8 +346,8 @@ def validateRecord = { record, capturePhase, expectedPins, earlierRecords ->
         budget.values().every { integer(it) && it >= 0 }, 'Variant acquisition original reservation counters are invalid')
     def distinct = allArchives.toSet()
     requireMigration(budget.unique_archive_count >= distinct.size() && budget.unique_archive_count <= allArchives.size() &&
-        budget.unique_archive_count <= 4096 && budget.unique_archive_bytes >= (distinct.sum { it[1] } ?: 0) &&
-        budget.unique_archive_bytes <= (allArchives.sum { it[1] } ?: 0) && budget.unique_archive_bytes <= 2L * 1024 * 1024 * 1024,
+        budget.unique_archive_count <= 4096 && budget.unique_archive_bytes >= (distinct.sum(0L) { it[1].longValue() }) &&
+        budget.unique_archive_bytes <= (allArchives.sum(0L) { it[1].longValue() }) && budget.unique_archive_bytes <= 2L * 1024 * 1024 * 1024,
         'Variant acquisition original archive reservation is inconsistent')
     def cumulative = archiveBudget(earlierRecords + [(capturePhase): record])
     requireMigration(cumulative.every { key, value -> budget[key] == value } && cumulative.cumulative_archive_count <= 4096 &&
