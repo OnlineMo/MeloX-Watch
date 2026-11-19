@@ -821,19 +821,39 @@ class RoomQueueStoreTest {
     }
 
     private suspend fun assertIndependentIntegrity(expectedEntries: Long, expectedPosition: Long) = withContext(Dispatchers.IO) {
-        SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
-            independent.rawQuery("PRAGMA integrity_check", null).use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                assertEquals("ok", cursor.getString(0))
+        // 先关闭 Room 的 bundled driver，避免两种 SQLite 实现在同一文件上重叠持有连接。
+        // 原生连接必须完成实际关闭，再恢复后续用例继续使用的 Room 夹具。
+        database.close()
+        var integrityFailure: Throwable? = null
+        try {
+            SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
+                independent.rawQuery("PRAGMA integrity_check", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals("ok", cursor.getString(0))
+                }
+                assertEquals(3, independent.version)
+                independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(expectedEntries, cursor.getLong(0))
+                }
+                independent.rawQuery("SELECT positionMs FROM queue_head WHERE id = 1", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals(expectedPosition, cursor.getLong(0))
+                }
             }
-            assertEquals(3, independent.version)
-            independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                assertEquals(expectedEntries, cursor.getLong(0))
-            }
-            independent.rawQuery("SELECT positionMs FROM queue_head WHERE id = 1", null).use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                assertEquals(expectedPosition, cursor.getLong(0))
+        } catch (error: Throwable) {
+            integrityFailure = error
+            throw error
+        } finally {
+            try {
+                database = open(file)
+                store = RoomQueueStore(database)
+                store.initialize()
+            } catch (error: Throwable) {
+                // 恢复夹具的失败只能附加到原始失败，不能掩盖完整性检查的结果。
+                val primary = integrityFailure
+                if (primary == null) throw error
+                if (primary !== error) primary.addSuppressed(error)
             }
         }
     }
