@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "kind": "owner-pr-dependency-acquire-strict",
+  "schema_version": 2,
+  "kind": "owner-pr-dependency-variant-acquire-strict",
   "owner_login": "OnlineMo",
   "owner_id": 143324986,
   "base_source_sha": "c39a762dc1dad86c065d2160e12dc12d19eed874",
@@ -29,8 +29,8 @@
     "scripts/ci/build_process.py": "65eca46733a14c24b6eec662478e312b18d56f41dd9267c65f39be89efd740bf"
   },
   "migration_tool_hashes": {
-    "scripts/ci/build.py": "49c1b738a05da4089689d6a697d2347876f8abd7a6527ad54a354076652c6fd4",
-    "scripts/ci/dependency-acquire.gradle": "5c56ea2667f44f3c6563998e9f4768facf44bb734fa949172c3198d66c25ba95"
+    "scripts/ci/build.py": "9f95582181404f152a2b81157bd4e4bc26cb6d62e08bd6081945b96c904e26ef",
+    "scripts/ci/dependency-acquire-variants.gradle": "9ada90c87c3412b8b7191196bd788965009b39ae5fe7869c5927130a807ed602"
   },
   "allowed_dependency_outputs": [
     "gradle/verification-metadata.xml",

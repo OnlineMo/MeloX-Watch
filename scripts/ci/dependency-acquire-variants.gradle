@@ -1,0 +1,541 @@
+// v5 has separate process originals: only the selected variant may produce files in this invocation.
+import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.nio.file.StandardOpenOption
+import java.security.MessageDigest
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.UnresolvedDependencyResult
+import org.gradle.api.tasks.testing.Test
+
+def requireMigration = { condition, message ->
+    if (!condition) throw new GradleException(message)
+}
+def phases = ['migration-acquire-debug', 'migration-acquire-release', 'migration-acquire-diagnostic']
+def phase = System.getenv('MELOX_CI_BUILD_PHASE')
+requireMigration(System.getenv('GITHUB_ACTIONS') == 'true' && System.getenv('CI') == 'true' &&
+    System.getenv('GITHUB_EVENT_NAME') == 'pull_request' && System.getenv('CI_UNSIGNED_APK') == 'true' &&
+    System.getenv('GITHUB_REPOSITORY') == 'OnlineMo/MeloX-Watch' && System.getenv('GITHUB_ACTOR') == 'OnlineMo' &&
+    System.getenv('GITHUB_ACTOR_ID') == '143324986' && System.getenv('GITHUB_TRIGGERING_ACTOR') == 'OnlineMo' &&
+    phases.contains(phase) && !System.getenv('CANDIDATE_OPERATION'),
+    'Variant dependency acquisition requires the explicit unsigned owner PR phase')
+requireMigration(gradle.startParameter.writeDependencyVerifications == ['sha256'] &&
+    gradle.startParameter.writeDependencyLocks && gradle.startParameter.rerunTasks &&
+    !gradle.startParameter.buildCacheEnabled && gradle.startParameter.excludedTaskNames.isEmpty(),
+    'Variant dependency acquisition requires one SHA-256 writer with real consumers')
+def mode = phase.substring('migration-acquire-'.length())
+def variant = mode.capitalize()
+def acquireId = ':ciAcquireVariantDependencyFiles'
+def collectorId = ':ciResolveAndLockAll'
+def binding = [:]
+['source_sha': 'SOURCE_SHA', 'build_sha': 'GITHUB_SHA', 'event': 'GITHUB_EVENT_NAME', 'ref': 'GITHUB_REF'].each { key, variable ->
+    binding[key] = System.getenv(variable)
+}
+requireMigration(binding.source_sha ==~ /[0-9a-f]{40}/ && binding.build_sha ==~ /[0-9a-f]{40}/ &&
+    binding.ref ==~ /refs\/pull\/[1-9][0-9]*\/merge/, 'Variant dependency acquisition source/run binding is invalid')
+['run_id': 'GITHUB_RUN_ID', 'run_attempt': 'GITHUB_RUN_ATTEMPT'].each { key, variable ->
+    def value = System.getenv(variable)
+    requireMigration(value != null && value ==~ /[1-9][0-9]{0,19}/, 'Variant dependency acquisition run identity is invalid')
+    binding[key] = new BigInteger(value)
+}
+def androidRoot = gradle.startParameter.currentDir.toPath().toAbsolutePath().normalize()
+def safeParents = { path ->
+    def cursor = path.toAbsolutePath().normalize()
+    while (cursor != null) {
+        requireMigration(!Files.isSymbolicLink(cursor), 'Variant dependency acquisition found a linked path')
+        cursor = cursor.parent
+    }
+}
+safeParents(androidRoot)
+def reportRoot = androidRoot.resolve('app/build/reports/dependency-bootstrap')
+safeParents(reportRoot)
+requireMigration(Files.isDirectory(reportRoot, LinkOption.NOFOLLOW_LINKS), 'Variant acquisition report root is unavailable')
+def rawBytes = { path ->
+    safeParents(path)
+    requireMigration(Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS), 'Variant acquisition original is missing or unsafe')
+    def before = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
+    requireMigration(before.size() <= 4 * 1024 * 1024, 'Variant acquisition original exceeds its bound')
+    byte[] bytes = Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).withCloseable { stream ->
+        stream.readNBytes((int) before.size() + 1)
+    }
+    safeParents(path)
+    def after = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
+    requireMigration(bytes.length == before.size() &&
+        [before.fileKey(), before.size(), before.lastModifiedTime()] == [after.fileKey(), after.size(), after.lastModifiedTime()],
+        'Variant acquisition original changed while reading')
+    bytes
+}
+def digestBytes = { bytes -> MessageDigest.getInstance('SHA-256').digest(bytes).encodeHex().toString() }
+def canonical
+canonical = { value ->
+    if (value instanceof Map) return new TreeMap(value.collectEntries { key, entry -> [(key): canonical(entry)] })
+    if (value instanceof List) return value.collect { canonical(it) }
+    value
+}
+def encoded = { value -> groovy.json.JsonOutput.toJson(canonical(value)) }
+def integer = { value -> value instanceof Integer || value instanceof Long || value instanceof BigInteger }
+def requestBytes = rawBytes(androidRoot.parent.resolve('.ci/dependency-migration-request.json'))
+def requestDigest = System.getenv('CI_DEPENDENCY_VARIANT_REQUEST_SHA256')
+requireMigration(requestDigest != null && requestDigest ==~ /[0-9a-f]{64}/ && digestBytes(requestBytes) == requestDigest &&
+    Arrays.equals(rawBytes(reportRoot.resolve('dependency-migration-request.json')), requestBytes),
+    'Variant dependency acquisition request bytes differ from the wrapper original')
+def request = new groovy.json.JsonSlurper().parse(requestBytes)
+requireMigration(request instanceof Map && request.keySet() == ['schema_version', 'kind', 'owner_login', 'owner_id',
+    'base_source_sha', 'current_schema', 'diagnostic_android_test', 'reviewed_input_hashes', 'frozen_input_hashes',
+    'migration_tool_hashes', 'allowed_dependency_outputs', 'runtime_components'].toSet() &&
+    integer(request.schema_version) && request.schema_version == 2 && request.kind == 'owner-pr-dependency-variant-acquire-strict' &&
+    request.owner_login == 'OnlineMo' && integer(request.owner_id) && request.owner_id == 143324986 &&
+    request.diagnostic_android_test instanceof Boolean,
+    'Variant dependency acquisition requires the integer v2 owner request')
+def instrumentation = androidRoot.resolve('app/src/androidTest')
+safeParents(instrumentation)
+def hasInstrumentation = Files.isDirectory(instrumentation, LinkOption.NOFOLLOW_LINKS)
+requireMigration(request.diagnostic_android_test == hasInstrumentation, 'Variant dependency acquisition instrumentation scope changed')
+def writerTasksFor = { selected ->
+    def selectedVariant = selected.capitalize()
+    def result = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost']
+    ['Kotlin', 'JavaWithJavac', 'UnitTestKotlin', 'UnitTestJavaWithJavac'].each { suffix ->
+        result.add(":app:compileWatchAndroid${selectedVariant}${suffix}".toString())
+    }
+    result.add(":app:lintWatchAndroid${selectedVariant}".toString())
+    if (selected == 'diagnostic' && hasInstrumentation) {
+        ['Kotlin', 'JavaWithJavac'].each { suffix -> result.add(":app:compileWatchAndroidDiagnosticAndroidTest${suffix}".toString()) }
+    }
+    result
+}
+def consumersFor = { selected ->
+    def selectedVariant = selected.capitalize()
+    def result = writerTasksFor(selected).collectEntries { [(it): 'task-input-archives'] }
+    ["lintAnalyzeWatchAndroid${selectedVariant}", "lintAnalyzeWatchAndroid${selectedVariant}UnitTest",
+        "lintReportWatchAndroid${selectedVariant}"].each { name -> result[":app:${name}".toString()] = 'task-input-archives' }
+    result[":app:testWatchAndroid${selectedVariant}UnitTest".toString()] = 'test-classpath-archives'
+    ['bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'].each { name -> result[":app:${name}".toString()] = 'configuration-artifacts' }
+    [':buildscript:classpath', ':app:buildscript:classpath'].each { id -> result[id] = 'buildscript-artifacts' }
+    result
+}
+def writerTasks = writerTasksFor(mode)
+requireMigration(gradle.startParameter.taskNames == writerTasks + [acquireId] + (mode == 'diagnostic' ? [collectorId] : []),
+    'Variant dependency acquisition task selection differs from the reviewed writer')
+def inputConsumers = consumersFor(mode).findAll { id, kind -> kind == 'task-input-archives' }.keySet().toList()
+def testId = ":app:testWatchAndroid${variant}UnitTest".toString()
+def optionalInputs = [":app:lintAnalyzeWatchAndroid${variant}AndroidTest".toString()]
+def archiveConsumers = consumersFor(mode) + optionalInputs.collectEntries { [(it): 'task-input-archives'] }
+def sharedIds = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost', ':app:bundledSqliteHost',
+    ':app:robolectricSdk', ':app:robolectricSdk30', ':buildscript:classpath', ':app:buildscript:classpath'].toSet()
+def previousPhases = phases.take(phases.indexOf(phase))
+def predecessorText = System.getenv('CI_DEPENDENCY_VARIANT_PREDECESSORS')
+requireMigration(predecessorText != null && predecessorText.getBytes('UTF-8').length <= 1024,
+    'Variant acquisition predecessor bindings are unavailable or over bound')
+def predecessorPins = new groovy.json.JsonSlurper().parseText(predecessorText)
+requireMigration(predecessorPins instanceof Map && predecessorPins.keySet() == previousPhases.toSet() &&
+    predecessorPins.values().every { it instanceof String && it ==~ /[0-9a-f]{64}/ },
+    'Variant acquisition predecessor bindings differ from the selected phase')
+def previousRecords = [:]
+long priorArchiveCount = 0
+long priorArchiveBytes = 0
+long priorConsumerCount = 0
+
+def archiveRejection = { id, kind, file, path, regularFile, safeName ->
+    // This observes the first refusal without reading it or exporting a path/name; it never permits the input.
+    def approved = archiveConsumers.containsKey(id) && archiveConsumers[id] == kind
+    def scope = path.startsWith(androidRoot.resolve('build')) || path.startsWith(androidRoot.resolve('app/build')) ?
+        'project-build-output' : path.startsWith(androidRoot) ? 'project-input' :
+        path.startsWith(gradle.gradleUserHomeDir.toPath().toAbsolutePath().normalize()) ? 'gradle-user-home' : 'outside-project'
+    def directory = Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)
+    def state = directory ? 'directory' : regularFile ? 'regular-file' :
+        Files.exists(path, LinkOption.NOFOLLOW_LINKS) ? 'other' : 'not-observed'
+    def name = file.name
+    def nameHash = name.length() <= 1024 ?
+        MessageDigest.getInstance('SHA-256').digest(name.getBytes('UTF-8')).encodeHex().toString() : null
+    def line = 'CI_DEPENDENCY_ARCHIVE_REJECTION ' + groovy.json.JsonOutput.toJson([
+        schema_version: 1, kind: 'dependency-archive-rejection', phase: phase,
+        consumer_id: approved ? id : 'unapproved-consumer', consumer_kind: approved ? kind : 'unapproved-kind',
+        input_scope: scope, regular_file_at_gate: regularFile, archive_name_safe_at_gate: safeName,
+        directory: directory, observed_state: state,
+        archive_suffix: name.endsWith('.jar') ? 'jar' : name.endsWith('.aar') ? 'aar' : 'other',
+        basename_sha256: nameHash,
+    ])
+    requireMigration(line.getBytes('UTF-8').length <= 1024, 'Dependency acquisition archive rejection diagnostic exceeds its bound')
+    gradle.rootProject.logger.lifecycle(line)
+}
+def hashedFiles = [:]
+long reservedBytes = 0
+def archiveBytes = { file, id, kind ->
+    def path = file.toPath().toAbsolutePath().normalize()
+    safeParents(path)
+    def regularFile = Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)
+    def safeName = file.name ==~ /[A-Za-z0-9_.+\-]{1,200}\.(jar|aar)/
+    try {
+        requireMigration(regularFile && safeName, 'Dependency acquisition archive is missing or unsafe')
+    } catch (GradleException failure) {
+        try {
+            archiveRejection(id, kind, file, path, regularFile, safeName)
+        } catch (Throwable ignored) {
+            try {
+                failure.addSuppressed(new GradleException('Dependency acquisition archive rejection diagnostic is unavailable'))
+            } catch (Throwable ignoredSuppression) {
+                // Diagnostic allocation/linkage failures cannot replace the original archive refusal.
+            }
+        }
+        throw failure
+    }
+    def before = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
+    requireMigration(before.size() > 0 && before.size() <= 256L * 1024 * 1024, 'Dependency acquisition archive exceeds its bound')
+    def cached = hashedFiles[path]
+    if (cached != null) {
+        requireMigration(cached.identity == [before.fileKey(), before.size(), before.lastModifiedTime()],
+            'Dependency acquisition archive changed after hashing')
+        return new LinkedHashMap(cached.record)
+    }
+    requireMigration(priorArchiveCount + hashedFiles.size() < 4096 && priorArchiveBytes + reservedBytes + before.size() <= 2L * 1024 * 1024 * 1024,
+        'Dependency acquisition total archive bound exceeded')
+    reservedBytes += before.size()
+    def digest = MessageDigest.getInstance('SHA-256')
+    long readBytes = 0
+    Files.newInputStream(path, LinkOption.NOFOLLOW_LINKS).withCloseable { stream ->
+        byte[] buffer = new byte[65536]
+        int count
+        while ((count = stream.read(buffer)) != -1) {
+            readBytes += count
+            requireMigration(readBytes <= before.size(), 'Dependency acquisition archive grew while hashing')
+            digest.update(buffer, 0, count)
+        }
+    }
+    safeParents(path)
+    def after = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
+    def identity = [before.fileKey(), before.size(), before.lastModifiedTime()]
+    requireMigration(readBytes == before.size() && identity == [after.fileKey(), after.size(), after.lastModifiedTime()],
+        'Dependency acquisition archive changed while hashing')
+    def record = [name: file.name, size: readBytes, sha256: digest.digest().encodeHex().toString()]
+    hashedFiles[path] = [identity: identity, record: record]
+    record
+}
+def fileCollectionRecord = { id, kind, collection ->
+    // .files is the real FileCollection API: missing archives fail, directories are counted without traversing sources.
+    def files = collection.files
+    requireMigration(files.size() <= 4096, 'Dependency acquisition consumer file bound exceeded')
+    def record = [id: id, kind: kind, file_count: files.size(), directory_count: 0,
+        excluded_file_count: 0, missing_non_archive_count: 0, files: []]
+    files.each { file ->
+        def path = file.toPath().toAbsolutePath().normalize()
+        safeParents(path)
+        if (file.name.endsWith('.jar') || file.name.endsWith('.aar')) {
+            record.files.add(archiveBytes(file, id, kind))
+        } else if (Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS)) {
+            record.directory_count++
+        } else if (Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+            record.excluded_file_count++
+        } else if (!Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+            record.missing_non_archive_count++
+        } else {
+            throw new GradleException('Dependency acquisition consumer has an unsupported input file type')
+        }
+    }
+    record.files.sort { a, b -> encoded(a) <=> encoded(b) }
+    record
+}
+def moduleArtifactsRecord = { id, kind, configuration ->
+    requireMigration(configuration != null && configuration.canBeResolved, 'Dependency acquisition configuration is unavailable')
+    // Accessing incoming.artifacts.artifacts downloads actual module files, unlike resolutionResult.
+    def artifacts = configuration.incoming.artifacts.artifacts
+    requireMigration(artifacts.size() <= 4096, 'Dependency acquisition module artifact bound exceeded')
+    def files = artifacts.collect { artifact ->
+        def component = artifact.id.componentIdentifier
+        requireMigration(component instanceof ModuleComponentIdentifier, 'Dependency acquisition requires Maven module artifacts')
+        def parts = [component.group, component.module, component.version]
+        requireMigration(parts.every { it ==~ /[A-Za-z0-9_.+\-]{1,120}/ }, 'Dependency acquisition module coordinate is unsafe')
+        archiveBytes(artifact.file, id, kind) + [component: parts]
+    }.sort { a, b -> encoded(a) <=> encoded(b) }
+    [id: id, kind: kind, files: files]
+}
+
+def archiveBudget = { records ->
+    [cumulative_archive_count: records.values().sum { it.archive_budget.unique_archive_count } ?: 0,
+        cumulative_archive_bytes: records.values().sum { it.archive_budget.unique_archive_bytes } ?: 0,
+        cumulative_consumer_count: records.values().sum { it.consumers.size() } ?: 0]
+}
+def validateRecord = { record, capturePhase, expectedPins, earlierRecords ->
+    def selected = capturePhase.substring('migration-acquire-'.length())
+    def selectedVariant = selected.capitalize()
+    requireMigration(record instanceof Map && record.keySet() == (['schema_version', 'kind', 'phase', 'variant',
+        'request_sha256', 'predecessor_acquisitions', 'writer_tasks', 'test_task_count', 'graph_task_count',
+        'runtime_classpath', 'consumers', 'archive_budget', 'file_capture'] + binding.keySet()).toSet() &&
+        integer(record.schema_version) && record.schema_version == 2 && record.kind == 'dependency-variant-file-acquisition' &&
+        record.phase == capturePhase && record.variant == selected && record.request_sha256 == requestDigest &&
+        record.predecessor_acquisitions instanceof Map && encoded(record.predecessor_acquisitions) == encoded(expectedPins) &&
+        binding.every { key, value -> integer(value) ? integer(record[key]) && record[key] == value :
+            record[key] instanceof String && record[key] == value } &&
+        integer(record.test_task_count) && record.test_task_count == 0 && integer(record.graph_task_count) &&
+        record.graph_task_count > 0 && record.graph_task_count <= 4096 && record.writer_tasks == writerTasksFor(selected) &&
+        record.file_capture == [task: acquireId, phase: capturePhase, status: 'completed'],
+        'Variant acquisition original has an invalid phase, request, graph or run binding')
+    def runtime = record.runtime_classpath
+    def selectedTest = ":app:testWatchAndroid${selectedVariant}UnitTest".toString()
+    requireMigration(runtime instanceof Map && runtime.keySet() == ['consumer_id', 'producer_tasks'].toSet() &&
+        runtime.consumer_id == selectedTest && runtime.producer_tasks instanceof List &&
+        !runtime.producer_tasks.isEmpty() && runtime.producer_tasks.size() <= 4096,
+        'Variant acquisition original has no Test.classpath producer inventory')
+    runtime.producer_tasks.each { producer ->
+        requireMigration(producer instanceof Map && producer.keySet() == ['id', 'outcome'].toSet() &&
+            producer.id instanceof String && producer.id ==~ /:app:[A-Za-z0-9_.+\-]{1,180}/ && producer.id != selectedTest &&
+            producer.outcome in ['executed', 'up-to-date', 'no-source'] &&
+            !['Debug', 'Release', 'Diagnostic'].findAll { it != selectedVariant }.any { producer.id.contains('WatchAndroid' + it) },
+            'Variant acquisition original has an uncompleted or foreign classpath producer')
+    }
+    def producerIds = runtime.producer_tasks.collect { it.id }
+    requireMigration(producerIds == producerIds.toSet().toList().sort() && producerIds.size() <= record.graph_task_count,
+        'Variant acquisition original has a duplicate or inconsistent producer inventory')
+    def expectedConsumers = consumersFor(selected)
+    def optional = [(":app:lintAnalyzeWatchAndroid${selectedVariant}AndroidTest".toString()): 'task-input-archives']
+    requireMigration(record.consumers instanceof List && !record.consumers.isEmpty() && record.consumers.size() <= 64 &&
+        record.consumers.every { it instanceof Map && it.id instanceof String }, 'Variant acquisition original consumer list is invalid')
+    def ids = record.consumers.collect { it.id }
+    requireMigration(ids == ids.toSet().toList().sort() && ids.containsAll(expectedConsumers.keySet()) &&
+        (expectedConsumers + optional).keySet().containsAll(ids), 'Variant acquisition original has a missing, duplicate or foreign consumer')
+    def allArchives = []
+    record.consumers.each { consumer ->
+        def kind = (expectedConsumers + optional)[consumer.id]
+        def fields = ['id', 'kind', 'files']
+        if (kind in ['task-input-archives', 'test-classpath-archives']) {
+            fields += ['file_count', 'directory_count', 'excluded_file_count', 'missing_non_archive_count']
+        }
+        if (kind == 'task-input-archives') {
+            fields.add('outcome')
+            requireMigration(consumer.outcome == 'executed' ||
+                (consumer.outcome == 'no-source' && (consumer.id.endsWith('JavaWithJavac') || optional.containsKey(consumer.id))) ||
+                (consumer.outcome == 'up-to-date' && consumer.id.startsWith(':app:lintWatchAndroid')),
+                'Variant acquisition original did not complete its required compile or lint consumer')
+        }
+        requireMigration(consumer.keySet() == fields.toSet() && consumer.kind == kind && consumer.files instanceof List &&
+            consumer.files.size() <= 4096, 'Variant acquisition original file record shape is invalid')
+        consumer.files.each { item ->
+            def itemFields = ['name', 'size', 'sha256']
+            if (kind in ['configuration-artifacts', 'buildscript-artifacts']) {
+                itemFields.add('component')
+                requireMigration(item instanceof Map && item.component instanceof List && item.component.size() == 3 &&
+                    item.component.every { it instanceof String && it ==~ /[A-Za-z0-9_.+\-]{1,120}/ },
+                    'Variant acquisition original requires public Maven identities')
+            }
+            requireMigration(item instanceof Map && item.keySet() == itemFields.toSet() && item.name instanceof String &&
+                item.name ==~ /[A-Za-z0-9_.+\-]{1,200}\.(jar|aar)/ && integer(item.size) && item.size > 0 &&
+                item.size <= 256L * 1024 * 1024 && item.sha256 instanceof String && item.sha256 ==~ /[0-9a-f]{64}/,
+                'Variant acquisition original archive hash is unsafe or over bound')
+            allArchives.add([item.name, item.size, item.sha256])
+        }
+        requireMigration(encoded(consumer.files) == encoded(consumer.files.toList().sort { a, b -> encoded(a) <=> encoded(b) }),
+            'Variant acquisition original archive inventory is not canonical')
+        if (kind in ['task-input-archives', 'test-classpath-archives']) {
+            def counts = ['file_count', 'directory_count', 'excluded_file_count', 'missing_non_archive_count'].collect { consumer[it] }
+            requireMigration(counts.every { integer(it) && it >= 0 && it <= 4096 } &&
+                counts[0] == consumer.files.size() + counts.tail().sum(), 'Variant acquisition original file counts differ')
+            requireMigration(!(kind == 'test-classpath-archives' || consumer.id.endsWith('Kotlin')) || !consumer.files.isEmpty(),
+                'Variant acquisition original did not fetch compiler or Test runtime archives')
+        }
+        if (kind == 'configuration-artifacts') {
+            requireMigration(consumer.files.size() == 1 && consumer.files[0].component ==
+                request.runtime_components[consumer.id.substring(':app:'.length())], 'Variant acquisition original runtime coordinates differ')
+        }
+    }
+    requireMigration(!record.consumers.find { it.id == ':buildscript:classpath' }.files.isEmpty(),
+        'Variant acquisition original has no plugin archive bytes')
+    def budget = record.archive_budget
+    requireMigration(budget instanceof Map && budget.keySet() == ['unique_archive_count', 'unique_archive_bytes',
+        'cumulative_archive_count', 'cumulative_archive_bytes', 'cumulative_consumer_count'].toSet() &&
+        budget.values().every { integer(it) && it >= 0 }, 'Variant acquisition original reservation counters are invalid')
+    def distinct = allArchives.toSet()
+    requireMigration(budget.unique_archive_count >= distinct.size() && budget.unique_archive_count <= allArchives.size() &&
+        budget.unique_archive_count <= 4096 && budget.unique_archive_bytes >= (distinct.sum { it[1] } ?: 0) &&
+        budget.unique_archive_bytes <= (allArchives.sum { it[1] } ?: 0) && budget.unique_archive_bytes <= 2L * 1024 * 1024 * 1024,
+        'Variant acquisition original archive reservation is inconsistent')
+    def cumulative = archiveBudget(earlierRecords + [(capturePhase): record])
+    requireMigration(cumulative.every { key, value -> budget[key] == value } && cumulative.cumulative_archive_count <= 4096 &&
+        cumulative.cumulative_archive_bytes <= 2L * 1024 * 1024 * 1024 && cumulative.cumulative_consumer_count <= 64,
+        'Variant acquisition original exceeds the shared archive or consumer reservation')
+}
+def mergeConsumers = { records ->
+    def result = [:]
+    phases.findAll { records.containsKey(it) }.each { capturePhase ->
+        records[capturePhase].consumers.each { consumer ->
+            def prior = result[consumer.id]
+            if (prior != null) {
+                requireMigration(sharedIds.contains(consumer.id) && encoded(prior.record) == encoded(consumer),
+                    'Variant acquisition has an unexpected duplicate or shared consumer byte conflict')
+                prior.capture_phases.add(capturePhase)
+            } else {
+                result[consumer.id] = [id: consumer.id, kind: consumer.kind, capture_phases: [capturePhase], record: consumer]
+            }
+        }
+    }
+    def expectedPhases = phases.findAll { records.containsKey(it) }
+    requireMigration(result.size() <= 64 && sharedIds.every { result[it]?.capture_phases == expectedPhases },
+        'Variant acquisition merge omitted a shared consumer phase')
+    result.values().toList().sort { it.id }
+}
+previousPhases.each { capturePhase ->
+    byte[] original = rawBytes(reportRoot.resolve('acquisitions/' + capturePhase + '.json'))
+    requireMigration(digestBytes(original) == predecessorPins[capturePhase], 'Variant acquisition predecessor original changed')
+    def record = new groovy.json.JsonSlurper().parse(original)
+    def earlierPins = predecessorPins.findAll { key, value -> previousRecords.containsKey(key) }
+    validateRecord(record, capturePhase, earlierPins, previousRecords)
+    previousRecords[capturePhase] = record
+}
+if (!previousRecords.isEmpty()) mergeConsumers(previousRecords)
+def previousBudget = archiveBudget(previousRecords)
+priorArchiveCount = previousBudget.cumulative_archive_count
+priorArchiveBytes = previousBudget.cumulative_archive_bytes
+priorConsumerCount = previousBudget.cumulative_consumer_count
+
+def writeOriginal = { relative, value ->
+    byte[] bytes = (encoded(value) + '\n').getBytes('UTF-8')
+    requireMigration(bytes.length <= 4 * 1024 * 1024, 'Variant acquisition report bound exceeded')
+    def destination = reportRoot.resolve(relative)
+    safeParents(destination)
+    requireMigration(destination.normalize().startsWith(reportRoot) && !Files.exists(destination, LinkOption.NOFOLLOW_LINKS),
+        'Variant acquisition original destination is unsafe or occupied')
+    Files.createDirectories(destination.parent)
+    safeParents(destination)
+    requireMigration(Files.isDirectory(destination.parent, LinkOption.NOFOLLOW_LINKS), 'Variant acquisition original parent is unsafe')
+    Files.write(destination, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+    requireMigration(Arrays.equals(rawBytes(destination), bytes), 'Variant acquisition original changed while preserving')
+    [file: relative, sha256: digestBytes(bytes)]
+}
+def completedOutcome = { task ->
+    requireMigration(gradle.taskGraph.hasTask(task.path) && task.state.executed && task.state.failure == null,
+        'Variant acquisition producer or consumer did not complete in this process')
+    def outcome = task.state.noSource ? 'no-source' : task.state.upToDate ? 'up-to-date' : 'executed'
+    requireMigration(!task.state.skipped || outcome != 'executed', 'Variant acquisition producer or consumer was skipped')
+    outcome
+}
+def consumers = []
+def acquisitionDone = false
+def currentPin = null
+def classpathProducers = []
+def selectedTest = null
+gradle.taskGraph.whenReady { graph ->
+    // Disabled/skipped Test tasks are still forbidden; all producer states below belong to this graph only.
+    requireMigration(!graph.allTasks.any { it instanceof Test }, 'Variant dependency acquisition cannot execute business JUnit')
+    requireMigration(graph.allTasks.size() <= 4096 && inputConsumers.every { graph.hasTask(it) } && graph.hasTask(acquireId) &&
+        graph.hasTask(collectorId) == (mode == 'diagnostic'), 'Variant dependency acquisition real task graph is incomplete')
+    requireMigration(graph.allTasks.every { task ->
+        !['Debug', 'Release', 'Diagnostic'].findAll { it != variant }.any { task.path.contains('WatchAndroid' + it) }
+    }, 'Variant dependency acquisition graph contains another variant')
+    def actualProducers = selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+    requireMigration(actualProducers.collect { it.path } == classpathProducers.collect { it.path } &&
+        classpathProducers.every { !(it instanceof Test) && graph.hasTask(it.path) },
+        'Variant dependency acquisition classpath producer graph changed')
+}
+gradle.projectsEvaluated {
+    def root = gradle.rootProject
+    requireMigration(root.allprojects.collect { it.path }.sort() == [':', ':app'], 'Variant dependency acquisition project scope differs')
+    selectedTest = root.tasks.getByPath(testId)
+    requireMigration(selectedTest instanceof Test, 'Variant dependency acquisition Test.classpath is unavailable')
+    classpathProducers = selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+    requireMigration(!classpathProducers.isEmpty() && classpathProducers.size() <= 4096 &&
+        classpathProducers.every { !(it instanceof Test) }, 'Variant dependency acquisition has no Test-free classpath producers')
+    def acquire = root.tasks.register('ciAcquireVariantDependencyFiles') { task ->
+        task.notCompatibleWithConfigurationCache('Variant acquisition reads exact consumer files and predecessor originals')
+        task.mustRunAfter(inputConsumers)
+        // This selects the real FileCollection producers for this variant, including its runtime classes archives.
+        task.dependsOn(selectedTest.classpath.buildDependencies)
+        task.doLast {
+            requireMigration(!gradle.taskGraph.hasTask(testId), 'Variant dependency acquisition Test task entered the graph')
+            def actualProducers = selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
+            requireMigration(actualProducers.collect { it.path } == classpathProducers.collect { it.path },
+                'Variant dependency acquisition classpath producers changed before file capture')
+            def producerRecords = classpathProducers.collect { [id: it.path, outcome: completedOutcome(it)] }
+            (inputConsumers + optionalInputs.findAll { gradle.taskGraph.hasTask(it) }).each { id ->
+                def consumer = root.tasks.getByPath(id)
+                def outcome = completedOutcome(consumer)
+                def record = fileCollectionRecord(id, 'task-input-archives', consumer.inputs.files)
+                record.outcome = outcome
+                consumers.add(record)
+            }
+            consumers.add(fileCollectionRecord(testId, 'test-classpath-archives', selectedTest.classpath))
+            def app = root.project(':app')
+            ['bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'].each { name ->
+                consumers.add(moduleArtifactsRecord(":app:${name}".toString(), 'configuration-artifacts', app.configurations.findByName(name)))
+            }
+            [root, app].each { project ->
+                def id = project.path == ':' ? ':buildscript:classpath' : ':app:buildscript:classpath'
+                consumers.add(moduleArtifactsRecord(id, 'buildscript-artifacts', project.buildscript.configurations.findByName('classpath')))
+            }
+            requireMigration(priorConsumerCount + consumers.size() <= 64, 'Variant dependency acquisition shared consumer bound exceeded')
+            def record = [schema_version: 2, kind: 'dependency-variant-file-acquisition', phase: phase, variant: mode] + binding + [
+                request_sha256: requestDigest, predecessor_acquisitions: predecessorPins, writer_tasks: writerTasks,
+                test_task_count: 0, graph_task_count: gradle.taskGraph.allTasks.size(),
+                runtime_classpath: [consumer_id: testId, producer_tasks: producerRecords], consumers: consumers.sort { it.id },
+                archive_budget: [unique_archive_count: hashedFiles.size(), unique_archive_bytes: reservedBytes,
+                    cumulative_archive_count: priorArchiveCount + hashedFiles.size(),
+                    cumulative_archive_bytes: priorArchiveBytes + reservedBytes,
+                    cumulative_consumer_count: priorConsumerCount + consumers.size()],
+                file_capture: [task: acquireId, phase: phase, status: 'completed'],
+            ]
+            validateRecord(record, phase, predecessorPins, previousRecords)
+            mergeConsumers(previousRecords + [(phase): record])
+            currentPin = writeOriginal('acquisitions/' + phase + '.json', record)
+            acquisitionDone = true
+            root.logger.lifecycle('CI_DEPENDENCY_VARIANT_ACQUISITION ' + encoded([
+                phase: phase, producer_count: producerRecords.size(), consumer_count: consumers.size(),
+                unique_archive_count: hashedFiles.size(), unique_archive_bytes: reservedBytes, report_sha256: currentPin.sha256,
+            ]))
+        }
+    }
+    if (mode == 'diagnostic') {
+        root.tasks.named('ciResolveAndLockAll').configure { task ->
+            task.mustRunAfter(inputConsumers)
+            task.mustRunAfter(acquire)
+            task.doFirst {
+                requireMigration(acquisitionDone, 'Variant acquisition file stage did not complete before full lock capture')
+            }
+            task.doLast {
+                requireMigration(acquisitionDone && currentPin != null, 'Variant acquisition has no current file original')
+                def records = new LinkedHashMap(previousRecords)
+                def pins = previousPhases.collectEntries { capturePhase ->
+                    def relative = 'acquisitions/' + capturePhase + '.json'
+                    byte[] original = rawBytes(reportRoot.resolve(relative))
+                    requireMigration(digestBytes(original) == predecessorPins[capturePhase], 'Variant acquisition predecessor drifted during full lock capture')
+                    [(capturePhase): [file: relative, sha256: predecessorPins[capturePhase]]]
+                }
+                byte[] currentOriginal = rawBytes(reportRoot.resolve(currentPin.file))
+                requireMigration(digestBytes(currentOriginal) == currentPin.sha256, 'Variant acquisition current original drifted before merge')
+                def currentRecord = new groovy.json.JsonSlurper().parse(currentOriginal)
+                validateRecord(currentRecord, phase, predecessorPins, previousRecords)
+                records[phase] = currentRecord
+                pins[phase] = currentPin
+                requireMigration(records.keySet() == phases.toSet(), 'Variant acquisition full merge is missing a phase')
+                def mergedConsumers = mergeConsumers(records)
+                def projects = [:]
+                root.allprojects.sort { it.path }.each { project ->
+                    def configurations = project.configurations.findAll { it.canBeResolved }.sort { it.name }
+                    requireMigration(configurations.size() <= 4096, 'Variant acquisition full configuration bound exceeded')
+                    configurations.each { configuration ->
+                        requireMigration(configuration.name ==~ /[A-Za-z0-9_.\-]{1,200}/, 'Variant acquisition configuration name is unsafe')
+                        // Only the already-run full graph collector supplies lock coverage, never archive hash evidence.
+                        def result = configuration.incoming.resolutionResult
+                        requireMigration(result.allComponents.size() <= 20000 && result.allDependencies.size() <= 60000 &&
+                            !result.allDependencies.any { it instanceof UnresolvedDependencyResult }, 'Variant acquisition full lock graph is incomplete')
+                    }
+                    projects[project.path] = configurations.collect { it.name }
+                }
+                hashedFiles.each { path, cached ->
+                    safeParents(path)
+                    def attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
+                    requireMigration(cached.identity == [attributes.fileKey(), attributes.size(), attributes.lastModifiedTime()],
+                        'Variant acquisition archive drifted during full lock capture')
+                }
+                def mergedRecord = [schema_version: 2, kind: 'dependency-variant-acquisition-merge', phase: phase] + binding + [
+                    request_sha256: requestDigest, variant_acquisitions: pins, consumers: mergedConsumers, archive_budget: archiveBudget(records),
+                    lock_capture: [kind: 'all-resolvable-configuration-graphs', task: collectorId, phase: phase,
+                        preceding_file_capture_task: acquireId, status: 'completed',
+                        configuration_count: projects.values().sum { it.size() }, unresolved_dependency_count: 0,
+                        project_configurations: projects],
+                ]
+                def mergedPin = writeOriginal('dependency-variant-acquisition.json', mergedRecord)
+                root.logger.lifecycle('CI_DEPENDENCY_VARIANT_MERGE ' + encoded([
+                    phase: phase, collector_task: collectorId, acquisition_count: records.size(), consumer_count: mergedConsumers.size(),
+                    cumulative_archive_count: mergedRecord.archive_budget.cumulative_archive_count,
+                    cumulative_archive_bytes: mergedRecord.archive_budget.cumulative_archive_bytes, report_sha256: mergedPin.sha256,
+                ]))
+            }
+        }
+    }
+}
