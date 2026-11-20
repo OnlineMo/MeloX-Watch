@@ -29,9 +29,11 @@ import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -452,14 +454,35 @@ class RoomQueueMutationTest {
         assertEquals(0L, database.queueDao().orderStats(record.generationId).entryCount)
     }
 
-    private fun integrity(expectedCount: Long) {
-        SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
-            independent.rawQuery("PRAGMA integrity_check", null).use { cursor ->
-                assertTrue(cursor.moveToFirst()); assertEquals("ok", cursor.getString(0))
+    private suspend fun integrity(expectedCount: Long) = withContext(Dispatchers.IO) {
+        // 两种 SQLite 实现不能重叠持有同一文件；先退役 Room，再用原生只读连接独立核验。
+        database.close()
+        var integrityFailure: Throwable? = null
+        try {
+            SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
+                independent.rawQuery("PRAGMA integrity_check", null).use { cursor ->
+                    assertTrue(cursor.moveToFirst())
+                    assertEquals("ok", cursor.getString(0))
+                }
+                independent.rawQuery("PRAGMA foreign_key_check", null).use { assertFalse(it.moveToFirst()) }
+                independent.rawQuery("SELECT COUNT(*) FROM queue_entries WHERE generationId = (SELECT activeGenerationId FROM queue_head WHERE id = 1)", null).use {
+                    assertTrue(it.moveToFirst())
+                    assertEquals(expectedCount, it.getLong(0))
+                }
             }
-            independent.rawQuery("PRAGMA foreign_key_check", null).use { assertFalse(it.moveToFirst()) }
-            independent.rawQuery("SELECT COUNT(*) FROM queue_entries WHERE generationId = (SELECT activeGenerationId FROM queue_head WHERE id = 1)", null).use {
-                assertTrue(it.moveToFirst()); assertEquals(expectedCount, it.getLong(0))
+        } catch (error: Throwable) {
+            integrityFailure = error
+            throw error
+        } finally {
+            try {
+                // native 已实际关闭才重开。后续重试仍读取原文件，不新建空库或重置随机源计数。
+                database = connect()
+                store = newStore()
+                store.initialize()
+            } catch (error: Throwable) {
+                val primary = integrityFailure
+                if (primary == null) throw error
+                if (primary !== error) primary.addSuppressed(error)
             }
         }
     }
