@@ -498,6 +498,109 @@ class TestProgressTests(unittest.TestCase):
             process.assert_not_called()
 
 
+class OverallBuildBudgetTests(unittest.TestCase):
+    """Exercise the real deadline/report loop with a clock and no launched process or Linux syscalls."""
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.now, self.finish_at, self.exit_code = 1000.0, 1001.0, 0
+        self.process = SimpleNamespace(stdout=Mock(), returncode=None)
+        self.selector = Mock()
+        self.selector.select.side_effect = self.advance
+        self.owner = SimpleNamespace(activate=Mock(), register=Mock(), refresh=Mock(return_value=[]),
+            members=Mock(return_value=[]), restore=Mock(), previous_subreaper=0, baseline_zombies=0,
+            baseline_live_descendants=0, restored=True)
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        actual_is_dir = Path.is_dir
+        for context in (patch.object(monitor.sys, 'platform', 'linux'),
+                patch.object(Path, 'is_dir', lambda path: path == Path('/proc') or actual_is_dir(path)),
+                patch.object(monitor.time, 'monotonic', side_effect=lambda: self.now),
+                patch.object(monitor, '_LinuxProcessOwner', return_value=self.owner),
+                patch.object(monitor, '_open_pipe', return_value=self.selector),
+                patch.object(monitor, '_has_children', return_value=False),
+                patch.object(monitor.os, 'read', return_value=b''),
+                patch.object(monitor, 'snapshot_native_crashes', return_value=None),
+                patch.object(monitor, '_stop_owned_processes', return_value={
+                    'parent_reaped': True, 'ownership_verified': True, 'signaled_owned_process_count': 0,
+                    'remaining_live_owned_processes': [], 'remaining_owned_zombies': []})):
+            resources.enter_context(context)
+        self.launch = resources.enter_context(patch.object(monitor.subprocess, 'Popen', return_value=self.process))
+
+    def advance(self, **_):
+        self.now = self.finish_at
+        self.process.returncode = self.exit_code
+        return [True] if self.exit_code is not None else []
+
+    def run_phase(self, phase='strict-debug', **kwargs):
+        return monitor.run_gradle(['unexecuted-budget-fixture'], cwd=self.root, env={}, phase=phase,
+                                  output=io.StringIO(), diagnostics=lambda *_: {'status': 'fixture'}, **kwargs)
+
+    def report(self, phase='strict-debug'):
+        return json.loads((self.root / 'app/build/reports/ci-process' / phase / 'process.json').read_text())
+
+    def test_default_total_limit_and_independent_limits_stay_unchanged(self):
+        self.run_phase()
+        record = self.report()
+        self.assertEqual(record['status'], 'completed')
+        self.assertEqual(record['overall_limit_seconds'], 2700)
+        self.assertEqual(record['overall_remaining_seconds_at_start'], 2700)
+        self.assertEqual(record['limits_seconds'], {'phase_seconds': 1200, 'silent_seconds': 300,
+            'test_seconds': 240, 'termination_seconds': 2, 'heartbeat_seconds': 30})
+
+    def test_selected_total_limit_drives_the_default_deadline_receipt_and_timeout_text(self):
+        for budget in (2700, 5400):
+            self.now, self.finish_at, self.exit_code = 1000.0, 1000.0 + budget, None
+            phase = 'budget-' + str(budget)
+            with self.subTest(budget=budget), self.assertRaises(monitor.BuildTimeout) as caught:
+                self.run_phase(phase, overall_limit_seconds=budget)
+            self.assertEqual(caught.exception.reason, 'overall build deadline')
+            self.assertEqual(caught.exception.timeout, budget)
+            self.assertIn(f'({budget}s limit)', str(caught.exception))
+            record = self.report(phase)
+            self.assertEqual(record['overall_limit_seconds'], budget)
+            self.assertEqual(record['overall_remaining_seconds_at_start'], budget)
+            self.assertEqual(record['timeout_reason'], 'overall build deadline')
+
+    def test_a_shorter_explicit_deadline_is_not_extended_by_the_selected_limit(self):
+        self.finish_at, self.exit_code = 1020.0, None
+        with self.assertRaises(monitor.BuildTimeout) as caught:
+            self.run_phase(total_deadline=1020.0, overall_limit_seconds=5400)
+        self.assertEqual(caught.exception.reason, 'overall build deadline')
+        self.assertEqual(caught.exception.timeout, 5400)
+        record = self.report()
+        self.assertEqual(record['overall_limit_seconds'], 5400)
+        self.assertEqual(record['overall_remaining_seconds_at_start'], 20)
+        self.assertEqual(record['elapsed_seconds'], 20)
+
+    def test_expired_explicit_deadline_rejects_before_launch_with_the_selected_timeout_text(self):
+        with self.assertRaises(monitor.BuildTimeout) as caught:
+            self.run_phase(total_deadline=999.0, overall_limit_seconds=5400)
+        self.assertEqual(caught.exception.timeout, 5400)
+        self.assertEqual(caught.exception.reason, 'overall build deadline before phase start')
+        self.launch.assert_not_called()
+        self.assertFalse((self.root / 'app').exists())
+
+    def test_later_phases_keep_the_original_deadline_and_report_only_the_remaining_budget(self):
+        deadline = self.now + 5400
+        self.run_phase('first-phase', total_deadline=deadline, overall_limit_seconds=5400)
+        self.now, self.finish_at, self.exit_code = deadline - 5, deadline + 1, None
+        with self.assertRaises(monitor.BuildTimeout) as caught:
+            self.run_phase('last-phase', total_deadline=deadline, overall_limit_seconds=5400)
+        self.assertEqual(caught.exception.reason, 'overall build deadline')
+        self.assertEqual(self.report('first-phase')['overall_remaining_seconds_at_start'], 5400)
+        self.assertEqual(self.report('last-phase')['overall_remaining_seconds_at_start'], 5)
+        self.assertEqual(self.report('last-phase')['elapsed_seconds'], 6)
+
+    def test_invalid_total_limits_reject_before_report_or_launch(self):
+        for budget in (0, -1, float('nan'), float('inf'), True, False):
+            with self.subTest(budget=budget), self.assertRaisesRegex(ValueError, 'positive finite'):
+                self.run_phase(overall_limit_seconds=budget)
+            self.launch.assert_not_called()
+            self.assertFalse((self.root / 'app').exists())
+
+
 class WaitidProtocolTests(unittest.TestCase):
     def setUp(self):
         resources = ExitStack()

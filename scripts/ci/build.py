@@ -46,7 +46,12 @@ DEPENDENCY_VARIANT_ACQUIRE_PHASES = tuple('migration-acquire-' + mode for mode i
 DEPENDENCY_VARIANT_MIGRATION_PHASES = (*DEPENDENCY_VARIANT_ACQUIRE_PHASES, *ROOM_SCHEMA_COLLECTION_PHASES)
 DEPENDENCY_VARIANT_ACQUISITION_TASK = ':ciAcquireVariantDependencyFiles'
 DEPENDENCY_VARIANT_MERGED_FILE = 'dependency-variant-acquisition.json'
-MIGRATION_VARIANT_TOOLS = ('scripts/ci/build.py', 'scripts/ci/dependency-acquire-variants.gradle')
+# v5 pins the revised monitor as a migration tool; v4 keeps its historical base-byte contract.
+MIGRATION_VARIANT_FROZEN_INPUTS = tuple(name for name in MIGRATION_FROZEN_INPUTS
+                                      if name != 'scripts/ci/build_process.py')
+MIGRATION_VARIANT_TOOLS = ('scripts/ci/build.py', 'scripts/ci/build_process.py',
+                         'scripts/ci/dependency-acquire-variants.gradle')
+DEPENDENCY_VARIANT_MIGRATION_SECONDS = 90 * 60
 
 
 def required_build_inputs():
@@ -426,7 +431,8 @@ def dependency_migration_request(build_sha, mode, missing):
             'Dependency migration requires a genuinely absent current schema at the base')
     reviewed = reviewed_schema_inputs(current, missing)
     tools = MIGRATION_VARIANT_TOOLS if request['schema_version'] == 2 else MIGRATION_TOOLS
-    for key, names in (('reviewed_input_hashes', reviewed), ('frozen_input_hashes', MIGRATION_FROZEN_INPUTS),
+    frozen_inputs = MIGRATION_VARIANT_FROZEN_INPUTS if request['schema_version'] == 2 else MIGRATION_FROZEN_INPUTS
+    for key, names in (('reviewed_input_hashes', reviewed), ('frozen_input_hashes', frozen_inputs),
                        ('migration_tool_hashes', tools)):
         values = request[key]
         require(type(values) is dict and set(values) == set(names) and
@@ -827,12 +833,11 @@ def validate_dependency_variant_accumulation(previous, updated):
             require(updated[name] == data, 'Dependency variant writer changed an old schema')
 
 
-def bootstrap_dependency_variant_migration(build_sha, missing, request, request_digest, reviewed, binding, total_deadline=None):
+def bootstrap_dependency_variant_migration(build_sha, missing, request, request_digest, reviewed, binding, total_deadline):
     """v5 consumes one real variant per writer process; only the last process captures the full lock graph."""
     frozen = migration_build_hashes(MIGRATION_VARIANT_TOOLS)
     current = request['current_schema']
     android = ROOT / 'android'
-    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
     writer_tasks = {phase: dependency_variant_acquire_tasks(mode, request['diagnostic_android_test'])
                     for phase, mode in zip(DEPENDENCY_VARIANT_ACQUIRE_PHASES, ('debug', 'release', 'diagnostic'))}
     tasks = [task for mode in ('debug', 'release', 'diagnostic') for task in gradle_tasks(mode)]
@@ -887,7 +892,8 @@ def bootstrap_dependency_variant_migration(build_sha, missing, request, request_
                 require(acquired is not None and merged is not None, 'Dependency variant migration cannot enter STRICT without its complete merge')
                 environment = gradle_environment(unsigned=True, diagnostic_phase=name)
             run_gradle(phase['command'], cwd=android, phase=name, build_sha=build_sha,
-                       total_deadline=total_deadline, env=environment)
+                       total_deadline=total_deadline, overall_limit_seconds=DEPENDENCY_VARIANT_MIGRATION_SECONDS,
+                       env=environment)
             require(migration_build_hashes(MIGRATION_VARIANT_TOOLS) == frozen and originals_match(),
                     'Dependency variant migration frozen inputs or saved originals changed during a call')
             after = schema_checked_input_hashes()
@@ -993,16 +999,21 @@ def bootstrap_dependency_variant_migration(build_sha, missing, request, request_
             'dependency inputs and Room schema, remove the explicit request, then rebuild strictly.')
 
 
-def bootstrap_dependency_migration(build_sha, mode, missing, total_deadline=None):
+def bootstrap_dependency_migration(build_sha, mode, missing, total_deadline=None, *, total_started=None):
     """One explicit writer acquires files; three strict calls and external review still gate every input."""
+    if total_deadline is None and total_started is None:
+        total_started = time.monotonic()
     request, request_digest, reviewed, binding = dependency_migration_request(build_sha, mode, missing)
+    # Select the exception only after the complete owner request passes, using the original build start.
+    total_seconds = (DEPENDENCY_VARIANT_MIGRATION_SECONDS if request['kind'] == DEPENDENCY_VARIANT_MIGRATION_KIND
+                     else TOTAL_BUILD_SECONDS)
+    total_deadline = total_started + total_seconds if total_deadline is None else total_deadline
     if request['kind'] == DEPENDENCY_VARIANT_MIGRATION_KIND:
         return bootstrap_dependency_variant_migration(
             build_sha, missing, request, request_digest, reviewed, binding, total_deadline)
     frozen = migration_build_hashes()
     current = request['current_schema']
     android = ROOT / 'android'
-    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
     writer_tasks = dependency_acquire_tasks(request['diagnostic_android_test'])
     tasks = [task for variant in ('debug', 'release', 'diagnostic') for task in gradle_tasks(variant)]
     phases = [{'name': 'migration-acquire', 'command': gradle_command(
@@ -1239,11 +1250,12 @@ def build(mode):
     if mode != 'debug':
         require(os.environ.get('CANDIDATE_OPERATION') == 'prepare-candidate', 'Use candidate preparation for optimized builds')
     tasks = gradle_tasks(mode)
-    total_deadline = time.monotonic() + TOTAL_BUILD_SECONDS
+    total_started = time.monotonic()
+    total_deadline = total_started + TOTAL_BUILD_SECONDS
     has_instrumentation = mode == 'diagnostic' and (ROOT / 'android/app/src/androidTest').is_dir()
     missing = missing_dependency_inputs()
     if has_migration_request:
-        bootstrap_dependency_migration(build_sha, mode, missing, total_deadline)
+        bootstrap_dependency_migration(build_sha, mode, missing, total_started=total_started)
     if missing:
         require(is_pr and mode == 'debug',
                 'Committed strict dependency inputs are missing: ' + ', '.join(missing) + '. '

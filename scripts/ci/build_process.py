@@ -1026,19 +1026,23 @@ def collect_native_crashes(cwd, report, snapshot, binding, reason):
     return result
 
 
-def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None, limits=BuildLimits(),
-               output=None, diagnostics=collect_jvm_diagnostics):
+def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
+               overall_limit_seconds=TOTAL_BUILD_SECONDS, limits=BuildLimits(), output=None,
+               diagnostics=collect_jvm_diagnostics):
     """The caller validates cloud authorization and strips tokens; Linux ownership is mandatory."""
     if not sys.platform.startswith('linux') or not Path('/proc').is_dir():
         raise ValueError('Cloud build process ownership requires the Linux runner')
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,80}', phase):
         raise ValueError('Invalid build phase identity')
+    if (isinstance(overall_limit_seconds, bool) or not math.isfinite(overall_limit_seconds) or
+            overall_limit_seconds <= 0):
+        raise ValueError('Overall build limit must be a positive finite number')
     started = time.monotonic()
-    total_deadline = started + TOTAL_BUILD_SECONDS if total_deadline is None else total_deadline
+    total_deadline = started + overall_limit_seconds if total_deadline is None else total_deadline
     if not math.isfinite(total_deadline):
         raise ValueError('Invalid total build deadline')
     if started >= total_deadline:
-        raise BuildTimeout(command, phase, 'overall build deadline before phase start', TOTAL_BUILD_SECONDS)
+        raise BuildTimeout(command, phase, 'overall build deadline before phase start', overall_limit_seconds)
     output = sys.stdout if output is None else output
     report = Path(cwd) / 'app/build/reports/ci-process' / phase
     report.mkdir(parents=True, exist_ok=False)
@@ -1046,7 +1050,7 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
     progress = TestProgress()
     lines = _EventLines(progress)
     record = {'schema_version': 1, 'phase': phase, 'status': 'started', 'limits_seconds': limits.__dict__,
-              'overall_limit_seconds': TOTAL_BUILD_SECONDS,
+              'overall_limit_seconds': overall_limit_seconds,
               'overall_remaining_seconds_at_start': total_deadline - started,
               'source_sha': env.get('SOURCE_SHA'), 'build_sha': build_sha, 'run_id': env.get('GITHUB_RUN_ID'),
               'run_attempt': env.get('GITHUB_RUN_ATTEMPT'), 'apk_exported': False}
@@ -1132,7 +1136,7 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
                 completed = ended and process.returncode is not None and not owned and not _has_children()
                 reason = None
                 if now >= total_deadline:
-                    reason = ('overall build deadline', TOTAL_BUILD_SECONDS)
+                    reason = ('overall build deadline', overall_limit_seconds)
                 elif now - started >= limits.phase_seconds:
                     reason = ('phase deadline', limits.phase_seconds)
                 elif progress.overdue(now, limits.test_seconds):
