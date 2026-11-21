@@ -992,10 +992,12 @@ class LyricsEntryViewModel(
         current.identity.sourceGeneration == sourceGeneration && !mutableState.value.loading && !mutableState.value.saving &&
         !playConfirmation.busy && !playback.busy
 
+    // Explicit review consumes restoredOffset before this Work finishes publishing and releasing its flags.
+    // Cancellation/route exit replace Work, so the proposal's lifetime cannot retire its successful reader.
     private fun isCurrent(operation: Work): Boolean = !closed && visible && work.value === operation &&
         latestKey == operation.key && sourceGeneration == operation.sourceGeneration &&
         (operation.action !is Action.Resume || operation.action.draft.route === entryRoute) &&
-        (operation.action !is Action.ReviewOffset || entryRoute != null && restoredOffset === operation.action.draft)
+        (operation.action !is Action.ReviewOffset || entryRoute != null)
 
     private suspend fun ensureCurrent(operation: Work) {
         currentCoroutineContext().ensureActive()

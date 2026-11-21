@@ -36,7 +36,7 @@ import org.robolectric.annotation.LooperMode
 
 /** Actual return effect and host observer. Real Main/Window producers remain a separate gate. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [30], qualifiers = "en-rUS-w192dp-h192dp-mdpi-round")
+@Config(sdk = [30], qualifiers = "en-rUS-w192dp-h192dp-round-mdpi")
 @LooperMode(LooperMode.Mode.PAUSED)
 class ProbeFontPickerReturnHostTest {
     @get:Rule val compose = createEmptyComposeRule()

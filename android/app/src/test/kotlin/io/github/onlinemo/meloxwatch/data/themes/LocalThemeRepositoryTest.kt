@@ -232,7 +232,7 @@ class LocalThemeRepositoryTest {
         assertEquals(0L, repository.ownedFontBytes())
     }
 
-    @Test fun fontLicenseAcknowledgmentPrecedesApplicationAndConsumptionCannotKeepAStaleToken() = runBlocking {
+    @Test fun fontLicenseAcknowledgmentPrecedesApplicationAndConsumptionCannotKeepAStaleToken(): Unit = runBlocking {
         val font = Fixture.font()
         val value = Fixture.packageOf(assets = listOf(font), fonts = mapOf("original" to font.id))
         val repository = Fixture.repository(temporary.newFolder(), BytesThemeSource(value.zip()))

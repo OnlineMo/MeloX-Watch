@@ -4,7 +4,6 @@ import android.app.Application
 import android.os.Looper
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.exoplayer.ExoPlayer
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
@@ -68,7 +67,7 @@ class QuarantinedPlaybackOwnerTest {
         val guard = PlaybackEngineReleaseGuard()
         val first = OwnerFixture(guard)
         try {
-            assertTrue(first.owner.initialPlayer is ExoPlayer)
+            assertTrue(first.owner.initialPlayer is RoutingPlaybackPlayer)
             assertEquals(PlaybackBackendKind.MEDIA3, first.owner.state.value.actualBackend)
             assertTrue(guard.blocksCreation())
         } finally { first.close() }
@@ -76,7 +75,7 @@ class QuarantinedPlaybackOwnerTest {
 
         val next = OwnerFixture(guard)
         try {
-            assertTrue(next.owner.initialPlayer is ExoPlayer)
+            assertTrue(next.owner.initialPlayer is RoutingPlaybackPlayer)
             assertEquals(PlaybackBackendKind.MEDIA3, next.owner.state.value.actualBackend)
             assertNull(next.owner.state.value.issue)
             assertTrue(guard.blocksCreation())
@@ -88,7 +87,7 @@ class QuarantinedPlaybackOwnerTest {
         val guard = PlaybackEngineReleaseGuard()
         val first = OwnerFixture(guard)
         try {
-            assertTrue(first.owner.initialPlayer is ExoPlayer)
+            assertTrue(first.owner.initialPlayer is RoutingPlaybackPlayer)
             val second = OwnerFixture(guard)
             try {
                 assertTrue(second.owner.initialPlayer is QuarantinedPlaybackBackend)

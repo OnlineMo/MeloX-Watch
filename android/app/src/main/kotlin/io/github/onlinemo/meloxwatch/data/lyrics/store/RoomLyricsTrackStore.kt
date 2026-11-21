@@ -1,7 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.lyrics.store
 
 import android.database.sqlite.SQLiteException
-import androidx.room.RoomDatabase
+import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.concurrent.atomic.AtomicBoolean
@@ -11,7 +11,7 @@ import kotlinx.coroutines.ensureActive
 
 /** The database transaction owns a bounded row read, real playback fence and SQL revision CAS. */
 class RoomLyricsTrackStore(
-    private val database: RoomDatabase,
+    private val database: MeloXDatabase,
     private val dao: LyricsDao,
 ) : LyricsTrackStore {
     private val occupied = AtomicBoolean(false)
@@ -35,7 +35,12 @@ class RoomLyricsTrackStore(
                 currentCoroutineContext().ensureActive()
                 LyricsTrackReadResult.Ready(current)
             }
-        } catch (cancelled: CancellationException) { throw cancelled }
+        } catch (cancelled: CancellationException) {
+            // Room closes its own job; a live caller still needs a typed storage failure.
+            currentCoroutineContext().ensureActive()
+            if (!database.isClosed) throw cancelled
+            LyricsTrackReadResult.Unavailable(LyricsTrackIssue.IO)
+        }
         catch (error: LyricsTrackException) { LyricsTrackReadResult.Unavailable(error.issue) }
         catch (_: SQLiteException) { LyricsTrackReadResult.Unavailable(LyricsTrackIssue.IO) }
         catch (_: IllegalStateException) { LyricsTrackReadResult.Unavailable(LyricsTrackIssue.IO) }
@@ -80,7 +85,11 @@ class RoomLyricsTrackStore(
                 currentCoroutineContext().ensureActive()
                 LyricsTrackCommitResult.Saved(replacement)
             }
-        } catch (cancelled: CancellationException) { throw cancelled }
+        } catch (cancelled: CancellationException) {
+            currentCoroutineContext().ensureActive()
+            if (!database.isClosed) throw cancelled
+            return LyricsTrackCommitResult.Failed(known, LyricsTrackIssue.IO)
+        }
         catch (stale: StaleTransaction) { return LyricsTrackCommitResult.Stale(stale.current) }
         catch (error: LyricsTrackException) { return LyricsTrackCommitResult.Failed(known, error.issue) }
         catch (_: SQLiteException) { return LyricsTrackCommitResult.Failed(known, LyricsTrackIssue.IO) }

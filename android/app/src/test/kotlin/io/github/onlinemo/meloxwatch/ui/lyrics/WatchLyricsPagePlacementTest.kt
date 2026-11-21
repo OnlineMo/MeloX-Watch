@@ -54,7 +54,7 @@ import org.robolectric.annotation.LooperMode
 
 /** Actual page placement and touch targets; pure geometry does not cover an RTL parent origin. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [30], qualifiers = "en-rUS-w192dp-h192dp-mdpi-round")
+@Config(sdk = [30], qualifiers = "en-rUS-w192dp-h192dp-round-mdpi")
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 class WatchLyricsPagePlacementTest {

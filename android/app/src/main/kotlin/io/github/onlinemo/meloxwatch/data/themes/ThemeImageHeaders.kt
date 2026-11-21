@@ -3,7 +3,7 @@ package io.github.onlinemo.meloxwatch.data.themes
 import io.github.onlinemo.meloxwatch.data.artwork.ArtworkLimits
 import java.util.zip.CRC32
 
-/** 静态位图容器先于原生解码检查；不接受动画帧、压缩文字/ICC 或尾随的另一种载荷。 */
+/** 静态位图容器先于原生解码检查；不接受动画帧、压缩文字/压缩 ICC 或尾随的另一种载荷。 */
 internal object ThemeImageHeaders {
     fun verify(bytes: ByteArray, mediaType: String, checkCancellation: () -> Unit) {
         when (mediaType) {
@@ -62,13 +62,14 @@ internal object ThemeImageHeaders {
         if (!hasHeader || !hasData || !hasEnd) themeFail(ThemeIssue.INVALID_IMAGE)
     }
 
-    /** JPEG 不靠首尾两字节认定容器完整；只接受原生可验证的静态帧和 JFIF/Adobe 元数据。 */
+    /** JPEG 不靠首尾两字节认定容器完整；只接受原生可验证的静态帧、JFIF/Adobe 及单片有界 ICC 颜色配置。 */
     private fun jpeg(bytes: ByteArray, checkCancellation: () -> Unit) {
         if (bytes.size < 4 || u8(bytes, 0) != 255 || u8(bytes, 1) != 216) themeFail(ThemeIssue.INVALID_IMAGE)
         var offset = 2
         var segments = 0
         var frame = false
         var scan = false
+        var hasIcc = false
         while (offset < bytes.size) {
             checkCancellation()
             if (++segments > 4096 || u8(bytes, offset) != 255) themeFail(ThemeIssue.INVALID_IMAGE)
@@ -99,6 +100,15 @@ internal object ThemeImageHeaders {
                         themeFail(ThemeIssue.INVALID_IMAGE)
                     }
                 }
+                226 -> {
+                    if (hasIcc || scan || count < 16) themeFail(ThemeIssue.INVALID_IMAGE)
+                    if (String(bytes, offset + 2, 12, Charsets.US_ASCII) != "ICC_PROFILE\u0000" ||
+                        u8(bytes, offset + 14) != 1 || u8(bytes, offset + 15) != 1) {
+                        themeFail(ThemeIssue.UNSUPPORTED_RESOURCE)
+                    }
+                    verifyIcc(bytes, offset + 16, count - 16, checkCancellation)
+                    hasIcc = true
+                }
                 238 -> if (count != 14 || String(bytes, offset + 2, 5, Charsets.US_ASCII) != "Adobe") {
                     themeFail(ThemeIssue.UNSUPPORTED_RESOURCE)
                 }
@@ -127,6 +137,24 @@ internal object ThemeImageHeaders {
             offset = end
         }
         themeFail(ThemeIssue.INVALID_IMAGE)
+    }
+
+    /** Android JPEG encoding includes a raw ICC profile; no decompression or multipart assembly is needed. */
+    private fun verifyIcc(bytes: ByteArray, start: Int, size: Int, checkCancellation: () -> Unit) {
+        if (size < 132 || big32(bytes, start) != size.toLong() || ascii(bytes, start + 36) != "acsp") {
+            themeFail(ThemeIssue.INVALID_IMAGE)
+        }
+        val tags = big32(bytes, start + 128)
+        if (tags !in 1L..128L || tags > (size - 132) / 12L) themeFail(ThemeIssue.INVALID_IMAGE)
+        val tableEnd = 132L + 12L * tags
+        repeat(tags.toInt()) { index ->
+            checkCancellation()
+            val record = start + 132 + index * 12
+            val offset = big32(bytes, record + 4)
+            val length = big32(bytes, record + 8)
+            if (offset < tableEnd || offset > size || (offset and 3L) != 0L ||
+                length < 8L || length > size - offset) themeFail(ThemeIssue.INVALID_IMAGE)
+        }
     }
 
     private fun webp(bytes: ByteArray, checkCancellation: () -> Unit) {
@@ -179,5 +207,5 @@ internal object ThemeImageHeaders {
     private val PNG_SIGNATURE = byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)
     private val PNG_CHUNKS = setOf("IHDR", "PLTE", "tRNS", "IDAT", "IEND", "pHYs", "sRGB", "gAMA", "cHRM", "bKGD", "sBIT")
     private val WEBP_CHUNKS = setOf("VP8X", "VP8 ", "VP8L", "ALPH")
-    private val JPEG_MARKERS = setOf(192, 193, 194, 196, 218, 219, 221, 224, 238)
+    private val JPEG_MARKERS = setOf(192, 193, 194, 196, 218, 219, 221, 224, 226, 238)
 }

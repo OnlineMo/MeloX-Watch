@@ -106,6 +106,31 @@ class ThemeAssetValidatorNativeTest {
             0xff.toByte(), 0xd9.toByte()), "image/jpeg") {} }
     }
 
+    @Test fun androidJpegIccProfileIsBoundedAndMalformedOrRepeatedColorPayloadsAreRejected(): Unit {
+        val valid = Fixture.raster(Bitmap.CompressFormat.JPEG)
+        val marker = iccMarker(valid)
+        val count = unsigned16(valid, marker + 2)
+        val profile = marker + 18
+        ThemeImageHeaders.verify(valid, "image/jpeg") {}
+        val bitmap = validator.decodeImage(valid, "image/jpeg", 32, false, CancellationSignal())
+        try { assertEquals(255, Color.alpha(bitmap.getPixel(16, 16))) }
+        finally { bitmap.recycle() }
+
+        val multipart = valid.copyOf().also { it[marker + 16] = 2 }
+        Fixture.expect(ThemeIssue.UNSUPPORTED_RESOURCE) { ThemeImageHeaders.verify(multipart, "image/jpeg") {} }
+        val arbitrary = valid.copyOf().also { it[marker + 4] = 'X'.code.toByte() }
+        Fixture.expect(ThemeIssue.UNSUPPORTED_RESOURCE) { ThemeImageHeaders.verify(arbitrary, "image/jpeg") {} }
+        val signature = valid.copyOf().also { it[profile + 36] = 0 }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(signature, "image/jpeg") {} }
+        val truncated = valid.copyOf().also { putBig32(it, profile, count - 15) }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(truncated, "image/jpeg") {} }
+        val escapingTag = valid.copyOf().also { putBig32(it, profile + 136, count) }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(escapingTag, "image/jpeg") {} }
+        val repeated = valid.copyOfRange(0, marker) + valid.copyOfRange(marker, marker + count + 2) +
+            valid.copyOfRange(marker, valid.size)
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(repeated, "image/jpeg") {} }
+    }
+
     @Test fun animatedWebpFlagsAndRiffLengthMismatchHaveNoFirstFrameSuccess() {
         val header = ByteArray(30)
         "RIFF".toByteArray().copyInto(header, 0)
@@ -202,6 +227,23 @@ class ThemeAssetValidatorNativeTest {
         }
         assertArrayEquals(image.bytes, outside.readBytes())
     }
+
+    private fun iccMarker(bytes: ByteArray): Int {
+        var offset = 2
+        while (offset < bytes.size - 4) {
+            assertEquals(255, bytes[offset].toInt() and 255)
+            val marker = bytes[offset + 1].toInt() and 255
+            if (marker == 226) return offset
+            if (marker == 218 || marker == 217) break
+            val count = unsigned16(bytes, offset + 2)
+            assertTrue(count >= 2 && count <= bytes.size - offset - 2)
+            offset += count + 2
+        }
+        throw AssertionError("The Android-generated JPEG must contain its original ICC color profile")
+    }
+
+    private fun unsigned16(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 255) shl 8) or (bytes[offset + 1].toInt() and 255)
 
     private fun putBig32(bytes: ByteArray, offset: Int, value: Int) {
         ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.BIG_ENDIAN).putInt(value)

@@ -10,10 +10,14 @@ import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
@@ -214,6 +218,36 @@ internal class LyricsTrackMalformedTest : LyricsRoomPlaybackFixture() {
             store.commit(0L, LyricsTrackPreferences(trackKey, userDelayMs = 100), fence) { true })
         reopen()
         assertEquals(LyricsTrackPreferences(trackKey), ready())
+    }
+
+    @Test(timeout = 30000L)
+    fun anOpenNativeDatabasePreservesIndependentDaoCancellationAndItsWriterRemainsReusable(): Unit = runBlocking {
+        val original = CancellationException("Controlled independent DAO cancellation")
+        val actualDao = database.lyricsDao()
+        val interruptedDao = object : LyricsDao by actualDao {
+            override suspend fun localTrackExists(trackId: String): Boolean = throw original
+        }
+        val interrupted = RoomLyricsTrackStore(database, interruptedDao)
+        assertFalse(database.isClosed)
+        try {
+            interrupted.read(trackKey)
+            fail("Independent DAO cancellation must not be relabelled as storage IO")
+        } catch (cancelled: CancellationException) { assertSame(original, cancelled) }
+        currentCoroutineContext().ensureActive()
+        try {
+            interrupted.commit(0L, LyricsTrackPreferences(trackKey, userDelayMs = 100), fence) { true }
+            fail("Independent write cancellation must retain its original cause")
+        } catch (cancelled: CancellationException) { assertSame(original, cancelled) }
+        currentCoroutineContext().ensureActive()
+        assertFalse(database.isClosed)
+        assertEquals(0L, scalar("SELECT COUNT(*) FROM lyrics_track_preferences"))
+        assertEquals(1200L, scalar("SELECT positionMs FROM queue_head"))
+        val next = LyricsTrackPreferences(trackKey, userDelayMs = 100)
+        assertEquals(LyricsTrackCommitResult.Saved(next.copy(revision = 1L)), store.commit(0L, next, fence) { true })
+        assertIntegrity()
+        reopen()
+        assertFalse(database.isClosed)
+        assertEquals(next.copy(revision = 1L), ready())
     }
 
     private suspend fun saveBoth(): LyricsTrackPreferences {

@@ -141,7 +141,7 @@ class AppliedThemeResourcesTest {
                 val actual = installed.repository.apply(Fixture.apply(preview)).snapshot
                 assertEquals(checkNotNull(installed.snapshot.revision) + 1, actual.revision)
                 assertEquals(installed.snapshot.effective, actual.effective)
-                assertEquals(installed.snapshot.effectiveManifest, actual.effectiveManifest)
+                assertSameManifest(installed.snapshot.effectiveManifest, actual.effectiveManifest)
                 val newKey = PlaybackBackgroundImageKey.Theme(actual, image.id)
                 assertFalse(oldKey.stableKey() == newKey.stableKey())
                 assertEquals(oldKey.pixelKey(), newKey.pixelKey())
@@ -243,6 +243,20 @@ class AppliedThemeResourcesTest {
                 retireBackgroundTestScope(io, scope, scheduler)
             }
         }
+    }
+
+    /** Each catalog read constructs an immutable manifest; compare every value rather than object identity. */
+    private fun assertSameManifest(expected: ThemeManifest, actual: ThemeManifest) {
+        assertEquals(expected.schemaVersion, actual.schemaVersion)
+        assertEquals(expected.id, actual.id)
+        assertEquals(expected.displayName, actual.displayName)
+        assertEquals(expected.author, actual.author)
+        assertEquals(expected.license, actual.license)
+        assertEquals(expected.palette, actual.palette)
+        assertEquals(expected.background, actual.background)
+        assertEquals(expected.resources, actual.resources)
+        assertEquals(expected.icons, actual.icons)
+        assertEquals(expected.fonts, actual.fonts)
     }
 
     private suspend fun install(value: Fixture.Package, io: LocalProviderIo = LocalProviderIo()): Installation {

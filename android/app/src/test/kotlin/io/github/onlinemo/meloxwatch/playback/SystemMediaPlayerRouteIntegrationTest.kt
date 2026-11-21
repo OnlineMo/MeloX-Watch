@@ -73,7 +73,7 @@ class SystemMediaPlayerRouteIntegrationTest {
     fun startPauseAndResumeObserveOneNativePlayerAndRetireThePausedOwner() = fixture().use { fixture ->
         fixture.prepare("first")
         fixture.native.beforeStart = { assertFalse(fixture.route.cachedState().known) }
-        fixture.adapter.play()
+        fixture.play()
         val first = fixture.route.read()
         assertTrue(first.known)
         assertEquals(1, fixture.native.listeners.size)
@@ -85,7 +85,7 @@ class SystemMediaPlayerRouteIntegrationTest {
         assertTrue(relative.accepted && relative.changed)
         assertEquals(5, checkNotNull(relative.snapshot).values.current)
         assertEquals(starts, fixture.native.starts)
-        fixture.adapter.play()
+        fixture.play()
         val resumed = fixture.route.read()
         assertTrue(resumed.known)
         assertNotEquals(first.ownerId, resumed.ownerId)
@@ -96,7 +96,7 @@ class SystemMediaPlayerRouteIntegrationTest {
     @Test
     fun resetRetiresBeforeTheNativeCallAndOldSourceCallbacksCannotChangeTheNewOwner() = fixture().use { fixture ->
         fixture.prepare("first")
-        fixture.adapter.play()
+        fixture.play()
         val first = fixture.route.read()
         val oldCallback = fixture.native.listeners.single().first
         fixture.native.beforeReset = { assertFalse(fixture.route.cachedState().known) }
@@ -105,7 +105,7 @@ class SystemMediaPlayerRouteIntegrationTest {
         assertFalse(fixture.route.read().known)
         assertTrue(fixture.native.removed.contains(oldCallback))
         fixture.prepareCurrent()
-        fixture.adapter.play()
+        fixture.play()
         val second = fixture.route.read()
         assertTrue(second.known)
         assertNotEquals(first.ownerId, second.ownerId)
@@ -119,7 +119,7 @@ class SystemMediaPlayerRouteIntegrationTest {
     @Test
     fun sourceGenerationLossDuringTheFinalRouteReadRejectsTheAbsoluteWrite() = fixture().use { fixture ->
         fixture.prepare("first")
-        fixture.adapter.play()
+        fixture.play()
         val expected = checkNotNull(fixture.volume.read().snapshot)
         fixture.native.onRoutedRead = { fixture.adapter.stop() }
         val result = fixture.volume.setAbsolute(MediaVolumeSetRequest(expected, 9))
@@ -134,7 +134,7 @@ class SystemMediaPlayerRouteIntegrationTest {
     fun failedPlatformStartKeepsTheRouteUnknownAndDoesNotCreateAReplacementPlayer() = fixture().use { fixture ->
         fixture.prepare("first")
         fixture.native.failStart = true
-        fixture.adapter.play()
+        fixture.play()
         assertFalse(fixture.route.read().known)
         assertFalse(fixture.adapter.isPlaying)
         assertTrue(fixture.adapter.playerError != null)
@@ -146,7 +146,7 @@ class SystemMediaPlayerRouteIntegrationTest {
     @Test
     fun releaseFailureRetiresBeforeNativeReleaseAndLeavesTheLeaseQuarantined() = fixture().use { fixture ->
         fixture.prepare("first")
-        fixture.adapter.play()
+        fixture.play()
         val oldCallback = fixture.native.listeners.single().first
         fixture.native.beforeRelease = { assertFalse(fixture.route.cachedState().known) }
         fixture.native.failRelease = true
@@ -169,7 +169,7 @@ class SystemMediaPlayerRouteIntegrationTest {
     @Config(sdk = [26])
     fun api26NeverCallsMediaPlayerAudioRoutingAndPausedRelativeVolumeStillWorks() = fixture().use { fixture ->
         fixture.prepare("first")
-        fixture.adapter.play()
+        fixture.play()
         assertTrue(fixture.adapter.isPlaying)
         assertFalse(fixture.route.read().known)
         fixture.adapter.pause()
@@ -246,6 +246,12 @@ class SystemMediaPlayerRouteIntegrationTest {
             assertEquals(0, dispatcher.pending)
             assertEquals(Player.STATE_READY, adapter.playbackState)
             assertFalse(adapter.playWhenReady)
+        }
+
+        fun play() {
+            adapter.play()
+            // SimpleBasePlayer posts onEvents; drain the paused looper before reading its route gate.
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
         }
 
         override fun close() {

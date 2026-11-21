@@ -113,7 +113,7 @@ internal object ThemeTestFixtures {
     fun font(name: String = LyricsFontTestFixtures.VARIABLE, resourceId: String = "font.original"): Asset {
         val extension = name.substringAfterLast('.')
         val licenseFile = if (extension == "ttf") "RobotoMono-OFL.txt" else "SourceCodePro-LICENSE.md"
-        val license = checkNotNull(javaClass.getResourceAsStream("/fonts/$licenseFile")).use {
+        val license = checkNotNull(javaClass.getResourceAsStream("/fixtures/lyrics-fonts/$licenseFile")).use {
             it.readBytes().toString(Charsets.UTF_8)
         }
         return Asset(resourceId, "assets/$name", LyricsFontTestFixtures.bytes(name), "font", "font/$extension",

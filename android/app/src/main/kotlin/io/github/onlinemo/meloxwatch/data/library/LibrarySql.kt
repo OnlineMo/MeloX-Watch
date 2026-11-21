@@ -66,7 +66,10 @@ internal object LibrarySql {
             ))))
     """.trimIndent()
 
-    /** Scan payloads remain unchanged. Every query derives the same revisioned user layer. */
+    /**
+     * Scan payloads remain unchanged. The shared artist projection is materialized so the
+     * correlated primary-artist selector does not rebuild names and overrides for every track.
+     */
     private fun displayCtes(revision: Long): String = """
         scanned_tracks AS (
             SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1
@@ -95,7 +98,7 @@ internal object LibrarySql {
             UNION ALL
             SELECT t.versionId, t.trackId, '4:', NULL, '4:', 'UNKNOWN', '', 0
             FROM scanned_tracks t WHERE NOT EXISTS (SELECT 1 FROM raw_artists raw WHERE raw.trackId = t.trackId)
-        ), display_artist_rows AS (
+        ), display_artist_rows AS MATERIALIZED (
             SELECT raw.versionId, raw.trackId, raw.artistKey, raw.ordinal,
                 COALESCE(names.displayName, raw.displayName) AS displayName,
                 COALESCE(names.sortKey, raw.originalSortKey) AS sortKey,
@@ -172,9 +175,11 @@ internal object LibrarySql {
         }
         val (primary, nullRank, section) = sortColumns(view.sort.field)
         // Choose the minimum scoped access through this track's relations, then join its exact version payload.
+        // The outer payload join and correlated selector share one materialized scoped-access
+        // relation; permission and exclusion resolution must not be rebuilt for each track.
         val sql = """
             WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""}
-            ${displayCtes(revision)}, alias_rows AS (
+            ${displayCtes(revision)}, alias_rows AS MATERIALIZED (
                 SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
                     lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE

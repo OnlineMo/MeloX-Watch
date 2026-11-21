@@ -16,7 +16,8 @@ internal object LyricsFontTestFixtures {
     const val STATIC = "SourceCodePro-Regular.otf"
     const val ROOM = LyricsFontLimits.FREE_RESERVE_BYTES + 64L * 1024 * 1024
 
-    fun bytes(name: String = VARIABLE): ByteArray = checkNotNull(javaClass.getResourceAsStream("/fonts/$name")).use { it.readBytes() }
+    // Robolectric reserves fonts/ for system configuration; fixtures must not shadow it.
+    fun bytes(name: String = VARIABLE): ByteArray = checkNotNull(javaClass.getResourceAsStream("/fixtures/lyrics-fonts/$name")).use { it.readBytes() }
     fun file(directory: File, name: String = VARIABLE): File = File(directory, name).apply { writeBytes(bytes(name)) }
     fun request(name: String = VARIABLE): LyricsFontImportRequest = LyricsFontImportRequest(
         "content://font-fixture/selected", name, LyricsFontLimits.LICENSE_ACKNOWLEDGMENT_VERSION,

@@ -690,7 +690,7 @@ class RoomQueueStoreTest {
         database.close()
         withContext(Dispatchers.IO) {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READWRITE).use { independent ->
-                independent.version = 4
+                independent.version = 7
             }
         }
         database = open(file)
@@ -698,7 +698,7 @@ class RoomQueueStoreTest {
         expectIssue(QueueStoreIssue.RECOVERY_REQUIRED) { store.initialize() }
         withContext(Dispatchers.IO) {
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
-                assertEquals(4, independent.version)
+                assertEquals(7, independent.version)
                 independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
                     assertTrue(cursor.moveToFirst())
                     assertEquals(3L, cursor.getLong(0))
@@ -831,7 +831,7 @@ class RoomQueueStoreTest {
                     assertTrue(cursor.moveToFirst())
                     assertEquals("ok", cursor.getString(0))
                 }
-                assertEquals(3, independent.version)
+                assertEquals(6, independent.version)
                 independent.rawQuery("SELECT COUNT(*) FROM queue_entries", null).use { cursor ->
                     assertTrue(cursor.moveToFirst())
                     assertEquals(expectedEntries, cursor.getLong(0))

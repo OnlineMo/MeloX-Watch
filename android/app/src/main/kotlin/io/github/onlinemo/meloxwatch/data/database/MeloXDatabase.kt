@@ -99,6 +99,15 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
+    @Volatile private var closed = false
+    internal val isClosed: Boolean get() = closed
+
+    /** Room's public isOpen observes its legacy helper; explicit close owns the driver lifecycle. */
+    override fun close() {
+        closed = true
+        super.close()
+    }
+
     abstract fun queueDao(): QueueDao
     abstract fun libraryDao(): LibraryDao
     abstract fun listeningDao(): ListeningDao

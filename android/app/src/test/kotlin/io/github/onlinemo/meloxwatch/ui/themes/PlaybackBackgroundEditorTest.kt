@@ -197,7 +197,7 @@ class PlaybackBackgroundEditorTest {
         }
     }
 
-    @Test fun unreadableFailureReadbackCannotTurnTheSafeDefaultIntoASuccessfulSave() = runBlocking {
+    @Test fun unreadableFailureReadbackCannotTurnTheSafeDefaultIntoASuccessfulSave(): Unit = runBlocking {
         withTimeout(15_000) {
             val fixture = fixture()
             val store = SaveFaultStore(fixture.store, loseAfterCommit = false).also { it.failFailureRead = true }
