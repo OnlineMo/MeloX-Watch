@@ -38,7 +38,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** Historical 3→4 DDL, production 1→5 opens and pinned 1/2 schemas remain separate oracles. */
+/** Historical 3→4 DDL, production 1→6 opens and pinned 1/2 schemas remain separate oracles. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -50,7 +50,7 @@ internal class LyricsMigrationThreeToFourTest {
         translation = LyricsRoomRows.association(translation = true), userDelayMs = -300)
 
     @Test(timeout = 30_000L)
-    fun generatedV3ToProductionV5AddsLyricsAndTransfersAndKeepsEveryOldObjectCellAndReopenIdentity() = runBlocking {
+    fun generatedV3ToProductionV6AddsLyricsAndTransfersAndKeepsEveryOldObjectCellAndReopenIdentity() = runBlocking {
         val file = File(folder.root, "from-generated-v3.db")
         val before = createVersionThree(file)
         val database = open(file)
@@ -240,9 +240,16 @@ internal class LyricsMigrationThreeToFourTest {
     }
 
     private suspend fun assertCurrentSchema(database: RoomDatabase, expectedLyricsRows: Long = 0L): String = database.withTestWriterSql {
-        assertEquals(5L, scalarLong("PRAGMA user_version"))
-        assertEquals(V3_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations"), applicationTables().toSet())
+        assertEquals(6L, scalarLong("PRAGMA user_version"))
+        assertEquals(
+            V3_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") + VERSION_SIX_NEW_TABLES,
+            applicationTables().toSet(),
+        )
         assertEquals(expectedLyricsRows, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
+        assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
+        for (table in VERSION_SIX_NEW_TABLES) {
+            assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table`"))
+        }
         query("PRAGMA table_info(lyrics_track_preferences)") { rows ->
             val actual = buildList { while (rows.step()) add(Column(rows.getText(1), rows.getText(2), rows.getLong(3), rows.getLong(5))) }
             assertEquals(LYRICS_COLUMNS, actual)
@@ -280,7 +287,10 @@ internal class LyricsMigrationThreeToFourTest {
 
     private fun open(file: File, lastMigration: Migration = MeloXDatabase.MIGRATION_3_4): MeloXDatabase = Room.databaseBuilder(
         context, MeloXDatabase::class.java, file.absolutePath,
-    ).setDriver(BundledSQLiteDriver()).addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3, lastMigration, MeloXDatabase.MIGRATION_4_5).build()
+    ).setDriver(BundledSQLiteDriver()).addMigrations(
+        MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3, lastMigration,
+        MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6,
+    ).build()
 
     private fun supportOpen(file: File, failAfterDdl: Boolean): SupportSQLiteOpenHelper {
         val callback = object : SupportSQLiteOpenHelper.Callback(4) {
@@ -380,8 +390,12 @@ internal class LyricsMigrationThreeToFourTest {
         private const val IDENTITY_QUERY = "SELECT identity_hash FROM room_master_table WHERE id = 42"
         private const val TABLES_QUERY = "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' " +
             "AND name NOT IN ('room_master_table', 'android_metadata') ORDER BY name"
+        // Compare every V3 table/index definition; later tables have separate migration assertions.
         private const val CATALOG_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' " +
-            "AND name NOT IN ('room_master_table', 'android_metadata') AND tbl_name NOT IN ('lyrics_track_preferences', 'transferred_import_operations') ORDER BY type, name"
+            "AND name NOT IN ('room_master_table', 'android_metadata') AND tbl_name NOT IN (" +
+            "'lyrics_track_preferences', 'transferred_import_operations', " +
+            "'display_groups', 'display_names', 'display_album_links', 'display_artist_links', " +
+            "'transfer_room_operations', 'transfer_display_previews', 'transferred_theme_candidates') ORDER BY type, name"
         private val V3_TABLES = setOf(
             "queue_generations", "queue_entries", "queue_head", "library_meta", "local_sources", "local_grants", "local_source_versions",
             "local_locations", "local_location_versions", "local_tracks", "local_track_locations", "local_track_versions", "local_artist_values",
@@ -390,6 +404,10 @@ internal class LyricsMigrationThreeToFourTest {
             "listening_round_segments", "listening_history", "listening_track_totals", "listening_day_totals", "playlist_meta", "playlist_heads",
             "playlist_generations", "playlist_members", "playlist_views", "playlist_receipts", "playlist_exchange_previews", "playlist_exchange_rows",
             "playlist_export_receipts",
+        )
+        private val VERSION_SIX_NEW_TABLES = setOf(
+            "display_groups", "display_names", "display_album_links", "display_artist_links",
+            "transfer_room_operations", "transfer_display_previews", "transferred_theme_candidates",
         )
         private val LYRICS_COLUMNS = listOf(
             Column("trackId", "TEXT", 1L, 1L), Column("schemaVersion", "INTEGER", 1L), Column("revision", "INTEGER", 1L),

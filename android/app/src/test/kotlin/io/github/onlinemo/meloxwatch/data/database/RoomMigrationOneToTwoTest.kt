@@ -41,7 +41,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** Frozen 1→2, historical-v3 observations and production-v5 repository behavior stay separate. */
+/** Frozen 1→2, historical-v3 observations and production-v6 repository behavior stay separate. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -73,7 +73,7 @@ class RoomMigrationOneToTwoTest {
     }
 
     @Test(timeout = 30000L)
-    fun applicationOpenMigratesASeededV1FileThroughV2ToV5AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
+    fun applicationOpenMigratesASeededV1FileThroughV2ToV6AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
         val context = RuntimeEnvironment.getApplication() as Context
         // Robolectric owns this application's database directory; the production filename and
         // applicationContext path are used so the test cannot bypass MeloXDatabase.open.
@@ -297,8 +297,12 @@ class RoomMigrationOneToTwoTest {
             requireNotNull(path)
         }
         assertEquals(file.canonicalPath, File(mainPath).canonicalPath)
-        assertEquals(5L, scalarLong("PRAGMA user_version"))
-        assertEquals(VERSION_THREE_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations"), query(TABLES_QUERY, block = ::applicationTables))
+        assertEquals(6L, scalarLong("PRAGMA user_version"))
+        assertEquals(
+            VERSION_THREE_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") +
+                VERSION_SIX_NEW_TABLES,
+            query(TABLES_QUERY, block = ::applicationTables),
+        )
         val identity = query(IDENTITY_QUERY) { rows ->
             assertTrue(rows.step())
             val value = rows.getText(0)
@@ -310,6 +314,9 @@ class RoomMigrationOneToTwoTest {
         }
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
+        for (table in VERSION_SIX_NEW_TABLES) {
+            assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table`"))
+        }
         query("PRAGMA foreign_key_check", block = ::assertNoForeignKeyViolations)
         query("PRAGMA integrity_check", block = ::assertIntegrity)
         identity
@@ -510,6 +517,10 @@ class RoomMigrationOneToTwoTest {
         val VERSION_THREE_TABLES = VERSION_TWO_TABLES + setOf(
             "playlist_meta", "playlist_heads", "playlist_generations", "playlist_members", "playlist_views", "playlist_receipts",
             "playlist_exchange_previews", "playlist_exchange_rows", "playlist_export_receipts",
+        )
+        val VERSION_SIX_NEW_TABLES = setOf(
+            "display_groups", "display_names", "display_album_links", "display_artist_links",
+            "transfer_room_operations", "transfer_display_previews", "transferred_theme_candidates",
         )
     }
 }
