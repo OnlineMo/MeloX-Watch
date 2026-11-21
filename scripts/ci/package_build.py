@@ -12,7 +12,7 @@ import time
 
 from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk, require_unsigned
 from ci_common import ROOT, cloud_only, expected_identity, no_signing_secrets, properties, require, run_tool, sha256, write_checksums, write_json
-from package_contract import (DEPENDENCY_FILES, ROLES, SCHEMA_DIRECTORY, SPECS, artifact_layout, committed_hash, exact_data, input_hashes,
+from package_contract import (DEPENDENCY_FILES, ROLES, SPECS, allowed_schema_paths, artifact_layout, committed_hash, exact_data, input_hashes,
                               native_abis, project_plan, required_inputs, room_declarations, safe_path, validate_artifacts)
 
 # These are hard admissions, not predictions that a build fits. They lower the old 2700/5400 budgets.
@@ -29,6 +29,7 @@ def source_hashes(root):
     require(result.returncode == 0, 'Package source inventory cannot be read')
     names = result.stdout.decode('utf-8').split('\0')
     result = {}
+    schema_inputs = None
     for row in filter(None, names):
         metadata, name = row.split('\t', 1)
         mode, kind, expected_blob = metadata.split(' ')
@@ -39,8 +40,12 @@ def source_hashes(root):
         if not (android or policy or fixed):
             continue
         require(mode in ('100644', '100755') and kind == 'blob', 'Build inputs must be ordinary Git files')
-        if android and (name.removeprefix('android/') in DEPENDENCY_FILES or
-                        name.startswith('android/' + SCHEMA_DIRECTORY + '/')):
+        if android and name.removeprefix('android/') in DEPENDENCY_FILES:
+            continue
+        if name.startswith('android/app/schemas/'):
+            if schema_inputs is None:
+                schema_inputs = allowed_schema_paths(root)
+            require(name.removeprefix('android/') in schema_inputs, 'Unregistered package schema input')
             continue
         require('/build/' not in name and '/.gradle/' not in name, 'Generated files cannot be committed build inputs')
         path = safe_path(root, name, file=True)

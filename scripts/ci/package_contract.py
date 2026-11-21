@@ -22,7 +22,12 @@ DEPENDENCY_FILES = ('gradle/verification-metadata.xml', 'app/gradle.lockfile',
                     'companion/gradle.lockfile', 'gradle.lockfile')
 DATABASE_SOURCE = 'android/app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/database/MeloXDatabase.kt'
 SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase'
-ROOM_DECLARATIONS = ((DATABASE_SOURCE, 'io.github.onlinemo.meloxwatch.data.database.MeloXDatabase', None, True),) + tuple(
+ONLINE_DATABASE_SOURCE = 'android/app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/online/cache/OnlineCatalogDatabase.kt'
+HISTORICAL_SCHEMA_VERSIONS = (1, 2, 3)
+ROOM_DECLARATIONS = (
+    (DATABASE_SOURCE, 'io.github.onlinemo.meloxwatch.data.database.MeloXDatabase', None, True),
+    (ONLINE_DATABASE_SOURCE, 'io.github.onlinemo.meloxwatch.data.online.cache.OnlineCatalogDatabase', 1, True),
+) + tuple(
     ('android/app/src/test/kotlin/io/github/onlinemo/meloxwatch/data/database/HistoricalMeloXV' + str(version) + 'Database.kt',
      'io.github.onlinemo.meloxwatch.data.database.HistoricalMeloXV' + str(version) + 'Database', version, False)
     for version in (3, 4, 5)) + (
@@ -157,7 +162,7 @@ def current_schema(root=ROOT):
 
 
 def room_declarations(root=ROOT, revision=None):
-    """Bind the actual exported main DB and nonexporting historical/test Room declarations."""
+    """Bind registered exported main databases and nonexporting historical/test declarations."""
     result = {}
     for relative, qualified, fixed_version, exported in ROOM_DECLARATIONS:
         raw = data_bytes(root, relative, revision, optional=relative != DATABASE_SOURCE)
@@ -165,7 +170,7 @@ def room_declarations(root=ROOT, revision=None):
             continue
         source = raw.decode('utf-8')
         package, name = qualified.rsplit('.', 1)
-        declarations = re.findall(r'@Database\s*\(([\s\S]*?)\)\s*abstract\s+class\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*RoomDatabase\s*\(\s*\)', source)
+        declarations = re.findall(r'@Database\s*\(([\s\S]*?)\)\s*(?:internal\s+)?abstract\s+class\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*RoomDatabase\s*\(\s*\)', source)
         require(re.findall(r'^package\s+([A-Za-z0-9_.]+)\s*$', source, re.MULTILINE) == [package] and
                 len(declarations) == 1 and declarations[0][1] == name, 'Room source namespace/declaration differs')
         arguments = declarations[0][0]
@@ -180,19 +185,35 @@ def room_declarations(root=ROOT, revision=None):
     return result
 
 
-def schema_output_paths(root=ROOT):
+def current_schemas(root=ROOT, revision=None):
+    # Only the exact registered, actually present exported databases define current outputs.
+    declarations = room_declarations(root, revision)
+    paths = sorted(entry['schema_output'] for entry in declarations.values() if entry['export_schema'])
+    require(1 <= len(paths) <= 2 and len(paths) == len(set(paths)) and
+            declarations[DATABASE_SOURCE]['schema_output'] in paths, 'Current Room schema inventory differs')
+    return paths
+
+
+def allowed_schema_paths(root=ROOT, revision=None):
+    history = {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in HISTORICAL_SCHEMA_VERSIONS}
+    return history | set(current_schemas(root, revision))
+
+
+def schema_output_paths(root=ROOT, *, allow_unexpected=False):
     android = Path(root) / 'android'
     directory = safe_path(android, 'app/schemas')
     require(not directory.exists() or directory.is_dir(), 'Room schema root is invalid')
     paths = sorted(directory.rglob('*.json'))
     require(len(paths) <= 128, 'Room schema output inventory exceeds its bound')
     result = []
+    allowed = set() if allow_unexpected else allowed_schema_paths(root)
     for path in paths:
         relative = path.relative_to(android).as_posix()
         parts = PurePosixPath(relative).parts
         require(len(parts) == 4 and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,240}', parts[2]) and
                 re.fullmatch(r'[1-9][0-9]*\.json', parts[3]), 'Room schema output path is invalid')
         safe_path(android, relative, file=True)
+        require(allow_unexpected or relative in allowed, 'Unregistered or noncurrent Room schema output')
         result.append(relative)
     return result
 
@@ -205,15 +226,18 @@ def input_hashes(root=ROOT):
         if path.exists():
             result[relative] = sha256(safe_path(android, relative, file=True))
     for relative in schema_output_paths(root):
-        require(PurePosixPath(relative).parent.as_posix() == SCHEMA_DIRECTORY,
-                'Unexpected Room schema namespace; historical/test declarations do not export JSON')
         result[relative] = sha256(safe_path(android, relative, file=True))
     return result
 
 
 def required_inputs(root=ROOT):
-    return ('gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile',
-            SCHEMA_DIRECTORY + '/1.json', current_schema(root))
+    current = current_schemas(root)
+    if len(current) == 1:
+        return ('gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile',
+                SCHEMA_DIRECTORY + '/1.json', current[0])
+    history = {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in HISTORICAL_SCHEMA_VERSIONS}
+    return tuple(sorted({'gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile'} |
+                        history | set(current)))
 
 
 def tasks_for(mode, plan, *, tests=False, outputs=True):

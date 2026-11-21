@@ -75,13 +75,13 @@ requireMigration(requestDigest != null && requestDigest ==~ /[0-9a-f]{64}/ &&
     Arrays.equals(rawBytes(reportRoot.resolve('dependency-migration-request.json')), requestBytes),
     'Package acquisition request differs from the wrapper original')
 def request = new groovy.json.JsonSlurper().parse(requestBytes)
-requireMigration(request instanceof Map && request.schema_version instanceof Integer && request.schema_version == 3 &&
+requireMigration(request instanceof Map && request.schema_version instanceof Integer && [3, 4].contains(request.schema_version) &&
     request.kind == 'owner-pr-package-input-acquire-strict-compile' && request.owner_login == 'OnlineMo' &&
     request.owner_id == 143324986 && request.plan.application_roles == ['watch', 'phone'] &&
     request.variants instanceof List && !request.variants.isEmpty() && request.variants[0] == 'debug' &&
     request.variants == request.variants.toSet().toList() &&
     ['debug', 'release', 'diagnostic'].containsAll(request.variants),
-    'Explicit integer package request v3 is required')
+    'Explicit integer package request v3/v4 is required')
 def specs = [watch: [project: ':app', flavor: 'WatchAndroid'], phone: [project: ':companion', flavor: 'PhoneAndroid']]
 def testRoles = request.plan.instrumentation_roles
 requireMigration(testRoles instanceof List && testRoles == testRoles.toSet().toList() &&

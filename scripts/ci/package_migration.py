@@ -11,7 +11,8 @@ import tomllib
 
 from build import dependency_lock_snapshot, migration_json, verification_snapshot
 from ci_common import require, sha256, write_json
-from package_contract import (DEPENDENCY_FILES, ROLES, SCHEMA_DIRECTORY, SPECS, committed_hash, current_schema, exact_data, input_hashes,
+from package_contract import (DEPENDENCY_FILES, HISTORICAL_SCHEMA_VERSIONS, ROLES, SCHEMA_DIRECTORY, SPECS,
+                              committed_hash, current_schema, current_schemas, exact_data, input_hashes,
                               project_plan, required_inputs, room_declarations, safe_path, schema_output_paths)
 from package_build import REQUEST_FILE, source_hashes
 
@@ -58,7 +59,27 @@ def runtime_components(root):
     return result
 
 
-def make_request(root, base, variants=('debug',)):
+def request_current_schemas(request):
+    return [request['current_schema']] if request['schema_version'] == 3 else request['current_schemas']
+
+
+def request_collected_schemas(request):
+    if request['schema_version'] == 3:
+        return [] if request['schema_to_collect'] is None else [request['schema_to_collect']]
+    return request['schemas_to_collect']
+
+
+def request_schema_fields(request):
+    names = ('current_schema', 'schema_to_collect') if request['schema_version'] == 3 else ('current_schemas', 'schemas_to_collect')
+    return {name: request[name] for name in names}
+
+
+def schema_export_name(request, phase, relative):
+    suffix = relative.rsplit('/', 1)[-1] if request['schema_version'] == 3 else relative
+    return 'schema-exports/' + phase + '/' + suffix
+
+
+def make_request(root, base, variants=('debug',), *, schema_version=None):
     require(re.fullmatch(r'[0-9a-f]{40}', base), 'A frozen base source SHA is required')
     plan = project_plan(root)
     reviewed = input_hashes(root)
@@ -66,19 +87,32 @@ def make_request(root, base, variants=('debug',)):
                                              SCHEMA_DIRECTORY + '/1.json')), 'Preserve the admitted Watch baseline first')
     for name, digest in reviewed.items():
         require(committed_hash(root, 'android/' + name, base) == digest, 'Reviewed package preimage differs from the base')
-    current = current_schema(root)
-    schema_to_collect = None if current in reviewed else current
-    if schema_to_collect:
-        require(not safe_path(root, 'android/' + current).exists(), 'Unreviewed schema output cannot be reused')
+    current = current_schemas(root)
+    version = (4 if len(current) > 1 else 3) if schema_version is None else schema_version
+    require(type(version) is int and version in (3, 4), 'Package schema request must be v3 or v4')
+    if version == 3:
+        require(len(current) == 1 and current[0] == current_schema(root), 'Request v3 binds only one actual current database')
+    else:
+        history = {SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in HISTORICAL_SCHEMA_VERSIONS}
+        require(history <= set(reviewed), 'Request v4 must retain all admitted Watch history1/2/3')
+    collected = [name for name in current if name not in reviewed]
+    for name in collected:
+        require(not safe_path(root, 'android/' + name).exists(), 'Unreviewed schema output cannot be reused')
     variants = list(variants)
     require(variants and variants[0] == 'debug' and variants == list(dict.fromkeys(variants)) and
             set(variants) <= {'debug', 'release', 'diagnostic'}, 'Acquisition variants must be explicit and bounded')
     frozen = source_hashes(root)
-    return {'schema_version': 3, 'kind': KIND, 'owner_login': 'OnlineMo', 'owner_id': 143324986,
-            'base_source_sha': base, 'variants': variants, 'plan': plan, 'current_schema': current,
-            'room_declarations': room_declarations(root),
-            'schema_to_collect': schema_to_collect, 'reviewed_input_hashes': reviewed,
-            'frozen_input_hashes': frozen, 'migration_tool_hashes': {name: frozen[name] for name in TOOLS},
+    declarations = room_declarations(root)
+    if version == 4:
+        require(all(frozen.get(name) == entry['source_sha256'] for name, entry in declarations.items()),
+                'Request v4 Room declarations must be exact committed source inputs')
+    return {'schema_version': version, 'kind': KIND, 'owner_login': 'OnlineMo', 'owner_id': 143324986,
+            'base_source_sha': base, 'variants': variants, 'plan': plan,
+            **({'current_schema': current[0]} if version == 3 else {'current_schemas': current}),
+            'room_declarations': declarations,
+            **({'schema_to_collect': collected[0] if collected else None} if version == 3 else {'schemas_to_collect': collected}),
+            'reviewed_input_hashes': reviewed, 'frozen_input_hashes': frozen,
+            'migration_tool_hashes': {name: frozen[name] for name in TOOLS},
             'allowed_dependency_outputs': list(DEPENDENCY_FILES), 'runtime_components': runtime_components(root),
             'graph_input_hashes': {name: frozen[name] for name in GRAPH_FILES}}
 
@@ -94,25 +128,32 @@ def admit(root, binding, plan):
     digest = committed_hash(root, REQUEST_FILE)
     request = migration_json(path.read_bytes())
     fields = {'schema_version', 'kind', 'owner_login', 'owner_id', 'base_source_sha', 'variants', 'plan',
-              'current_schema', 'schema_to_collect', 'reviewed_input_hashes', 'frozen_input_hashes',
-              'migration_tool_hashes', 'allowed_dependency_outputs', 'runtime_components', 'graph_input_hashes', 'room_declarations'}
-    require(type(request) is dict and set(request) == fields and type(request['schema_version']) is int and
-            request['schema_version'] == 3 and request['kind'] == KIND and request['owner_login'] == 'OnlineMo' and
-            type(request['owner_id']) is int and request['owner_id'] == 143324986, 'Explicit package request v3 is required')
+              'reviewed_input_hashes', 'frozen_input_hashes', 'migration_tool_hashes', 'allowed_dependency_outputs',
+              'runtime_components', 'graph_input_hashes', 'room_declarations'}
+    require(type(request) is dict and type(request.get('schema_version')) is int and request['schema_version'] in (3, 4),
+            'Explicit package request v3/v4 is required')
+    fields |= {'current_schema', 'schema_to_collect'} if request['schema_version'] == 3 else {'current_schemas', 'schemas_to_collect'}
+    require(set(request) == fields and request['kind'] == KIND and request['owner_login'] == 'OnlineMo' and
+            type(request['owner_id']) is int and request['owner_id'] == 143324986, 'Package request owner or fields differ')
     base = request['base_source_sha']
     require(type(base) is str and re.fullmatch(r'[0-9a-f]{40}', base), 'Package migration base SHA is invalid')
     git(root, 'merge-base', '--is-ancestor', base, binding['source_sha'])
     git(root, 'merge-base', '--is-ancestor', binding['source_sha'], binding['build_sha'])
-    require(exact_data(request, make_request(root, base, request['variants'])) and exact_data(request['plan'], plan),
+    require(exact_data(request, make_request(root, base, request['variants'], schema_version=request['schema_version'])) and exact_data(request['plan'], plan),
             'Package request does not bind the current committed source and admitted baseline')
-    require(request['schema_to_collect'] is not None or
+    require(request_collected_schemas(request) or
             'companion/gradle.lockfile' not in request['reviewed_input_hashes'] or
             graph_changed(root, base),
             'Unchanged graph/schema cannot trigger another acquisition')
     report = safe_path(root, REPORT)
     require(not report.exists() or not any(report.iterdir()), 'Package acquisition report must be fresh')
-    return {'request': request, 'request_sha256': digest, 'acquired_input_hashes': None,
-            'writer_schema_sha256': None, 'strict_schema_sha256': None, 'acquisition_sha256': None}
+    admission = {'request': request, 'request_sha256': digest, 'acquired_input_hashes': None}
+    if request['schema_version'] == 3:
+        admission.update(writer_schema_sha256=None, strict_schema_sha256=None)
+    else:
+        admission.update(writer_schema_hashes={}, strict_schema_hashes={})
+    admission['acquisition_sha256'] = None
+    return admission
 
 
 def writer_tasks(request):
@@ -307,19 +348,22 @@ def acquire(root, state, legacy):
     require(source_hashes(root) == state['source_input_hashes'] and committed_hash(root, REQUEST_FILE) == admission['request_sha256'],
             'Acquisition changed frozen source/request inputs')
     observed = input_hashes(root)
-    allowed = set(before) | set(DEPENDENCY_FILES) | {request['current_schema']}
+    allowed = set(before) | set(DEPENDENCY_FILES) | set(request_current_schemas(request))
     require(set(observed) <= allowed and all(name in observed for name in required_inputs(root)),
             'Package writer omitted required outputs or added another input')
     after = {name: safe_path(Path(root) / 'android', name, file=True).read_bytes() for name in observed}
-    growth(before, {name: data for name, data in after.items() if name != request['schema_to_collect']})
+    growth(before, {name: data for name, data in after.items() if name not in request_collected_schemas(request)})
     witness = safe_path(root, REPORT + '/acquisition.json', file=True)
     record = migration_json(witness.read_bytes())
     validate_acquisition(record, {**state, '_root': str(root)})
     admission['acquisition_sha256'] = sha256(witness)
     admission['acquired_input_hashes'] = observed
-    if request['schema_to_collect'] is not None:
-        admission['writer_schema_sha256'] = observed[request['current_schema']]
-        preserve(root, 'schema-exports/acquire/' + request['current_schema'].rsplit('/', 1)[-1], after[request['current_schema']])
+    for name in request_collected_schemas(request):
+        digest = preserve(root, schema_export_name(request, 'acquire', name), after[name])
+        if request['schema_version'] == 3:
+            admission['writer_schema_sha256'] = digest
+        else:
+            admission['writer_schema_hashes'][name] = digest
     for name, raw in after.items():
         preserve(root, 'acquired-inputs/' + name, raw)
 
@@ -330,10 +374,12 @@ def before_strict(root, state, stage):
     require(committed_hash(root, REQUEST_FILE) == admission['request_sha256'] and
             sha256(safe_path(root, REPORT + '/acquisition.json', file=True)) == admission['acquisition_sha256'],
             'Acquisition originals changed before strict validation')
-    if stage == 'strict-inputs' and request['schema_to_collect'] is not None:
-        path = safe_path(Path(root) / 'android', request['schema_to_collect'], file=True)
-        require(sha256(path) == admission['writer_schema_sha256'], 'Only the current run export may be regenerated')
-        path.unlink()
+    if stage == 'strict-inputs':
+        for name in request_collected_schemas(request):
+            path = safe_path(Path(root) / 'android', name, file=True)
+            expected = admission['writer_schema_sha256'] if request['schema_version'] == 3 else admission['writer_schema_hashes'][name]
+            require(sha256(path) == expected, 'Only an exact current-run export may be regenerated')
+            path.unlink()
 
 
 def after_strict(root, state, stage):
@@ -342,10 +388,15 @@ def after_strict(root, state, stage):
     observed = input_hashes(root)
     require(observed == admission['acquired_input_hashes'], 'Strict build changed dependency, lock or schema bytes')
     if stage == 'strict-inputs':
-        if request['schema_to_collect'] is not None:
-            raw = safe_path(Path(root) / 'android', request['current_schema'], file=True).read_bytes()
-            admission['strict_schema_sha256'] = preserve(root, 'schema-exports/strict-inputs/' + request['current_schema'].rsplit('/', 1)[-1], raw)
-            require(admission['strict_schema_sha256'] == admission['writer_schema_sha256'], 'Independent Room schema exports differ')
+        for name in request_collected_schemas(request):
+            raw = safe_path(Path(root) / 'android', name, file=True).read_bytes()
+            digest = preserve(root, schema_export_name(request, 'strict-inputs', name), raw)
+            expected = admission['writer_schema_sha256'] if request['schema_version'] == 3 else admission['writer_schema_hashes'][name]
+            require(digest == expected, 'Independent Room schema exports differ for one current database')
+            if request['schema_version'] == 3:
+                admission['strict_schema_sha256'] = digest
+            else:
+                admission['strict_schema_hashes'][name] = digest
         admission['strict_inputs_completed'] = True
 
 
@@ -354,7 +405,7 @@ def strict_inputs(root, state, legacy):
     environment = legacy.gradle_environment(unsigned=True)
     for name in ('CI_DEPENDENCY_PACKAGE_REQUEST_SHA256', 'CI_DEPENDENCY_PACKAGE_VARIANTS', 'CI_PACKAGE_FRESH_ROOM_SCHEMA', 'CI_PACKAGE_DEBUG_BINDING'):
         environment.pop(name, None)
-    if state['collection']['request']['schema_to_collect'] is not None:
+    if request_collected_schemas(state['collection']['request']):
         environment['CI_PACKAGE_FRESH_ROOM_SCHEMA'] = 'true'
     legacy.run_gradle(legacy.gradle_command(writer_tasks(state['collection']['request'])), cwd=Path(root) / 'android',
                       env=environment, phase='package-strict-inputs', build_sha=state['binding']['build_sha'],
@@ -374,14 +425,15 @@ def seal(root, state):
         raw = safe_path(Path(root) / 'android', name, file=True).read_bytes()
         require(hashlib.sha256(raw).hexdigest() == digest, 'Final package input drifted')
         files[name] = preserve(root, name, raw)
-    manifest = {'schema_version': 6, 'collection_kind': KIND, **state['binding'], **state['plan'],
+    schema_hashes = {name: admission[name] for name in (('writer_schema_sha256', 'strict_schema_sha256')
+                     if request['schema_version'] == 3 else ('writer_schema_hashes', 'strict_schema_hashes'))}
+    manifest = {'schema_version': 6 if request['schema_version'] == 3 else 7, 'collection_kind': KIND, **state['binding'], **state['plan'],
                 'room_declarations': request['room_declarations'],
                 'request_sha256': admission['request_sha256'], 'base_source_sha': request['base_source_sha'],
-                'variants': request['variants'], 'current_schema': request['current_schema'],
-                'schema_to_collect': request['schema_to_collect'], 'reviewed_input_hashes': request['reviewed_input_hashes'],
+                'variants': request['variants'], **request_schema_fields(request), 'reviewed_input_hashes': request['reviewed_input_hashes'],
                 'source_input_hashes': state['source_input_hashes'], 'acquired_input_hashes': admission['acquired_input_hashes'],
                 'strict_input_hashes': input_hashes(root), 'acquisition_sha256': admission['acquisition_sha256'],
-                'writer_schema_sha256': admission['writer_schema_sha256'], 'strict_schema_sha256': admission['strict_schema_sha256'],
+                **schema_hashes,
                 'input_validation_scope': 'strict-debug-compilation-and-lint', 'application_tests': 'NOT_RUN',
                 'apk_assembly': 'NOT_RUN', 'release_diagnostic_full_suites': 'NOT REQUESTED',
                 'overall_limit_seconds': state['overall_limit_seconds'], 'elapsed_seconds': time.monotonic() - state['started_monotonic_seconds'],
@@ -397,9 +449,11 @@ def record_failure(root, state, stage, failure):
     report.mkdir(parents=True, exist_ok=True)
     partial = {}
     unavailable = []
-    allowed = set(request['reviewed_input_hashes']) | set(DEPENDENCY_FILES) | {request['current_schema']}
+    admitted_schema_outputs = set(request_current_schemas(request)) | {
+        SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in HISTORICAL_SCHEMA_VERSIONS}
+    allowed = set(request['reviewed_input_hashes']) | set(DEPENDENCY_FILES) | admitted_schema_outputs
     try:
-        allowed |= set(schema_output_paths(root))
+        allowed |= set(schema_output_paths(root, allow_unexpected=True))
     except Exception:
         unavailable.append('app/schemas')
     for name in sorted(allowed):
@@ -421,7 +475,8 @@ def record_failure(root, state, stage, failure):
             continue
         name = path.relative_to(report).as_posix()
         originals[name] = sha256(safe_path(report, name, file=True))
-    manifest = {'schema_version': 6, 'collection_kind': KIND, **state['binding'], **state['plan'],
+    manifest = {'schema_version': 6 if request['schema_version'] == 3 else 7, 'collection_kind': KIND, **state['binding'], **state['plan'],
+                **({} if request['schema_version'] == 3 else request_schema_fields(request)),
                 'status': 'failed-partial', 'failed_stage': stage,
                 'failure_type': type(failure).__name__, 'completed_stages': state['completed'],
                 'request_sha256': admission['request_sha256'], 'base_source_sha': request['base_source_sha'],
@@ -430,7 +485,7 @@ def record_failure(root, state, stage, failure):
                 'reviewed_input_hashes': request['reviewed_input_hashes'], 'partial_input_hashes': partial,
                 'partial_capture_unavailable': sorted(set(unavailable)), 'retained_originals': originals,
                 'unexpected_schema_outputs': sorted(name for name in partial if name.startswith('app/schemas/') and
-                    Path(name).parent.as_posix() != SCHEMA_DIRECTORY),
+                    name not in admitted_schema_outputs),
                 'overall_limit_seconds': state['overall_limit_seconds'],
                 'elapsed_seconds': time.monotonic() - state['started_monotonic_seconds'],
                 'accepted': False, 'apk_exported': False}
