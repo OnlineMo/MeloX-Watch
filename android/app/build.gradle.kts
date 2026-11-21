@@ -290,7 +290,9 @@ tasks.withType<Test>().configureEach {
         }
         logger.lifecycle("MELOX_CI_TEST_RESOURCES " + JsonOutput.toJson(report))
     }
-    failFast = true
+    // Collect independent regressions in this run before returning the same failed Test result.
+    // The shared phase and per-test deadlines still stop stalled work; later phases remain blocked.
+    failFast = nativeCrashPhase != "package-test-debug"
     val testTaskPath = path
     addTestListener(object : TestListener {
         override fun beforeSuite(suite: TestDescriptor) = Unit

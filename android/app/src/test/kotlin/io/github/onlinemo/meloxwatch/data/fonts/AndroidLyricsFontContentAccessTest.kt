@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.fonts
 
+import android.content.ClipDescription
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
@@ -7,11 +8,13 @@ import android.content.pm.ProviderInfo
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontTestFixtures as Fixture
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import java.io.File
+import java.io.FileNotFoundException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -118,6 +121,14 @@ class FontDocumentProvider : ContentProvider() {
     override fun insert(uri: Uri, values: ContentValues?): Uri? = null
     override fun delete(uri: Uri, selection: String?, args: Array<out String>?): Int = 0
     override fun update(uri: Uri, values: ContentValues?, selection: String?, args: Array<out String>?): Int = 0
+    // Read-only resolver calls use the typed route; forward cancellation to the same file slice.
+    override fun openTypedAssetFile(uri: Uri, mimeTypeFilter: String, opts: Bundle?, signal: CancellationSignal?): AssetFileDescriptor {
+        if (mimeTypeFilter != "*/*" && !ClipDescription.compareMimeTypes(getType(uri), mimeTypeFilter)) {
+            throw FileNotFoundException("Controlled selected-font type mismatch")
+        }
+        return openAssetFile(uri, "r", signal)
+    }
+
     override fun openAssetFile(uri: Uri, mode: String, signal: CancellationSignal?): AssetFileDescriptor {
         modes += mode
         if (denied) throw SecurityException("Controlled selected-font permission withdrawal")
