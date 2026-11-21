@@ -1,5 +1,7 @@
 import groovy.json.JsonOutput
 import java.util.Properties
+import org.gradle.api.tasks.Sync
+import org.gradle.api.tasks.testing.Test
 import org.gradle.api.tasks.testing.TestDescriptor
 import org.gradle.api.tasks.testing.TestListener
 import org.gradle.api.tasks.testing.TestResult
@@ -71,7 +73,22 @@ android {
         warningsAsErrors = true
         checkDependencies = true
     }
-    testOptions { unitTests.isReturnDefaultValues = false }
+    testOptions {
+        unitTests.isReturnDefaultValues = false
+        unitTests.isIncludeAndroidResources = true
+    }
+}
+
+// The phone fixtures use SDK26. Resolve its exact preinstrumented jar through Gradle verification before tests.
+val robolectricSdk by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+    isTransitive = false
+}
+val robolectricSdkDirectory = layout.buildDirectory.dir("robolectric-sdk")
+val prepareRobolectricSdk by tasks.registering(Sync::class) {
+    from(robolectricSdk)
+    into(robolectricSdkDirectory)
 }
 
 androidComponents {
@@ -93,6 +110,11 @@ kotlin {
 }
 
 tasks.withType<Test>().configureEach {
+    dependsOn(prepareRobolectricSdk)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.usePreinstrumentedJars", "true")
+    systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
+    systemProperty("robolectric.enabledSdks", "26")
     maxParallelForks = 1
     maxHeapSize = "512m"
     failFast = true
@@ -128,4 +150,6 @@ dependencies {
     implementation(libs.lifecycle.viewmodel.ktx)
     implementation(libs.coroutines.android)
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric.test)
+    add(robolectricSdk.name, libs.robolectric.sdk)
 }

@@ -116,7 +116,7 @@ def admit(root, binding, plan):
 
 
 def writer_tasks(request):
-    tasks = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost']
+    tasks = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost', ':companion:prepareRobolectricSdk']
     for mode in request['variants']:
         for role in ROLES:
             spec = SPECS[role]
@@ -141,6 +141,7 @@ def consumers(request):
                 result[prefix + first + variant + last] = 'task-input-archives'
             result[prefix + 'test' + variant + 'UnitTest'] = 'test-classpath-archives'
     result.update({':app:' + name: 'configuration-artifacts' for name in ('bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30')})
+    result[':companion:robolectricSdk'] = 'configuration-artifacts'
     result.update({name: 'buildscript-artifacts' for name in (':buildscript:classpath', ':app:buildscript:classpath', ':companion:buildscript:classpath')})
     return result
 
@@ -234,7 +235,7 @@ def validate_acquisition(record, state):
                     'Real compiler/Test runtime archives were not consumed')
         if kind == 'configuration-artifacts':
             require(len(consumer['files']) == 1 and consumer['files'][0].get('component') ==
-                    request['runtime_components'][consumer['id'].removeprefix(':app:')], 'Runtime component coordinates differ')
+                    request['runtime_components'][consumer['id'].rsplit(':', 1)[1]], 'Runtime component coordinates differ')
     runtime = record.get('runtime_classpaths')
     expected_tests = {name for name, kind in expected.items() if kind == 'test-classpath-archives'}
     require(type(runtime) is list and len(runtime) == len(expected_tests) and

@@ -111,12 +111,16 @@ class PackageContractTests(unittest.TestCase):
     def test_acquisition_selects_real_debug_consumers_for_both_projects_without_test_execution(self):
         request = {'variants': ['debug'], 'plan': PLAN}
         tasks = writer_tasks(request)
-        self.assertEqual(len(tasks), 12)
+        self.assertEqual(len(tasks), 13)
+        self.assertIn(':companion:prepareRobolectricSdk', tasks)
         self.assertFalse(any(':test' in task for task in tasks))
         selected = consumers(request)
         self.assertIn(':app:testWatchAndroidDebugUnitTest', selected)
         self.assertIn(':companion:testPhoneAndroidDebugUnitTest', selected)
         self.assertIn(':companion:buildscript:classpath', selected)
+        self.assertEqual({name for name, kind in selected.items() if kind == 'configuration-artifacts'},
+                         {':app:bundledSqliteHost', ':app:robolectricSdk', ':app:robolectricSdk30',
+                          ':companion:robolectricSdk'})
         self.assertFalse(any('Release' in name or 'Diagnostic' in name for name in selected))
 
     def test_both_role_versions_flags_and_signed_hashes_are_checked(self):

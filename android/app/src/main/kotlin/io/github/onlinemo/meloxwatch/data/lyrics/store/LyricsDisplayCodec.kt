@@ -8,7 +8,6 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 
-@ConsistentCopyVisibility
 internal data class DecodedLyricsDisplay(
     val preferences: LyricsDisplayPreferences?,
     val persisted: Boolean,

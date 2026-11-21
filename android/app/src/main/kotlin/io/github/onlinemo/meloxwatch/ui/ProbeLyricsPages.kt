@@ -140,7 +140,7 @@ internal fun ProbeLyricsScreen(
                 onBack = onBack, onChooseLyrics = onOptions, onSettings = onOptions,
                 onRetry = { if (page?.visibleNow == true) entry.retry() })
         }
-        if (ready != null && page != null) ProbePersonalLyricsFonts(app, page, ready) { body(it.fonts) }
+        if (ready != null) ProbePersonalLyricsFonts(app, page, ready) { body(it.fonts) }
         else body(LyricsFonts())
     }
 }

@@ -212,6 +212,7 @@ class LocalBackgroundImages private constructor(
     }
 
     private fun copy(request: CustomBackgroundImportRequest, destination: File, owned: Long, signal: CancellationSignal): Pair<String, Long> {
+        val directory = destination.parentFile ?: backgroundFail(PlaybackBackgroundIssue.STORAGE_UNAVAILABLE)
         val opened = sourceRead { opener.open(request.uri, signal) }
         var failure: Throwable? = null
         var written = 0L
@@ -230,7 +231,7 @@ class LocalBackgroundImages private constructor(
                     if (count < 0) break
                     if (count == 0) backgroundFail(PlaybackBackgroundIssue.SOURCE_UNAVAILABLE)
                     if (count > ArtworkLimits.INPUT_BYTES - written) backgroundFail(PlaybackBackgroundIssue.IMAGE_TOO_LARGE)
-                    requireRoom(owned, written, count.toLong(), destination.parentFile)
+                    requireRoom(owned, written, count.toLong(), directory)
                     output.write(bytes, 0, count)
                     digest.update(bytes, 0, count)
                     written += count

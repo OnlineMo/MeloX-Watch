@@ -120,7 +120,7 @@ class PackageStageTests(unittest.TestCase):
             if kind == 'task-input-archives':
                 entry['outcome'] = 'executed'
             if kind in ('configuration-artifacts', 'buildscript-artifacts'):
-                entry['files'][0]['component'] = request['runtime_components'][name.removeprefix(':app:')] if kind == 'configuration-artifacts' else ['x', 'plugin', '1']
+                entry['files'][0]['component'] = request['runtime_components'][name.rsplit(':', 1)[1]] if kind == 'configuration-artifacts' else ['x', 'plugin', '1']
             records.append(entry)
         runtimes = []
         for name, kind in sorted(selected.items()):
@@ -154,6 +154,7 @@ class PackageStageTests(unittest.TestCase):
                 package_build.run_stage('seal', digest, self.root, self.legacy)
         commands = [call.args[0] for call in self.legacy.run_gradle.call_args_list]
         self.assertEqual(len(commands), 2)
+        self.assertTrue(all(':companion:prepareRobolectricSdk' in command for command in commands))
         self.assertFalse(any(':test' in task or ':assemble' in task for command in commands for task in command))
         self.assertEqual((self.root / 'android/' / SCHEMA_DIRECTORY / '3.json').read_text(), 'schema three\n')
         report = json.loads((self.root / package_migration.REPORT / 'package-manifest.json').read_text())
@@ -309,6 +310,42 @@ class PackageStageTests(unittest.TestCase):
         changed.append(malformed)
         malformed = copy.deepcopy(witness)
         malformed['archive_budget']['unique_archive_count'] = True
+        changed.append(malformed)
+        for index, record in enumerate(changed):
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                package_migration.validate_acquisition(record, validation_state)
+        self.legacy.run_gradle.assert_not_called()
+
+    def test_both_sdk_archives_and_phone_preparation_are_mandatory_and_scoped(self):
+        self.add_request()
+        with patch.dict(os.environ, self.environment(), clear=True):
+            state, _ = package_build.start('debug', self.root, self.legacy)
+        self.acquire_fixture(state)
+        witness = json.loads((self.root / package_migration.REPORT / 'acquisition.json').read_text())
+        validation_state = {**state, '_root': str(self.root)}
+        package_migration.validate_acquisition(witness, validation_state)
+        changed = []
+        for sdk in (':app:robolectricSdk', ':companion:robolectricSdk'):
+            malformed = copy.deepcopy(witness)
+            next(item for item in malformed['consumers'] if item['id'] == sdk)['files'] = []
+            changed.append(malformed)
+            for key, value in [('component', ['x', 'foreign-sdk', '1']), ('sha256', 'unhashed')]:
+                malformed = copy.deepcopy(witness)
+                next(item for item in malformed['consumers'] if item['id'] == sdk)['files'][0][key] = value
+                changed.append(malformed)
+        for missing in (':companion:robolectricSdk', ':companion:prepareRobolectricSdk'):
+            malformed = copy.deepcopy(witness)
+            malformed['consumers'] = [item for item in malformed['consumers'] if item['id'] != missing]
+            changed.append(malformed)
+        for foreign in (':companion:robolectricSdk30', ':companion:bundledSqliteHost'):
+            malformed = copy.deepcopy(witness)
+            extra = copy.deepcopy(next(item for item in malformed['consumers'] if item['id'] == ':companion:robolectricSdk'))
+            extra['id'] = foreign
+            malformed['consumers'].append(extra)
+            malformed['consumers'].sort(key=lambda item: item['id'])
+            changed.append(malformed)
+        malformed = copy.deepcopy(witness)
+        malformed['writer_tasks'].remove(':companion:prepareRobolectricSdk')
         changed.append(malformed)
         for index, record in enumerate(changed):
             with self.subTest(index=index), self.assertRaises(ValueError):

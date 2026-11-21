@@ -92,7 +92,7 @@ specs.each { role, spec ->
     requireMigration(Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS) == testRoles.contains(role),
         'Package instrumentation source changed')
 }
-def writerTasks = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost']
+def writerTasks = [':app:prepareRobolectricSdk', ':app:prepareBundledSqliteHost', ':companion:prepareRobolectricSdk']
 def archiveConsumers = [:]
 def optionalInputs = []
 def testIds = []
@@ -122,6 +122,7 @@ optionalInputs.each { archiveConsumers[it] = 'task-input-archives' }
 ['bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'].each { name ->
     archiveConsumers[":app:${name}".toString()] = 'configuration-artifacts'
 }
+archiveConsumers[':companion:robolectricSdk'] = 'configuration-artifacts'
 [':buildscript:classpath', ':app:buildscript:classpath', ':companion:buildscript:classpath'].each { id ->
     archiveConsumers[id] = 'buildscript-artifacts'
 }
@@ -319,7 +320,10 @@ gradle.projectsEvaluated {
                 records.add(moduleArtifactsRecord(":app:${name}".toString(), 'configuration-artifacts',
                     app.configurations.findByName(name)))
             }
-            [root, app, root.project(':companion')].each { project ->
+            def companion = root.project(':companion')
+            records.add(moduleArtifactsRecord(':companion:robolectricSdk', 'configuration-artifacts',
+                companion.configurations.findByName('robolectricSdk')))
+            [root, app, companion].each { project ->
                 def id = project.path == ':' ? ':buildscript:classpath' : project.path + ':buildscript:classpath'
                 records.add(moduleArtifactsRecord(id, 'buildscript-artifacts', project.buildscript.configurations.findByName('classpath')))
             }
