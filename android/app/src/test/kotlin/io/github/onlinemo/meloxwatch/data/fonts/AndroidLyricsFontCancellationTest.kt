@@ -129,21 +129,21 @@ class AndroidLyricsFontCancellationTest {
     }
 
     @Test fun defaultFileOwnerRunsReadParseAndDecodeOffTheCallingThread() = runBlocking {
-        val callingThread = Thread.currentThread().id
+        val callingThread = Thread.currentThread()
         val source = object : LyricsFontStreamOpener {
             override fun open(uri: String, signal: CancellationSignal): OpenedLyricsFontStream {
-                assertTrue(Thread.currentThread().id != callingThread)
+                assertTrue(Thread.currentThread() !== callingThread)
                 return OpenedLyricsFontStream(ByteArrayInputStream(Fixture.bytes()))
             }
         }
         val delegate = FilesOnlyFontDecoder()
         val decoder = object : LyricsFontDecoder {
             override fun validate(file: File, info: SfntFontInfo, checkCancellation: () -> Unit): FontWeightCapability {
-                assertTrue(Thread.currentThread().id != callingThread)
+                assertTrue(Thread.currentThread() !== callingThread)
                 return delegate.validate(file, info, checkCancellation)
             }
             override fun decode(file: File, info: SfntFontInfo, capability: FontWeightCapability, requested: Float?): DecodedLyricsFont {
-                assertTrue(Thread.currentThread().id != callingThread)
+                assertTrue(Thread.currentThread() !== callingThread)
                 return delegate.decode(file, info, capability, requested)
             }
         }

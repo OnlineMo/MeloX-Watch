@@ -119,7 +119,7 @@ class LocalLyricsTreeProviderFixture : DocumentsProvider() {
                         DocumentsContract.Document.COLUMN_FLAGS -> 0
                         else -> null
                     }
-                }.toTypedArray())
+                }.toTypedArray<Any?>())
             }
         }
     }

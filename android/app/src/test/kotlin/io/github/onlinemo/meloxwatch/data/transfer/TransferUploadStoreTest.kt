@@ -96,7 +96,7 @@ class TransferUploadStoreTest {
         val declaration = TransferTestFixtures.declaration(bytes, name = "同名音乐.wav")
         val stage = fixture.store.begin(TransferTestFixtures.binding(auth, declaration), declaration, auth.permit())
         assertTrue(stage.file.name.endsWith(".partial") && stage.file.name != declaration.displayName)
-        assertTrue(stage.file.parentFile.canonicalFile == fixture.partials.canonicalFile)
+        assertTrue(checkNotNull(stage.file.parentFile).canonicalFile == fixture.partials.canonicalFile)
         stage.discard()
         assertTrue(fixture.owned.listFiles().orEmpty().isEmpty())
     }

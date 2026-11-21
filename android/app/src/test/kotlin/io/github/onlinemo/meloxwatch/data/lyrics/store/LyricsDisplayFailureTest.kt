@@ -306,6 +306,6 @@ internal class LyricsDisplayFailureTest : LyricsDisplayFileFixture() {
 
     private fun clearMoveObstruction(blocker: File) {
         assertTrue(blocker.delete())
-        assertTrue(blocker.parentFile.delete())
+        assertTrue(checkNotNull(blocker.parentFile).delete())
     }
 }

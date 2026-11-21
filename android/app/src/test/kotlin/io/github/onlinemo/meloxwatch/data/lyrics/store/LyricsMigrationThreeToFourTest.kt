@@ -303,7 +303,7 @@ internal class LyricsMigrationThreeToFourTest {
             "7, 3, 1, 'SINGLE', 2, 1, 100, 0, 2, 3, 1)")
         repeat(3) { index ->
             sqlite.execSQL("INSERT INTO queue_entries VALUES ('migration-generation', ?, 'local', ?, ?, ?, 'Historical duplicate', 180000, " +
-                "NULL, NULL, NULL, NULL, NULL, NULL, NULL)", arrayOf("migration-entry-$index", key.trackId, index, 2 - index))
+                "NULL, NULL, NULL, NULL, NULL, NULL, NULL)", arrayOf<Any?>("migration-entry-$index", key.trackId, index, 2 - index))
         }
         sqlite.execSQL("INSERT INTO queue_head VALUES (1, 'migration-generation', 1, 3, 'migration-entry-1', 4321, 1)")
     }

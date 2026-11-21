@@ -21,6 +21,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -228,6 +229,7 @@ class PlaybackBackgroundEditorTest {
         }
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test(timeout = 30_000L) fun hidingAfterPhysicalSaveBeforeEditorDeliveryReconcilesOnReopenWithoutHiddenWork() = runBlocking {
         withTimeout(15_000) {
             val dispatcher = BackgroundPhysicalDispatcher()
