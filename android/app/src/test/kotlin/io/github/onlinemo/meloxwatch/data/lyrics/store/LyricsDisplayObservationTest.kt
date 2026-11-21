@@ -25,7 +25,7 @@ internal class LyricsDisplayObservationTest : LyricsDisplayFileFixture() {
     }
 
     @Test(timeout = 30000L)
-    fun aLateSnapshotWithNoUsableRevisionIsCheckedAgainstTheRealCurrentFile() = runBlocking {
+    fun aLateSnapshotWithNoUsableRevisionIsCheckedAgainstTheRealCurrentFile(): Unit = runBlocking {
         val file = preferencesFile()
         writeDisplayFixture(file, LyricsDisplayCodec.encode(LyricsDisplayPreferences(revision = 3L)))
         val old = LyricsDisplayCodec.encode(LyricsDisplayPreferences(revision = 3L)).toMutablePreferences().apply {

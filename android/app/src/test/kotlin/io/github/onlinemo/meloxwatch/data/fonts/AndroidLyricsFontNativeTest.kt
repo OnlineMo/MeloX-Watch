@@ -12,12 +12,14 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.Before
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import org.robolectric.nativeruntime.DefaultNativeRuntimeLoader
 
 /** Real unmodified font bytes and native pixels, never getAxes/getWeight request echoes as proof. */
 @RunWith(RobolectricTestRunner::class)
@@ -26,6 +28,8 @@ import org.robolectric.annotation.GraphicsMode
 class AndroidLyricsFontNativeTest {
     @get:Rule val temporary = TemporaryFolder()
     private val decoder = AndroidLyricsFontDecoder()
+
+    @Before fun initializeNativeFonts() = initializeNativeLyricsFonts()
 
     @Test fun realVariableFontRendersThreeDistinctWeightsWithinItsActualAxisRange() {
         val file = Fixture.file(temporary.root)
@@ -93,6 +97,8 @@ class AndroidLyricsFontNativeTest {
 class AndroidLyricsFontStaticApi26Test {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Before fun initializeNativeFonts() = initializeNativeLyricsFonts()
+
     @Test fun api26BuildsTheRealStaticTtfAndOtfNormalPaths() {
         val decoder = AndroidLyricsFontDecoder()
         for (name in listOf(Fixture.VARIABLE, Fixture.STATIC)) {
@@ -119,6 +125,13 @@ class AndroidLyricsFontStaticApi26Test {
         assertNull(requested.configuredAxisWeight)
         assertTrue(nativeFontPixels(requested.typeface).contentEquals(nativeFontPixels(regular.typeface)))
     }
+}
+
+/** Load outside font builders so fallback construction cannot reenter an unfinished native registry. */
+internal fun initializeNativeLyricsFonts() {
+    DefaultNativeRuntimeLoader.injectAndLoad()
+    Paint()
+    assertNotNull(Typeface.DEFAULT)
 }
 
 internal fun nativeFontPixels(typeface: Typeface): IntArray {

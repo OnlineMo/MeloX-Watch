@@ -4,6 +4,7 @@ import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.async
@@ -26,20 +27,22 @@ class LocalLyricsResolverDispatcherTest {
         fixture.directory = listOf(fixture.audioRow.copy(displayName = "Écho.mp3")) +
             List(205) { index -> sibling.copy(objectId = "other-$index", uri = "content://lyrics.fixture/other-$index",
                 displayName = "other-$index-${"E\u0301".repeat(100)}.txt") } + sibling
-        val callerThread = Thread.currentThread().name
-        val callbackThreads = CopyOnWriteArrayList<String>()
-        Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "lyrics-directory-work") }.asCoroutineDispatcher().use { dispatcher ->
+        val callerThread = Thread.currentThread()
+        val callbackThreads = CopyOnWriteArrayList<Thread>()
+        val workerThread = AtomicReference<Thread>()
+        Executors.newSingleThreadExecutor { runnable -> Thread(runnable, "lyrics-directory-work").also(workerThread::set) }.asCoroutineDispatcher().use { dispatcher ->
             val resolver = LocalLyricsSourceResolver(fixture.access(), LocalLyricsLoadLimits(), dispatcher)
             val result = resolver.resolve(fixture.audio.copy(contentValidation = LocalContentValidation.VERIFIED),
                 LyricsSiblingScope("folder", "Écho.mp3")) {
                 currentCoroutineContext().ensureActive()
-                callbackThreads += Thread.currentThread().name
+                callbackThreads += Thread.currentThread()
             }
             assertEquals(LyricsSiblingStatus.MATCHED, result.status)
             assertEquals(sibling, result.candidate)
         }
         assertTrue(callbackThreads.size > fixture.directory.size)
-        assertTrue(callbackThreads.all { it == "lyrics-directory-work" && it != callerThread })
+        // Coroutine debug labels may change Thread.name; object identity proves the exact worker.
+        assertTrue(callbackThreads.all { it === workerThread.get() && it !== callerThread })
         assertTrue(fixture.batchLimits.size >= 3)
         assertTrue(fixture.batchLimits.all { it in 1..100 })
         assertEquals(1, fixture.cursorCloses.get())

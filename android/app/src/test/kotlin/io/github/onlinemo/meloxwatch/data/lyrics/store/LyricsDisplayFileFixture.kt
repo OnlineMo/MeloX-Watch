@@ -11,6 +11,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.Flow
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Rule
 import org.junit.rules.TemporaryFolder
@@ -42,22 +44,24 @@ internal open class LyricsDisplayFileFixture {
         file: File,
         wrap: (DataStore<Preferences>) -> DataStore<Preferences> = { it },
     ): LyricsDisplayTestSession {
-        val job = SupervisorJob()
-        val scope = CoroutineScope(job + Dispatchers.IO)
-        val backing = createLyricsDisplayDataStore(scope) { file }
+        val fileJob = SupervisorJob()
+        val observerJob = SupervisorJob()
+        val backing = createLyricsDisplayDataStore(CoroutineScope(fileJob + Dispatchers.IO)) { file }
         val dataStore = wrap(backing)
-        return LyricsDisplayTestSession(DataStoreLyricsDisplayStore(dataStore, scope), job, backing).also { sessions.add(it) }
+        return LyricsDisplayTestSession(DataStoreLyricsDisplayStore(dataStore, CoroutineScope(observerJob + Dispatchers.IO)),
+            observerJob, backing, fileJob).also { sessions.add(it) }
     }
 
     protected fun openPhysicalDisplay(
         storage: LyricsDisplayPhysicalStorage,
         wrap: (DataStore<Preferences>) -> DataStore<Preferences> = { it },
     ): LyricsDisplayTestSession {
-        val job = SupervisorJob()
-        val scope = CoroutineScope(job + Dispatchers.IO)
+        val fileJob = SupervisorJob()
+        val observerJob = SupervisorJob()
         val backing = DataStoreFactory.create(storage = storage, corruptionHandler = null,
-            migrations = emptyList(), scope = scope)
-        return LyricsDisplayTestSession(DataStoreLyricsDisplayStore(wrap(backing), scope), job, backing).also { sessions.add(it) }
+            migrations = emptyList(), scope = CoroutineScope(fileJob + Dispatchers.IO))
+        return LyricsDisplayTestSession(DataStoreLyricsDisplayStore(wrap(backing), CoroutineScope(observerJob + Dispatchers.IO)),
+            observerJob, backing, fileJob).also { sessions.add(it) }
     }
 
     protected suspend fun writeDisplayFixture(file: File, preferences: Preferences) {
@@ -70,9 +74,12 @@ internal open class LyricsDisplayFileFixture {
 
 internal class LyricsDisplayTestSession(
     val store: LyricsDisplayStore,
-    private val job: Job,
+    private val observerJob: Job,
     val backingDataStore: DataStore<Preferences>,
+    private val fileJob: Job,
 ) {
+    val observerCancelled: Boolean get() = observerJob.isCancelled
+    val fileOwnerActive: Boolean get() = fileJob.isActive
     suspend fun ready(): LyricsDisplayState.Ready = withTimeout(10000L) {
         store.state.filterIsInstance<LyricsDisplayState.Ready>().first()
     }
@@ -81,7 +88,12 @@ internal class LyricsDisplayTestSession(
         store.state.filterIsInstance<LyricsDisplayState.Unavailable>().first()
     }
 
-    suspend fun close() { job.cancelAndJoin() }
+    suspend fun close() = withContext(NonCancellable) {
+        // The observer's real identity read-back is NonCancellable. Keep its DataStore actor
+        // alive until that read drains, then await the actual file owner's write/close cleanup.
+        try { observerJob.cancelAndJoin() }
+        finally { fileJob.cancelAndJoin() }
+    }
 }
 
 /** Scheduling adapters delegate all actual persistence to the real file-backed DataStore. */

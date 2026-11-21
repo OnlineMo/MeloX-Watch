@@ -11,6 +11,7 @@ import io.github.onlinemo.meloxwatch.data.fonts.BytesFontStream
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontIssue
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSelection
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontTestFixtures as Fixture
+import io.github.onlinemo.meloxwatch.data.fonts.initializeNativeLyricsFonts
 import io.github.onlinemo.meloxwatch.data.fonts.nativeFontPixels
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import kotlinx.coroutines.runBlocking
@@ -18,6 +19,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.Before
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
@@ -31,6 +33,8 @@ import org.robolectric.annotation.GraphicsMode
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class LyricsFontFamilyMappingNativeTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Before fun initializeNativeFonts() = initializeNativeLyricsFonts()
 
     @Test fun composePreservesBothRealAxisFacesWithoutSynthesisAndFallbackKeepsTheOtherRole() = runBlocking {
         val files = AndroidLyricsFontFiles(temporary.newFolder("compose-fonts"), LocalProviderIo(),

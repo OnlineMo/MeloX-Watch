@@ -8,6 +8,7 @@ import io.github.onlinemo.meloxwatch.data.fonts.AndroidLyricsFontDecoder
 import io.github.onlinemo.meloxwatch.data.fonts.FontWeightSupport
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontRole
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontTestFixtures as Fixture
+import io.github.onlinemo.meloxwatch.data.fonts.initializeNativeLyricsFonts
 import io.github.onlinemo.meloxwatch.data.fonts.nativeFontPixels
 import io.github.onlinemo.meloxwatch.ui.fonts.lyricsFontFamilies
 import kotlinx.coroutines.runBlocking
@@ -15,6 +16,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -27,6 +29,8 @@ import org.robolectric.annotation.GraphicsMode
 @Config(sdk = [30], manifest = Config.NONE)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 internal class FontSettingsNativeIntegrationTest : FontSettingsFileFixture() {
+    @Before fun initializeNativeFonts() = initializeNativeLyricsFonts()
+
     @Test(timeout = 30000L)
     fun reopenedRoleWeightsKeepTheirDistinctNativeGlyphsAndDisablingOnePreservesTheOther() = runBlocking {
         val file = settingsFile()

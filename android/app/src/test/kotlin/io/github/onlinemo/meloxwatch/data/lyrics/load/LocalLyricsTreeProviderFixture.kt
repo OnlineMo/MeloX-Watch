@@ -2,11 +2,14 @@ package io.github.onlinemo.meloxwatch.data.lyrics.load
 
 import android.Manifest
 import android.content.ComponentName
+import android.content.ContentResolver
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.ProviderInfo
 import android.database.Cursor
 import android.database.MatrixCursor
+import android.net.Uri
+import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
@@ -48,6 +51,28 @@ class LocalLyricsTreeProviderFixture : DocumentsProvider() {
         DocumentsContract.Root.COLUMN_ROOT_ID, DocumentsContract.Root.COLUMN_DOCUMENT_ID,
         DocumentsContract.Root.COLUMN_TITLE, DocumentsContract.Root.COLUMN_FLAGS,
     ))
+
+    // Robolectric calls this legacy overload directly; retain DocumentsProvider's TREE routing.
+    override fun query(
+        uri: Uri,
+        projection: Array<out String>?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+        sortOrder: String?,
+        cancellationSignal: CancellationSignal?,
+    ): Cursor? {
+        cancellationSignal?.throwIfCanceled()
+        val queryArgs = if (selection == null && selectionArgs == null && sortOrder == null) {
+            null
+        } else {
+            Bundle().apply {
+                selection?.let { putString(ContentResolver.QUERY_ARG_SQL_SELECTION, it) }
+                selectionArgs?.let { putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, it) }
+                sortOrder?.let { putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, it) }
+            }
+        }
+        return super.query(uri, projection, queryArgs, cancellationSignal)
+    }
 
     override fun queryDocument(documentId: String, projection: Array<out String>?): Cursor =
         rows(projection, listOf(documentId))
