@@ -191,7 +191,7 @@ class TransferRoomMigrationTest {
                     LocalNodeKind.AUDIO, bytes.size.toLong(), providerContentToken = "sha256:$digest",
                     entityProof = "owned:migration-audio-fixture:$operation")
                 if (committed) {
-                    database.libraryDao().insertTrack(LibraryTrackEntity(track, "local", 1L, 1L))
+                    database.libraryDao().insertTrack(LibraryTrackEntity(track, "local", 1L, schema.toLong()))
                     database.withTestWriterTransaction { execute("INSERT INTO lyrics_track_preferences(trackId, schemaVersion, revision, userDelayMs) VALUES (?, 1, 7, -300)", track) }
                 }
                 val original = LibraryTransferredImportEntity(operation, schema, 1, "a".repeat(64), "b".repeat(64),
