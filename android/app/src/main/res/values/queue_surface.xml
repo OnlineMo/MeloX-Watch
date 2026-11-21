@@ -9,7 +9,6 @@
     <string name="queue_repeat_until_changed">Repeats until you choose another item</string>
     <string name="queue_repeat_progress">Repeat progress: %1$d/%2$d</string>
     <string name="queue_row_number">#%1$d</string>
-    <string name="queue_row_duration">%1$s · %2$s</string>
     <string name="queue_row_current">%1$s · %2$s</string>
     <string name="queue_row_artist">%1$s · %2$s</string>
     <string name="queue_artist_detail">Artist: %1$s</string>

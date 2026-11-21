@@ -14,9 +14,14 @@ import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontIssue
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontLimits
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontRole
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSelection
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSaveResult
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettings
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettingsStore
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontTestFixtures as Fixture
 import io.github.onlinemo.meloxwatch.data.fonts.PreparedLyricsFont
 import io.github.onlinemo.meloxwatch.data.fonts.SfntFontParser
+import io.github.onlinemo.meloxwatch.data.themes.ThemePreview
+import io.github.onlinemo.meloxwatch.data.themes.ThemeSnapshot
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
@@ -249,14 +254,14 @@ class ProbeFontPickerViewModelTest {
     companion object { private const val READ = Intent.FLAG_GRANT_READ_URI_PERMISSION }
 }
 
-/** New narrow import seam: FontHostFixture.Files deliberately rejects all imports. */
+/** Deterministic Store/Loader seams keep picker ownership independent of native font decode. */
 internal class FontPickerFixture {
     val text = LyricsFontPreviewText("Original music", "Translation music")
     val uri: Uri = Uri.parse("content://font-picker-fixture/selected")
     val owner = LyricsFontPresentationOwner()
-    val store = FontHostFixture.Store()
-    val loader = FontHostFixture.Loader()
+    val store = Store()
     val files = ImportFiles()
+    val loader = Loader(files)
     val runtime = LyricsFontRuntime(store, owner, loader)
     val editor = LyricsFontEditor(store, files, owner)
     val nameReads = AtomicInteger()
@@ -297,6 +302,43 @@ internal class FontPickerFixture {
         override fun close() {
             work.releaseMemory()
             work.cancelRetiredWork()
+        }
+    }
+
+    /** Every CAS attempt is counted, so an accidental picker confirmation cannot pass as a read. */
+    class Store : LyricsFontSettingsStore {
+        var actual = LyricsFontSettings()
+            private set
+        val writes = AtomicInteger()
+
+        override suspend fun read(): LyricsFontSettings {
+            currentCoroutineContext().ensureActive()
+            return actual
+        }
+
+        override suspend fun compareAndSet(expectedRevision: Long, replacement: LyricsFontSettings): LyricsFontSaveResult {
+            currentCoroutineContext().ensureActive()
+            require(expectedRevision >= 0L && replacement.revision == expectedRevision)
+            writes.incrementAndGet()
+            if (actual.revision != expectedRevision) return LyricsFontSaveResult.Conflict(actual)
+            actual = replacement.copy(revision = Math.addExact(actual.revision, 1L))
+            return LyricsFontSaveResult.Saved(actual)
+        }
+    }
+
+    /** The personal host reuses the import seam; a theme read would violate this fixture's boundary. */
+    class Loader(private val files: LyricsFontFiles) : LyricsFontRuntime.Loader {
+        override suspend fun personal(selection: LyricsFontSelection, text: String): LoadedLyricsFont =
+            files.loadFont(selection, text)
+
+        override suspend fun themeUi(snapshot: ThemeSnapshot, role: LyricsFontRole, text: String): LoadedLyricsFont? =
+            throw AssertionError("Font picker fixture must not read an applied theme")
+
+        override suspend fun preview(preview: ThemePreview, role: LyricsFontRole, weight: Float?, text: String): LoadedLyricsFont =
+            throw AssertionError("Font picker fixture must not read a theme preview")
+
+        override suspend fun awaitIdle() {
+            currentCoroutineContext().ensureActive()
         }
     }
 

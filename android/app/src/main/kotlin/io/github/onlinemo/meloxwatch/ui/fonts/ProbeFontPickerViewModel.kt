@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontException
@@ -423,7 +424,7 @@ private fun fontPickerNameReader(application: Application): suspend (String) -> 
     val io = (application as MeloXApplication).localProviderIo
     return { encoded ->
         io.read { signal ->
-            context.contentResolver.query(Uri.parse(encoded), arrayOf(OpenableColumns.DISPLAY_NAME),
+            context.contentResolver.query(encoded.toUri(), arrayOf(OpenableColumns.DISPLAY_NAME),
                 null, null, null, signal)?.use { cursor ->
                 val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 if (column < 0 || !cursor.moveToFirst() || cursor.isNull(column)) {

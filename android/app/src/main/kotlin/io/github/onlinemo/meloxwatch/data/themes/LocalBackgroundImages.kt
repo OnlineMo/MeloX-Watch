@@ -4,9 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.media.ExifInterface
 import android.os.CancellationSignal
 import android.util.AtomicFile
+import androidx.exifinterface.media.ExifInterface
 import io.github.onlinemo.meloxwatch.data.artwork.ArtworkException
 import io.github.onlinemo.meloxwatch.data.artwork.ArtworkIssue
 import io.github.onlinemo.meloxwatch.data.artwork.ArtworkLimits

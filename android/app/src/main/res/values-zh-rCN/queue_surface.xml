@@ -9,7 +9,6 @@
     <string name="queue_repeat_until_changed">持续重复，直到选择另一项</string>
     <string name="queue_repeat_progress">循环完成次数：%1$d/%2$d</string>
     <string name="queue_row_number">第 %1$d 项</string>
-    <string name="queue_row_duration">%1$s · %2$s</string>
     <string name="queue_row_current">%1$s · %2$s</string>
     <string name="queue_row_artist">%1$s · %2$s</string>
     <string name="queue_artist_detail">艺人：%1$s</string>

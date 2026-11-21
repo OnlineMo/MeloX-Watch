@@ -32,18 +32,26 @@ class TransferProtocolCodecTest {
         val auth = TransferTestFixtures.authorized()
         val ids = List(100) { TransferTestFixtures.id() }
         val name = "音".repeat(4096)
-        val request = TransferRequest.PreviewDisplay(TransferTestFixtures.id(), auth.scope, TransferDisplayKind.ALBUM, TransferTestFixtures.id(), 1L, name, ids)
-        val bytes = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, request) }.toByteArray()
-        assertTrue(bytes.size <= TransferLimits.FRAME_BYTES)
-        val decoded = TransferProtocolCodec.readRequest(ByteArrayInputStream(bytes)) as TransferRequest.PreviewDisplay
-        assertTrue(decoded.displayName == name && decoded.relatedIds == ids)
+        val fence = TransferLibraryRevision(1L, 3L)
+        for (patch in listOf<TransferDisplayPatch>(TransferDisplayPatch.Rename(name), TransferDisplayPatch.Add(ids))) {
+            val request = TransferRequest.PreviewDisplay(TransferTestFixtures.id(), auth.scope, TransferDisplayKind.ALBUM, TransferTestFixtures.id(), 1L, fence, patch)
+            val bytes = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, request) }.toByteArray()
+            assertTrue(bytes.size <= TransferLimits.FRAME_BYTES)
+            val decoded = TransferProtocolCodec.readRequest(ByteArrayInputStream(bytes)) as TransferRequest.PreviewDisplay
+            assertTrue(decoded.expectedLibraryRevision.sameAs(fence))
+            if (patch is TransferDisplayPatch.Rename) {
+                assertTrue((decoded.patch as TransferDisplayPatch.Rename).displayName == name)
+            } else {
+                assertTrue((decoded.patch as TransferDisplayPatch.Add).trackIds == ids)
+            }
+        }
     }
 
     @Test fun oversizedDeclaredFrameIsRejectedBeforeAnyBodyIsRead() {
         val header = ByteArrayOutputStream()
         DataOutputStream(header).use { output ->
             output.writeInt(0x4d585452)
-            output.writeShort(1)
+            output.writeShort(TransferLimits.SCHEMA)
             output.writeByte(1)
             output.writeByte(0)
             output.writeLong(0L)
@@ -57,7 +65,7 @@ class TransferProtocolCodecTest {
         val auth = TransferTestFixtures.authorized()
         val request = TransferRequest.Authenticate(TransferTestFixtures.id(), auth.scope.target, auth.scope.sessionId)
         val encoded = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, request) }.toByteArray()
-        val future = encoded.copyOf().also { ByteBuffer.wrap(it).putShort(4, 2) }
+        val future = encoded.copyOf().also { ByteBuffer.wrap(it).putShort(4, (TransferLimits.SCHEMA + 1).toShort()) }
         expect(TransferIssue.INCOMPATIBLE_SCHEMA) { TransferProtocolCodec.readRequest(ByteArrayInputStream(future)) }
         val trailing = encoded + byteArrayOf(0)
         ByteBuffer.wrap(trailing).putInt(24, encoded.size - 28 + 1)
@@ -96,7 +104,7 @@ class TransferProtocolCodecTest {
         val original = request(20L, 4L)
         val encoded = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, original) }
         val decoded = TransferProtocolCodec.readRequest(ByteArrayInputStream(encoded.toByteArray())) as TransferRequest.EditPlaylist
-        assertTrue(decoded.expectedLibraryRevision.sameAs(original.expectedLibraryRevision) && (decoded.edit as TransferPlaylistEdit.Add).trackIds == listOf(selected))
+        assertTrue(checkNotNull(decoded.expectedLibraryRevision).sameAs(checkNotNull(original.expectedLibraryRevision)) && (decoded.edit as TransferPlaylistEdit.Add).trackIds == listOf(selected))
         val binding = TransferProtocolCodec.operationBinding(auth.peer, original)
         assertFalse(binding.sameOperation(TransferProtocolCodec.operationBinding(auth.peer, request(21L, 4L))))
         assertFalse(binding.sameOperation(TransferProtocolCodec.operationBinding(auth.peer, request(20L, 5L))))

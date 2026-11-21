@@ -52,7 +52,7 @@ internal class LyricsReferenceRecoveryTest : LyricsRoomPlaybackFixture() {
     private val bytes = "[00:01]preserved original lyrics".toByteArray(Charsets.UTF_8)
     private val candidate get() = ObservedCandidate("selected-lyrics", "selected-document",
         "content://lyrics-reference-fixture/document/selected", null, "selected.lrc", "text/plain",
-        LocalNodeKind.FILE, sizeBytes = bytes.size.toLong())
+        LocalNodeKind.OTHER, sizeBytes = bytes.size.toLong())
 
     @Before
     fun initializeCopyDirectory() {

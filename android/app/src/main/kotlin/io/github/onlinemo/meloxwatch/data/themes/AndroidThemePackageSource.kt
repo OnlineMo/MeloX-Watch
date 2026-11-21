@@ -1,8 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.themes
 
 import android.content.ContentResolver
-import android.net.Uri
 import android.os.CancellationSignal
+import androidx.core.net.toUri
 import io.github.onlinemo.meloxwatch.data.local.LocalInputLimits
 import java.io.InputStream
 import java.util.concurrent.atomic.AtomicBoolean
@@ -43,7 +43,7 @@ internal class AndroidThemePackageSource(private val resolver: ContentResolver) 
         if (uri.isBlank() || uri.length > LocalInputLimits.URI_CHARACTERS || uri.any(Char::isISOControl)) {
             themeFail(ThemeIssue.INVALID_INPUT)
         }
-        val parsed = Uri.parse(uri)
+        val parsed = uri.toUri()
         if (parsed.scheme != "content" || parsed.authority.isNullOrBlank() || parsed.fragment != null) {
             themeFail(ThemeIssue.INVALID_INPUT)
         }

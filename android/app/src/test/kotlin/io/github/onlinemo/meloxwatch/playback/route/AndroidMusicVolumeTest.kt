@@ -6,6 +6,7 @@ import android.media.MediaRouter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -16,6 +17,7 @@ import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.shadow.api.Shadow
 import org.robolectric.shadows.ShadowAudioManager
+import org.robolectric.util.ReflectionHelpers
 
 /** Records real public AudioManager calls under Robolectric; no device volume/routing evidence is claimed. */
 @RunWith(RobolectricTestRunner::class)
@@ -106,12 +108,14 @@ class AndroidMusicVolumeTest {
         val router = requireNotNull(fixture.context.getSystemService(MediaRouter::class.java))
         val output = router.createUserRoute(router.createRouteCategory("Synthetic volume route", false)).apply {
             setName("Synthetic remote output")
-            setSupportedTypes(MediaRouter.ROUTE_TYPE_LIVE_AUDIO)
+            // UserRouteInfo has no public type setter; the real synthetic route must match this adapter's query.
+            ReflectionHelpers.setField(this, "mSupportedTypes", supportedTypes or MediaRouter.ROUTE_TYPE_LIVE_AUDIO)
             setPlaybackType(MediaRouter.RouteInfo.PLAYBACK_TYPE_REMOTE)
         }
         router.addUserRoute(output)
         try {
             router.selectRoute(MediaRouter.ROUTE_TYPE_LIVE_AUDIO, output)
+            assertSame(output, router.getSelectedRoute(MediaRouter.ROUTE_TYPE_LIVE_AUDIO))
             val service = ServiceMediaVolume(fixture.port) { PlaybackRouteSessionState() }
             val result = service.read()
             assertTrue(requireNotNull(result.snapshot).values.remote)

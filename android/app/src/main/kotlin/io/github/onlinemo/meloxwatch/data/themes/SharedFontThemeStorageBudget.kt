@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.themes
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.CancellationSignal
 import io.github.onlinemo.meloxwatch.data.fonts.AndroidLyricsFontFiles
@@ -93,9 +94,13 @@ class SharedFontThemeStorageBudget private constructor(
         val themes = incomingThemes?.pendingBytesOnPhysicalWorker() ?: 0L
         if (audio < 0L || themes < 0L || themes > Long.MAX_VALUE - audio) themeFail(ThemeIssue.STORAGE_FULL)
         val pending = audio + themes
-        val actual = directory.usableSpace
+        val actual = physicalThemeAvailableBytes(directory)
         return if (actual <= pending) 0L else actual - pending
     }
+
+    // 预留按当前物理可写空间扣减；尚未回收的缓存不能算作已接受音频和主题的可用字节。
+    @SuppressLint("UsableSpace")
+    private fun physicalThemeAvailableBytes(directory: File): Long = directory.usableSpace
 
     private fun requireWorker(owner: Owner): Worker {
         val active = worker.get() ?: throw IllegalStateException("Font/theme accounting requires the physical worker")

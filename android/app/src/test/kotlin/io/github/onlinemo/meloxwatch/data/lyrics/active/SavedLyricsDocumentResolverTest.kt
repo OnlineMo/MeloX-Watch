@@ -136,9 +136,10 @@ class SavedLyricsDocumentResolverTest {
     }
 
     @Test fun privateProviderQueryExposesOnlyACompletedLocalTokenAndForeignCallersAreRejected() {
+        val providerContext = context
         val provider = OwnedLyricsProvider().apply {
-            attachInfo(context, ProviderInfo().apply {
-                authority = OwnedLyricsProvider.authority(context)
+            attachInfo(providerContext, ProviderInfo().apply {
+                authority = OwnedLyricsProvider.authority(providerContext)
                 exported = false
             })
         }

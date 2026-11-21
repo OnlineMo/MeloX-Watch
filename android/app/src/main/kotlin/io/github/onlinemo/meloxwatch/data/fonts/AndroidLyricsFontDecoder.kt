@@ -10,6 +10,7 @@ import android.graphics.fonts.FontFamily
 import android.graphics.fonts.FontVariationAxis
 import android.os.Build
 import androidx.annotation.RequiresApi
+import androidx.core.graphics.createBitmap
 import java.io.File
 
 internal interface LyricsFontDecoder {
@@ -113,7 +114,7 @@ internal class AndroidLyricsFontDecoder : LyricsFontDecoder {
     }
 
     private fun raster(typeface: Typeface, text: String): Bitmap {
-        val bitmap = Bitmap.createBitmap(PROBE_WIDTH, PROBE_HEIGHT, Bitmap.Config.ARGB_8888)
+        val bitmap = createBitmap(PROBE_WIDTH, PROBE_HEIGHT, Bitmap.Config.ARGB_8888)
         try {
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 this.typeface = typeface

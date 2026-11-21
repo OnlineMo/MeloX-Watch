@@ -95,6 +95,7 @@ fun WatchLyricsPage(
     mediaDurationMs: Long?,
     screenShape: ScreenShape,
     visible: Boolean,
+    modifier: Modifier = Modifier,
     clockMapping: LyricsClockMapping = LyricsClockMapping(),
     options: LyricsDisplayOptions = LyricsDisplayOptions(),
     fonts: LyricsFonts = LocalWatchThemeFonts.current,
@@ -105,7 +106,6 @@ fun WatchLyricsPage(
     onChooseLyrics: (() -> Unit)? = null,
     onSettings: (() -> Unit)? = null,
     onRetry: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
 ) {
     val ready = content as? LyricsPageContent.Ready
     val document = ready?.document

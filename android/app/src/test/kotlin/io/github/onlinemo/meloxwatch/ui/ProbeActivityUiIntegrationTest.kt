@@ -421,7 +421,7 @@ internal class ProbeActivityUiIntegrationTest : LyricsDisplayFileFixture() {
                 assertSame(proposal, display.vm.editor.state.value.draft)
                 RuntimeEnvironment.setQualifiers("zh-rCN")
                 val next = fixture.install(fixture.prepareActivity())
-                assertEquals("zh", RuntimeEnvironment.getApplication<android.app.Application>()
+                assertEquals("zh", RuntimeEnvironment.getApplication()
                     .resources.configuration.locales[0].language)
                 assertTrue(next.page().visibleNow)
                 old.callbacks.onUiStateChanged(fixture.state.copy(page = ProbePage.PLAYBACK))

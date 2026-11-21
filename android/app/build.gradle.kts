@@ -88,6 +88,12 @@ android {
         unitTests.isReturnDefaultValues = false
         unitTests.isIncludeAndroidResources = true
     }
+    bundle {
+        language {
+            // The user can change languages offline; both locales must remain in every package.
+            enableSplit = false
+        }
+    }
 }
 
 room {
@@ -333,6 +339,7 @@ kotlin {
 dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.exifinterface)
     // 直接消费已使用的Android runtime API，此声明不经过available-at转发。
     implementation(libs.compose.runtime)
     implementation(libs.compose.ui)
@@ -351,6 +358,8 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric.test)
+    testImplementation(libs.coroutines.test)
+    testImplementation(libs.compose.ui.test.junit4)
     ksp(libs.room.compiler)
     kspTest(libs.room.compiler)
     add(robolectricSdk.name, libs.robolectric.sdk)

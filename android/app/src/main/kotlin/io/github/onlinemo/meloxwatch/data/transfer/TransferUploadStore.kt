@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.transfer
 
+import android.annotation.SuppressLint
 import android.os.CancellationSignal
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
@@ -28,6 +29,10 @@ import kotlinx.coroutines.yield
 
 fun interface TransferDiskSpace { fun availableBytes(directory: File): Long }
 
+// 上传须保留实际空闲空间；尚未回收的缓存不能扩大分块写入和既有预留的预算。
+@SuppressLint("UsableSpace")
+private fun physicalTransferAvailableBytes(directory: File): Long = directory.usableSpace
+
 /**
  * Only an isolated noBackup directory is accepted. The caller never passes peer filenames as paths.
  * All physical I/O uses the existing LocalProviderIo; a cancelled waiter does not free ownership.
@@ -37,7 +42,7 @@ class TransferUploadStore(
     internal val providerIo: LocalProviderIo,
     private val accounting: TransferQuotaAccounting,
     private val validator: TransferContentValidator,
-    private val diskSpace: TransferDiskSpace = TransferDiskSpace { it.usableSpace },
+    private val diskSpace: TransferDiskSpace = TransferDiskSpace(::physicalTransferAvailableBytes),
     private val clock: TransferClock = TransferClock { System.nanoTime() / 1_000_000L },
 ) {
     private val lock = Any()

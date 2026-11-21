@@ -134,7 +134,7 @@ fun LazyListScope.queueContent(
             val isCurrent = !state.showingPreviousData && entry.queueEntryId == currentEntryId
             QueueEntryButton(
                 entry = entry,
-                artist = QueueArtistLabel(state, entry),
+                artist = queueArtistLabel(state, entry),
                 rowsIdentity = state.rowsIdentity,
                 generationId = snapshot.generationId,
                 artworkVisible = state.canSelect && entry.queueEntryId in state.visibleEntryIds,
@@ -181,7 +181,7 @@ private fun QueueEditorControls(
         draft.entry?.let {
             QueueText(stringResource(R.string.queue_edit_target, it.playbackOrder + 1L,
                 it.displayName?.takeIf { name -> name.isNotBlank() } ?: stringResource(R.string.queue_unnamed_entry)), primary = true)
-            QueueText(stringResource(R.string.queue_artist_detail, QueueArtistLabel(state, it)))
+            QueueText(stringResource(R.string.queue_artist_detail, queueArtistLabel(state, it)))
             it.durationMs?.let { duration -> QueueText(stringResource(R.string.queue_duration, elapsedTime(duration))) }
             QueueText(stringResource(entryStatusText(it)))
         }
@@ -432,7 +432,7 @@ private fun QueueEntryButton(
 }
 
 @Composable
-private fun QueueArtistLabel(state: QueueViewerState, entry: QueueEntry): String = when {
+private fun queueArtistLabel(state: QueueViewerState, entry: QueueEntry): String = when {
     entry.trackKey.providerId != TrackKey.LOCAL_PROVIDER -> stringResource(R.string.queue_artist_unavailable)
     state.artists.containsKey(entry.trackKey) -> state.artists[entry.trackKey]?.takeIf { it.isNotBlank() }
         ?: stringResource(R.string.library_unknown_artist)

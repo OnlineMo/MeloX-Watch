@@ -1,8 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.fonts
 
 import android.content.ContentResolver
-import android.net.Uri
 import android.os.CancellationSignal
+import androidx.core.net.toUri
 import java.io.InputStream
 
 internal fun interface LyricsFontStreamOpener {
@@ -27,7 +27,7 @@ internal class OpenedLyricsFontStream(
 /** Transient SAF read only: no write access, persisted grant or all-files permission is requested. */
 internal class AndroidLyricsFontStream(private val resolver: ContentResolver) : LyricsFontStreamOpener {
     override fun open(uri: String, signal: CancellationSignal): OpenedLyricsFontStream {
-        val content = Uri.parse(uri)
+        val content = uri.toUri()
         if (content.scheme != "content" || content.authority.isNullOrBlank()) fontFail(LyricsFontIssue.INVALID_INPUT)
         signal.throwIfCanceled()
         val descriptor = resolver.openAssetFileDescriptor(content, "r", signal)

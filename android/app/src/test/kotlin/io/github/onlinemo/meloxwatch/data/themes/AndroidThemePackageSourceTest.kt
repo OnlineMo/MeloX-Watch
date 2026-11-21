@@ -10,7 +10,6 @@ import android.net.Uri
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
-import androidx.test.core.app.ApplicationProvider
 import io.github.onlinemo.meloxwatch.data.themes.ThemeTestFixtures as Fixture
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -27,6 +26,7 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowContentResolver
 
@@ -132,7 +132,7 @@ class AndroidThemePackageSourceTest {
         }
     }
 
-    private fun context(): Context = ApplicationProvider.getApplicationContext()
+    private fun context(): Context = RuntimeEnvironment.getApplication()
 
     private fun provider(): SelectedThemeTestProvider {
         val provider = SelectedThemeTestProvider()

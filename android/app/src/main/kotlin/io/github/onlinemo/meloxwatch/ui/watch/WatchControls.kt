@@ -213,10 +213,10 @@ enum class WatchGlyph { MENU, BACK, PLAY, PAUSE, PREVIOUS, NEXT, QUEUE }
 fun WatchCircleButton(
     label: String,
     glyph: WatchGlyph,
+    modifier: Modifier = Modifier,
     enabled: Boolean = true,
     size: Dp = 48.dp,
     emphasized: Boolean = false,
-    modifier: Modifier = Modifier,
     onClick: () -> Unit,
 ) {
     val colors = LocalWatchThemeColors.current

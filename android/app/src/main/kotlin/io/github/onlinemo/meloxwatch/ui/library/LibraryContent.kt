@@ -337,10 +337,10 @@ private fun TrackCard(track: LibraryTrack, path: ArtworkReadPath, enabled: Boole
         WatchContentRow(onClick = onClick, enabled = enabled) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (grid) {
-                    TrackArtwork(track, path, artworkRevision)
+                    TrackArtwork(track, path, revision = artworkRevision)
                     TrackLabel(track)
                 } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TrackArtwork(track, path, artworkRevision)
+                    TrackArtwork(track, path, revision = artworkRevision)
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) { TrackLabel(track) }
                 }
                 if (track.availability != LibraryAvailability.AVAILABLE) LibraryText(stringResource(availabilityText(track.availability)))
@@ -360,8 +360,8 @@ private fun TrackLabel(track: LibraryTrack) {
 }
 
 @Composable
-internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, revision: Long = 0L,
-    size: Dp = 56.dp, modifier: Modifier = Modifier, visible: Boolean = true) {
+internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, modifier: Modifier = Modifier,
+    revision: Long = 0L, size: Dp = 56.dp, visible: Boolean = true) {
     val app = LocalContext.current.applicationContext as MeloXApplication
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var lease by remember(track.trackKey, track.location, path, revision) { mutableStateOf<ArtworkLease?>(null) }
@@ -395,7 +395,7 @@ private fun LazyListScope.detailContent(state: LibraryUiState, model: LibraryVie
     onAddToPlaylist: (LibraryViewToken, TrackKey?, String?) -> Unit) {
     val track = state.detail
     if (track == null) { item { LibraryText(stringResource(R.string.library_detail_missing)) }; return }
-    item(key = "library:detail-art") { TrackArtwork(track, state.preferences.artworkReadPath, state.artworkRevision) }
+    item(key = "library:detail-art") { TrackArtwork(track, state.preferences.artworkReadPath, revision = state.artworkRevision) }
     item { LibraryText(track.title, primary = true) }
     item { LibraryText(stringResource(R.string.library_display_artist_value, track.displayArtist ?: stringResource(R.string.library_unknown_artist))) }
     item { LibraryText(stringResource(R.string.library_display_album_value, track.displayAlbum ?: stringResource(R.string.library_unknown_album))) }
