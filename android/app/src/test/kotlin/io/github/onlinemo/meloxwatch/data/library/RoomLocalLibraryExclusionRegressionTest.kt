@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.data.library
 
 import android.content.Context
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
@@ -174,7 +175,8 @@ class RoomLocalLibraryExclusionRegressionTest {
 
     private fun open() {
         database = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
-            MeloXDatabase::class.java, file.absolutePath).addMigrations(MeloXDatabase.MIGRATION_1_2).build()
+            MeloXDatabase::class.java, file.absolutePath).setDriver(BundledSQLiteDriver())
+            .addMigrations(MeloXDatabase.MIGRATION_1_2).build()
         library = RoomLocalLibraryRepository(database, { 1000L }, { 1_790_000_000_000L })
     }
 

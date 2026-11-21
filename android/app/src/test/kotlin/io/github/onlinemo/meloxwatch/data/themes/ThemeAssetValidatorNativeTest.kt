@@ -131,6 +131,89 @@ class ThemeAssetValidatorNativeTest {
         Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(repeated, "image/jpeg") {} }
     }
 
+    @Test fun androidWebpIccIsBoundedAndMustMatchItsExtendedHeader(): Unit {
+        val valid = Fixture.raster(Bitmap.CompressFormat.WEBP)
+        assertEquals("VP8X", String(valid, 12, 4, Charsets.US_ASCII))
+        assertEquals(0x20, (valid[20].toInt() and 0x20))
+        val marker = webpChunkOffset(valid, "ICCP")
+        val count = little32(valid, marker + 4)
+        val end = marker + 8 + count + (count and 1)
+        val profile = marker + 8
+        ThemeImageHeaders.verify(valid, "image/webp") {}
+        val bitmap = validator.decodeImage(valid, "image/webp", 32, false, CancellationSignal())
+        try { assertEquals(255, Color.alpha(bitmap.getPixel(16, 16))) }
+        finally { bitmap.recycle() }
+
+        val noFlag = valid.copyOf().also { it[20] = (it[20].toInt() and 0xdf).toByte() }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(noFlag, "image/webp") {} }
+        val noProfile = riffLength(valid.copyOfRange(0, marker) + valid.copyOfRange(end, valid.size))
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(noProfile, "image/webp") {} }
+        val noExtendedHeader = riffLength(valid.copyOfRange(0, 12) + valid.copyOfRange(30, valid.size))
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(noExtendedHeader, "image/webp") {} }
+        val signature = valid.copyOf().also { it[profile + 36] = 0 }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(signature, "image/webp") {} }
+        val wrongSize = valid.copyOf().also { putBig32(it, profile, count - 1) }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(wrongSize, "image/webp") {} }
+        val escapingTag = valid.copyOf().also { putBig32(it, profile + 136, count) }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(escapingTag, "image/webp") {} }
+        val originalChunk = valid.copyOfRange(marker, end)
+        val repeated = riffLength(valid.copyOfRange(0, marker) + originalChunk + valid.copyOfRange(marker, valid.size))
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(repeated, "image/webp") {} }
+        val late = riffLength(valid.copyOfRange(0, marker) + valid.copyOfRange(end, valid.size) + originalChunk)
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(late, "image/webp") {} }
+
+        val oversizedProfile = valid.copyOfRange(profile, profile + count).copyOf(64 * 1024 + 1)
+        putBig32(oversizedProfile, 0, oversizedProfile.size)
+        val oversized = riffLength(valid.copyOfRange(0, marker) + webpChunk("ICCP", oversizedProfile) +
+            valid.copyOfRange(end, valid.size))
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(oversized, "image/webp") {} }
+        for (unsupported in listOf("EXIF", "XMP ", "ANIM")) {
+            val added = riffLength(valid + webpChunk(unsupported, byteArrayOf(0, 0)))
+            Fixture.expect(ThemeIssue.UNSUPPORTED_RESOURCE) { ThemeImageHeaders.verify(added, "image/webp") {} }
+        }
+    }
+
+    @Test fun webpAlphaChunksAndLosslessHintsPreserveActualTransparency(): Unit {
+        val opaque = Fixture.raster(Bitmap.CompressFormat.WEBP)
+        val falseAlpha = opaque.copyOf().also { it[20] = (it[20].toInt() or 0x10).toByte() }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(falseAlpha, "image/webp") {} }
+        val lateOpaqueAlpha = riffLength(opaque + webpChunk("ALPH", byteArrayOf(0, 0)))
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(lateOpaqueAlpha, "image/webp") {} }
+
+        val alpha = nativeAlphaWebp()
+        assertWebpTransparency(alpha)
+        val marker = webpChunkOffset(alpha, "ALPH")
+        val count = little32(alpha, marker + 4)
+        val end = marker + 8 + count + (count and 1)
+        val originalChunk = alpha.copyOfRange(marker, end)
+        val noFlag = alpha.copyOf().also { it[20] = (it[20].toInt() and 0xef).toByte() }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(noFlag, "image/webp") {} }
+        val missing = riffLength(alpha.copyOfRange(0, marker) + alpha.copyOfRange(end, alpha.size))
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(missing, "image/webp") {} }
+        val late = riffLength(alpha.copyOfRange(0, marker) + alpha.copyOfRange(end, alpha.size) + originalChunk)
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(late, "image/webp") {} }
+        val reserved = alpha.copyOf().also { it[marker + 8] = (it[marker + 8].toInt() or 0x80).toByte() }
+        Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(reserved, "image/webp") {} }
+
+        if (Build.VERSION.SDK_INT >= 30) {
+            val lossless = nativeAlphaWebp(lossless = true)
+            assertWebpTransparency(lossless)
+            val image = webpChunkOffset(lossless, "VP8L")
+            assertEquals(0x10, lossless[image + 12].toInt() and 0x10)
+            val noHint = lossless.copyOf().also { it[image + 12] = (it[image + 12].toInt() and 0xef).toByte() }
+            // The official codec specification makes this hint nonauthoritative; real alpha still decodes.
+            assertWebpTransparency(noHint)
+            val mixed = riffLength(lossless.copyOfRange(0, image) + originalChunk + lossless.copyOfRange(image, lossless.size))
+            Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(mixed, "image/webp") {} }
+            val futureCodec = lossless.copyOf().also { it[image + 12] = (it[image + 12].toInt() or 0x20).toByte() }
+            Fixture.expect(ThemeIssue.INVALID_IMAGE) { ThemeImageHeaders.verify(futureCodec, "image/webp") {} }
+            val imageCount = little32(lossless, image + 4)
+            val simple = riffLength(lossless.copyOfRange(0, 12) +
+                lossless.copyOfRange(image, image + 8 + imageCount + (imageCount and 1)))
+            assertWebpTransparency(simple)
+        }
+    }
+
     @Test fun animatedWebpFlagsAndRiffLengthMismatchHaveNoFirstFrameSuccess() {
         val header = ByteArray(30)
         "RIFF".toByteArray().copyInto(header, 0)
@@ -226,6 +309,59 @@ class ThemeAssetValidatorNativeTest {
             validator.validate(directory, ThemeManifestReader.read(value.manifest), CancellationSignal())
         }
         assertArrayEquals(image.bytes, outside.readBytes())
+    }
+
+    private fun nativeAlphaWebp(lossless: Boolean = false): ByteArray {
+        val bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.TRANSPARENT)
+            for (y in 8 until 24) for (x in 8 until 24) bitmap.setPixel(x, y, Color.RED)
+            val output = java.io.ByteArrayOutputStream()
+            val format = if (lossless && Build.VERSION.SDK_INT >= 30) Bitmap.CompressFormat.WEBP_LOSSLESS
+                else Bitmap.CompressFormat.WEBP
+            assertTrue(bitmap.compress(format, 85, output))
+            return output.toByteArray()
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun assertWebpTransparency(bytes: ByteArray) {
+        ThemeImageHeaders.verify(bytes, "image/webp") {}
+        val bitmap = validator.decodeImage(bytes, "image/webp", 32, false, CancellationSignal())
+        try {
+            assertEquals(0, Color.alpha(bitmap.getPixel(0, 0)))
+            assertEquals(255, Color.alpha(bitmap.getPixel(16, 16)))
+            assertTrue(bitmap.allocationByteCount <= ArtworkLimits.BITMAP_BYTES)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun webpChunkOffset(bytes: ByteArray, type: String): Int {
+        var offset = 12
+        while (offset <= bytes.size - 8) {
+            val count = little32(bytes, offset + 4)
+            assertTrue(count >= 0 && count <= bytes.size - offset - 8)
+            if (String(bytes, offset, 4, Charsets.US_ASCII) == type) return offset
+            offset += 8 + count + (count and 1)
+        }
+        throw AssertionError("The Android-generated WebP must contain its original ICC color profile")
+    }
+
+    private fun little32(bytes: ByteArray, offset: Int): Int =
+        ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
+
+    private fun riffLength(bytes: ByteArray): ByteArray = bytes.also {
+        ByteBuffer.wrap(it, 4, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(it.size - 8)
+    }
+
+    private fun webpChunk(type: String, data: ByteArray): ByteArray {
+        val bytes = ByteArray(8 + data.size + (data.size and 1))
+        type.toByteArray(Charsets.US_ASCII).copyInto(bytes, 0)
+        ByteBuffer.wrap(bytes, 4, 4).order(ByteOrder.LITTLE_ENDIAN).putInt(data.size)
+        data.copyInto(bytes, 8)
+        return bytes
     }
 
     private fun iccMarker(bytes: ByteArray): Int {

@@ -39,6 +39,9 @@ import org.robolectric.annotation.SQLiteMode
 class RoomCompanionLargePagesTest {
     @get:Rule val temporary = TemporaryFolder()
     private lateinit var fixture: CompanionRoomFixture
+    private var stageCase = ""
+    private var stageStartNanos = 0L
+    private var stageEvents = 0
 
     @Before fun open() = runBlocking {
         fixture = CompanionRoomFixture(RuntimeEnvironment.getApplication() as Context,
@@ -49,7 +52,9 @@ class RoomCompanionLargePagesTest {
     @After fun close() { fixture.close() }
 
     @Test(timeout = 30_000L) fun actualRoomCatalogContainsAll20001TracksAcross201PagesAndRevocationStopsReads() = runBlocking {
+        startStages("catalog")
         val firstTrackId = seedLargeLibrary()
+        stage("catalog.begin")
         val first = fixture.firstPage()
         assertEquals(COUNT, first.totalCount)
         var page = first
@@ -70,6 +75,7 @@ class RoomCompanionLargePagesTest {
                 ordinal++
             }
             pages++
+            if (pages % 50 == 0) stage("catalog.pages", rows = ordinal, pages = pages)
             if (page.nextCursor == null) break
             page = fixture.nextPage(page)
         }
@@ -78,7 +84,9 @@ class RoomCompanionLargePagesTest {
         assertEquals("large-track:20000", lastTrackId)
         assertNull(page.nextCursor)
         assertNativeLibraryCount()
+        stage("catalog.end", rows = ordinal, pages = pages)
 
+        stage("revoke.begin")
         val active = fixture.permit(TransferCapability.READ_LIBRARY)
         val oldScope = fixture.scope
         val reread = TransferRequest.ReadPage(CompanionRoomFixture.uuid(), oldScope, first.kind,
@@ -96,10 +104,13 @@ class RoomCompanionLargePagesTest {
             assertEquals(0L, scalarLong("SELECT COUNT(*) FROM library_views WHERE owner = 'TRANSFER'"))
         }
         assertNativeLibraryCount()
+        stage("revoke.end")
     }
 
     @Test(timeout = 30_000L) fun actualNativePlaylistContainsAll20001OrdinalsAcross201PagesAndCloseRetainsUiViews() = runBlocking {
+        startStages("playlist")
         val firstTrackId = seedLargeLibrary()
+        stage("playlist.begin")
         val sourceView = fixture.library.openView(owner = LibraryViewOwner.UI)
         val input = FrozenPlaylistInput(CompanionRoomFixture.uuid(), sourceView.revision, COUNT)
         var cursor: LibraryCursor? = null
@@ -117,6 +128,8 @@ class RoomCompanionLargePagesTest {
             }
             cursor = page.nextCursor
             sourcePages++
+            if (sourcePages % 50 == 0) stage("source.pages", rows = consumed, pages = sourcePages)
+            if (cursor == null) stage("source.end", rows = consumed, pages = sourcePages)
             PlaylistInputPage(input, offset, references, cursor == null)
         }
         val created = try {
@@ -133,9 +146,12 @@ class RoomCompanionLargePagesTest {
             assertEquals(COUNT - 1L, scalarLong("SELECT MAX(ordinal) FROM playlist_members WHERE generationId = ?", native.generationId))
         }
 
+        stage("playlist.end", rows = consumed, pages = sourcePages)
+        stage("members.setup")
         val uiLibrary = fixture.library.openView()
         val uiPlaylist = fixture.playlists.openView(native.playlistId, PlaylistViewOwner.UI)
         try {
+            stage("members.begin")
             val first = fixture.firstPage(TransferCatalogKind.PLAYLIST_MEMBERS, native.playlistId)
             var page = first
             var ordinal = 0L
@@ -155,6 +171,7 @@ class RoomCompanionLargePagesTest {
                     ordinal++
                 }
                 pages++
+                if (pages % 50 == 0) stage("members.pages", rows = ordinal, pages = pages)
                 if (page.nextCursor == null) break
                 page = fixture.nextPage(page, native.playlistId)
             }
@@ -180,6 +197,7 @@ class RoomCompanionLargePagesTest {
                 assertEquals(1L, scalarLong("SELECT COUNT(*) FROM playlist_views WHERE owner = 'UI'"))
             }
             assertNativeLibraryCount()
+            stage("members.end", rows = ordinal, pages = pages)
         } finally {
             fixture.library.closeView(uiLibrary.viewId)
             fixture.playlists.closeView(uiPlaylist.viewId)
@@ -252,20 +270,33 @@ class RoomCompanionLargePagesTest {
             )
         }
         var firstOrdinal = 1L
+        var batches = 0
         while (firstOrdinal < COUNT) {
             val lastOrdinal = minOf(firstOrdinal + 99L, COUNT - 1L)
             fixture.database.withTestWriterTransaction {
-                for ((sql, template) in plans) execute(sql, firstOrdinal, lastOrdinal, template)
+                // Ten fixed copies share these 100 ordinals on this borrowed writer connection.
+                execute("CREATE TEMP TABLE companion_large_page_batch(n INTEGER PRIMARY KEY)")
+                execute("""WITH RECURSIVE numbers(n) AS (
+                    SELECT ? UNION ALL SELECT n + 1 FROM numbers WHERE n < ?)
+                    INSERT INTO temp.companion_large_page_batch(n) SELECT n FROM numbers
+                """.trimIndent(), firstOrdinal, lastOrdinal)
+                for ((sql, template) in plans) execute(sql, template)
+                execute("DROP TABLE temp.companion_large_page_batch")
             }
             firstOrdinal = lastOrdinal + 1L
+            batches++
+            if (batches % 50 == 0) stage("seed.batch", nextOrdinal = firstOrdinal)
         }
+        stage("seed.publish")
         fixture.database.withTestWriterTransaction {
             assertEquals(meta, dao.meta())
             assertEquals(1, dao.updateMeta(meta.copy(revision = revision,
                 nextAddedSequence = Math.addExact(sequence, COUNT - 1L))))
         }
+        stage("seed.validate")
         assertNativeLibraryCount()
         assertEquals(COUNT, fixture.library.overview().visibleTracks)
+        stage("seed.end", rows = COUNT)
         return first.trackKey.trackId
     }
 
@@ -278,10 +309,9 @@ class RoomCompanionLargePagesTest {
         assertTrue(key in columns && overrides.keys.all { it in columns })
         val names = columns.joinToString(",", transform = ::quoted)
         val values = columns.joinToString(",") { column -> overrides[column] ?: "original." + quoted(column) }
-        return """WITH RECURSIVE batch(n) AS (
-            SELECT ? UNION ALL SELECT n + 1 FROM batch WHERE n < ?)
-            INSERT INTO $table ($names) SELECT $values
-            FROM $table original CROSS JOIN batch WHERE original.$key = ?
+        return """INSERT INTO $table ($names) SELECT $values
+            FROM $table original CROSS JOIN temp.companion_large_page_batch batch
+            WHERE original.$key = ?
         """.trimIndent()
     }
 
@@ -291,6 +321,22 @@ class RoomCompanionLargePagesTest {
         assertEquals(COUNT, scalarLong("SELECT COUNT(*) FROM local_locations"))
         assertEquals(COUNT, scalarLong("SELECT COUNT(*) FROM local_access_aliases"))
         query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
+    }
+
+    /** Fixed labels and counters only; at most 32 records, with no identities, URIs or paths. */
+    private fun startStages(case: String) {
+        stageCase = case
+        stageStartNanos = System.nanoTime()
+        stageEvents = 0
+        stage("seed.begin")
+    }
+
+    private fun stage(name: String, rows: Long? = null, pages: Int? = null, nextOrdinal: Long? = null) {
+        if (stageEvents >= 32) return
+        stageEvents++
+        val elapsedNanos = System.nanoTime() - stageStartNanos
+        println("MELOX_LARGE_PAGE case=$stageCase stage=$name elapsedNanos=$elapsedNanos " +
+            "rows=$rows pages=$pages nextOrdinal=$nextOrdinal")
     }
 
     private fun expectedTrackId(first: String, ordinal: Long) =

@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.playback
 
 import android.content.Context
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
@@ -53,7 +54,7 @@ class LibraryQueueProducerTest {
     fun open() = runBlocking {
         database = Room.inMemoryDatabaseBuilder(
             RuntimeEnvironment.getApplication() as Context, MeloXDatabase::class.java,
-        ).build()
+        ).setDriver(BundledSQLiteDriver()).build()
         library = RoomLocalLibraryRepository(database, { elapsed }, { 1_790_000_000_000L })
         counted = CountingLibrary(library)
         assertEquals(0L, library.initialize().totalTracks)

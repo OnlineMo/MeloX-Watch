@@ -138,6 +138,9 @@ class ProbeFontPickerReturnHostTest {
             assertEquals(0, fixture.store.writes.get())
             compose.runOnIdle { oldSlot.close() }
             assertEquals(fixture.files.prepared.asset, last.get()?.state?.original?.font?.asset)
+        } catch (timeout: androidx.compose.ui.test.ComposeTimeoutException) {
+            reportReturnTimeout(fixture, last.get(), entered.isCompleted, shown.value, slot.current != null)
+            throw timeout
         } finally {
             release.complete(Unit)
             compose.runOnIdle {
@@ -146,6 +149,40 @@ class ProbeFontPickerReturnHostTest {
                 slot.current?.close()
             }
         }
+    }
+
+    /** Capture safe fixture gates before cleanup releases or retires the exact import child. */
+    private fun reportReturnTimeout(
+        fixture: FontPickerFixture,
+        host: WatchFontHostValue?,
+        entered: Boolean,
+        shown: Boolean,
+        slotInstalled: Boolean,
+    ) {
+        val metadata = host?.editorState
+        val editor = fixture.editor.state.value
+        val picker = fixture.picker.state.value
+        val phase = when {
+            picker.consuming -> "CONSUMING"
+            picker.pendingReturn != null -> "RETURNED"
+            picker.awaitingPlatform -> "LAUNCHED"
+            else -> "NONE"
+        }
+        println("ProbeFontPickerReturnHostTest timeout " +
+            "entered=$entered shown=$shown slotInstalled=$slotInstalled hostPresent=${host != null} " +
+            "hostKind=${host?.state?.kind?.name ?: "NONE"} hostLoading=${host?.loading == true} " +
+            "hostEditorPresent=${metadata != null} hostActive=${metadata?.presentationActive == true} " +
+            "hostWorking=${metadata?.working == true} hostIssue=${metadata?.issue?.name ?: "NONE"} " +
+            "editorActive=${editor.presentationActive} editorWorking=${editor.working} " +
+            "editorIssue=${editor.issue?.name ?: "NONE"} savedPresent=${editor.saved != null} " +
+            "draftPresent=${editor.draft != null} retryPresent=${editor.retry != null} " +
+            "consentCurrent=${fixture.picker.licenseAcknowledgedFor(editor.draft)} " +
+            "ticketPhase=$phase pickerIssue=${picker.issue?.name ?: "NONE"} " +
+            "nameReads=${fixture.nameReads.get()} imports=${fixture.files.imports.get()} " +
+            "activeNameJobs=${fixture.nameJobs.count { it.isActive }} " +
+            "activeImportJobs=${fixture.files.importJobs.count { it.isActive }} " +
+            "cancelledImportJobs=${fixture.files.importJobs.count { it.isCancelled }} " +
+            "writes=${fixture.store.writes.get()}")
     }
 
     /** The concrete PageBinding/Window producer is covered by Root's independent integration tests. */

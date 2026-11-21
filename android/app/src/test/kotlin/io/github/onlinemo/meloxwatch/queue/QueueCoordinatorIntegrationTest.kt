@@ -14,6 +14,7 @@ import androidx.media3.common.Timeline
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
@@ -123,7 +124,8 @@ class QueueCoordinatorIntegrationTest {
 
     @Before
     fun open() {
-        database = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication() as Context, MeloXDatabase::class.java).build()
+        database = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication() as Context, MeloXDatabase::class.java)
+            .setDriver(BundledSQLiteDriver()).build()
         store = RoomQueueStore(database, shuffleIndex = { it })
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         val pair = createBackend()

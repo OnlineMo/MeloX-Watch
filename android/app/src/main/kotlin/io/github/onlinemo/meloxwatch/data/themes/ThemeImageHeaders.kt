@@ -139,9 +139,9 @@ internal object ThemeImageHeaders {
         themeFail(ThemeIssue.INVALID_IMAGE)
     }
 
-    /** Android JPEG encoding includes a raw ICC profile; no decompression or multipart assembly is needed. */
+    /** Android encoders include raw ICC profiles; bound the shared validator without decompression or multipart assembly. */
     private fun verifyIcc(bytes: ByteArray, start: Int, size: Int, checkCancellation: () -> Unit) {
-        if (size < 132 || big32(bytes, start) != size.toLong() || ascii(bytes, start + 36) != "acsp") {
+        if (size !in 132..MAX_ICC_BYTES || big32(bytes, start) != size.toLong() || ascii(bytes, start + 36) != "acsp") {
             themeFail(ThemeIssue.INVALID_IMAGE)
         }
         val tags = big32(bytes, start + 128)
@@ -163,6 +163,10 @@ internal object ThemeImageHeaders {
         var offset = 12
         var chunks = 0
         var imageChunks = 0
+        var extendedFlags: Int? = null
+        var hasIcc = false
+        var hasAlpha = false
+        var lossless = false
         val seen = HashSet<String>()
         while (offset < bytes.size) {
             checkCancellation()
@@ -173,11 +177,33 @@ internal object ThemeImageHeaders {
             if (!seen.add(type) || length > bytes.size - offset - 8) themeFail(ThemeIssue.INVALID_IMAGE)
             val count = length.toInt()
             if (type == "VP8X") {
-                if (count != 10 || offset != 12 || (u8(bytes, offset + 8) and 0xef) != 0 ||
+                if (count != 10 || offset != 12 || (u8(bytes, offset + 8) and 0xcf) != 0 ||
                     u8(bytes, offset + 9) != 0 || u8(bytes, offset + 10) != 0 || u8(bytes, offset + 11) != 0) {
                     themeFail(ThemeIssue.UNSUPPORTED_RESOURCE)
                 }
+                extendedFlags = u8(bytes, offset + 8)
                 pixels(little24(bytes, offset + 12) + 1, little24(bytes, offset + 15) + 1)
+            }
+            if (type == "ICCP") {
+                // The color flag and its single raw profile must agree, before alpha/image data.
+                if (extendedFlags == null || (extendedFlags and 0x20) == 0 || imageChunks != 0 || "ALPH" in seen) {
+                    themeFail(ThemeIssue.INVALID_IMAGE)
+                }
+                verifyIcc(bytes, offset + 8, count, checkCancellation)
+                hasIcc = true
+            }
+            if (type == "ALPH") {
+                if (extendedFlags == null || (extendedFlags and 0x10) == 0 || imageChunks != 0 || count < 2 ||
+                    (u8(bytes, offset + 8) and 0xc0) != 0) themeFail(ThemeIssue.INVALID_IMAGE)
+                hasAlpha = true
+            }
+            if (type == "VP8L") {
+                if (hasAlpha || count < 5 || u8(bytes, offset + 8) != 0x2f ||
+                    (u8(bytes, offset + 12) and 0xe0) != 0) themeFail(ThemeIssue.INVALID_IMAGE)
+                val packed = little32(bytes, offset + 9)
+                pixels((packed and 0x3fff) + 1, ((packed shr 14) and 0x3fff) + 1)
+                // VP8L carries alpha itself. Its alpha_is_used bit is only a hint, never an ALPH requirement.
+                lossless = true
             }
             if (type == "VP8 " || type == "VP8L") imageChunks++
             val padded = count + (count and 1)
@@ -185,7 +211,10 @@ internal object ThemeImageHeaders {
             if ((count and 1) != 0 && bytes[offset + 8 + count] != 0.toByte()) themeFail(ThemeIssue.INVALID_IMAGE)
             offset += padded + 8
         }
-        if (imageChunks != 1) themeFail(ThemeIssue.INVALID_IMAGE)
+        if (imageChunks != 1 || (extendedFlags?.and(0x20) == 0x20) != hasIcc ||
+            !lossless && extendedFlags != null && ((extendedFlags and 0x10) != 0) != hasAlpha) {
+            themeFail(ThemeIssue.INVALID_IMAGE)
+        }
     }
 
     private fun u8(bytes: ByteArray, offset: Int): Int = bytes[offset].toInt() and 255
@@ -206,6 +235,7 @@ internal object ThemeImageHeaders {
     private fun ascii(bytes: ByteArray, offset: Int): String = String(bytes, offset, 4, Charsets.US_ASCII)
     private val PNG_SIGNATURE = byteArrayOf(137.toByte(), 80, 78, 71, 13, 10, 26, 10)
     private val PNG_CHUNKS = setOf("IHDR", "PLTE", "tRNS", "IDAT", "IEND", "pHYs", "sRGB", "gAMA", "cHRM", "bKGD", "sBIT")
-    private val WEBP_CHUNKS = setOf("VP8X", "VP8 ", "VP8L", "ALPH")
+    private const val MAX_ICC_BYTES = 64 * 1024
+    private val WEBP_CHUNKS = setOf("VP8X", "ICCP", "VP8 ", "VP8L", "ALPH")
     private val JPEG_MARKERS = setOf(192, 193, 194, 196, 218, 219, 221, 224, 226, 238)
 }
