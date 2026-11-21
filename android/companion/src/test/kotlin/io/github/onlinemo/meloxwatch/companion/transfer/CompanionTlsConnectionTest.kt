@@ -413,7 +413,7 @@ class CompanionTlsConnectionTest {
 
     private inner class LoopbackServer(val identity: TransferTlsIdentity) {
         private val rawServer = ServerSocket(0, 2, InetAddress.getLoopbackAddress())
-        val endpoint = CompanionEndpoint.parse(rawServer.inetAddress.hostAddress, rawServer.localPort.toString())
+        val endpoint = CompanionEndpoint.parse(checkNotNull(rawServer.inetAddress.hostAddress), rawServer.localPort.toString())
         private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val accepted: MutableList<Socket> = Collections.synchronizedList(ArrayList())
         val authenticatedPeers: MutableList<TransferFingerprint> = Collections.synchronizedList(ArrayList())
