@@ -1,6 +1,9 @@
 name: Locked Android environment
 description: Configure the repository-owned toolchain on a GitHub-hosted runner.
 inputs:
+  policy-checked:
+    description: The prerequisite job already ran the applicable Python CI suite; retain metadata checks here.
+    default: 'false'
   bootstrap:
     description: Install the pinned Gradle distribution to generate the initial wrapper in the cloud.
     default: 'false'
@@ -9,7 +12,18 @@ runs:
   steps:
     - id: config
       shell: bash
-      run: python3 scripts/ci/check.py
+      run: |
+        python3 - <<'PY'
+        import inspect, os, sys
+        sys.path.insert(0, 'scripts/ci')
+        from check import check
+        options = {}
+        if os.environ.get('POLICY_CHECKED') == 'true' and 'unit_checks' in inspect.signature(check).parameters:
+            options['unit_checks'] = False
+        check(**options)
+        PY
+      env:
+        POLICY_CHECKED: ${{ inputs.policy-checked }}
     - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
       with:
         distribution: ${{ steps.config.outputs.java-distribution }}
