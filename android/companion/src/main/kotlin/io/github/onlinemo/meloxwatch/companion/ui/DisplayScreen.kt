@@ -78,20 +78,20 @@ internal fun LazyListScope.displayItems(state: CompanionUiState, model: Companio
     val page = state.pageWindow.current?.page
     if (page != null) items(page.rows, key = ::companionRowIdentity) { row ->
         when (row) {
-            is TransferCatalogRow.Group -> groupView(row, state, model)
-            is TransferCatalogRow.Track -> trackView(row, state, model)
-            is TransferCatalogRow.Playlist -> playlistRowView(row, state, model)
+            is TransferCatalogRow.Group -> GroupView(row, state, model)
+            is TransferCatalogRow.Track -> TrackView(row, state, model)
+            is TransferCatalogRow.Playlist -> PlaylistRowView(row, state, model)
             is TransferCatalogRow.Member -> MeloXCard {
                 MeloXText(row.titleHint)
                 MeloXText(row.artistHint, secondary = true)
             }
         }
     }
-    state.local?.display?.let { draft -> item(key = "durable-display-draft") { displayDraftView(draft, state, model) } }
+    state.local?.display?.let { draft -> item(key = "durable-display-draft") { DisplayDraftView(draft, state, model) } }
 }
 
 @Composable
-private fun displayDraftView(draft: CompanionDisplayDraft, state: CompanionUiState, model: CompanionViewModel) {
+private fun DisplayDraftView(draft: CompanionDisplayDraft, state: CompanionUiState, model: CompanionViewModel) {
     var submit by remember(draft.operationId, draft.phase) { mutableStateOf(false) }
     var discard by remember(draft.operationId) { mutableStateOf(false) }
     val target = draft.target.forLocalDisplay().chunked(8).joinToString(" ")
@@ -115,7 +115,7 @@ private fun displayDraftView(draft: CompanionDisplayDraft, state: CompanionUiSta
         if (draft.phase == CompanionEditPhase.PREVIEWED) MeloXText(stringResource(R.string.display_preview_bound), secondary = true)
         if (draft.phase == CompanionEditPhase.UNCERTAIN) MeloXText(stringResource(R.string.exact_retry_required), secondary = true)
         if (draft.phase == CompanionEditPhase.CONFLICT) MeloXText(stringResource(R.string.conflict_reload_keeps_draft), secondary = true)
-        draft.receipt?.let { receiptView(it) }
+        draft.receipt?.let { ReceiptView(it) }
         MeloXAction(stringResource(R.string.preview_on_watch), model::previewDisplay, enabled = enabled && draft.phase == CompanionEditPhase.DRAFT)
         val sendable = draft.phase in setOf(CompanionEditPhase.PREVIEWED, CompanionEditPhase.UNCERTAIN)
         MeloXAction(stringResource(if (draft.phase == CompanionEditPhase.UNCERTAIN) R.string.retry_same_operation else R.string.review_and_submit), { submit = true },
@@ -147,6 +147,6 @@ private fun displayKindName(kind: TransferDisplayKind): String = stringResource(
 @Composable
 private fun displayPatchSummary(patch: TransferDisplayPatch): String = when (patch) {
     is TransferDisplayPatch.Rename -> stringResource(R.string.edit_display_rename, patch.displayName)
-    is TransferDisplayPatch.Add -> stringResource(R.string.edit_display_add, patch.trackIds.size)
-    is TransferDisplayPatch.Remove -> stringResource(R.string.edit_display_remove, patch.trackIds.size)
+    is TransferDisplayPatch.Add -> companionPlural(R.plurals.edit_display_add, patch.trackIds.size.toLong())
+    is TransferDisplayPatch.Remove -> companionPlural(R.plurals.edit_display_remove, patch.trackIds.size.toLong())
 }

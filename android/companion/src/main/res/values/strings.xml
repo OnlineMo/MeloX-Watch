@@ -67,13 +67,25 @@
     <string name="display_preview_bound">已核对原对象、成员批次与修订状态；确认后才应用此预览。</string>
     <string name="display_target_id">手表上的分类编号</string>
     <string name="draft_saved">草稿已保存，尚未提交</string>
-    <string name="duration_seconds">时长：%1$d 秒</string>
+    <plurals name="duration_seconds">
+        <item quantity="one">时长：%1$d 秒</item>
+        <item quantity="other">时长：%1$d 秒</item>
+    </plurals>
     <string name="duration_unknown">时长未知</string>
-    <string name="edit_display_add">向此分类添加 %1$d 首歌曲</string>
+    <plurals name="edit_display_add">
+        <item quantity="one">向此分类添加 %1$d 首歌曲</item>
+        <item quantity="other">向此分类添加 %1$d 首歌曲</item>
+    </plurals>
     <string name="edit_display_group">编辑此分类</string>
-    <string name="edit_display_remove">从此分类移除 %1$d 首歌曲</string>
+    <plurals name="edit_display_remove">
+        <item quantity="one">从此分类移除 %1$d 首歌曲</item>
+        <item quantity="other">从此分类移除 %1$d 首歌曲</item>
+    </plurals>
     <string name="edit_display_rename">显示名改为：%1$s</string>
-    <string name="edit_playlist_add">添加 %1$d 首已选歌曲</string>
+    <plurals name="edit_playlist_add">
+        <item quantity="one">添加 %1$d 首已选歌曲</item>
+        <item quantity="other">添加 %1$d 首已选歌曲</item>
+    </plurals>
     <string name="edit_playlist_create">新建歌单：%1$s</string>
     <string name="edit_playlist_delete">删除此歌单及其成员记录，保留音频文件。</string>
     <string name="edit_playlist_move">将成员 %1$s 移动到第 %2$d 项</string>
@@ -112,7 +124,10 @@
     <string name="icon_next">下一首图标</string>
     <string name="icon_pause">暂停图标</string>
     <string name="icon_play">播放图标</string>
-    <string name="icon_prepared_bytes">本地图标已准备：%1$d 字节</string>
+    <plurals name="icon_prepared_bytes">
+        <item quantity="one">本地图标已准备：%1$d 字节</item>
+        <item quantity="other">本地图标已准备：%1$d 字节</item>
+    </plurals>
     <string name="icon_previous">上一首图标</string>
     <string name="icon_queue">队列图标</string>
     <string name="library">曲库</string>
@@ -193,7 +208,10 @@
     <string name="select_display_add">选择添加到此分类的歌曲</string>
     <string name="select_display_remove">选择从此分类移除的歌曲</string>
     <string name="select_icon_image">选择有许可的图标图片</string>
-    <string name="selected_bytes">本地副本：%1$d 字节</string>
+    <plurals name="selected_bytes">
+        <item quantity="one">本地副本：%1$d 字节</item>
+        <item quantity="other">本地副本：%1$d 字节</item>
+    </plurals>
     <string name="selected_upload">所选传输内容</string>
     <string name="selection_batch_limit">每次最多选择 100 首；提交后可继续下一批。成员列表支持完整分页。</string>
     <string name="send_selected">传入已授权手表</string>
@@ -218,18 +236,33 @@
     <string name="track_count">成员数量：%1$d</string>
     <string name="track_unavailable">此歌曲当前不可用</string>
     <string name="tracks">歌曲</string>
-    <string name="tracks_for_display_add">添加到“%1$s”：已选 %2$d 首</string>
-    <string name="tracks_for_display_remove">从“%1$s”移除：已选 %2$d 首</string>
-    <string name="tracks_for_playlist">歌单“%1$s”：已选 %2$d 首</string>
+    <plurals name="tracks_for_display_add">
+        <item quantity="one">添加到“%1$s”：已选 %2$d 首</item>
+        <item quantity="other">添加到“%1$s”：已选 %2$d 首</item>
+    </plurals>
+    <plurals name="tracks_for_display_remove">
+        <item quantity="one">从“%1$s”移除：已选 %2$d 首</item>
+        <item quantity="other">从“%1$s”移除：已选 %2$d 首</item>
+    </plurals>
+    <plurals name="tracks_for_playlist">
+        <item quantity="one">歌单“%1$s”：已选 %2$d 首</item>
+        <item quantity="other">歌单“%1$s”：已选 %2$d 首</item>
+    </plurals>
     <string name="unnamed_group">未命名分类</string>
     <string name="unnamed_playlist">未命名歌单</string>
     <string name="untitled_track">未命名歌曲</string>
     <string name="upload_bound_target">此操作绑定目标指纹：%1$s</string>
     <string name="upload_failed">传输失败，副本保留</string>
-    <string name="upload_progress">已传 %1$d / %2$d 字节</string>
+    <plurals name="upload_progress">
+        <item quantity="one">已传 %1$d / %2$d 字节</item>
+        <item quantity="other">已传 %1$d / %2$d 字节</item>
+    </plurals>
     <string name="watch_certificate">手表证书指纹</string>
     <string name="watch_label">本地目标标签</string>
     <string name="working">正在处理</string>
     <string name="send_upload_title">确认所选文件与目标手表</string>
-    <string name="send_upload_message">文件：%1$s\n大小：%2$d 字节\n目标证书指纹：%3$s\n请核对手表上显示的目标与手机配对授权。仅发送这一份私有副本，原文件保持不变。</string>
+    <plurals name="send_upload_message">
+        <item quantity="one">文件：%1$s\n大小：%2$d 字节\n目标证书指纹：%3$s\n请核对手表上显示的目标与手机配对授权。仅发送这一份私有副本，原文件保持不变。</item>
+        <item quantity="other">文件：%1$s\n大小：%2$d 字节\n目标证书指纹：%3$s\n请核对手表上显示的目标与手机配对授权。仅发送这一份私有副本，原文件保持不变。</item>
+    </plurals>
 </resources>

@@ -63,17 +63,17 @@ internal fun LazyListScope.playlistItems(state: CompanionUiState, model: Compani
     val page = state.pageWindow.current?.page
     if (page != null) items(page.rows, key = ::companionRowIdentity) { row ->
         when (row) {
-            is TransferCatalogRow.Playlist -> playlistRowView(row, state, model)
-            is TransferCatalogRow.Member -> playlistMemberView(row, state, model)
-            is TransferCatalogRow.Track -> trackView(row, state, model)
-            is TransferCatalogRow.Group -> groupView(row, state, model)
+            is TransferCatalogRow.Playlist -> PlaylistRowView(row, state, model)
+            is TransferCatalogRow.Member -> PlaylistMemberView(row, state, model)
+            is TransferCatalogRow.Track -> TrackView(row, state, model)
+            is TransferCatalogRow.Group -> GroupView(row, state, model)
         }
     }
-    state.local?.playlist?.let { draft -> item(key = "durable-playlist-draft") { playlistDraftView(draft, state, model) } }
+    state.local?.playlist?.let { draft -> item(key = "durable-playlist-draft") { PlaylistDraftView(draft, state, model) } }
 }
 
 @Composable
-private fun playlistMemberView(row: TransferCatalogRow.Member, state: CompanionUiState, model: CompanionViewModel) {
+private fun PlaylistMemberView(row: TransferCatalogRow.Member, state: CompanionUiState, model: CompanionViewModel) {
     var destination by remember(row.memberId, state.playlist?.row?.revision) { mutableStateOf((row.ordinal + 1L).toString()) }
     MeloXCard {
         MeloXText(row.titleHint.ifBlank { stringResource(R.string.untitled_track) })
@@ -93,7 +93,7 @@ private fun playlistMemberView(row: TransferCatalogRow.Member, state: CompanionU
 }
 
 @Composable
-private fun playlistDraftView(draft: CompanionPlaylistDraft, state: CompanionUiState, model: CompanionViewModel) {
+private fun PlaylistDraftView(draft: CompanionPlaylistDraft, state: CompanionUiState, model: CompanionViewModel) {
     var submit by remember(draft.operationId, draft.phase) { mutableStateOf(false) }
     var discard by remember(draft.operationId) { mutableStateOf(false) }
     val summary = playlistEditSummary(draft.edit)
@@ -114,7 +114,7 @@ private fun playlistDraftView(draft: CompanionPlaylistDraft, state: CompanionUiS
             MeloXAction(stringResource(R.string.reload_draft_target), model::reloadPlaylistDraftTarget,
                 enabled = state.available && state.allowed(TransferCapability.READ_LIBRARY) && state.connection.target?.fingerprint == draft.target)
         }
-        draft.receipt?.let { receiptView(it) }
+        draft.receipt?.let { ReceiptView(it) }
         val sendable = draft.phase in setOf(CompanionEditPhase.DRAFT, CompanionEditPhase.UNCERTAIN)
         MeloXAction(stringResource(if (draft.phase == CompanionEditPhase.UNCERTAIN) R.string.retry_same_operation else R.string.review_and_submit), { submit = true },
             enabled = state.available && state.allowed(TransferCapability.WRITE_PLAYLISTS) && state.connection.target?.fingerprint == draft.target && sendable, prominent = true)
@@ -143,7 +143,7 @@ private fun playlistEditSummary(edit: TransferPlaylistEdit): String = when (edit
     is TransferPlaylistEdit.Create -> stringResource(R.string.edit_playlist_create, edit.name)
     is TransferPlaylistEdit.Rename -> stringResource(R.string.edit_playlist_rename, edit.name)
     is TransferPlaylistEdit.Delete -> stringResource(R.string.edit_playlist_delete)
-    is TransferPlaylistEdit.Add -> stringResource(R.string.edit_playlist_add, edit.trackIds.size)
+    is TransferPlaylistEdit.Add -> companionPlural(R.plurals.edit_playlist_add, edit.trackIds.size.toLong())
     is TransferPlaylistEdit.Remove -> stringResource(R.string.edit_playlist_remove, edit.memberId)
     is TransferPlaylistEdit.Move -> stringResource(R.string.edit_playlist_move, edit.memberId, edit.destinationOrdinal + 1L)
 }

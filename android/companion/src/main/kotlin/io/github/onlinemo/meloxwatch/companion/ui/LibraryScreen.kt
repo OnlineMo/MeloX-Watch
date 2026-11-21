@@ -50,9 +50,9 @@ internal fun LazyListScope.libraryItems(state: CompanionUiState, model: Companio
     val page = state.pageWindow.current?.page
     if (page != null) items(page.rows, key = ::companionRowIdentity) { row ->
         when (row) {
-            is TransferCatalogRow.Track -> trackView(row, state, model)
-            is TransferCatalogRow.Group -> groupView(row, state, model)
-            is TransferCatalogRow.Playlist -> playlistRowView(row, state, model)
+            is TransferCatalogRow.Track -> TrackView(row, state, model)
+            is TransferCatalogRow.Group -> GroupView(row, state, model)
+            is TransferCatalogRow.Playlist -> PlaylistRowView(row, state, model)
             is TransferCatalogRow.Member -> MeloXCard {
                 MeloXText(row.titleHint)
                 MeloXText(row.artistHint, secondary = true)
@@ -62,9 +62,9 @@ internal fun LazyListScope.libraryItems(state: CompanionUiState, model: Companio
     if (state.trackSelection != CompanionTrackSelection.NONE) item(key = "library-track-selection") {
         MeloXCard {
             MeloXText(when (state.trackSelection) {
-                CompanionTrackSelection.PLAYLIST_ADD -> stringResource(R.string.tracks_for_playlist, state.playlist?.row?.name.orEmpty(), state.selectedTracks.size)
-                CompanionTrackSelection.DISPLAY_ADD -> stringResource(R.string.tracks_for_display_add, state.group?.state?.currentName.orEmpty(), state.selectedTracks.size)
-                CompanionTrackSelection.DISPLAY_REMOVE -> stringResource(R.string.tracks_for_display_remove, state.group?.state?.currentName.orEmpty(), state.selectedTracks.size)
+                CompanionTrackSelection.PLAYLIST_ADD -> companionPlural(R.plurals.tracks_for_playlist, state.selectedTracks.size.toLong(), state.playlist?.row?.name.orEmpty(), state.selectedTracks.size.toLong())
+                CompanionTrackSelection.DISPLAY_ADD -> companionPlural(R.plurals.tracks_for_display_add, state.selectedTracks.size.toLong(), state.group?.state?.currentName.orEmpty(), state.selectedTracks.size.toLong())
+                CompanionTrackSelection.DISPLAY_REMOVE -> companionPlural(R.plurals.tracks_for_display_remove, state.selectedTracks.size.toLong(), state.group?.state?.currentName.orEmpty(), state.selectedTracks.size.toLong())
                 CompanionTrackSelection.NONE -> ""
             })
             MeloXText(stringResource(R.string.selection_batch_limit), secondary = true)
@@ -103,20 +103,20 @@ internal fun LazyListScope.pageItems(state: CompanionUiState, model: CompanionVi
 }
 
 @Composable
-internal fun trackView(row: TransferCatalogRow.Track, state: CompanionUiState, model: CompanionViewModel) {
+internal fun TrackView(row: TransferCatalogRow.Track, state: CompanionUiState, model: CompanionViewModel) {
     MeloXCard {
         val writeCapability = if (state.trackSelection == CompanionTrackSelection.PLAYLIST_ADD) TransferCapability.WRITE_PLAYLISTS else TransferCapability.WRITE_DISPLAY_METADATA
         if (state.trackSelection != CompanionTrackSelection.NONE) MeloXToggle(row.title.ifBlank { stringResource(R.string.untitled_track) }, row.trackId in state.selectedTracks, { model.toggleTrack(row) }, enabled = state.available && state.allowed(TransferCapability.READ_LIBRARY) && state.allowed(writeCapability))
         else MeloXText(row.title)
         MeloXText(row.artist, secondary = true)
         MeloXText(row.album, secondary = true)
-        MeloXText(if (row.durationMs == null) stringResource(R.string.duration_unknown) else stringResource(R.string.duration_seconds, row.durationMs / 1000L), secondary = true)
+        MeloXText(if (row.durationMs == null) stringResource(R.string.duration_unknown) else companionPlural(R.plurals.duration_seconds, row.durationMs / 1000L), secondary = true)
         if (!row.available) MeloXText(stringResource(R.string.track_unavailable), secondary = true)
     }
 }
 
 @Composable
-internal fun groupView(row: TransferCatalogRow.Group, state: CompanionUiState, model: CompanionViewModel) {
+internal fun GroupView(row: TransferCatalogRow.Group, state: CompanionUiState, model: CompanionViewModel) {
     MeloXCard {
         MeloXText(row.title)
         MeloXText(row.subtitle, secondary = true)
@@ -127,7 +127,7 @@ internal fun groupView(row: TransferCatalogRow.Group, state: CompanionUiState, m
 }
 
 @Composable
-internal fun playlistRowView(row: TransferCatalogRow.Playlist, state: CompanionUiState, model: CompanionViewModel) {
+internal fun PlaylistRowView(row: TransferCatalogRow.Playlist, state: CompanionUiState, model: CompanionViewModel) {
     MeloXCard {
         MeloXText(row.name)
         MeloXText(stringResource(R.string.track_count, row.memberCount), secondary = true)

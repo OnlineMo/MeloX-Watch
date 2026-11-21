@@ -67,13 +67,25 @@
     <string name="display_preview_bound">The original object, member batch and revisions are bound to this preview. Confirm before applying it.</string>
     <string name="display_target_id">Group ID shown on watch</string>
     <string name="draft_saved">Draft saved; not submitted</string>
-    <string name="duration_seconds">Duration: %1$d seconds</string>
+    <plurals name="duration_seconds">
+        <item quantity="one">Duration: %1$d second</item>
+        <item quantity="other">Duration: %1$d seconds</item>
+    </plurals>
     <string name="duration_unknown">Duration unknown</string>
-    <string name="edit_display_add">Add %1$d tracks to this group</string>
+    <plurals name="edit_display_add">
+        <item quantity="one">Add %1$d track to this group</item>
+        <item quantity="other">Add %1$d tracks to this group</item>
+    </plurals>
     <string name="edit_display_group">Edit this group</string>
-    <string name="edit_display_remove">Remove %1$d tracks from this group</string>
+    <plurals name="edit_display_remove">
+        <item quantity="one">Remove %1$d track from this group</item>
+        <item quantity="other">Remove %1$d tracks from this group</item>
+    </plurals>
     <string name="edit_display_rename">Set display name to: %1$s</string>
-    <string name="edit_playlist_add">Add %1$d selected tracks</string>
+    <plurals name="edit_playlist_add">
+        <item quantity="one">Add %1$d selected track</item>
+        <item quantity="other">Add %1$d selected tracks</item>
+    </plurals>
     <string name="edit_playlist_create">Create playlist: %1$s</string>
     <string name="edit_playlist_delete">Delete this playlist and its member records; keep audio files.</string>
     <string name="edit_playlist_move">Move member %1$s to position %2$d</string>
@@ -112,7 +124,10 @@
     <string name="icon_next">Next icon</string>
     <string name="icon_pause">Pause icon</string>
     <string name="icon_play">Play icon</string>
-    <string name="icon_prepared_bytes">Local icon ready: %1$d bytes</string>
+    <plurals name="icon_prepared_bytes">
+        <item quantity="one">Local icon ready: %1$d byte</item>
+        <item quantity="other">Local icon ready: %1$d bytes</item>
+    </plurals>
     <string name="icon_previous">Previous icon</string>
     <string name="icon_queue">Queue icon</string>
     <string name="library">Library</string>
@@ -193,7 +208,10 @@
     <string name="select_display_add">Choose tracks to add to this group</string>
     <string name="select_display_remove">Choose tracks to remove from this group</string>
     <string name="select_icon_image">Select a licensed icon image</string>
-    <string name="selected_bytes">Local copy: %1$d bytes</string>
+    <plurals name="selected_bytes">
+        <item quantity="one">Local copy: %1$d byte</item>
+        <item quantity="other">Local copy: %1$d bytes</item>
+    </plurals>
     <string name="selected_upload">Selected transfer</string>
     <string name="selection_batch_limit">Choose up to 100 tracks per edit. Continue with another batch after submission. The complete member list is paginated.</string>
     <string name="send_selected">Send to authorized watch</string>
@@ -218,18 +236,33 @@
     <string name="track_count">Members: %1$d</string>
     <string name="track_unavailable">This track is unavailable</string>
     <string name="tracks">Tracks</string>
-    <string name="tracks_for_display_add">Add to %1$s: %2$d selected</string>
-    <string name="tracks_for_display_remove">Remove from %1$s: %2$d selected</string>
-    <string name="tracks_for_playlist">Playlist %1$s: %2$d selected</string>
+    <plurals name="tracks_for_display_add">
+        <item quantity="one">Add to %1$s: %2$d track selected</item>
+        <item quantity="other">Add to %1$s: %2$d tracks selected</item>
+    </plurals>
+    <plurals name="tracks_for_display_remove">
+        <item quantity="one">Remove from %1$s: %2$d track selected</item>
+        <item quantity="other">Remove from %1$s: %2$d tracks selected</item>
+    </plurals>
+    <plurals name="tracks_for_playlist">
+        <item quantity="one">Playlist %1$s: %2$d track selected</item>
+        <item quantity="other">Playlist %1$s: %2$d tracks selected</item>
+    </plurals>
     <string name="unnamed_group">Unnamed group</string>
     <string name="unnamed_playlist">Unnamed playlist</string>
     <string name="untitled_track">Untitled track</string>
     <string name="upload_bound_target">Operation target fingerprint: %1$s</string>
     <string name="upload_failed">Transfer failed; copy retained</string>
-    <string name="upload_progress">Sent %1$d / %2$d bytes</string>
+    <plurals name="upload_progress">
+        <item quantity="one">Sent %1$d / %2$d byte</item>
+        <item quantity="other">Sent %1$d / %2$d bytes</item>
+    </plurals>
     <string name="watch_certificate">Watch certificate fingerprint</string>
     <string name="watch_label">Local target label</string>
     <string name="working">Working</string>
     <string name="send_upload_title">Confirm the selected file and watch</string>
-    <string name="send_upload_message">File: %1$s\nSize: %2$d bytes\nTarget certificate fingerprint: %3$s\nCheck the target and phone authorization shown on the watch. Send this private copy; the original file is preserved.</string>
+    <plurals name="send_upload_message">
+        <item quantity="one">File: %1$s\nSize: %2$d byte\nTarget certificate fingerprint: %3$s\nCheck the target and phone authorization shown on the watch. Send this private copy; the original file is preserved.</item>
+        <item quantity="other">File: %1$s\nSize: %2$d bytes\nTarget certificate fingerprint: %3$s\nCheck the target and phone authorization shown on the watch. Send this private copy; the original file is preserved.</item>
+    </plurals>
 </resources>

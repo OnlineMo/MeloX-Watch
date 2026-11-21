@@ -154,6 +154,8 @@ class PackageStageTests(unittest.TestCase):
                 package_build.run_stage('seal', digest, self.root, self.legacy)
         commands = [call.args[0] for call in self.legacy.run_gradle.call_args_list]
         self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0].count('--continue'), 1)
+        self.assertNotIn('--continue', commands[1])
         self.assertTrue(all(':companion:prepareRobolectricSdk' in command for command in commands))
         self.assertFalse(any(':test' in task or ':assemble' in task for command in commands for task in command))
         self.assertEqual((self.root / 'android/' / SCHEMA_DIRECTORY / '3.json').read_text(), 'schema three\n')
@@ -172,6 +174,45 @@ class PackageStageTests(unittest.TestCase):
             self.assertEqual(call.kwargs['overall_limit_seconds'], 1800)
             self.assertEqual(call.kwargs['env'].get('CI_PACKAGE_FRESH_ROOM_SCHEMA'),
                              'true' if call.kwargs['phase'] == 'package-strict-inputs' else None)
+
+    def test_acquire_failure_keeps_partial_diagnostics_without_qualifying_or_starting_strict(self):
+        self.add_request()
+        original = subprocess.CalledProcessError(1, ['fixture-independent-writer'])
+        partial_schema = b'fixture partial schema, never admitted\n'
+        watch_report = b'fixture watch compiler failure\n'
+        phone_report = b'fixture phone lint failure\n'
+        with patch.dict(os.environ, self.environment(), clear=True):
+            state, digest = package_build.start('debug', self.root, self.legacy)
+            def process(command, **kwargs):
+                self.assertIn('--continue', command)
+                self.assertEqual(kwargs['phase'], 'package-acquire')
+                self.write('android/' + state['collection']['request']['current_schema'], partial_schema)
+                self.write('android/app/build/reports/fixture-compiler.txt', watch_report)
+                self.write('android/companion/build/reports/fixture-lint.txt', phone_report)
+                raise original
+            self.legacy.run_gradle.side_effect = process
+            with self.assertRaises(subprocess.CalledProcessError) as caught:
+                package_build.run_stage('acquire', digest, self.root, self.legacy)
+            self.assertIs(caught.exception, original)
+            session = self.root / package_build.SESSION_FILE
+            failed = json.loads(session.read_bytes())
+            self.assertEqual(failed['status'], 'failed')
+            self.assertEqual(failed['completed'], [])
+            self.assertIsNone(failed['collection']['acquired_input_hashes'])
+            report = json.loads((self.root / package_migration.REPORT / 'failure-manifest.json').read_bytes())
+            self.assertEqual(report['failed_stage'], 'acquire')
+            self.assertFalse(report['accepted'])
+            self.assertFalse(report['apk_exported'])
+            current = state['collection']['request']['current_schema']
+            self.assertEqual(report['partial_input_hashes'][current], hashlib.sha256(partial_schema).hexdigest())
+            with self.assertRaises(ValueError):
+                package_build.run_stage('strict-inputs', hashlib.sha256(session.read_bytes()).hexdigest(), self.root, self.legacy)
+        self.assertEqual((self.root / 'android/app/build/reports/fixture-compiler.txt').read_bytes(), watch_report)
+        self.assertEqual((self.root / 'android/companion/build/reports/fixture-lint.txt').read_bytes(), phone_report)
+        self.assertEqual(self.legacy.run_gradle.call_count, 1)
+        self.assertFalse((self.root / package_migration.REPORT / 'package-manifest.json').exists())
+        self.assertFalse((self.root / package_test_evidence.REPORT).exists())
+        self.assertFalse((self.root / 'artifacts').exists())
 
     def test_old_request_contract_is_rejected_before_any_gradle(self):
         request = self.add_request()

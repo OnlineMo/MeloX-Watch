@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.companion.data
 
+import android.annotation.SuppressLint
 import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -10,6 +11,7 @@ import android.net.Uri
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.provider.OpenableColumns
+import androidx.core.graphics.createBitmap
 import io.github.onlinemo.meloxwatch.data.transfer.TransferException
 import io.github.onlinemo.meloxwatch.data.transfer.TransferHash
 import io.github.onlinemo.meloxwatch.data.transfer.TransferIssue
@@ -530,7 +532,7 @@ class CompanionDocuments(
         var iconBitmap: Bitmap? = null
         try {
             if (bitmap.width > CompanionLimits.ICON_EDGE * 2 || bitmap.height > CompanionLimits.ICON_EDGE * 2) throw TransferException(TransferIssue.QUOTA_EXCEEDED)
-            val square = Bitmap.createBitmap(CompanionLimits.ICON_EDGE, CompanionLimits.ICON_EDGE, Bitmap.Config.ARGB_8888)
+            val square = createBitmap(CompanionLimits.ICON_EDGE, CompanionLimits.ICON_EDGE)
             iconBitmap = square
             val scale = minOf(square.width.toFloat() / bitmap.width, square.height.toFloat() / bitmap.height)
             val width = (bitmap.width * scale).toInt().coerceAtLeast(1)
@@ -734,11 +736,14 @@ class CompanionDocuments(
         return fallback
     }
 
+    // Both copy budgets preserve physical free space; reclaimable caches are outside that reserve.
+    @SuppressLint("UsableSpace")
     private fun budget(directory: File, next: Long, ownedAudio: Long) {
         if (next < 0L || ownedAudio < 0L || next > CompanionLimits.STAGED_AUDIO_BYTES - ownedAudio) throw TransferException(TransferIssue.QUOTA_EXCEEDED)
         val available = directory.usableSpace
         if (available < CompanionLimits.FREE_RESERVE_BYTES || next > available - CompanionLimits.FREE_RESERVE_BYTES) throw TransferException(TransferIssue.STORAGE_FULL)
     }
+    @SuppressLint("UsableSpace")
     private fun themeBudget(directory: File, next: Long, owned: Long) {
         if (next < 0L || owned < 0L || next > CompanionLimits.STAGED_THEME_BYTES - owned) throw TransferException(TransferIssue.QUOTA_EXCEEDED)
         val available = directory.usableSpace

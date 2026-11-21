@@ -75,11 +75,11 @@ internal fun LazyListScope.uploadItems(state: CompanionUiState, model: Companion
                 if (selectAudio != null) MeloXAction(stringResource(R.string.select_audio), selectAudio, enabled = state.available)
             } else {
                 MeloXText(draft.declaration.displayName)
-                MeloXText(stringResource(R.string.selected_bytes, checkNotNull(draft.declaration.declaredBytes)), secondary = true)
+                MeloXText(companionPlural(R.plurals.selected_bytes, checkNotNull(draft.declaration.declaredBytes)), secondary = true)
                 MeloXText(uploadPhaseName(draft.phase))
                 if (draft.target != null) MeloXText(stringResource(R.string.upload_bound_target, draft.target.forLocalDisplay().chunked(8).joinToString(" ")), secondary = true, mono = true)
-                state.uploadProgress?.let { progress -> MeloXText(stringResource(R.string.upload_progress, progress.sentBytes, progress.totalBytes), secondary = true) }
-                draft.receipt?.let { receiptView(it) }
+                state.uploadProgress?.let { progress -> MeloXText(companionPlural(R.plurals.upload_progress, progress.totalBytes, progress.sentBytes, progress.totalBytes), secondary = true) }
+                draft.receipt?.let { ReceiptView(it) }
                 if (draft.declaration.kind == TransferUploadKind.THEME) MeloXText(stringResource(R.string.theme_watch_confirmation), secondary = true)
                 val sendable = draft.phase in setOf(CompanionUploadPhase.READY, CompanionUploadPhase.UNCERTAIN, CompanionUploadPhase.FAILED, CompanionUploadPhase.CANCELLED)
                 MeloXAction(stringResource(if (draft.phase == CompanionUploadPhase.UNCERTAIN) R.string.retry_same_operation else R.string.send_selected), { send = true },
@@ -88,7 +88,7 @@ internal fun LazyListScope.uploadItems(state: CompanionUiState, model: Companion
             }
         }
         if (send && draft != null && target != null) MeloXConfirmation(stringResource(R.string.send_upload_title),
-            stringResource(R.string.send_upload_message, draft.declaration.displayName, checkNotNull(draft.declaration.declaredBytes), target.forLocalDisplay().chunked(8).joinToString(" ")),
+            companionPlural(R.plurals.send_upload_message, checkNotNull(draft.declaration.declaredBytes), draft.declaration.displayName, checkNotNull(draft.declaration.declaredBytes), target.forLocalDisplay().chunked(8).joinToString(" ")),
             stringResource(if (draft.phase == CompanionUploadPhase.UNCERTAIN) R.string.retry_same_operation else R.string.send_selected),
         onConfirm = {
                 send = false

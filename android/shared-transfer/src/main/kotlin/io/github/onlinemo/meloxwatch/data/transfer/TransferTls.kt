@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.transfer
 
+import android.annotation.SuppressLint
 import java.net.Socket
 import java.security.Principal
 import java.security.PrivateKey
@@ -97,6 +98,9 @@ object TransferTls {
         it.init(arrayOf(identity.keyManager()), arrayOf(trust), SecureRandom())
     }
 
+    // Local identities are self-signed: validate their purpose, validity, signature and target pin.
+    // TLS proves key possession; TransferSessionAuthority separately grants application access.
+    @SuppressLint("CustomX509TrustManager")
     private class CandidateTrust(private val server: Boolean, private val pin: TransferFingerprint?) : X509TrustManager {
         override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {
             if (server || !authType.contains("RSA")) throw CertificateException("Invalid local certificate")

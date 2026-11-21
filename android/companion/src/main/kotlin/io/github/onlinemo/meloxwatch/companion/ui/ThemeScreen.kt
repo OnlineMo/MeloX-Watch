@@ -95,7 +95,7 @@ internal fun LazyListScope.themeItems(
             MeloXToggle(stringResource(R.string.preview_round_screen), round, { round = it })
             MeloXAction(stringResource(R.string.preview_saved_theme), model::previewTheme, enabled = state.available)
             if (preview != null) {
-                themePreviewView(preview, round)
+                ThemePreviewView(preview, round)
                 MeloXText(stringResource(R.string.theme_preview_static), secondary = true)
             }
             MeloXAction(stringResource(R.string.prepare_saved_theme_package), model::prepareTheme, enabled = state.available && state.local?.upload == null)
@@ -112,9 +112,9 @@ internal fun LazyListScope.themeItems(
                 MeloXText(roleName, heading = true)
                 if (icon == null) MeloXText(stringResource(R.string.builtin_icon), secondary = true)
                 else {
-                    MeloXText(stringResource(R.string.icon_prepared_bytes, icon.byteCount), secondary = true)
+                    MeloXText(companionPlural(R.plurals.icon_prepared_bytes, icon.byteCount), secondary = true)
                     val preview = state.themePreview?.takeIf { it.draft.revision == saved.revision && it.draft.id == saved.id }
-                    if (preview != null) themeIcon(preview, role, themeColor(preview.draft, CompanionColor.TEXT_PRIMARY))
+                    if (preview != null) ThemeIcon(preview, role, themeColor(preview.draft, CompanionColor.TEXT_PRIMARY))
                 }
                 MeloXField(stringResource(R.string.icon_license_name), licenseName, { licenseName = it }, enabled = state.available, maximum = 512)
                 MeloXField(stringResource(R.string.icon_license_text), licenseText, { licenseText = it }, enabled = state.available, multiline = true, maximum = 16 * 1024)
@@ -134,7 +134,7 @@ internal fun LazyListScope.themeItems(
 }
 
 @Composable
-private fun themePreviewView(preview: CompanionThemePreview, round: Boolean) {
+private fun ThemePreviewView(preview: CompanionThemePreview, round: Boolean) {
     val draft = preview.draft
     val background = themeColor(draft, CompanionColor.BACKGROUND)
     val raised = themeColor(draft, CompanionColor.SURFACE_RAISED)
@@ -166,16 +166,16 @@ private fun themePreviewView(preview: CompanionThemePreview, round: Boolean) {
                 drawLine(accent, Offset(0f, size.height / 2), Offset(size.width * .42f, size.height / 2), size.height, StrokeCap.Round)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                themeIcon(preview, CompanionIconRole.PREVIOUS, primary)
-                themeIcon(preview, CompanionIconRole.PLAY, primary)
-                themeIcon(preview, CompanionIconRole.NEXT, primary)
+                ThemeIcon(preview, CompanionIconRole.PREVIOUS, primary)
+                ThemeIcon(preview, CompanionIconRole.PLAY, primary)
+                ThemeIcon(preview, CompanionIconRole.NEXT, primary)
             }
         }
     }
 }
 
 @Composable
-private fun themeIcon(preview: CompanionThemePreview, role: CompanionIconRole, color: Color) {
+private fun ThemeIcon(preview: CompanionThemePreview, role: CompanionIconRole, color: Color) {
     val image = preview.icons[role]
     val label = iconRoleName(role)
     if (image != null) {

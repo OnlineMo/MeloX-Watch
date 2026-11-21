@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.companion.ui
 
+import androidx.annotation.PluralsRes
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -35,7 +36,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -81,7 +84,10 @@ internal fun MeloXCard(modifier: Modifier = Modifier, content: @Composable Colum
 }
 
 @Composable
-internal fun MeloXAction(label: String, onClick: () -> Unit, enabled: Boolean = true, prominent: Boolean = false, modifier: Modifier = Modifier) {
+internal fun MeloXAction(
+    label: String, onClick: () -> Unit, modifier: Modifier = Modifier,
+    enabled: Boolean = true, prominent: Boolean = false,
+) {
     var focused by remember { mutableStateOf(false) }
     Box(modifier.fillMaxWidth().heightIn(min = 48.dp)
         .onFocusChanged { focused = it.isFocused }
@@ -146,7 +152,8 @@ internal fun MeloXDivider() { Spacer(Modifier.fillMaxWidth().height(1.dp).backgr
 
 @Composable
 internal fun MeloXConfirmation(title: String, message: String, confirm: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    val maximumHeight = LocalConfiguration.current.screenHeightDp.dp * .85f
+    val windowHeight = LocalWindowInfo.current.containerSize.height
+    val maximumHeight = with(LocalDensity.current) { windowHeight.toDp() * .85f }
     Dialog(onDismissRequest = onDismiss) {
         Column(Modifier.widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maximumHeight)
             .background(CompanionInk.surface, RoundedCornerShape(20.dp)).verticalScroll(rememberScrollState()).padding(20.dp),
@@ -157,6 +164,18 @@ internal fun MeloXConfirmation(title: String, message: String, confirm: String, 
             MeloXAction(stringResource(R.string.cancel), onDismiss)
         }
     }
+}
+
+@Composable
+internal fun companionPlural(@PluralsRes id: Int, count: Long, vararg formatArgs: Any): String {
+    // Chinese and English need only these quantity classes; formatting keeps the full Long.
+    val quantity = when (count) {
+        0L -> 0
+        1L -> 1
+        else -> 2
+    }
+    val arguments = if (formatArgs.isEmpty()) arrayOf<Any>(count) else formatArgs
+    return pluralStringResource(id, quantity, *arguments)
 }
 
 @Composable

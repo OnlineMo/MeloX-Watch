@@ -120,7 +120,7 @@ internal fun editPhaseName(phase: CompanionEditPhase): String = stringResource(w
 })
 
 @Composable
-internal fun receiptView(receipt: TransferReceipt) {
+internal fun ReceiptView(receipt: TransferReceipt) {
     MeloXText(stringResource(when (receipt.result) {
         TransferReceiptKind.AUDIO_COMMITTED -> R.string.receipt_audio
         TransferReceiptKind.THEME_PENDING_CONFIRMATION -> R.string.receipt_theme
