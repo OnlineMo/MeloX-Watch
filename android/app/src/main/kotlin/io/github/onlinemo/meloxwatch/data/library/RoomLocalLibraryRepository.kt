@@ -8,6 +8,7 @@ import androidx.sqlite.SQLiteException
 import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -716,6 +717,44 @@ class RoomLocalLibraryRepository(
         result
     }
 
+    /** The transfer owner queries only its exact lease inside this repository's real transaction. */
+    internal suspend fun <T> transferTransaction(view: LibraryViewToken? = null,
+        action: suspend (LibraryMetaEntity) -> T): T = access {
+        database.withPreservedTransaction {
+            if (view != null) {
+                if (view.owner != LibraryViewOwner.TRANSFER) fail(LibraryIssue.INVALID_INPUT)
+                checkView(view)
+            }
+            action(meta())
+        }
+    }
+
+    /** Called only by transferTransaction; it must not reacquire the library mutex. */
+    internal suspend fun openTransferViewUnlocked(query: LibraryQuery = LibraryQuery(),
+        sort: LibrarySort = LibrarySort()): LibraryViewToken {
+        if (!database.hasCurrentWriterTransaction()) fail(LibraryIssue.RECOVERY_REQUIRED)
+        val current = meta()
+        val draft = LibraryViewToken(id(), current.revision, current.rulesRevision, 0L, query, sort,
+            current.shortAudioFilter, LibraryViewOwner.TRANSFER, statisticsEpoch = current.statisticsEpoch)
+        return draft.copy(totalCount = dao.scalar(LibrarySql.count(draft))).also { storeView(it) }
+    }
+
+    /** Metadata retirement is bounded and idempotent; no unrelated user's view can be released. */
+    internal suspend fun closeTransferView(view: LibraryViewToken) = withContext(NonCancellable) {
+        access {
+            if (view.owner != LibraryViewOwner.TRANSFER) fail(LibraryIssue.INVALID_INPUT)
+            val held = liveViews[view.viewId]
+            if (held != null && held != view) fail(LibraryIssue.INVALID_INPUT)
+            database.withPreservedTransaction {
+                val row = dao.view(view.viewId)
+                if (row != null && (row.sessionId != sessionId || row.owner != LibraryViewOwner.TRANSFER.name ||
+                        row.fingerprint != fingerprint(view))) fail(LibraryIssue.INVALID_INPUT)
+                dao.deleteView(view.viewId)
+            }
+            liveViews.remove(view.viewId)
+        }
+    }
+
     /** Called only in the ledger transaction; it must never acquire the repository mutex again. */
     internal suspend fun commitOwnedCopyUnlocked(spec: LocalSourceSpec, grant: LocalGrantObservation,
         candidate: ObservedCandidate, metadata: LocalAudioMetadata): TrackKey {
@@ -743,15 +782,29 @@ class RoomLocalLibraryRepository(
     }
 
     private suspend fun ownedObservation(spec: LocalSourceSpec, observed: ObservedCandidate): ObservedCandidate {
-        val value = dao.ownedImport(spec.sourceId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
-        val record = value.model()
-        val original = value.ownedCandidate?.let(LibraryCodec::candidate) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
-        if (observed.objectId != record.intent.fileToken || observed.uri != spec.uri ||
-            (observed.sizeBytes != null && observed.sizeBytes != record.actualBytes) ||
+        val ordinary = dao.ownedImport(spec.sourceId)
+        val actualBytes: Long
+        val original: ObservedCandidate
+        if (ordinary != null) {
+            val record = ordinary.model()
+            actualBytes = record.actualBytes
+            original = ordinary.ownedCandidate?.let(LibraryCodec::candidate) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+            if (original.objectId != record.intent.fileToken || original.displayName != record.intent.candidate.displayName) fail(LibraryIssue.RECOVERY_REQUIRED)
+        } else {
+            val transferred = database.transferredImportDao().ownedTransferredImport(spec.sourceId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+            val record = transferred.transferModel()
+            actualBytes = record.actualBytes
+            original = transferred.ownedCandidate?.let(LibraryCodec::candidate) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+            if (transferred.ownedSpec?.let(LibraryCodec::source) != spec || original.objectId != record.selection.fileToken ||
+                original.displayName != record.selection.declaration.displayName) fail(LibraryIssue.RECOVERY_REQUIRED)
+        }
+        if (original.sizeBytes != actualBytes) fail(LibraryIssue.RECOVERY_REQUIRED)
+        if (observed.objectId != original.objectId || observed.uri != spec.uri ||
+            (observed.sizeBytes != null && observed.sizeBytes != actualBytes) ||
             (observed.providerContentToken != null && observed.providerContentToken != original.providerContentToken) ||
             (observed.entityProof != null && observed.entityProof != original.entityProof)) fail(LibraryIssue.SOURCE_CHANGED)
-        return observed.copy(displayName = record.intent.candidate.displayName, kind = LocalNodeKind.AUDIO,
-            mimeType = observed.mimeType ?: record.metadata?.mimeType,
+        return observed.copy(displayName = original.displayName, kind = LocalNodeKind.AUDIO,
+            mimeType = observed.mimeType ?: original.mimeType,
             providerContentToken = original.providerContentToken, entityProof = original.entityProof)
     }
 
@@ -836,7 +889,11 @@ class RoomLocalLibraryRepository(
         view.sortRuleVersion.toString(), view.statisticsEpoch.toString()))
     private suspend fun storeView(token: LibraryViewToken) {
         expireViews()
-        val cap = if (token.owner == LibraryViewOwner.UI) LibraryLimits.UI_VIEWS else LibraryLimits.QUEUE_VIEWS
+        val cap = when (token.owner) {
+            LibraryViewOwner.UI -> LibraryLimits.UI_VIEWS
+            LibraryViewOwner.QUEUE -> LibraryLimits.QUEUE_VIEWS
+            LibraryViewOwner.TRANSFER -> LibraryLimits.TRANSFER_VIEWS
+        }
         if (dao.views().count { it.owner == token.owner.name } >= cap) fail(LibraryIssue.BUSY)
         dao.insertView(LibraryViewEntity(token.viewId, sessionId, token.revision, token.totalCount, fingerprint(token), token.owner.name, expiry(), token.sortRuleVersion))
         liveViews[token.viewId] = token
@@ -867,7 +924,8 @@ class RoomLocalLibraryRepository(
     private suspend fun cleanVersions() {
         expireViews()
         for (clean in listOf<suspend () -> Int>(dao::cleanTrackVersions, dao::cleanAliasVersions, dao::cleanLocationVersions, dao::cleanNodeVersions,
-            dao::cleanRelations, dao::cleanRules, dao::cleanSourceVersions, dao::cleanGrants)) {
+            dao::cleanRelations, dao::cleanRules, dao::cleanSourceVersions, dao::cleanGrants,
+            database.displayDao()::cleanNames, database.displayDao()::cleanAlbums, database.displayDao()::cleanArtists)) {
             currentCoroutineContext().ensureActive()
             database.withPreservedTransaction { clean() }
         }

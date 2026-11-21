@@ -70,7 +70,7 @@ import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryViewModel
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistTrackControls
 import io.github.onlinemo.meloxwatch.ui.watch.WatchActionRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchContentRow
-import io.github.onlinemo.meloxwatch.ui.watch.WatchPalette
+import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchThemeColors
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -337,10 +337,10 @@ private fun TrackCard(track: LibraryTrack, path: ArtworkReadPath, enabled: Boole
         WatchContentRow(onClick = onClick, enabled = enabled) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (grid) {
-                    TrackArtwork(track, path, revision = artworkRevision)
+                    TrackArtwork(track, path, artworkRevision)
                     TrackLabel(track)
                 } else Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TrackArtwork(track, path, revision = artworkRevision)
+                    TrackArtwork(track, path, artworkRevision)
                     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) { TrackLabel(track) }
                 }
                 if (track.availability != LibraryAvailability.AVAILABLE) LibraryText(stringResource(availabilityText(track.availability)))
@@ -354,14 +354,14 @@ private fun TrackCard(track: LibraryTrack, path: ArtworkReadPath, enabled: Boole
 @Composable
 private fun TrackLabel(track: LibraryTrack) {
     Text(track.title, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = TextOverflow.Ellipsis)
-    Text(track.metadata.artist ?: stringResource(R.string.library_unknown_artist), style = MaterialTheme.typography.bodyMedium,
+    Text(track.displayArtist ?: stringResource(R.string.library_unknown_artist), style = MaterialTheme.typography.bodyMedium,
         maxLines = 2, overflow = TextOverflow.Ellipsis)
     LibraryText(track.metadata.durationMs?.let(::formatDuration) ?: stringResource(R.string.probe_unknown_duration))
 }
 
 @Composable
-internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, modifier: Modifier = Modifier,
-    revision: Long = 0L, size: Dp = 56.dp, visible: Boolean = true) {
+internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, revision: Long = 0L,
+    size: Dp = 56.dp, modifier: Modifier = Modifier, visible: Boolean = true) {
     val app = LocalContext.current.applicationContext as MeloXApplication
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var lease by remember(track.trackKey, track.location, path, revision) { mutableStateOf<ArtworkLease?>(null) }
@@ -381,7 +381,7 @@ internal fun TrackArtwork(track: LibraryTrack, path: ArtworkReadPath, modifier: 
         }
     }
     val description = stringResource(R.string.library_artwork, track.title)
-    Box(modifier.size(size).clip(RoundedCornerShape(10.dp)).background(WatchPalette.Raised)
+    Box(modifier.size(size).clip(RoundedCornerShape(10.dp)).background(LocalWatchThemeColors.current.raised)
         .semantics { contentDescription = description }, contentAlignment = Alignment.Center) {
         val image = lease?.bitmap
         if (image == null) Text("♪", style = MaterialTheme.typography.titleLarge)
@@ -395,8 +395,10 @@ private fun LazyListScope.detailContent(state: LibraryUiState, model: LibraryVie
     onAddToPlaylist: (LibraryViewToken, TrackKey?, String?) -> Unit) {
     val track = state.detail
     if (track == null) { item { LibraryText(stringResource(R.string.library_detail_missing)) }; return }
-    item(key = "library:detail-art") { TrackArtwork(track, state.preferences.artworkReadPath, revision = state.artworkRevision) }
+    item(key = "library:detail-art") { TrackArtwork(track, state.preferences.artworkReadPath, state.artworkRevision) }
     item { LibraryText(track.title, primary = true) }
+    item { LibraryText(stringResource(R.string.library_display_artist_value, track.displayArtist ?: stringResource(R.string.library_unknown_artist))) }
+    item { LibraryText(stringResource(R.string.library_display_album_value, track.displayAlbum ?: stringResource(R.string.library_unknown_album))) }
     item { LibraryText(stringResource(R.string.library_file_value, track.filename)) }
     item { LibraryText(stringResource(R.string.library_artist_value, track.metadata.artist ?: stringResource(R.string.library_unknown_artist))) }
     items(track.metadata.artists.withIndex().toList(), key = { "artist-value:${it.index}" }) { artist -> LibraryText(artist.value) }

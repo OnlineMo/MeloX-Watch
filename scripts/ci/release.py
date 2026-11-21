@@ -15,6 +15,7 @@ from ci_common import (ROOT, OWNER, OWNER_EMAIL, REPOSITORY, expected_identity, 
 from release_evidence import (candidate_identity, report_file, validate_approval,
                               validate_approval_history, verify_protections)
 from version_policy import validate_frozen_version
+from package_contract import native_abis
 
 
 def validate_release_target(manifest, history, tags):
@@ -91,14 +92,15 @@ def publish(run_id, attempt, artifact_id, approval):
     report_path = report_file(ROOT, readiness.get('device_report', ''), version, approval)
     report = json.loads(report_path.read_text(encoding='utf-8'))
     evidence = validate_approval(readiness, report, identity, approval)
-    confirmation = f'{run_id}/{attempt}/{artifact_id}:{identity["apk_sha256"]}'
-    require(os.environ.get('CANDIDATE_CONFIRMATION') == confirmation, 'Owner must confirm the exact accepted candidate and APK hash')
+    confirmation = f'{run_id}/{attempt}/{artifact_id}:{identity["package_set_sha256"]}'
+    require(os.environ.get('CANDIDATE_CONFIRMATION') == confirmation, 'Owner must confirm the exact accepted candidate package-set hash')
     tools = build_tools(properties(ROOT / '.ci/toolchain.properties'))
-    apk = directory / 'watch-release.apk'
-    require(sha256(apk) == identity['apk_sha256'], 'Accepted APK hash mismatch')
-    inspect_apk(apk, tools, expected_identity('release', manifest['version']))
     pin = json.loads((ROOT / '.ci/signing-certificates.json').read_text(encoding='utf-8'))['release']
-    require(certificate(apk, tools, pin) == identity['certificate_sha256'], 'Accepted certificate mismatch')
+    for entry in identity['packages']:
+        apk = directory / entry['file']
+        require(sha256(apk) == entry['sha256'] and native_abis(apk) == entry['abis'], 'Accepted package bytes or ABIs differ')
+        inspect_apk(apk, tools, expected_identity('release', manifest['version'], entry['role']))
+        require(certificate(apk, tools, pin) == entry['certificate_sha256'], 'Accepted package certificate mismatch')
     require(version != '0.1.0' or manifest['prerelease'] is True, '0.1.0 must remain a prerelease')
     tag = 'v' + version
     protection = verify_protections(client, approval, tag)
@@ -122,7 +124,7 @@ def publish(run_id, attempt, artifact_id, approval):
     verify_protections(client, approval, tag)
     with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
         summary.write(f'Published original candidate `{run_id}/{attempt}/{artifact_id}` as `{tag}` (Release {release_id}). '
-                      f'APK SHA-256: `{identity["apk_sha256"]}`. No compilation or signing was performed.\n')
+                      f'Watch/phone package-set SHA-256: `{identity["package_set_sha256"]}`. No compilation or signing was performed.\n')
 
 
 if __name__ == '__main__':

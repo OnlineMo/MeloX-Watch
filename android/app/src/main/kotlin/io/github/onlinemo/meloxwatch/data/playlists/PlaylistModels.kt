@@ -9,12 +9,13 @@ object PlaylistLimits {
     const val MAX_IDENTIFIER_CHARACTERS = 128
     const val UI_VIEWS = 3
     const val QUEUE_VIEWS = 1
+    const val TRANSFER_VIEWS = 4
     const val VIEW_LEASE_MS = 10 * 60 * 1000L
     const val FAVORITES_ID = "system:favorites"
 }
 
 enum class PlaylistKind { ORDINARY, FOLDER, FAVORITES }
-enum class PlaylistViewOwner { UI, QUEUE }
+enum class PlaylistViewOwner { UI, QUEUE, TRANSFER }
 enum class PlaylistReferenceIssue { UNMATCHED, REQUIRES_REASSOCIATION, NETWORK_REFERENCE }
 
 /** 提示文字不是授权或播放器资源；未匹配项不能伪造成已经存在的曲目。 */

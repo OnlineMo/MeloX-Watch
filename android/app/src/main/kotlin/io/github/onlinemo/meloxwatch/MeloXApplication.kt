@@ -3,11 +3,25 @@ package io.github.onlinemo.meloxwatch
 import android.app.Application
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.artwork.LocalArtworkRepository
+import io.github.onlinemo.meloxwatch.data.fonts.AndroidLyricsFontFiles
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettingsStore
+import io.github.onlinemo.meloxwatch.data.fonts.store.LyricsFontSettingsStoreFactory
 import io.github.onlinemo.meloxwatch.data.imports.LocalImportManager
+import io.github.onlinemo.meloxwatch.data.imports.AudioCopyQuota
+import io.github.onlinemo.meloxwatch.data.transfer.ImportedAudioTransferBackend
+import io.github.onlinemo.meloxwatch.data.transfer.LocalTransferContentValidator
+import io.github.onlinemo.meloxwatch.data.transfer.LocalTransferQuotaAccounting
+import io.github.onlinemo.meloxwatch.data.transfer.LocalTransferReceiver
+import io.github.onlinemo.meloxwatch.data.transfer.LocalTransferServer
+import io.github.onlinemo.meloxwatch.data.transfer.PlatformAudioTransferValidator
+import io.github.onlinemo.meloxwatch.data.transfer.RoomCompanionTransferBackend
+import io.github.onlinemo.meloxwatch.data.transfer.ThemeReceivingTransferBackend
+import io.github.onlinemo.meloxwatch.data.transfer.TransferUploadStore
 import io.github.onlinemo.meloxwatch.data.imports.ImportException
 import io.github.onlinemo.meloxwatch.data.imports.ImportIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
+import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.RoomImportLedger
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
 import io.github.onlinemo.meloxwatch.data.library.RoomFolderPlaylistController
@@ -20,6 +34,18 @@ import io.github.onlinemo.meloxwatch.data.listening.RoomListeningRepository
 import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
 import io.github.onlinemo.meloxwatch.data.local.LocalMetadataReader
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
+import io.github.onlinemo.meloxwatch.data.lyrics.active.LocalLyricsContext
+import io.github.onlinemo.meloxwatch.data.lyrics.active.LyricsDocumentCopies
+import io.github.onlinemo.meloxwatch.data.lyrics.active.LyricsDocuments
+import io.github.onlinemo.meloxwatch.data.lyrics.active.LyricsLoadAuthority
+import io.github.onlinemo.meloxwatch.data.lyrics.active.RoomLyricsContextResolver
+import io.github.onlinemo.meloxwatch.data.lyrics.active.SavedLyricsDocumentResolver
+import io.github.onlinemo.meloxwatch.data.lyrics.load.LocalLyricsLoader
+import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDisplayStore
+import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDisplayStoreFactory
+import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackStore
+import io.github.onlinemo.meloxwatch.data.lyrics.store.ReferenceGatedLyricsTrackStore
+import io.github.onlinemo.meloxwatch.data.lyrics.store.RoomLyricsTrackStore
 import io.github.onlinemo.meloxwatch.data.preferences.UserPreferencesRepository
 import io.github.onlinemo.meloxwatch.data.preferences.UserPreferencesRepositoryFactory
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
@@ -33,6 +59,18 @@ import io.github.onlinemo.meloxwatch.data.queue.RoomQueueStore
 import io.github.onlinemo.meloxwatch.data.scan.LocalScanEngine
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
+import io.github.onlinemo.meloxwatch.data.themes.AppearancePreferencesStore
+import io.github.onlinemo.meloxwatch.data.themes.AppearancePreferencesStoreFactory
+import io.github.onlinemo.meloxwatch.data.themes.AppliedThemeResources
+import io.github.onlinemo.meloxwatch.data.themes.LocalBackgroundImages
+import io.github.onlinemo.meloxwatch.data.themes.LocalThemeRepository
+import io.github.onlinemo.meloxwatch.data.themes.SharedFontThemeStorageBudget
+import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapOwner
+import io.github.onlinemo.meloxwatch.data.themes.ThemeTransferQuota
+import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeCoordinator
+import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontEditor
+import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontPresentationOwner
+import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontRuntime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -54,11 +92,42 @@ class MeloXApplication : Application() {
     val library by lazy { RoomLocalLibraryRepository(database) }
     val listening by lazy { RoomListeningRepository(library) }
     val localProviderIo by lazy { LocalProviderIo() }
+    private val themeBitmapOwner = lazy { ThemeBitmapOwner() }
+    val themeBitmaps get() = themeBitmapOwner.value
+    private val audioCopyQuota by lazy {
+        AudioCopyQuota(this, localProviderIo,
+            otherPendingBytes = { incomingThemeQuota.pendingBytesOnPhysicalWorker() },
+            otherTransferTickets = { incomingThemeQuota.ticketsOnPhysicalWorker() })
+    }
+    private val incomingThemeQuota by lazy {
+        ThemeTransferQuota(this, localProviderIo,
+            audioPendingBytes = { audioCopyQuota.pendingBytesOnPhysicalWorker() },
+            audioTickets = { audioCopyQuota.transferTicketsOnPhysicalWorker() })
+    }
+    private val fontThemeStorageBudget by lazy {
+        SharedFontThemeStorageBudget(this, localProviderIo, incomingThemeQuota) { audioCopyQuota.pendingBytesOnPhysicalWorker() }
+    }
+    private val appearanceStoreScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    private val appearanceStoreFactory by lazy { AppearancePreferencesStoreFactory() }
+    val appearancePreferences: AppearancePreferencesStore
+        get() = appearanceStoreFactory.get(this, appearanceStoreScope)
+    val themes by lazy { LocalThemeRepository(this, localProviderIo, fontThemeStorageBudget, themeBitmaps) }
+    val appliedThemeResources by lazy { AppliedThemeResources(this, localProviderIo, themeBitmaps) }
+    val playbackBackgrounds by lazy { LocalBackgroundImages(this, localProviderIo, themeBitmaps) }
+    val lyricsFontFiles by lazy { AndroidLyricsFontFiles(this, localProviderIo, fontThemeStorageBudget, themeBitmaps) }
+    val lyricsFontSettings: LyricsFontSettingsStore get() = LyricsFontSettingsStoreFactory.get(this)
+    val lyricsFontPresentationOwner by lazy { LyricsFontPresentationOwner() }
+    val lyricsFontEditor by lazy { LyricsFontEditor(lyricsFontSettings, lyricsFontFiles, lyricsFontPresentationOwner) }
+    val lyricsFontRuntime by lazy {
+        LyricsFontRuntime(lyricsFontSettings, lyricsFontFiles, themes, appliedThemeResources,
+            localProviderIo, lyricsFontPresentationOwner)
+    }
     private val playlistFences by lazy { RoomPlaylistFences(database) }
-    val playlists: LocalPlaylistRepository by lazy {
+    private val roomPlaylists by lazy {
         RoomPlaylistRepository(database, database.playlistDao(), folderFenceVerifier = playlistFences,
             libraryFenceVerifier = playlistFences)
     }
+    val playlists: LocalPlaylistRepository get() = roomPlaylists
     val playlistFolders by lazy { RoomFolderPlaylistController(database, playlists, library) }
     private val folderPlaylistMaintainer by lazy { RoomFolderPlaylistMaintainer(database, playlists, library) }
     private class FolderMaintenanceVisibility(val foreground: Boolean)
@@ -83,6 +152,27 @@ class MeloXApplication : Application() {
         catch (error: TimeoutCancellationException) { throw PlaylistException(PlaylistIssue.BUSY, error) }
     }
     val localSources by lazy { AndroidLocalSources(this, localProviderIo) }
+    val lyricsAuthority by lazy { LyricsLoadAuthority() }
+    val lyricsCopies by lazy { LyricsDocumentCopies(this, localProviderIo) }
+    val lyricsContexts by lazy { RoomLyricsContextResolver(database, library) }
+    private val rawLyricsTracks by lazy { RoomLyricsTrackStore(database, database.lyricsDao()) }
+    val lyricsTracks: LyricsTrackStore by lazy { ReferenceGatedLyricsTrackStore(rawLyricsTracks, lyricsCopies) }
+    val lyricsDocuments: LyricsDocuments by lazy {
+        SavedLyricsDocumentResolver(this, localSources, lyricsCopies, localSources::verifyObservedCandidate)
+    }
+    val lyricsLoader by lazy {
+        LocalLyricsLoader.android(this, localProviderIo, library, localSources, lyricsAuthority::isCurrent)
+    }
+    val lyricsDisplay: LyricsDisplayStore by lazy { LyricsDisplayStoreFactory.get(this) }
+
+    /** Registration and physical read proofs are separate checks, outside a Room writer. */
+    suspend fun validateLyricsContext(context: LocalLyricsContext): Boolean {
+        if (!lyricsContexts.isCurrent(context)) return false
+        val verified = localSources.validateRead(context.audio)
+        return verified.contentValidation == LocalContentValidation.VERIFIED &&
+            verified.copy(contentValidation = context.audio.contentValidation) == context.audio &&
+            lyricsContexts.isCurrent(context)
+    }
     val localMetadata by lazy { LocalMetadataReader(this, localProviderIo) }
     private val scansOwner = lazy {
         LocalScanEngine(localSources, localMetadata::read, library, localProviderIo,
@@ -90,9 +180,43 @@ class MeloXApplication : Application() {
             verifyMetadataCandidate = localSources::verifyMetadataCandidate)
     }
     val scans get() = scansOwner.value
-    val imports by lazy { LocalImportManager(this, localSources, localMetadata, RoomImportLedger(library), localProviderIo) }
+    val imports by lazy {
+        LocalImportManager(this, localSources, localMetadata, RoomImportLedger(library), localProviderIo, copyQuota = audioCopyQuota)
+    }
+    val transferredThemes by lazy { TransferredThemeCoordinator(database, themes, incomingThemeQuota) }
+    private val transferUploads by lazy {
+        TransferUploadStore(audioCopyQuota.transferDirectory, localProviderIo,
+            LocalTransferQuotaAccounting(audioCopyQuota, incomingThemeQuota),
+            LocalTransferContentValidator(PlatformAudioTransferValidator(), incomingThemeQuota))
+    }
+    private val transferBackend by lazy {
+        // 主题路由在最外层，历史状态查询也由真实主题文件/收据所有者核验。
+        ThemeReceivingTransferBackend(
+            RoomCompanionTransferBackend(database, library, roomPlaylists, ImportedAudioTransferBackend(imports)),
+            transferredThemes)
+    }
+    private val transferReceiverOwner = lazy {
+        LocalTransferReceiver(LocalTransferServer(transferUploads, transferBackend), localProviderIo,
+            prepare = ::prepareTransferReception, retireUploads = ::retireTransferUploads)
+    }
+    val transferReceiver get() = transferReceiverOwner.value
+
+    internal suspend fun prepareTransferReception() {
+        library.initialize()
+        playlists.initialize()
+        // 完整的已安装副本保留到原操作获新授权；pending 不能封死认证恢复入口。
+        // recoverTransferred 对未知、缺失或损坏的已安装对象仍拒绝，不自动发布。
+        imports.recoverTransferred()
+        transferUploads.retireAbandoned()
+        transferredThemes.load()
+    }
+
+    internal suspend fun retireTransferUploads() {
+        transferUploads.retireAbandoned()
+        transferUploads.awaitIdle()
+    }
     private val artworkOwner = lazy {
-        LocalArtworkRepository(this, localProviderIo, validateRead = localSources::validateRead)
+        LocalArtworkRepository(this, localProviderIo, validateRead = localSources::validateRead, bitmaps = themeBitmaps)
     }
     val artworks get() = artworkOwner.value
     private val recoveryLock = Mutex()
@@ -137,6 +261,7 @@ class MeloXApplication : Application() {
     }
 
     fun onUiBackground() {
+        if (transferReceiverOwner.isInitialized()) transferReceiver.close()
         folderMaintenanceForeground.value = FolderMaintenanceVisibility(false)
         if (scansOwner.isInitialized()) scans.onBackground()
     }
@@ -179,6 +304,6 @@ class MeloXApplication : Application() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (artworkOwner.isInitialized()) artworks.trimUnused()
+        if (themeBitmapOwner.isInitialized()) themeBitmaps.trimUnused()
     }
 }

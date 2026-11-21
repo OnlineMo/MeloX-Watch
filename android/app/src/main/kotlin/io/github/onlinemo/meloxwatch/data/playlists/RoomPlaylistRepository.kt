@@ -26,7 +26,7 @@ import kotlinx.coroutines.withContext
  * 名称元数据与成员代次分开；改名不复制大歌单，回收保留仍被head/header/view引用的成员。
  */
 class RoomPlaylistRepository(
-    private val database: RoomDatabase,
+    internal val database: RoomDatabase,
     private val dao: PlaylistDao,
     private val elapsedMs: () -> Long = SystemClock::elapsedRealtime,
     private val epochMs: () -> Long = System::currentTimeMillis,
@@ -85,11 +85,19 @@ class RoomPlaylistRepository(
     override fun observeFavorite(trackKey: TrackKey): Flow<Boolean> =
         dao.observeFavoriteContains(PlaylistReference(trackKey = trackKey).identityKey())
 
-    override suspend fun apply(request: PlaylistMutationRequest, source: PlaylistPageSource?): PlaylistCommit = storage {
+    override suspend fun apply(request: PlaylistMutationRequest, source: PlaylistPageSource?): PlaylistCommit =
+        applyInternal(request, source, participant = null)
+
+    internal suspend fun applyAuthorized(request: PlaylistMutationRequest, source: PlaylistPageSource?,
+        participant: PlaylistCommitParticipant): PlaylistCommit = applyInternal(request, source, participant)
+
+    private suspend fun applyInternal(request: PlaylistMutationRequest, source: PlaylistPageSource?,
+        participant: PlaylistCommitParticipant?): PlaylistCommit = storage {
         mutate {
+            checkStagingActive(participant)
             require(request.operationId != INITIAL_OPERATION)
             val fingerprint = request.fingerprint()
-            database.withPreservedTransaction { replay(request, fingerprint) }?.let { return@mutate it }
+            database.withPreservedTransaction { replay(request, fingerprint, participant) }?.let { return@mutate it }
             validateSource(request, source)
             database.withPreservedTransaction {
                 requireMeta()
@@ -98,9 +106,9 @@ class RoomPlaylistRepository(
             reclaimBatch()
             val plan = database.withPreservedTransaction { plan(request) }
             if (plan.unchanged) return@mutate acceptUnchanged(request, fingerprint, checkNotNull(plan.old),
-                result = unchangedResult(request.mutation))
+                result = unchangedResult(request.mutation), participant = participant)
             if (request.mutation is PlaylistMutation.Delete) {
-                return@mutate acceptDelete(request, fingerprint, checkNotNull(plan.old))
+                return@mutate acceptDelete(request, fingerprint, checkNotNull(plan.old), participant)
             }
 
             var stagingId: String? = null
@@ -110,26 +118,27 @@ class RoomPlaylistRepository(
             try {
                 val staged = generation(request, plan, fingerprint)
                 stagingId = staged.generationId
-                currentCoroutineContext().ensureActive()
+                checkStagingActive(participant)
                 database.withPreservedTransaction { dao.insertGeneration(staged) }
                 val counts = if (plan.shareData) BuildCounts(checkNotNull(plan.old).memberCount, 0L, 0L)
                 else if (request.mutation is PlaylistMutation.SynchronizeFolder) {
                     val incoming = generation(request, plan, fingerprint)
                     incomingId = incoming.generationId
                     database.withPreservedTransaction { dao.insertGeneration(incoming) }
-                    buildSynchronizedMembers(staged, incoming, plan, checkNotNull(source))
+                    buildSynchronizedMembers(staged, incoming, plan, checkNotNull(source), participant)
                 }
-                else buildMembers(staged, plan, source)
+                else buildMembers(staged, plan, source, participant)
                 if (request.mutation is PlaylistMutation.Add && counts.added == 0L) {
-                    return@mutate acceptUnchanged(request, fingerprint, checkNotNull(plan.old), counts.duplicates)
+                    return@mutate acceptUnchanged(request, fingerprint, checkNotNull(plan.old), counts.duplicates,
+                        participant = participant)
                 }
                 if (request.mutation is PlaylistMutation.SynchronizeFolder && counts.added == 0L && counts.removed == 0L) {
                     return@mutate acceptUnchanged(request, fingerprint, checkNotNull(plan.old), counts.duplicates,
-                        PlaylistOperationResult.SYNCHRONIZED)
+                        PlaylistOperationResult.SYNCHRONIZED, participant)
                 }
-                seal(staged, counts.count, plan.shareData)
-                currentCoroutineContext().ensureActive()
-                acceptGeneration(request, fingerprint, staged, plan, counts) { accepted = true }
+                seal(staged, counts.count, plan.shareData, participant)
+                checkStagingActive(participant)
+                acceptGeneration(request, fingerprint, staged, plan, counts, participant) { accepted = true }
             } catch (error: Throwable) {
                 failure = error
                 throw error
@@ -155,13 +164,15 @@ class RoomPlaylistRepository(
         }
     }
 
-    override suspend fun openCatalogView(): PlaylistCatalogView = storage {
+    override suspend fun openCatalogView(): PlaylistCatalogView = openCatalogView(PlaylistViewOwner.UI)
+
+    internal suspend fun openCatalogView(owner: PlaylistViewOwner): PlaylistCatalogView = storage {
         database.withPreservedTransaction {
             val meta = requireMeta()
-            reserveView(PlaylistViewOwner.UI)
+            reserveView(owner)
             val count = dao.catalogCount(meta.revision)
             val row = PlaylistViewEntity(UUID.randomUUID().toString(), "CATALOG", null, meta.revision, count,
-                PlaylistViewOwner.UI.name, expiresElapsedMs(), processId)
+                owner.name, expiresElapsedMs(), processId)
             dao.insertView(row)
             PlaylistCatalogView(row.viewId, row.revision, row.totalCount)
         }
@@ -375,28 +386,29 @@ class RoomPlaylistRepository(
         staged: PlaylistGenerationEntity,
         plan: PlaylistMutationPlan,
         source: PlaylistPageSource?,
+        participant: PlaylistCommitParticipant?,
     ): BuildCounts {
         val old = plan.old
         val appending = old != null && plan.input != null && !plan.replaceMembers
         if (old != null) requireDataOwner(old)
         // 先完整验证新增输入；全重复添加不用复制原歌单或产生新可见版本。
         var count = if (appending) checkNotNull(old).memberCount
-        else if (old != null && !plan.replaceMembers) copyMembers(staged, plan, old) else 0L
+        else if (old != null && !plan.replaceMembers) copyMembers(staged, plan, old, participant) else 0L
         var added = 0L
         var duplicates = 0L
         val input = plan.input
         if (input != null) {
             val inputCounts = stageInput(staged.generationId, input, checkNotNull(source), count,
                 if (appending) checkNotNull(old).dataGenerationId else null,
-                localOnly = plan.folderSynchronization != null)
+                localOnly = plan.folderSynchronization != null, participant = participant)
             count = inputCounts.count
             added = inputCounts.added
             duplicates = inputCounts.duplicates
         }
-        if (appending && added > 0L) copyMembers(staged, plan, checkNotNull(old))
+        if (appending && added > 0L) copyMembers(staged, plan, checkNotNull(old), participant)
         val favorite = plan.appendFavorite
         if (favorite != null) {
-            insertBatch(listOf(favorite.record(staged.generationId, UUID.randomUUID().toString(), count)))
+            insertBatch(listOf(favorite.record(staged.generationId, UUID.randomUUID().toString(), count)), participant)
             count = increment(count)
             added += 1L
         }
@@ -410,16 +422,17 @@ class RoomPlaylistRepository(
         incoming: PlaylistGenerationEntity,
         plan: PlaylistMutationPlan,
         source: PlaylistPageSource,
+        participant: PlaylistCommitParticipant?,
     ): BuildCounts {
         val old = checkNotNull(plan.old)
         requireDataOwner(old)
         val input = checkNotNull(plan.input)
-        val inputCounts = stageInput(incoming.generationId, input, source, 0L, localOnly = true)
-        seal(incoming, inputCounts.count, shareData = false)
+        val inputCounts = stageInput(incoming.generationId, input, source, 0L, localOnly = true, participant = participant)
+        seal(incoming, inputCounts.count, shareData = false, participant = participant)
         var first = 0L
         var retained = 0L
         while (first < old.memberCount) {
-            currentCoroutineContext().ensureActive()
+            checkStagingActive(participant)
             val limit = minOf(PlaylistLimits.PAGE_SIZE.toLong(), old.memberCount - first).toInt()
             val page = dao.membersPage(old.dataGenerationId, first, limit)
             requireCompletePage(page, first, limit)
@@ -432,14 +445,14 @@ class RoomPlaylistRepository(
                     retained = increment(retained)
                 }
             }
-            insertBatch(kept)
+            insertBatch(kept, participant)
             first += page.size
         }
         first = 0L
         var count = retained
         var added = 0L
         while (first < inputCounts.count) {
-            currentCoroutineContext().ensureActive()
+            checkStagingActive(participant)
             val limit = minOf(PlaylistLimits.PAGE_SIZE.toLong(), inputCounts.count - first).toInt()
             val page = dao.membersPage(incoming.generationId, first, limit)
             requireCompletePage(page, first, limit)
@@ -453,7 +466,7 @@ class RoomPlaylistRepository(
                     added = increment(added)
                 }
             }
-            insertBatch(appended)
+            insertBatch(appended, participant)
             first += page.size
         }
         return BuildCounts(count, added, inputCounts.duplicates, old.memberCount - retained)
@@ -466,16 +479,17 @@ class RoomPlaylistRepository(
         firstOrdinal: Long,
         existingGenerationId: String? = null,
         localOnly: Boolean = false,
+        participant: PlaylistCommitParticipant?,
     ): BuildCounts {
         var offset = 0L
         var count = firstOrdinal
         var added = 0L
         var duplicates = 0L
         do {
-            currentCoroutineContext().ensureActive()
+            checkStagingActive(participant)
             val expected = minOf(PlaylistLimits.PAGE_SIZE.toLong(), input.totalCount - offset).toInt()
             val page = readInput(source, offset, maxOf(1, expected))
-            currentCoroutineContext().ensureActive()
+            checkStagingActive(participant)
             if (page.view != input || page.offset != offset) throw PlaylistException(PlaylistIssue.SOURCE_CHANGED)
             if (page.references.size != expected || page.endReached != (offset + expected == input.totalCount)) {
                 throw PlaylistException(PlaylistIssue.INCOMPLETE)
@@ -496,7 +510,7 @@ class RoomPlaylistRepository(
                     added = increment(added)
                 }
             }
-            insertBatch(members)
+            insertBatch(members, participant)
             offset += references.size
         } while (offset < input.totalCount)
         return BuildCounts(count, added, duplicates)
@@ -506,11 +520,12 @@ class RoomPlaylistRepository(
         staged: PlaylistGenerationEntity,
         plan: PlaylistMutationPlan,
         old: PlaylistGenerationEntity,
+        participant: PlaylistCommitParticipant?,
     ): Long {
         var first = 0L
         var count = 0L
         while (first < old.memberCount) {
-            currentCoroutineContext().ensureActive()
+            checkStagingActive(participant)
             val limit = minOf(PlaylistLimits.PAGE_SIZE.toLong(), old.memberCount - first).toInt()
             val page = dao.membersPage(old.dataGenerationId, first, limit)
             requireCompletePage(page, first, limit)
@@ -521,7 +536,7 @@ class RoomPlaylistRepository(
                     checkNotNull(plan.replacementReference).record(staged.generationId, member.memberId, ordinal)
                 } else member.copy(generationId = staged.generationId, ordinal = ordinal)
             }
-            insertBatch(kept)
+            insertBatch(kept, participant)
             count += kept.size
             first += page.size
         }
@@ -542,14 +557,15 @@ class RoomPlaylistRepository(
         }
     }
 
-    private suspend fun insertBatch(members: List<PlaylistMemberEntity>) {
+    private suspend fun insertBatch(members: List<PlaylistMemberEntity>, participant: PlaylistCommitParticipant?) {
         require(members.size <= PlaylistLimits.PAGE_SIZE)
-        currentCoroutineContext().ensureActive()
+        checkStagingActive(participant)
         if (members.isNotEmpty()) database.withPreservedTransaction { dao.insertMembers(members) }
     }
 
-    private suspend fun seal(generation: PlaylistGenerationEntity, count: Long, shareData: Boolean) {
-        currentCoroutineContext().ensureActive()
+    private suspend fun seal(generation: PlaylistGenerationEntity, count: Long, shareData: Boolean,
+        participant: PlaylistCommitParticipant?) {
+        checkStagingActive(participant)
         database.withPreservedTransaction {
             if (shareData) requireDataOwner(generation) else {
                 val order = dao.orderSummary(generation.generationId)
@@ -568,10 +584,11 @@ class RoomPlaylistRepository(
         staged: PlaylistGenerationEntity,
         plan: PlaylistMutationPlan,
         counts: BuildCounts,
+        participant: PlaylistCommitParticipant?,
         onAccepted: () -> Unit,
     ): PlaylistCommit = withContext(NonCancellable) {
         val commit = database.withPreservedTransaction {
-            replay(request, fingerprint)?.let { return@withPreservedTransaction it }
+            replay(request, fingerprint, participant)?.let { return@withPreservedTransaction it }
             verifyExpectedHead(request, plan.old)
             verifyTransactionFences(request)
             if (dao.generation(staged.generationId) != staged.copy(state = "SEALED", memberCount = counts.count)) {
@@ -580,6 +597,7 @@ class RoomPlaylistRepository(
             val meta = requireMeta()
             val nextGlobal = increment(meta.revision)
             val old = plan.old
+            participant?.claimCommit()
             if (dao.publish(staged.generationId, nextGlobal) != 1) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
             if (old == null) {
                 dao.insertHead(PlaylistHeadEntity(request.playlistId, staged.generationId, staged.revision, meta.nextPlaylistSequence))
@@ -598,7 +616,9 @@ class RoomPlaylistRepository(
             val receipt = PlaylistReceiptEntity(request.operationId, request.playlistId, fingerprint, staged.revision,
                 plan.result.name, counts.added, counts.removed, counts.duplicates, sameName)
             dao.insertReceipt(receipt)
-            receipt.model(currentSnapshot(request.playlistId), wasReplay = false)
+            receipt.model(currentSnapshot(request.playlistId), wasReplay = false).also {
+                participant?.recordCommit(it)
+            }
         }
         // 事务返回才代表提交成功；历史receipt重放不能认领本次staging。
         if (!commit.wasReplay) onAccepted()
@@ -611,19 +631,21 @@ class RoomPlaylistRepository(
         old: PlaylistGenerationEntity,
         duplicateCount: Long = 0L,
         result: PlaylistOperationResult = PlaylistOperationResult.UNCHANGED,
+        participant: PlaylistCommitParticipant? = null,
     ): PlaylistCommit {
         currentCoroutineContext().ensureActive()
         return withContext(NonCancellable) {
             database.withPreservedTransaction {
-                replay(request, fingerprint)?.let { return@withPreservedTransaction it }
+                replay(request, fingerprint, participant)?.let { return@withPreservedTransaction it }
                 verifyExpectedHead(request, old)
                 verifyTransactionFences(request)
                 val head = requireHead(request.playlistId)
                 val current = requireCurrent(head)
                 val receipt = PlaylistReceiptEntity(request.operationId, request.playlistId, fingerprint, head.revision,
                     result.name, 0L, 0L, duplicateCount, dao.sameNameCount(current.nameKey, request.playlistId))
+                participant?.claimCommit()
                 dao.insertReceipt(receipt)
-                receipt.model(current.model(), wasReplay = false)
+                receipt.model(current.model(), wasReplay = false).also { participant?.recordCommit(it) }
             }
         }
     }
@@ -632,16 +654,18 @@ class RoomPlaylistRepository(
         request: PlaylistMutationRequest,
         fingerprint: String,
         old: PlaylistGenerationEntity,
+        participant: PlaylistCommitParticipant?,
     ): PlaylistCommit {
         currentCoroutineContext().ensureActive()
         return withContext(NonCancellable) {
             database.withPreservedTransaction {
-                replay(request, fingerprint)?.let { return@withPreservedTransaction it }
+                replay(request, fingerprint, participant)?.let { return@withPreservedTransaction it }
                 verifyExpectedHead(request, old)
                 verifyTransactionFences(request)
                 val meta = requireMeta()
                 val nextGlobal = increment(meta.revision)
                 val nextList = increment(old.revision)
+                participant?.claimCommit()
                 if (dao.closeGeneration(old.generationId, nextGlobal - 1L) != 1) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
                 if (dao.publishHead(request.playlistId, old.revision, old.generationId, null, nextList, deleted = true) != 1) {
                     throw PlaylistException(PlaylistIssue.CONFLICT)
@@ -650,17 +674,18 @@ class RoomPlaylistRepository(
                 val receipt = PlaylistReceiptEntity(request.operationId, request.playlistId, fingerprint, nextList,
                     PlaylistOperationResult.DELETED.name, 0L, old.memberCount, 0L, 0L)
                 dao.insertReceipt(receipt)
-                receipt.model(null, wasReplay = false)
+                receipt.model(null, wasReplay = false).also { participant?.recordCommit(it) }
             }
         }
     }
 
-    private suspend fun replay(request: PlaylistMutationRequest, fingerprint: String): PlaylistCommit? {
+    private suspend fun replay(request: PlaylistMutationRequest, fingerprint: String,
+        participant: PlaylistCommitParticipant?): PlaylistCommit? {
         val receipt = dao.receipt(request.operationId) ?: return null
         if (receipt.playlistId != request.playlistId || receipt.fingerprint != fingerprint) {
             throw PlaylistException(PlaylistIssue.INVALID_INPUT)
         }
-        return receipt.model(currentSnapshot(receipt.playlistId), wasReplay = true)
+        return receipt.model(currentSnapshot(receipt.playlistId), wasReplay = true).also { participant?.verifyReplay(it) }
     }
 
     private suspend fun verifyExpectedHead(request: PlaylistMutationRequest, old: PlaylistGenerationEntity?) {
@@ -741,7 +766,11 @@ class RoomPlaylistRepository(
 
     private suspend fun reserveView(owner: PlaylistViewOwner) {
         dao.expireViews(processId, elapsedMs())
-        val limit = if (owner == PlaylistViewOwner.UI) PlaylistLimits.UI_VIEWS else PlaylistLimits.QUEUE_VIEWS
+        val limit = when (owner) {
+            PlaylistViewOwner.UI -> PlaylistLimits.UI_VIEWS
+            PlaylistViewOwner.QUEUE -> PlaylistLimits.QUEUE_VIEWS
+            PlaylistViewOwner.TRANSFER -> PlaylistLimits.TRANSFER_VIEWS
+        }
         if (dao.viewCount(owner.name) >= limit) throw PlaylistException(PlaylistIssue.BUSY)
     }
 
@@ -802,6 +831,11 @@ class RoomPlaylistRepository(
         } finally {
             actions.unlock()
         }
+    }
+
+    private suspend fun checkStagingActive(participant: PlaylistCommitParticipant?) {
+        currentCoroutineContext().ensureActive()
+        participant?.checkActive()
     }
 
     private suspend fun <T> storage(block: suspend () -> T): T = withContext(Dispatchers.IO) {

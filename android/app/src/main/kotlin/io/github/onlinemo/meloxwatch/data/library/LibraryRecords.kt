@@ -195,8 +195,8 @@ internal fun LibraryRowRecord.reference(): LocalLocationReference? {
 
 internal fun LibraryRowRecord.model() = LibraryTrack(TrackKey(track.providerId, track.trackId), track.displayTitle, track.filename,
     track.metadata(), LibraryAvailability.entries.getOrNull(availabilityRank) ?: throw LibraryException(LibraryIssue.RECOVERY_REQUIRED),
-    track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, track.albumKey, reference(), selectedSourceId,
-    selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs)
+    track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, displayAlbumKey, reference(), selectedSourceId,
+    selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs, displayArtist, displayAlbum)
 
 internal fun LibraryRowRecord.cursor(view: LibraryViewToken) = LibraryCursor(view.viewId, view.revision, view.sortRuleVersion,
     missingRank, nullRank, sortKey, track.providerId, track.trackId)

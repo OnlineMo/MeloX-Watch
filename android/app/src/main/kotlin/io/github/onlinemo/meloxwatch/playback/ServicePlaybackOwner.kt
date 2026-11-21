@@ -2,9 +2,11 @@ package io.github.onlinemo.meloxwatch.playback
 
 import android.content.Context
 import android.os.Bundle
+import android.os.Handler
 import android.os.Looper
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
@@ -12,7 +14,6 @@ import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.ContentDataSource
 import androidx.media3.datasource.DataSource
-import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
@@ -20,6 +21,16 @@ import io.github.onlinemo.meloxwatch.data.preferences.UserPreferencesRepository
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
 import io.github.onlinemo.meloxwatch.model.UserPreferences
+import io.github.onlinemo.meloxwatch.playback.route.AndroidMusicVolume
+import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeResult
+import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeSetRequest
+import io.github.onlinemo.meloxwatch.playback.route.MusicVolumePort
+import io.github.onlinemo.meloxwatch.playback.route.PlaybackAudioRoute
+import io.github.onlinemo.meloxwatch.playback.route.PlaybackRouteSessionState
+import io.github.onlinemo.meloxwatch.playback.route.RoutingRenderersFactory
+import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolume
+import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
+import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,7 +47,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Backend creation is service-owned. A switch never holds the old player as a rollback instance. */
+/**
+ * 服务在主线程创建并持有唯一后端，每个内核 lease 绑定一份实际路由观察者。
+ *
+ * 切换先释放旧实例和观察者，再重建目标或回退后端；对外状态不携带原生对象或设备身份。
+ */
 @UnstableApi
 internal class ServicePlaybackOwner(
     context: Context,
@@ -46,6 +61,7 @@ internal class ServicePlaybackOwner(
     ensureForeground: () -> Boolean,
     private val onFailure: (PlaybackBackendIssue) -> Unit,
     private val releaseGuard: PlaybackEngineReleaseGuard = PlaybackEngineReleaseGuard.process,
+    musicVolumePort: MusicVolumePort = AndroidMusicVolume(context.applicationContext),
 ) {
     private class Backend(
         val kind: PlaybackBackendKind,
@@ -53,6 +69,7 @@ internal class ServicePlaybackOwner(
         val operations: PlaybackBackendOperations,
         val releaseGuard: PlaybackEngineReleaseGuard,
         val releaseLease: PlaybackEngineReleaseGuard.Lease,
+        val route: PlaybackAudioRoute,
         val media3: Media3PlaybackOperations? = null,
         val system: SystemMediaPlayerAdapter? = null,
     ) {
@@ -60,14 +77,22 @@ internal class ServicePlaybackOwner(
             closeOperations = { media3?.close() },
             releasePlayer = { if (system != null) system.releaseOwnedPlayer() else player.release() })
 
-        fun releaseLater() = release.start()
+        fun releaseLater() = run {
+            route.close()
+            release.start()
+        }
 
-        suspend fun releaseAndAwait() = withContext(NonCancellable) { release.start().await() }
+        suspend fun releaseAndAwait() = withContext(NonCancellable) { releaseLater().await() }
     }
 
     private val applicationContext = context.applicationContext.also { checkMain() }
+    private val routeHandler = Handler(Looper.getMainLooper())
+    private val routeExecutor = Executor { command -> routeHandler.post(command) }
     private val _state = MutableStateFlow(PlaybackBackendState())
     val state = _state.asStateFlow()
+    private val _routeState = MutableStateFlow(PlaybackRouteSessionState())
+    val routeState = _routeState.asStateFlow()
+    private val mediaVolume = ServiceMediaVolume(musicVolumePort, ::readCurrentRoute)
     private var quarantined: Backend? = null
     private val pausedBackend = QuarantinedPlaybackBackend(releaseGuard)
     private var active: Backend? = createInitialBackend()
@@ -127,7 +152,28 @@ internal class ServicePlaybackOwner(
     fun sessionExtras(): Bundle {
         checkMain()
         val queues = checkNotNull(coordinator)
-        return _state.value.copy(generation = queues.sessionBackendGeneration()).toSessionExtras()
+        return _state.value.copy(generation = queues.sessionBackendGeneration()).toSessionExtras().apply {
+            putAll(currentRouteSessionState().toSessionExtras())
+        }
+    }
+
+    /** 主线程新读当前路由、媒体流约束和读回路由；关闭后不再访问平台。 */
+    fun readMediaVolume(): MediaVolumeResult {
+        checkMain()
+        return if (closed) unavailableMediaVolume() else mediaVolume.read()
+    }
+
+    /** 主线程绝对值绑定请求快照；平台调用中路由仍可能变化，writeAttempted 不表示可回滚已写音量。 */
+    fun setMediaVolume(request: MediaVolumeSetRequest): MediaVolumeResult {
+        checkMain()
+        return if (closed) unavailableMediaVolume() else mediaVolume.setAbsolute(request)
+    }
+
+    /** 主线程按本次新读媒体流增减一格；暂停或路由未知时也不触发播放。 */
+    fun adjustMediaVolume(delta: Int): MediaVolumeResult {
+        checkMain()
+        require(delta == -1 || delta == 1)
+        return if (closed) unavailableMediaVolume() else mediaVolume.adjust(delta)
     }
 
     suspend fun initializePreferences() {
@@ -154,15 +200,21 @@ internal class ServicePlaybackOwner(
         val accepted = focus.requestPlay()
         if (accepted) _state.value = _state.value.copy(issue =
             if (active?.kind == currentPreferences.playbackBackend) null else PlaybackBackendIssue.SWITCH_FAILED)
+        active?.let(::updateRouteGate)
         return accepted
     }
 
-    fun userPause() = focus.userPause()
+    fun userPause() {
+        checkMain()
+        active?.route?.setPlaybackActive(false)
+        refreshRouteState()
+        focus.userPause()
+    }
 
     fun userIntentChanged() = focus.cancelResumeIntent()
 
     fun foregroundDenied() {
-        focus.userPause()
+        userPause()
         coordinator?.pauseForInterruption()
         report(PlaybackBackendIssue.FOREGROUND_DENIED)
     }
@@ -197,6 +249,9 @@ internal class ServicePlaybackOwner(
                 if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
             }
         }
+        attempt { previous?.route?.close() }
+        if (retained !== previous) attempt { retained?.route?.close() }
+        refreshRouteState()
         attempt(focus::close)
         attempt { previous?.player?.pause() }
         attempt(::unbindObserver)
@@ -271,7 +326,9 @@ internal class ServicePlaybackOwner(
         var unbound = false
         val previous = active
         val entryId = queues.state.value.snapshot?.currentEntryId
+        previous?.route?.setPlaybackActive(false)
         _state.value = _state.value.copy(switching = true, issue = null)
+        refreshRouteState()
         try {
             val frozen = queues.freezeForBackendSwitch()
             checkpoint = frozen
@@ -287,7 +344,10 @@ internal class ServicePlaybackOwner(
             _state.value = _state.value.copy(actualBackend = null, gaplessAvailable = false,
                 generation = _state.value.generation + 1L)
             try { previous?.releaseAndAwait() }
-            catch (error: Exception) { quarantined = previous; throw error }
+            catch (error: Exception) {
+                quarantined = previous
+                throw error
+            }
             currentCoroutineContext().ensureActive()
             if (closed) throw CancellationException("Playback service closed")
             val replacement = createBackend(saved.playbackBackend, saved.playbackSpeedTenths)
@@ -340,7 +400,10 @@ internal class ServicePlaybackOwner(
                     }
                     // A successful restore has consumed the token. Notification failure must
                     // propagate without sending that token through a second cleanup attempt.
-                    if (restored) { report(PlaybackBackendIssue.SWITCH_FAILED); return }
+                    if (restored) {
+                        report(PlaybackBackendIssue.SWITCH_FAILED)
+                        return
+                    }
                     if (!closed) report(PlaybackBackendIssue.SWITCH_FAILED)
                 } else {
                     withContext(NonCancellable + Dispatchers.Main.immediate) {
@@ -393,13 +456,27 @@ internal class ServicePlaybackOwner(
             }
             override fun onPlayerError(error: PlaybackException) {
                 if (isCurrent(backend, generation)) {
+                    backend.route.setPlaybackActive(false)
+                    refreshRouteState()
                     focus.userPause()
                     report(PlaybackBackendIssue.SOURCE_UNAVAILABLE)
                 }
             }
+
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (!isCurrent(backend, generation)) return
+                // 自然换曲可以不经过服务命令；复用原生轨道时仍需新来源票据隔离其排队监听回调。
+                if (backend.media3 != null) backend.route.sourceChanged(keepSource = true)
+                updateRouteGate(backend)
+            }
+
+            override fun onEvents(player: Player, events: Player.Events) {
+                if (isCurrent(backend, generation)) updateRouteGate(backend)
+            }
         }
         observer = listener
         backend.player.addListener(listener)
+        updateRouteGate(backend)
         backend.system?.let { platform ->
             speedObserver = scope.launch(Dispatchers.Main.immediate) {
                 platform.speedState.collect { speed ->
@@ -420,6 +497,38 @@ internal class ServicePlaybackOwner(
 
     private fun isCurrent(backend: Backend, generation: Long): Boolean = !closed && active === backend && _state.value.generation == generation
 
+    private fun updateRouteGate(backend: Backend) {
+        val playing = try { backend.player.isPlaying && backend.player.playerError == null }
+        catch (_: RuntimeException) { false }
+        backend.route.setPlaybackActive(active === backend && hasUsableBackend && playing)
+        refreshRouteState()
+    }
+
+    private fun readCurrentRoute(): PlaybackRouteSessionState {
+        checkMain()
+        val backend = active
+        if (backend == null || !hasUsableBackend) {
+            backend?.route?.setPlaybackActive(false)
+            refreshRouteState()
+            return PlaybackRouteSessionState()
+        }
+        updateRouteGate(backend)
+        val fresh = backend.route.read()
+        val current = if (active === backend && hasUsableBackend) fresh else PlaybackRouteSessionState()
+        _routeState.value = current
+        return current
+    }
+
+    private fun currentRouteSessionState(): PlaybackRouteSessionState =
+        if (hasUsableBackend) active?.route?.cachedState() ?: PlaybackRouteSessionState() else PlaybackRouteSessionState()
+
+    private fun refreshRouteState() {
+        checkMain()
+        _routeState.value = currentRouteSessionState()
+    }
+
+    private fun unavailableMediaVolume() = MediaVolumeResult(null, ServiceMediaVolumeIssue.UNAVAILABLE)
+
     private fun blockedByPriorRelease(): Boolean = releaseGuard.hasUnconfirmedRelease() || active == null && releaseGuard.blocksCreation()
 
     private fun createInitialBackend(): Backend? = try {
@@ -432,9 +541,11 @@ internal class ServicePlaybackOwner(
 
     private fun createBackend(kind: PlaybackBackendKind, speedTenths: Int): Backend {
         val lease = releaseGuard.acquire()
+        val route = PlaybackAudioRoute(lease, releaseGuard, routeExecutor, ::refreshRouteState)
         return try {
-            createLeasedBackend(kind, speedTenths, lease)
+            createLeasedBackend(kind, speedTenths, lease, route)
         } catch (error: Exception) {
+            route.close()
             // If allocation failed before an owned instance could be released, its resources are
             // unknown. A configuration failure with confirmed cleanup has already cleared lease.
             if (releaseGuard.isRetained(lease) && !releaseGuard.releaseStarted(lease)) releaseGuard.quarantine(lease)
@@ -442,25 +553,36 @@ internal class ServicePlaybackOwner(
         }
     }
 
-    private fun createLeasedBackend(kind: PlaybackBackendKind, speedTenths: Int, lease: PlaybackEngineReleaseGuard.Lease): Backend = when (kind) {
+    private fun createLeasedBackend(
+        kind: PlaybackBackendKind,
+        speedTenths: Int,
+        lease: PlaybackEngineReleaseGuard.Lease,
+        route: PlaybackAudioRoute,
+    ): Backend = when (kind) {
         PlaybackBackendKind.SYSTEM_MEDIA_PLAYER -> {
-            val platform = SystemMediaPlayerAdapter(applicationContext, localIo, scope, speedTenths)
-            val backend = Backend(kind, platform, platform, releaseGuard, lease, system = platform)
-            try { platform.initializePlatform(); backend }
-            catch (error: Exception) {
+            val platform = SystemMediaPlayerAdapter(applicationContext, localIo, scope, route, speedTenths)
+            val backend = Backend(kind, platform, platform, releaseGuard, lease, route, system = platform)
+            try {
+                platform.initializePlatform()
+                backend
+            } catch (error: Exception) {
                 try { backend.releaseLater() }
-                catch (cleanup: Exception) { quarantined = backend; error.addSuppressed(cleanup) }
+                catch (cleanup: Exception) {
+                    quarantined = backend
+                    error.addSuppressed(cleanup)
+                }
                 throw error
             }
         }
         PlaybackBackendKind.MEDIA3 -> {
             val localDataSource = DataSource.Factory { ContentDataSource(applicationContext) }
-            val renderers = DefaultRenderersFactory(applicationContext)
+            val renderers = RoutingRenderersFactory(applicationContext, route)
                 .setEnableAudioFloatOutput(false).setEnableAudioTrackPlaybackParams(false)
             val player = ExoPlayer.Builder(applicationContext).setRenderersFactory(renderers)
                 .setMediaSourceFactory(DefaultMediaSourceFactory(localDataSource)).setReleaseTimeoutMs(1500L).build()
-            val operations = Media3PlaybackOperations(player)
-            val backend = Backend(kind, player, operations, releaseGuard, lease, media3 = operations)
+            val routedPlayer = RoutingPlaybackPlayer(player, route)
+            val operations = Media3PlaybackOperations(routedPlayer)
+            val backend = Backend(kind, routedPlayer, operations, releaseGuard, lease, route, media3 = operations)
             try {
                 player.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), false)
@@ -472,7 +594,10 @@ internal class ServicePlaybackOwner(
                 backend
             } catch (error: Exception) {
                 try { backend.releaseLater() }
-                catch (cleanup: Exception) { quarantined = backend; error.addSuppressed(cleanup) }
+                catch (cleanup: Exception) {
+                    quarantined = backend
+                    error.addSuppressed(cleanup)
+                }
                 throw error
             }
         }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lyrics_offset_draft_review_required">偏移草稿已保留，请先读取并查看当前歌词和设置，再保存。</string>
+    <string name="lyrics_offset_draft_review">用当前歌词重新查看草稿</string>
+    <string name="lyrics_offset_draft_other_entry">草稿属于之前的队列条目，请取消后再开始新的偏移草稿。</string>
+</resources>

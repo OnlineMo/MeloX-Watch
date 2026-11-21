@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "purpose": "UNMODIFIED_TEST_RESOURCES_ONLY_NOT_DEFAULT_APK_ASSETS",
+  "license": "SIL-OFL-1.1",
+  "fonts": [
+    {
+      "file": "RobotoMono-wght.ttf",
+      "repository": "https://github.com/google/fonts",
+      "commit": "aa24661a5ba24c8f8a550a16fb13198719fc2c23",
+      "upstreamPath": "ofl/robotomono/RobotoMono[wght].ttf",
+      "licenseFile": "RobotoMono-OFL.txt"
+    },
+    {
+      "file": "SourceCodePro-Regular.otf",
+      "repository": "https://github.com/adobe-fonts/source-code-pro",
+      "commit": "803b7e23ec97ae58b6232ea76519a76d428ba268",
+      "upstreamPath": "OTF/SourceCodePro-Regular.otf",
+      "licenseFile": "SourceCodePro-LICENSE.md",
+      "reservedFontName": "Source"
+    }
+  ],
+  "originalBytes": [
+    {
+      "file": "RobotoMono-wght.ttf",
+      "bytes": 183700,
+      "sha256": "66a80e79d17e4c7cabd162e2916578a4cc08fd19eef6e2a643305eae9c567b2b"
+    },
+    {
+      "file": "RobotoMono-OFL.txt",
+      "bytes": 4395,
+      "sha256": "50ab8dd54680d3473f649c9db86fece88434d097c7834475c1c72d2f8c429215"
+    },
+    {
+      "file": "SourceCodePro-Regular.otf",
+      "bytes": 131128,
+      "sha256": "9f9664e2edf6f045c11e774f9bd0be6993971f2544a39061a5ce478b96b051f8"
+    },
+    {
+      "file": "SourceCodePro-LICENSE.md",
+      "bytes": 4566,
+      "sha256": "7c940e28a5388e9bba866cf0e408edda45fe0899ba98665b8f6ab31dc5e4b8ff"
+    }
+  ],
+  "modifications": "NONE",
+  "normalParserTests": "NOT_RUN",
+  "androidNativeTests": "NOT_RUN",
+  "deviceAcceptance": "NOT_RUN"
+}

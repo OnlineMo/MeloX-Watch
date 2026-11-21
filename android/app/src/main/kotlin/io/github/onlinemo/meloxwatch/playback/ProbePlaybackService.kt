@@ -40,6 +40,9 @@ import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerCommands
 import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerSessionState
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
+import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeCommands
+import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeResult
+import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
 import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -76,12 +79,20 @@ class ProbePlaybackService : MediaSessionService() {
     private var activeCommand: Job? = null
     private var initialization: Job? = null
     private var extrasObserver: Job? = null
+    private var routeStateObserver: Job? = null
     private var seekStateObserver: Job? = null
     private var commandPreferencesObserver: Job? = null
     private var initializing = true
     private var mediaButtonsEnabled = true
     private var destroyed = false
     private var retiredPlaylistProducer: PlaylistQueueProducer? = null
+    private val mediaVolumeCommands = ServiceMediaVolumeCommandHandler(
+        ownerUid = Process.myUid(),
+        read = { withMediaVolumeOwner(ServicePlaybackOwner::readMediaVolume) },
+        set = { request -> withMediaVolumeOwner { owner -> owner.setMediaVolume(request) } },
+        adjust = { delta -> withMediaVolumeOwner { owner -> owner.adjustMediaVolume(delta) } },
+        onResult = ::refreshSessionState,
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -171,6 +182,9 @@ class ProbePlaybackService : MediaSessionService() {
                 }
             }
         }
+        routeStateObserver = serviceScope.launch {
+            owner.routeState.collect { if (!destroyed) refreshSessionState() }
+        }
         seekStateObserver = serviceScope.launch {
             queues.seekState.collect { if (!destroyed) refreshSessionState() }
         }
@@ -229,6 +243,7 @@ class ProbePlaybackService : MediaSessionService() {
         pendingCommand?.cancel()
         initialization?.cancel()
         extrasObserver?.cancel()
+        routeStateObserver?.cancel()
         seekStateObserver?.cancel()
         commandPreferencesObserver?.cancel()
         timerSaveCommand?.cancel()
@@ -352,6 +367,11 @@ class ProbePlaybackService : MediaSessionService() {
         sleepTimer?.let { putAll(SleepTimerSessionState.fromService(it.state.value).toSessionExtras()) }
     }
 
+    private fun withMediaVolumeOwner(operation: (ServicePlaybackOwner) -> MediaVolumeResult): MediaVolumeResult {
+        val owner = playbackOwner.takeUnless { destroyed }
+        return if (owner == null) MediaVolumeResult(null, ServiceMediaVolumeIssue.UNAVAILABLE) else operation(owner)
+    }
+
     private fun refreshSessionState() {
         if (!destroyed) mediaSession?.setSessionExtras(sessionExtras())
     }
@@ -458,7 +478,10 @@ class ProbePlaybackService : MediaSessionService() {
 
     private suspend fun closePlaylistProducer(producer: PlaylistQueueProducer): Boolean = withContext(NonCancellable) {
         try {
-            withTimeoutOrNull(PLAYLIST_CLOSE_TIMEOUT_MS) { producer.close(); true } == true
+            withTimeoutOrNull(PLAYLIST_CLOSE_TIMEOUT_MS) {
+                producer.close()
+                true
+            } == true
         } catch (_: Exception) {
             false
         }
@@ -511,6 +534,7 @@ class ProbePlaybackService : MediaSessionService() {
                 .add(PlaybackCommands.beginSeek).add(PlaybackCommands.seekQueue)
                 .add(SleepTimerCommands.arm).add(SleepTimerCommands.cancel)
                 .add(SleepTimerCommands.retrySave).add(SleepTimerCommands.refresh)
+                .add(MediaVolumeCommands.read).add(MediaVolumeCommands.set).add(MediaVolumeCommands.adjust)
         }
         return commands.build()
     }
@@ -549,6 +573,9 @@ class ProbePlaybackService : MediaSessionService() {
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
+            mediaVolumeCommands.handle(controller.uid, customCommand.customAction, args)?.let { result ->
+                return Futures.immediateFuture(result)
+            }
             if (controller.uid != Process.myUid()) {
                 return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
             }

@@ -51,7 +51,7 @@ data class PlaybackPageInputContext(
 }
 
 /**
- * A single input slot covers both permanent progress helpers and rotary seek. Cancellation
+ * A single input slot covers both permanent progress helpers and either rotary target. Cancellation
  * keeps that slot occupied until the original callback finishes; changing pages cannot create
  * a replacement helper and admit overlapping work. The service remains the final authority.
  */
@@ -62,14 +62,14 @@ class PlaybackPageInput(
     private val acquireBinding: suspend () -> QueueSeekBinding?,
     private val isBindingCurrent: (QueueSeekBinding) -> Boolean,
     private val dispatchSeek: suspend (QueueSeekRequest) -> Boolean,
-    private val applyVolumeStep: (RotaryStep) -> Boolean,
+    private val applyVolumeStep: suspend (RotaryStep) -> Boolean,
     private val onRotaryApplied: (RotaryAppliedStep, RotaryInputContext) -> Unit,
 ) {
     private var inputEpoch = UUID.randomUUID().toString()
     private var closed = false
     private var admitting = false
     private var rotaryState = RotaryInputState()
-    private var rotarySeekJob: Job? = null
+    private var rotaryJob: Job? = null
     private var rotaryOwner: RotaryOwner? = null
     private val mutableRotaryPending = MutableStateFlow(false)
     val rotaryPending = mutableRotaryPending.asStateFlow()
@@ -79,8 +79,12 @@ class PlaybackPageInput(
     val independentState = independent.state
 
     val busy: Boolean
-        get() = admitting || rotarySeekJob != null || main.state.value.phase != PlaybackProgressInputPhase.IDLE ||
+        get() = admitting || rotaryJob != null || main.state.value.phase != PlaybackProgressInputPhase.IDLE ||
             independent.state.value.phase != PlaybackProgressInputPhase.IDLE
+
+    /** 宿主只可排除本次已拥有的音量请求；其他音量按钮/草稿仍阻止新的共同输入。 */
+    val ownsRotaryVolume: Boolean
+        get() = rotaryJob != null && rotaryOwner?.target == RotaryTarget.MEDIA_VOLUME
 
     fun begin(surface: SeekGestureSurface): String? = admit(null) { helper(surface).begin() }
 
@@ -136,13 +140,7 @@ class PlaybackPageInput(
             discardRotaryFractions()
             return decision.consume
         }
-        when (step.target) {
-            RotaryTarget.MEDIA_VOLUME -> {
-                val changed = applyVolumeStep(step)
-                onRotaryApplied(RotaryAppliedStep(step, changed), rotaryContext())
-            }
-            RotaryTarget.SEEK -> startRotarySeek(step, context, rotaryInput)
-        }
+        startRotary(step, context, rotaryInput)
         return decision.consume
     }
 
@@ -157,7 +155,7 @@ class PlaybackPageInput(
     fun contextChanged() {
         main.contextChanged()
         independent.contextChanged()
-        rotaryOwner?.takeIf { !matches(it, currentContext(), rotaryContext()) }?.let { rotarySeekJob?.cancel() }
+        rotaryOwner?.takeIf { !matches(it, currentContext(), rotaryContext()) }?.let { rotaryJob?.cancel() }
         val context = currentContext()
         val focus = rotaryContext().focusToken
         if (rotaryState.focusToken != focus || rotaryState.settingsRevision != context.settingsRevision ||
@@ -171,7 +169,7 @@ class PlaybackPageInput(
         inputEpoch = UUID.randomUUID().toString()
         main.invalidate()
         independent.invalidate()
-        rotarySeekJob?.cancel()
+        rotaryJob?.cancel()
         discardRotaryFractions()
     }
 
@@ -191,26 +189,38 @@ class PlaybackPageInput(
         SeekGestureSurface.INDEPENDENT_CONTROLS -> independent
     }
 
-    private fun startRotarySeek(step: RotaryStep, context: PlaybackPageInputContext, capturedRotary: RotaryInputContext) {
-        if (busy || context.serviceOwnerId == null || context.durationMs == null) return
-        val owner = RotaryOwner(context.serviceOwnerId, context.controlsStateKey, context.controls, capturedRotary)
+    private fun startRotary(step: RotaryStep, context: PlaybackPageInputContext, capturedRotary: RotaryInputContext) {
+        if (busy || step.target == RotaryTarget.SEEK && (context.serviceOwnerId == null || context.durationMs == null)) return
+        val owner = RotaryOwner(context.serviceOwnerId, context.controlsStateKey, context.controls, capturedRotary, step.target)
         rotaryOwner = owner
         val job = scope.launch(start = CoroutineStart.LAZY) {
             try {
-                val binding = acquireBinding() ?: return@launch
+                val changed = when (step.target) {
+                    RotaryTarget.MEDIA_VOLUME -> {
+                        if (!matches(owner, currentContext(), rotaryContext())) return@launch
+                        currentCoroutineContext().ensureActive()
+                        applyVolumeStep(step)
+                    }
+                    RotaryTarget.SEEK -> {
+                        val binding = acquireBinding() ?: return@launch
+                        currentCoroutineContext().ensureActive()
+                        val livePosition = currentContext().positionMs
+                        val request = RotaryInputPolicy.seekRequest(step, binding, livePosition) ?: return@launch
+                        if (!isBindingCurrent(binding)) return@launch
+                        currentCoroutineContext().ensureActive()
+                        if (!matches(owner, currentContext(), rotaryContext())) return@launch
+                        // Synchronous validation/context callbacks can retire this job. Cancellation
+                        // must be observed before even entering a dispatcher that may issue IPC.
+                        currentCoroutineContext().ensureActive()
+                        dispatchSeek(request)
+                    }
+                }
                 currentCoroutineContext().ensureActive()
-                val livePosition = currentContext().positionMs
-                val request = RotaryInputPolicy.seekRequest(step, binding, livePosition) ?: return@launch
-                if (!isBindingCurrent(binding)) return@launch
-                currentCoroutineContext().ensureActive()
-                if (!matches(owner, currentContext(), rotaryContext())) return@launch
-                // Synchronous validation/context callbacks can retire this job. Cancellation
-                // must be observed before even entering a dispatcher that may issue IPC.
-                currentCoroutineContext().ensureActive()
-                val accepted = dispatchSeek(request)
-                currentCoroutineContext().ensureActive()
-                if (matches(owner, currentContext(), rotaryContext())) {
-                    onRotaryApplied(RotaryAppliedStep(step, accepted), rotaryContext())
+                val live = currentContext()
+                val liveRotary = rotaryContext(live)
+                if (matches(owner, live, liveRotary)) {
+                    currentCoroutineContext().ensureActive()
+                    onRotaryApplied(RotaryAppliedStep(step, changed), liveRotary)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -219,11 +229,11 @@ class PlaybackPageInput(
                 // unsuccessful or stale rotary action never requests a success vibration.
             }
         }
-        rotarySeekJob = job
+        rotaryJob = job
         mutableRotaryPending.value = true
         job.invokeOnCompletion {
-            if (rotarySeekJob === job) {
-                rotarySeekJob = null
+            if (rotaryJob === job) {
+                rotaryJob = null
                 rotaryOwner = null
                 mutableRotaryPending.value = false
             }
@@ -256,6 +266,6 @@ class PlaybackPageInput(
         }
     }
 
-    private data class RotaryOwner(val serviceOwnerId: String, val controlsStateKey: String,
-        val controls: PlaybackControlsPreferences, val context: RotaryInputContext)
+    private data class RotaryOwner(val serviceOwnerId: String?, val controlsStateKey: String,
+        val controls: PlaybackControlsPreferences, val context: RotaryInputContext, val target: RotaryTarget)
 }

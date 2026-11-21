@@ -1,6 +1,6 @@
 # 播放、歌单与 Apple Music 风格界面整合
 
-本记录区分源码实现、云端验证、设备验收和发布批准。LP-04、LP-05、LP-07～09 的下列代码已进入整合；PR #31第五轮run43868565336的Debug/Diagnostic生产及测试Kotlin编译通过，Debug原JUnit实际109套/1248项、1116通过/132失败/0error/0skip，其中三类为初始化失败。第七轮run43924826977越过第六轮配置错误，Debug/Diagnostic生产Kotlin通过，测试Kotlin仍被PFD shadow的JVM签名冲突阻断；本轮没有单测、lint、后四阶段、合格APK与设备验收结果，精确source/build/run及原报告见[13](../13-仓库状态.md)。第五轮后的数据库、Provider、checkpoint及几何修复已完成交叉源码审阅，原20005项跨页、lease重试、旧回调隔离、断言、期限与Werror保留；本次shadow窄修仍待新云验。全部 256 个原验收用例仍为 `not_run`。网易云、默认关闭且用户配置的 Meting、真实 Android 手机伴侣及其余本地功能继续属于首个预发布版。
+本记录区分源码实现、云端验证、设备验收和发布批准。PR #31第三十一轮run44796881589/attempt1的已提交source `5df9fe9895051ca7f2489327540e6681b87f2f7c`已完成六阶段采集/STRICT：Debug、Release、Diagnostic各114份原JUnit、1349项全部通过，lint各3条Hint、无Error/Warning。最后按generated-unreviewed合同拒绝导出APK；精确原输入经审阅后已导入，详见[13](../13-仓库状态.md)和[依赖记录](DEV-104-dependencies.md)。本批后续歌词/字体/主题界面、认证传歌和真实Android手机App源码已整合，主库为V6，尚待新增输入采集及正常严格双APK构建；旧V3结果不能算新界面、手机端或V6通过。全部256个原验收用例仍为`not_run`。网易云、默认关闭且用户配置的Meting和其余本地功能继续属于首个预发布版。
 
 ## 当前实现
 
@@ -17,7 +17,7 @@
 
 LP-05 无缝、APE 和 DSD 不以设置项或“不支持”提示算实现完成。CUE 和歌词解析核心不代替实际来源、持久关联和服务接线。首版没有删减功能或新增歌曲数量上限。
 
-当前数据库迁移使用固定 Room 2.8.5 与 Bundled SQLite 2.6.2 的公开 writer API。真正的 COMMIT 失败由 Room 在归还连接前检查并回滚；不关闭重开数据库，不改用私有反射或较弱的故障触发器。生产 RawQuery、迁移和 Room 测试使用同一驱动，历史平台 schema 及 1→2 检查保留；主机 JNI 只从精确 JVM 制品提取，不重复加载 JVM 数据库类。修复的交叉审阅与下一轮云端编译、单测、lint、依赖/schema 资料验证分别进行，目前没有新的通过结果。
+当前数据库迁移使用固定Room2.8.5与Bundled SQLite2.6.2的公开writer API。真正的COMMIT失败由Room在归还连接前检查并回滚；不关闭重开数据库，不改用私有反射或较弱的故障触发器。生产RawQuery、迁移和Room测试使用同一驱动，历史平台schema及1→2检查保留；主机JNI只从精确JVM制品提取，不重复加载JVM数据库类。第三十一轮已提交V3源码的三变体测试与输入审阅通过；本批新V6迁移、真实传输/主题事务及大库分页定义仍须新云验。
 
 该修复提交 `9e425b20b23f5e00fec8dbcf0d593be17ac92c0d` 的第六轮[run43914527409](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43914527409)/attempt1在Gradle脚本配置编译失败：两处`lowercase(java.util.Locale.ROOT)`无法解析`util`，应用任务与后续阶段未启动。这里只显式导入`Locale`并保留两处`Locale.ROOT`调用，不变更依赖或降低检查；原失败归档和独立诊断保留，精确build、job、artifact/hash见[13](../13-仓库状态.md)。配置修正仍须新云验，不证明数据库迁移或当前界面通过。
 
@@ -30,6 +30,8 @@ Locale修正源码 `b349522f3db0c08a22232139a0b6c546674770dd` 的第七轮[run43
 前台维护的 START/STOP 事件保留不同对象身份，避免快速 STOP→START 被布尔状态合并。`collectLatest` 先取消并等待旧 owner 的清理，再启动新 owner；隐藏页面不自建维护任务或歌词计时器。扫描失败、覆盖不完整或撤权不能清空旧歌单；只有已覆盖的真实空目录可清除自动成员。
 
 ## 证据与后续验证
+
+本批源码已接线真实歌词加载/偏移持久化、媒体时钟与字体/主题设置，圆/方形状与大字组件已有完整源码及资源独审；没有新APK或设备可见结果。LP-13认证会话、共享配额、校验后提交和取消回收，以及LP-14手机端配对、传歌、库/歌单/专辑艺人编辑与主题上传已整合。两端共享协议是源码目录，主Room库为V6；HistoricalV3/V4/V5测试库不导出历史生产schema。新增91项手机定义、真实主题事务与20001项库/歌单分页定义均未运行，不能记为AC或云端通过。尚未接线的在线NetEase/Meting和无缝/APE/DSD、DSP、原文件写入、备份及外部歌词继续按完整任务依赖建设。
 
 本次独立静态审阅已覆盖歌单核心、迁移定义、预览 lease、交换的物理 provider 所有权、typed service receipt、失效成员恢复及文件夹维护/前台接线。审阅记录固定到本地不可变源码副本；历史发现及其修正分别保留，不把修改后的结论套到旧字节。
 

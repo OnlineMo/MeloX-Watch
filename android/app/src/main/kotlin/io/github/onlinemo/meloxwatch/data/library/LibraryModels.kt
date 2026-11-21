@@ -9,6 +9,7 @@ object LibraryLimits {
     const val PAGE_SIZE = 100
     const val UI_VIEWS = 3
     const val QUEUE_VIEWS = 1
+    const val TRANSFER_VIEWS = 4
     const val VIEW_LEASE_MS = 10 * 60 * 1000L
     const val SORT_RULE_VERSION = 1
     const val SHORT_AUDIO_MS = 60_000L
@@ -41,7 +42,7 @@ data class LocalAudioMetadata(
 
 enum class LibrarySourceState { ACTIVE, NEEDS_AUTHORIZATION, UNAVAILABLE, REMOVED }
 enum class LibraryAvailability { AVAILABLE, UNKNOWN, NEEDS_AUTHORIZATION, UNAVAILABLE, MISSING, REMOVED }
-enum class LibraryViewOwner { UI, QUEUE }
+enum class LibraryViewOwner { UI, QUEUE, TRANSFER }
 typealias LibrarySortField = io.github.onlinemo.meloxwatch.model.LibrarySortField
 typealias LibrarySort = io.github.onlinemo.meloxwatch.model.LibrarySort
 enum class LibraryGroupKind { ALBUM, ARTIST }
@@ -131,6 +132,8 @@ data class LibraryTrack(
     val nodeId: String?,
     val playCount: Long,
     val listeningMs: Long,
+    val displayArtist: String? = metadata.artists.firstOrNull() ?: metadata.artist,
+    val displayAlbum: String? = metadata.album,
 )
 
 data class LibraryPage(

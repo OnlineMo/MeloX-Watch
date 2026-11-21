@@ -75,6 +75,7 @@ android {
     }
     sourceSets {
         getByName("main").java.srcDir("src/main/kotlin")
+        getByName("main").java.srcDir("../shared-transfer/src/main/kotlin")
         getByName("test").java.srcDir("src/test/kotlin")
     }
     lint {
@@ -351,6 +352,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.robolectric.test)
     ksp(libs.room.compiler)
+    kspTest(libs.room.compiler)
     add(robolectricSdk.name, libs.robolectric.sdk)
     add(robolectricSdk30.name, libs.robolectric.sdk30)
     add(bundledSqliteHost.name, libs.sqlite.bundled.host)

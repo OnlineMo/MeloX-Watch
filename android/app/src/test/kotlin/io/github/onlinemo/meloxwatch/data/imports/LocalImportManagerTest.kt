@@ -28,6 +28,7 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.scan.LocalScanEngine
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
+import io.github.onlinemo.meloxwatch.data.transfer.TransferUploadKind
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -214,6 +215,33 @@ class LocalImportManagerTest {
         assertFalse(OwnedAudioProvider.finalFile(context, interruptedIntent.fileToken).exists())
         assertArrayEquals(bytes, original.readBytes())
         assertEquals(1L, library.overview().totalTracks)
+    }
+
+    @Test(timeout = 30_000L) fun interruptedCopyRetryRetiresItsSharedReservationWithoutRecopyingTheOriginal() = runBlocking {
+        val manager = manager()
+        val preview = manager.prepare(source)
+        ledger.begin(preview.intent)
+        manager.copyQuota.reserveImport(preview.intent.operationId, original.length())
+        io.read {
+            OwnedAudioProvider.stagingFile(context, preview.intent.fileToken).writeBytes(ByteArray(4096))
+            manager.copyQuota.recordImportBytesOnPhysicalWorker(preview.intent.operationId, 4096L)
+        }
+        val originalBytes = original.readBytes()
+        val interrupted = manager.confirmCopy(preview)
+        assertEquals(ImportPhase.FAILED, interrupted.phase)
+        assertEquals(ImportIssue.INTERRUPTED, interrupted.issue)
+        assertEquals(interrupted, manager.confirmCopy(preview))
+        assertEquals(0, openings)
+        assertFalse(OwnedAudioProvider.stagingFile(context, preview.intent.fileToken).exists())
+        assertFalse(OwnedAudioProvider.finalFile(context, preview.intent.fileToken).exists())
+        assertArrayEquals(originalBytes, original.readBytes())
+        assertEquals(0L, library.overview().totalTracks)
+        val ticket = UUID.randomUUID().toString()
+        try {
+            val available = manager.copyQuota.reserve(ticket, TransferUploadKind.AUDIO, ImportLimits.QUOTA_BYTES)
+            assertEquals(0L, available.ownedAudioBytes)
+            assertEquals(0L, available.otherReservedAudioBytes)
+        } finally { manager.copyQuota.release(ticket) }
     }
 
     @Test fun missingOrDifferentInstalledBytesStayPendingAndAreNeverReplaced() = runBlocking {

@@ -18,6 +18,11 @@
     <string name="input_volume_fixed">当前输出使用固定音量，请在输出设备上调整。</string>
     <string name="input_volume_remote">请在连接的远程输出设备上调整音量。</string>
     <string name="input_volume_output_changed">输出或系统音量已变化，请重新选择音量。</string>
-    <string name="input_volume_unconfirmed">无法确认音量变化，当前显示系统实际值。</string>
+    <string name="input_volume_unconfirmed">无法确认音量变化，可刷新读取当前媒体音量。</string>
     <string name="input_volume_unavailable">媒体音量暂不可用，可刷新后重试。</string>
+    <string name="input_volume_busy">正在完成当前媒体音量操作。</string>
+    <string name="input_volume_route_unknown">暂时无法确认当前输出。可使用音量按钮，滑杆暂不可用。</string>
+    <string name="input_volume_muted">媒体输出已静音。</string>
+    <string name="input_volume_at_limit">媒体音量已到当前限值。</string>
+    <string name="input_volume_refresh">刷新媒体音量</string>
 </resources>

@@ -25,7 +25,12 @@ import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.QueueWindow
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
+import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeSetRequest
+import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeSnapshot
+import io.github.onlinemo.meloxwatch.playback.route.PlaybackRouteSessionState
+import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
 import java.lang.reflect.Proxy
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -37,6 +42,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -64,6 +70,7 @@ class ServicePlaybackOwnerTest {
     private lateinit var owner: ServicePlaybackOwner
     private lateinit var statistics: ServiceListeningObserver
     private lateinit var queues: QueuePlaybackCoordinator
+    private lateinit var musicVolume: RecordingMusicVolume
     private val issues = mutableListOf<PlaybackBackendIssue>()
     private val queueFailures = mutableListOf<QueuePlaybackFailure>()
 
@@ -73,9 +80,11 @@ class ServicePlaybackOwnerTest {
         preferences = MutablePreferences()
         store = EmptyQueueStore()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        musicVolume = RecordingMusicVolume()
         owner = ServicePlaybackOwner(application, scope, preferences, LocalProviderIo(),
             ensureForeground = { throw AssertionError("An empty-queue switch must remain paused") },
             onFailure = issues::add,
+            musicVolumePort = musicVolume,
         )
         val noListeningCalls = Proxy.newProxyInstance(ListeningRepository::class.java.classLoader,
             arrayOf(ListeningRepository::class.java)) { _, method, _ ->
@@ -93,7 +102,10 @@ class ServicePlaybackOwnerTest {
             onFailure = queueFailures::add,
         )
         owner.attach(queues, statistics)
-        runBlocking { owner.initializePreferences(); queues.initialize() }
+        runBlocking {
+            owner.initializePreferences()
+            queues.initialize()
+        }
     }
 
     @After fun releaseOwner() = runBlocking {
@@ -219,6 +231,117 @@ class ServicePlaybackOwnerTest {
         assertTrue(queueFailures.isEmpty())
     }
 
+    @Test
+    fun realFactoriesKeepTheOperationsPlayerAndPausedRouteNamespaceConsistent() = runBlocking {
+        val kinds = listOf(
+            PlaybackBackendKind.MEDIA3,
+            PlaybackBackendKind.SYSTEM_MEDIA_PLAYER,
+            PlaybackBackendKind.MEDIA3,
+        )
+        for (kind in kinds) {
+            preferences.publish(kind)
+            val applying = scope.async { owner.initializePreferences() }
+            idleMain()
+            applying.await()
+            assertSame(owner.initialPlayer, owner.initialOperations.player)
+            if (kind == PlaybackBackendKind.MEDIA3) {
+                assertTrue(owner.initialPlayer is RoutingPlaybackPlayer)
+            } else {
+                assertTrue(owner.initialPlayer is SystemMediaPlayerAdapter)
+            }
+            val extras = owner.sessionExtras()
+            assertEquals(kind, checkNotNull(PlaybackBackendState.fromSessionExtras(extras)).actualBackend)
+            assertEquals(PlaybackRouteSessionState(), PlaybackRouteSessionState.fromSessionExtras(extras))
+            assertEquals(3, extras.keySet().count { it.startsWith("io.github.onlinemo.meloxwatch.route.") })
+            assertEquals(PlaybackRouteSessionState(), owner.routeState.value)
+            assertFalse(queues.sessionPlayer.playWhenReady)
+        }
+    }
+
+    @Test
+    fun pausedRelativeVolumeReadsTheCurrentStreamAndNeverRequestsPlayback() {
+        val before = checkNotNull(owner.readMediaVolume().snapshot)
+        assertFalse(before.route.known)
+        musicVolume.values = musicVolume.values.copy(current = 9)
+        val result = owner.adjustMediaVolume(1)
+        assertTrue(result.accepted && result.changed && result.writeAttempted)
+        assertEquals(10, checkNotNull(result.snapshot).values.current)
+        assertEquals(listOf(10), musicVolume.writes)
+        assertFalse(checkNotNull(result.snapshot).route.known)
+        assertFalse(owner.initialPlayer.playWhenReady)
+        assertFalse(queues.sessionPlayer.playWhenReady)
+        assertTrue(issues.isEmpty())
+    }
+
+    @Test
+    fun aForgedKnownRouteCannotCommitAnAbsoluteValueOnThePausedBackend() {
+        val expected = MediaVolumeSnapshot(
+            musicVolume.values,
+            PlaybackRouteSessionState(UUID.randomUUID().toString(), true),
+        )
+        val result = owner.setMediaVolume(MediaVolumeSetRequest(expected, 7))
+        assertEquals(ServiceMediaVolumeIssue.OUTPUT_CHANGED, result.issue)
+        assertFalse(result.accepted || result.writeAttempted)
+        assertFalse(checkNotNull(result.snapshot).route.known)
+        assertTrue(musicVolume.writes.isEmpty())
+        assertFalse(queues.sessionPlayer.playWhenReady)
+    }
+
+    @Test
+    fun relativeVolumeCompletesWhileTheBackendSwitchIsWaitingForQueueIO() = runBlocking {
+        val gate = store.blockSnapshot()
+        preferences.publish(PlaybackBackendKind.SYSTEM_MEDIA_PLAYER)
+        val applying = scope.async { owner.initializePreferences() }
+        idleMain()
+        assertTrue(gate.entered.isCompleted)
+        assertTrue(owner.state.value.switching)
+        val result = owner.adjustMediaVolume(-1)
+        assertTrue(result.accepted && result.changed)
+        assertEquals(3, checkNotNull(result.snapshot).values.current)
+        assertFalse(checkNotNull(result.snapshot).route.known)
+        assertFalse(applying.isCompleted)
+        assertFalse(queues.sessionPlayer.playWhenReady)
+        gate.release.complete(Unit)
+        idleMain()
+        applying.await()
+        assertPausedBackend(PlaybackBackendKind.SYSTEM_MEDIA_PLAYER, queues.sessionPlayer)
+    }
+
+    @Test
+    fun aClosedOwnerLeavesAllVolumeCommandsUnavailableWithoutPlatformAccess() {
+        val expected = MediaVolumeSnapshot(
+            musicVolume.values,
+            PlaybackRouteSessionState(UUID.randomUUID().toString(), true),
+        )
+        val reads = musicVolume.reads
+        owner.close()
+        val results = listOf(
+            owner.readMediaVolume(),
+            owner.adjustMediaVolume(1),
+            owner.setMediaVolume(MediaVolumeSetRequest(expected, 5)),
+        )
+        for (result in results) {
+            assertEquals(ServiceMediaVolumeIssue.UNAVAILABLE, result.issue)
+            assertNull(result.snapshot)
+            assertFalse(result.accepted || result.changed || result.writeAttempted)
+        }
+        assertEquals(reads, musicVolume.reads)
+        assertTrue(musicVolume.writes.isEmpty())
+        assertEquals(PlaybackRouteSessionState(), owner.routeState.value)
+    }
+
+    @Test
+    fun volumeEntryPointsRejectTheWrongThreadBeforeAnyStreamQuery() = runBlocking {
+        val reads = musicVolume.reads
+        try {
+            withContext(Dispatchers.Default) { owner.readMediaVolume() }
+            throw AssertionError("A Service volume command requires its owner Looper")
+        } catch (_: IllegalStateException) {
+            assertEquals(reads, musicVolume.reads)
+            assertTrue(musicVolume.writes.isEmpty())
+        }
+    }
+
     private fun assertSessionBinding(kind: PlaybackBackendKind, expectedGeneration: Long) {
         val observation = checkNotNull(PlaybackBackendState.fromSessionExtras(owner.sessionExtras()))
         assertEquals(kind, observation.actualBackend)
@@ -273,7 +396,10 @@ class ServicePlaybackOwnerTest {
         suspend fun await() {
             entered.complete(Unit)
             try { release.await() }
-            catch (error: CancellationException) { cancelled = true; throw error }
+            catch (error: CancellationException) {
+                cancelled = true
+                throw error
+            }
         }
     }
 
@@ -289,7 +415,10 @@ class ServicePlaybackOwnerTest {
             private set
         fun blockSnapshot(skip: Int = 0): Gate {
             check(nextGate == null && skip >= 0)
-            return Gate(skip).also { gates += it; nextGate = it }
+            val gate = Gate(skip)
+            gates += gate
+            nextGate = gate
+            return gate
         }
         fun releaseGates() = gates.forEach { it.release.complete(Unit) }
         override suspend fun initialize(): QueueSnapshot? = null
@@ -305,7 +434,12 @@ class ServicePlaybackOwnerTest {
                 }
                 val gate = nextGate
                 if (gate != null) {
-                    if (gate.skip > 0) gate.skip -= 1 else { nextGate = null; gate.await() }
+                    if (gate.skip > 0) {
+                        gate.skip -= 1
+                    } else {
+                        nextGate = null
+                        gate.await()
+                    }
                 }
                 return null
             } finally { activeSnapshots -= 1 }

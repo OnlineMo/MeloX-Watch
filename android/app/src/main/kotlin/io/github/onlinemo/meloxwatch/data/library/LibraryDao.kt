@@ -33,11 +33,16 @@ data class LibraryRowRecord(
     val selectedProviderContentToken: String?,
     val selectedVerifiedContentToken: String?,
     val selectedSizeBytes: Long?,
+    val displayAlbumKey: String,
+    val displayArtist: String?,
+    val displayAlbum: String?,
+    val displayAlbumSubtitle: String?,
 )
 
 data class LibraryGroupRecord(val groupKey: String, val title: String?, val subtitle: String?, val trackCount: Long)
 data class LibrarySectionRecord(val sectionKey: String, val trackCount: Long)
 data class LibraryTrackKeyRecord(val providerId: String, val trackId: String)
+data class LibraryArtistLabelRecord(val providerId: String, val trackId: String, val artist: String?, val currentVersionCount: Long)
 
 @Dao
 interface LibraryDao {
@@ -67,6 +72,18 @@ interface LibraryDao {
     @Query("SELECT EXISTS (SELECT 1 FROM local_track_locations WHERE locationId = :id AND validTo IS NULL LIMIT 1)") suspend fun hasLocationRelation(id: String): Boolean
     @Query("SELECT * FROM local_track_locations WHERE locationId = :id AND validTo IS NULL AND (:after IS NULL OR relationId > :after) ORDER BY relationId LIMIT :limit") suspend fun locationRelations(id: String, after: String?, limit: Int = LibraryLimits.PAGE_SIZE): List<LibraryTrackLocationEntity>
     @Query("SELECT * FROM local_track_versions WHERE trackId = :id AND validTo IS NULL") suspend fun currentTrack(id: String): LibraryTrackVersionEntity?
+    /** Only cached labels for a bounded page; this projection grants no access to the original file. */
+    @Query("""
+        SELECT providerId, trackId,
+               CASE WHEN COUNT(*) = 1 AND length(artist) <= 4096 THEN artist ELSE NULL END AS artist,
+               COUNT(*) AS currentVersionCount
+        FROM local_track_versions
+        WHERE providerId = :providerId AND trackId IN (:trackIds) AND validTo IS NULL
+        GROUP BY providerId, trackId
+        ORDER BY trackId
+        LIMIT :limit
+    """)
+    suspend fun artistLabels(providerId: String, trackIds: List<String>, limit: Int): List<LibraryArtistLabelRecord>
     @Query("UPDATE local_track_versions SET validTo = :revision - 1 WHERE trackId = :id AND validTo IS NULL") suspend fun closeTrackVersion(id: String, revision: Long)
     @Insert suspend fun insertTrackVersion(value: LibraryTrackVersionEntity)
     @Update suspend fun updateTrackVersion(value: LibraryTrackVersionEntity)

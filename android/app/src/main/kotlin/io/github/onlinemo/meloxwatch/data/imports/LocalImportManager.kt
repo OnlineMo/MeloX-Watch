@@ -21,6 +21,15 @@ import io.github.onlinemo.meloxwatch.data.local.ObservedCandidate
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.data.transfer.TransferCapability
+import io.github.onlinemo.meloxwatch.data.transfer.TransferCommitClaim
+import io.github.onlinemo.meloxwatch.data.transfer.TransferException
+import io.github.onlinemo.meloxwatch.data.transfer.TransferIssue
+import io.github.onlinemo.meloxwatch.data.transfer.TransferOperationBinding
+import io.github.onlinemo.meloxwatch.data.transfer.TransferOperationKind
+import io.github.onlinemo.meloxwatch.data.transfer.TransferPermit
+import io.github.onlinemo.meloxwatch.data.transfer.TransferReceipt
+import io.github.onlinemo.meloxwatch.data.transfer.TransferVerifiedUpload
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -59,6 +68,7 @@ class LocalImportManager(
     },
     private val freeBytes: (File) -> Long = { StatFs(it.absolutePath).availableBytes },
     private val syncDirectory: (File) -> Unit = ::syncImportDirectory,
+    val copyQuota: AudioCopyQuota = AudioCopyQuota(context, io, freeBytes),
 ) {
     private val operationLock = Mutex()
     private val stateLock = Any()
@@ -72,16 +82,10 @@ class LocalImportManager(
     suspend fun prepare(source: LocalSourceSpec): ImportPreview = exclusive {
         val observed = sources.observe(source)
         if (observed.root.directory || !observed.root.mayContainAudio) throw ImportException(ImportIssue.NOT_AUDIO)
-        val result = io.read { signal ->
-            signal.throwIfCanceled()
-            val root = OwnedAudioProvider.root(context)
-            val occupied = ownedBytes(root)
-            val available = freeBytes(root)
-            val declared = observed.root.sizeBytes
-            ImportSpacePolicy.requireRoom(occupied, 0, declared ?: 0, available)
-            ImportPreview(ImportIntent(UUID.randomUUID().toString(), observed.source, observed.root,
-                observed.identity, observed.providerVersion), declared, occupied, available)
-        }
+        val space = copyQuota.preview(observed.root.sizeBytes)
+        val result = ImportPreview(ImportIntent(UUID.randomUUID().toString(), observed.source, observed.root,
+            observed.identity, observed.providerVersion), observed.root.sizeBytes,
+            space.usedAndReservedBytes, space.availableBytes)
         synchronized(stateLock) { preview = result }
         result
     }
@@ -94,7 +98,14 @@ class LocalImportManager(
         val existing = ledger.record(confirmed.intent.operationId)
         if (existing != null) {
             if (existing.intent != confirmed.intent) throw ImportException(ImportIssue.CONFLICT)
-            if (existing.phase != ImportPhase.COPYING) return@exclusive recoverRecord(existing)
+            if (existing.phase != ImportPhase.COPYING) {
+                val result = recoverRecord(existing)
+                if (result.phase in setOf(ImportPhase.COMMITTED, ImportPhase.CANCELLED, ImportPhase.FAILED)) {
+                    withContext(NonCancellable) { io.awaitIdle()
+                        copyQuota.releaseImport(existing.intent.operationId) }
+                }
+                return@exclusive result
+            }
             // A previous process may have stopped while writing; a retry does not repeat that copy.
             return@exclusive interruptCopy(existing)
         }
@@ -110,6 +121,7 @@ class LocalImportManager(
         mutableProgress.value = ImportProgress(intent.operationId, 0)
         try {
             assertUnchanged(intent, sources.observe(intent.source))
+            copyQuota.reserveImport(intent.operationId, intent.candidate.sizeBytes ?: 0L)
             val verified = io.read { signal -> copyAndValidate(intent, signal) }
             val afterCopy = sources.observe(intent.source)
             assertUnchanged(intent, afterCopy)
@@ -164,8 +176,256 @@ class LocalImportManager(
             mutableState.value = result
             result
         } finally {
+            try {
+                withContext(NonCancellable) {
+                    io.awaitIdle()
+                    copyQuota.releaseImport(intent.operationId)
+                }
+            } finally { synchronized(stateLock) { if (active === task) active = null } }
+        }
+    }
+
+    private val transferredLedger: TransferImportLedger
+        get() = ledger as? TransferImportLedger ?: throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+
+    /** Exact authorized retry may recover retained installed bytes without retransmitting a GiB. */
+    suspend fun committedTransfer(binding: TransferOperationBinding, permit: TransferPermit): TransferReceipt? = transferExclusive {
+        validateTransferPermit(binding, permit)
+        val caller = currentCoroutineContext()
+        val record = transferredLedger.recordTransferred(binding.operationId) ?: return@transferExclusive null
+        if (!record.selection.binding.sameOperation(binding)) throw TransferException(TransferIssue.CONFLICT)
+        record.receipt()?.let {
+            permit.checkActive()
+            return@transferExclusive transferredLedger.requireCommittedTransferred(record.selection)
+        }
+        if (record.phase !in setOf(ImportPhase.VERIFIED, ImportPhase.INSTALLED)) return@transferExclusive null
+        val exists = io.read { signal ->
+            signal.throwIfCanceled()
+            permit.checkActive()
+            OwnedAudioProvider.finalFile(context, record.selection.fileToken).exists()
+        }
+        if (!exists) {
+            if (record.phase == ImportPhase.INSTALLED) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+            return@transferExclusive null
+        }
+        try {
+            verifyTransferredInput(record, permit, requireInstalled = true)
+            currentCoroutineContext().ensureActive()
+            permit.checkActive()
+            withContext(NonCancellable) {
+                val installed = transferredLedger.installedTransferred(record.selection)
+                publishTransferred(installed, permit) {
+                    caller.ensureActive()
+                    permit.claimCommit(binding)
+                }
+            }
+        } catch (error: Exception) {
+            withContext(NonCancellable) {
+                io.awaitIdle()
+                val durable = transferredLedger.recordTransferred(binding.operationId) ?: throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                durable.receipt()?.let { return@withContext transferredLedger.requireCommittedTransferred(durable.selection) }
+                val installed = if (durable.phase == ImportPhase.VERIFIED) transferredLedger.installedTransferred(durable.selection) else durable
+                transferredLedger.unfinishedTransferred(installed.selection, ImportPhase.INSTALLED, TransferIssue.RECOVERY_REQUIRED)
+                throw transferImportFailure(error)
+            }
+        }
+    }
+
+    /** Full verified private input is moved, never recopied or exposed as a staging content URI. */
+    suspend fun importTransferredAudio(binding: TransferOperationBinding, upload: TransferVerifiedUpload,
+        permit: TransferPermit): TransferReceipt = transferExclusive {
+        validateTransferPermit(binding, permit)
+        val caller = currentCoroutineContext()
+        if (!upload.binding.sameOperation(binding) || !upload.sharesPhysicalWorker(io)) throw TransferException(TransferIssue.CONFLICT)
+        val selection = TransferImportSelection(binding, upload.declaration)
+        val owner = transferredLedger
+        val inputOwner = upload.beginBackendCommit()
+        val task = Active(selection.operationId, currentCoroutineContext()[Job])
+        synchronized(stateLock) { active = task }
+        var record: TransferImportRecord? = null
+        try {
+            val previous = owner.recordTransferred(selection.operationId)
+            if (previous != null) {
+                if (!previous.selection.sameAs(selection)) throw TransferException(TransferIssue.CONFLICT)
+                previous.receipt()?.let {
+                    permit.checkActive()
+                    val receipt = owner.requireCommittedTransferred(previous.selection)
+                    upload.recordCommitted(receipt)
+                    return@transferExclusive receipt
+                }
+                val exists = io.read { signal -> signal.throwIfCanceled()
+                    permit.checkActive()
+                    OwnedAudioProvider.finalFile(context, selection.fileToken).exists() }
+                if (exists) {
+                    record = previous
+                    if (previous.phase !in setOf(ImportPhase.VERIFIED, ImportPhase.INSTALLED)) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                    verifyTransferredInput(previous, permit, requireInstalled = true)
+                    currentCoroutineContext().ensureActive()
+                    inputOwner.checkActive()
+                    return@transferExclusive withContext(NonCancellable) {
+                        val installed = owner.installedTransferred(selection)
+                        val receipt = publishTransferred(installed, permit) {
+                            caller.ensureActive()
+                            inputOwner.claimCommit(permit, binding)
+                        }
+                        upload.recordCommitted(receipt)
+                        receipt
+                    }
+                }
+                if (previous.phase == ImportPhase.INSTALLED) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                removeTransferredStaging(selection.fileToken)
+                record = owner.restartTransferred(selection)
+            } else record = owner.beginTransferred(selection)
+
+            val metadata = upload.readOnPhysicalWorker { file, signal -> readMetadata(file, signal) }
+            currentCoroutineContext().ensureActive()
+            inputOwner.checkActive()
+            record = owner.verifyTransferred(selection, upload.actualBytes, upload.sha256.forLocalStorage(), metadata)
+            upload.readOnPhysicalWorker { file, signal ->
+                signal.throwIfCanceled()
+                permit.checkActive()
+                val staging = OwnedAudioProvider.stagingFile(context, selection.fileToken)
+                val final = OwnedAudioProvider.finalFile(context, selection.fileToken)
+                if (staging.exists() || final.exists()) throw TransferException(TransferIssue.CONFLICT)
+                copyQuota.adoptTransferOnPhysicalWorker(upload.ticket, selection.operationId, file, upload.actualBytes)
+                FileChannel.open(file.toPath(), StandardOpenOption.WRITE).use { it.force(true) }
+                Files.move(file.toPath(), staging.toPath(), StandardCopyOption.ATOMIC_MOVE)
+                if (!staging.isFile || staging.length() != upload.actualBytes) throw TransferException(TransferIssue.INTEGRITY_FAILED)
+                syncDirectory(file.parentFile!!)
+                syncDirectory(staging.parentFile!!)
+            }
+            verifyTransferredInput(requireNotNull(record), permit, requireInstalled = false)
+            currentCoroutineContext().ensureActive()
+            inputOwner.checkActive()
+            withContext(NonCancellable) {
+                installPrivateFile(selection.fileToken, upload.actualBytes, alreadyInstalled = false)
+                val installed = owner.installedTransferred(selection)
+                val receipt = publishTransferred(installed, permit) {
+                    // Room 的最终检查可能挂起；保存原调用者，认领前再次校验取消。
+                    caller.ensureActive()
+                    inputOwner.claimCommit(permit, binding)
+                }
+                upload.recordCommitted(receipt)
+                receipt
+            }
+        } catch (error: Exception) {
+            val receipt = withContext(NonCancellable) {
+                io.awaitIdle()
+                val durable = owner.recordTransferred(selection.operationId) ?: record
+                if (durable == null || !durable.selection.sameAs(selection)) return@withContext null
+                durable.receipt()?.let {
+                    val receipt = owner.requireCommittedTransferred(durable.selection)
+                    upload.recordCommitted(receipt)
+                    return@withContext receipt
+                }
+                val exists = io.read { OwnedAudioProvider.finalFile(context, selection.fileToken).exists() }
+                if (exists) {
+                    if (durable.phase in setOf(ImportPhase.VERIFIED, ImportPhase.INSTALLED)) {
+                        val installed = if (durable.phase == ImportPhase.VERIFIED) owner.installedTransferred(selection) else durable
+                        owner.unfinishedTransferred(installed.selection, ImportPhase.INSTALLED, TransferIssue.RECOVERY_REQUIRED)
+                    }
+                    // An unexpected installed object is preserved; it is never replaced or published.
+                } else {
+                    removeTransferredStaging(selection.fileToken)
+                    owner.unfinishedTransferred(selection, if (error is CancellationException) ImportPhase.CANCELLED else ImportPhase.FAILED,
+                        if (error is CancellationException) TransferIssue.INTERRUPTED else transferImportIssue(error))
+                }
+                null
+            }
+            receipt ?: throw transferImportFailure(error)
+        } finally {
+            inputOwner.complete()
             synchronized(stateLock) { if (active === task) active = null }
         }
+    }
+
+    /** Startup retires uninstalled input only. A retained installed object needs fresh exact authorization. */
+    suspend fun recoverTransferred(): ImportRecoverySummary = transferExclusive {
+        var after: String? = null
+        var interrupted = 0L
+        var pending = 0L
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val page = transferredLedger.pendingTransferred(after)
+            for (record in page.records) {
+                currentCoroutineContext().ensureActive()
+                val finalExists = io.read { signal -> signal.throwIfCanceled()
+                    OwnedAudioProvider.finalFile(context, record.selection.fileToken).exists() }
+                if (finalExists) {
+                    if (record.phase !in setOf(ImportPhase.VERIFIED, ImportPhase.INSTALLED)) {
+                        throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                    }
+                    try {
+                        io.read { signal -> verifyPrivate(OwnedAudioProvider.finalFile(context, record.selection.fileToken),
+                            record.actualBytes, record.sha256, signal) }
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { throw TransferException(TransferIssue.RECOVERY_REQUIRED) }
+                    if (record.phase == ImportPhase.VERIFIED) transferredLedger.installedTransferred(record.selection)
+                    transferredLedger.unfinishedTransferred(record.selection, ImportPhase.INSTALLED, TransferIssue.RECOVERY_REQUIRED)
+                    pending = Math.addExact(pending, 1L)
+                } else {
+                    if (record.phase == ImportPhase.INSTALLED) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                    withContext(NonCancellable) {
+                        io.awaitIdle()
+                        removeTransferredStaging(record.selection.fileToken)
+                        transferredLedger.unfinishedTransferred(record.selection, ImportPhase.FAILED, TransferIssue.INTERRUPTED)
+                    }
+                    interrupted = Math.addExact(interrupted, 1L)
+                }
+            }
+            val next = page.nextOperationId ?: break
+            if (next == after || page.records.isEmpty()) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+            after = next
+        }
+        ImportRecoverySummary(0L, interrupted, pending)
+    }
+
+    private suspend fun verifyTransferredInput(record: TransferImportRecord, permit: TransferPermit,
+        requireInstalled: Boolean): Boolean = io.read { signal ->
+        permit.checkActive()
+        val final = OwnedAudioProvider.finalFile(context, record.selection.fileToken)
+        val installed = final.exists()
+        if (requireInstalled && !installed || !installed && record.phase == ImportPhase.INSTALLED) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+        val file = if (installed) final else OwnedAudioProvider.stagingFile(context, record.selection.fileToken)
+        verifyPrivate(file, record.actualBytes, record.sha256, signal, permit::checkActive)
+        installed
+    }
+
+    private suspend fun publishTransferred(record: TransferImportRecord, permit: TransferPermit,
+        commitBoundary: () -> TransferCommitClaim = { permit.claimCommit(record.selection.binding) }): TransferReceipt {
+        val selection = record.selection
+        val uri = OwnedAudioProvider.uri(context, selection.fileToken).toString()
+        val spec = LocalSourceSpec("transfer:${selection.operationId}", LocalSourceKind.APP_OWNED, uri,
+            authority = OwnedAudioProvider.authority(context), rootObjectId = selection.fileToken)
+        val grant = LocalGrantObservation(appOwned = true, read = ObservedCapability.AVAILABLE,
+            offlineRead = ObservedCapability.AVAILABLE, enumerate = ObservedCapability.UNAVAILABLE,
+            persistedRead = ObservedCapability.UNAVAILABLE, persistedWrite = ObservedCapability.UNAVAILABLE)
+        val candidate = ObservedCandidate(spec.sourceId, selection.fileToken, uri, null, selection.declaration.displayName,
+            record.metadata?.mimeType, LocalNodeKind.AUDIO, record.actualBytes,
+            providerContentToken = "sha256:${record.sha256}", entityProof = "owned:${spec.authority}:${selection.fileToken}")
+        val result = transferredLedger.commitTransferred(selection, permit, spec, grant, candidate, commitBoundary)
+        return result.receipt() ?: throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+    }
+
+    private suspend fun removeTransferredStaging(token: String) {
+        io.read { signal ->
+            signal.throwIfCanceled()
+            val file = OwnedAudioProvider.stagingFile(context, token)
+            if (Files.deleteIfExists(file.toPath())) syncDirectory(file.parentFile!!)
+        }
+    }
+
+    private fun validateTransferPermit(binding: TransferOperationBinding, permit: TransferPermit) {
+        if (binding.kind != TransferOperationKind.AUDIO || permit.capability != TransferCapability.UPLOAD_AUDIO) throw TransferException(TransferIssue.PERMISSION_DENIED)
+        if (binding.target != permit.target || binding.peer != permit.peer) throw TransferException(TransferIssue.WRONG_TARGET)
+        permit.checkActive()
+    }
+
+    private suspend fun <T> transferExclusive(action: suspend () -> T): T {
+        if (!operationLock.tryLock()) throw TransferException(TransferIssue.BUSY)
+        try { return action() }
+        catch (error: Exception) { throw transferImportFailure(error) }
+        finally { operationLock.unlock() }
     }
 
     suspend fun cancel(operationId: String) {
@@ -193,6 +453,9 @@ class LocalImportManager(
                     else -> pending = Math.addExact(pending, 1)
                 }
                 mutableState.value = result
+                if (result.phase in setOf(ImportPhase.COMMITTED, ImportPhase.FAILED, ImportPhase.CANCELLED)) {
+                    copyQuota.releaseImport(record.intent.operationId)
+                }
             }
             val next = page.nextOperationId ?: break
             if (next == after || page.records.isEmpty()) throw ImportException(ImportIssue.RECOVERY_REQUIRED)
@@ -231,7 +494,9 @@ class LocalImportManager(
         val exists = io.read { OwnedAudioProvider.finalFile(context, record.intent.fileToken).exists() }
         if (exists) throw ImportException(ImportIssue.RECOVERY_REQUIRED)
         removeStaging(record.intent)
-        ledger.markUnfinished(record.intent.operationId, ImportPhase.FAILED, ImportIssue.INTERRUPTED)
+        val interrupted = ledger.markUnfinished(record.intent.operationId, ImportPhase.FAILED, ImportIssue.INTERRUPTED)
+        copyQuota.releaseImport(record.intent.operationId)
+        interrupted
     }
 
     private suspend fun verifyInstallInput(record: ImportRecord): Boolean = io.read { signal ->
@@ -248,18 +513,7 @@ class LocalImportManager(
 
     private suspend fun installAndCommit(record: ImportRecord, alreadyInstalled: Boolean): ImportRecord {
         val intent = record.intent
-        io.read { signal ->
-            val final = OwnedAudioProvider.finalFile(context, intent.fileToken)
-            val staging = OwnedAudioProvider.stagingFile(context, intent.fileToken)
-            signal.throwIfCanceled()
-            if (!alreadyInstalled) {
-                if (final.exists() || !staging.isFile || staging.length() != record.actualBytes) throw ImportException(ImportIssue.INTEGRITY_FAILED)
-                // No non-atomic copy fallback and no replacement of an existing completed object.
-                Files.move(staging.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE)
-            }
-            if (!final.isFile || final.length() != record.actualBytes) throw ImportException(ImportIssue.INTEGRITY_FAILED)
-            syncDirectory(final.parentFile!!)
-        }
+        installPrivateFile(intent.fileToken, record.actualBytes, alreadyInstalled)
         val installed = if (record.phase == ImportPhase.INSTALLED) record else ledger.markInstalled(intent.operationId)
         val uri = OwnedAudioProvider.uri(context, intent.fileToken).toString()
         val spec = LocalSourceSpec("import:${intent.operationId}", LocalSourceKind.APP_OWNED, uri,
@@ -277,10 +531,24 @@ class LocalImportManager(
         return committed
     }
 
+    private suspend fun installPrivateFile(token: String, actualBytes: Long, alreadyInstalled: Boolean) {
+        io.read { signal ->
+            val final = OwnedAudioProvider.finalFile(context, token)
+            val staging = OwnedAudioProvider.stagingFile(context, token)
+            signal.throwIfCanceled()
+            if (!alreadyInstalled) {
+                if (final.exists() || !staging.isFile || staging.length() != actualBytes) throw ImportException(ImportIssue.INTEGRITY_FAILED)
+                // Atomic same-volume handoff is shared by both real input origins; no overwrite/copy fallback.
+                Files.move(staging.toPath(), final.toPath(), StandardCopyOption.ATOMIC_MOVE)
+            }
+            if (!final.isFile || final.length() != actualBytes) throw ImportException(ImportIssue.INTEGRITY_FAILED)
+            syncDirectory(final.parentFile!!)
+        }
+    }
+
     private fun copyAndValidate(intent: ImportIntent, signal: CancellationSignal): VerifiedCopy {
         val staging = OwnedAudioProvider.stagingFile(context, intent.fileToken)
         val root = staging.parentFile!!
-        val occupied = ownedBytes(root)
         val buffer = ByteArray(ImportLimits.BUFFER_BYTES)
         val digest = MessageDigest.getInstance("SHA-256")
         var copied = 0L
@@ -297,11 +565,13 @@ class LocalImportManager(
                             continue
                         }
                         emptyReads = 0
-                        ImportSpacePolicy.requireRoom(occupied, copied, read.toLong(), freeBytes(root))
+                        copyQuota.requireImportBlockOnPhysicalWorker(intent.operationId, Math.addExact(copied, read.toLong()), freeBytes(root))
                         val chunk = ByteBuffer.wrap(buffer, 0, read)
-                        while (chunk.hasRemaining()) { signal.throwIfCanceled(); output.write(chunk) }
+                        while (chunk.hasRemaining()) { signal.throwIfCanceled()
+                            output.write(chunk) }
                         digest.update(buffer, 0, read)
                         copied = Math.addExact(copied, read.toLong())
+                        copyQuota.recordImportBytesOnPhysicalWorker(intent.operationId, copied)
                         mutableProgress.value = ImportProgress(intent.operationId, copied)
                     }
                 }
@@ -320,11 +590,16 @@ class LocalImportManager(
     }
 
     private fun verifyPrivate(file: File, record: ImportRecord, signal: CancellationSignal) {
-        if (!file.isFile || Files.isSymbolicLink(file.toPath()) || file.length() != record.actualBytes) {
+        verifyPrivate(file, record.actualBytes, record.sha256, signal)
+    }
+
+    private fun verifyPrivate(file: File, actualBytes: Long, sha256: String?, signal: CancellationSignal,
+        checkAuthority: () -> Unit = {}) {
+        if (!file.isFile || Files.isSymbolicLink(file.toPath()) || file.length() != actualBytes) {
             throw ImportException(ImportIssue.INTEGRITY_FAILED)
         }
-        val actual = Files.newInputStream(file.toPath()).use { hash(it, signal, record.actualBytes) }
-        if (actual != record.sha256) throw ImportException(ImportIssue.INTEGRITY_FAILED)
+        val actual = Files.newInputStream(file.toPath()).use { hash(it, signal, actualBytes, checkAuthority) }
+        if (actual != sha256) throw ImportException(ImportIssue.INTEGRITY_FAILED)
     }
 
     private suspend fun removeStaging(intent: ImportIntent) {
@@ -333,18 +608,6 @@ class LocalImportManager(
             val file = OwnedAudioProvider.stagingFile(context, intent.fileToken)
             if (Files.deleteIfExists(file.toPath())) syncDirectory(file.parentFile!!)
         }
-    }
-
-    private fun ownedBytes(root: File): Long {
-        var occupied = 0L
-        Files.newDirectoryStream(root.toPath()).use { paths ->
-            for (path in paths) {
-                if (Files.isSymbolicLink(path) || !Files.isRegularFile(path)) throw ImportException(ImportIssue.RECOVERY_REQUIRED)
-                occupied = Math.addExact(occupied, Files.size(path))
-                if (occupied > ImportLimits.QUOTA_BYTES) throw ImportException(ImportIssue.QUOTA_EXCEEDED)
-            }
-        }
-        return occupied
     }
 
     private fun assertUnchanged(intent: ImportIntent, observation: LocalSourceObservation) {
@@ -363,13 +626,14 @@ class LocalImportManager(
         try { return action() } finally { operationLock.unlock() }
     }
 
-    private fun hash(input: InputStream, signal: CancellationSignal, expectedBytes: Long): String {
+    private fun hash(input: InputStream, signal: CancellationSignal, expectedBytes: Long, checkAuthority: () -> Unit = {}): String {
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(ImportLimits.BUFFER_BYTES)
         var readBytes = 0L
         var emptyReads = 0
         while (true) {
             signal.throwIfCanceled()
+            checkAuthority()
             val count = input.read(buffer)
             if (count < 0) break
             if (count == 0) {
@@ -433,4 +697,23 @@ private fun importIssue(error: Exception): ImportIssue = when (error) {
     }
     is IllegalArgumentException -> ImportIssue.INVALID_INPUT
     else -> ImportIssue.SOURCE_UNAVAILABLE
+}
+
+private fun transferImportFailure(error: Exception): Exception = if (error is CancellationException) error else
+    if (error is TransferException) error else TransferException(transferImportIssue(error))
+
+private fun transferImportIssue(error: Exception): TransferIssue = when (error) {
+    is TransferException -> error.issue
+    else -> when (importIssue(error)) {
+        ImportIssue.BUSY -> TransferIssue.BUSY
+        ImportIssue.CONFLICT -> TransferIssue.CONFLICT
+        ImportIssue.SOURCE_CHANGED, ImportIssue.INTEGRITY_FAILED -> TransferIssue.INTEGRITY_FAILED
+        ImportIssue.INVALID_INPUT -> TransferIssue.INVALID_INPUT
+        ImportIssue.QUOTA_EXCEEDED -> TransferIssue.QUOTA_EXCEEDED
+        ImportIssue.STORAGE_FULL -> TransferIssue.STORAGE_FULL
+        ImportIssue.NOT_AUDIO -> TransferIssue.NOT_AUDIO
+        ImportIssue.UNSUPPORTED_FORMAT -> TransferIssue.UNSUPPORTED_TYPE
+        ImportIssue.RECOVERY_REQUIRED -> TransferIssue.RECOVERY_REQUIRED
+        else -> TransferIssue.STORAGE_UNAVAILABLE
+    }
 }

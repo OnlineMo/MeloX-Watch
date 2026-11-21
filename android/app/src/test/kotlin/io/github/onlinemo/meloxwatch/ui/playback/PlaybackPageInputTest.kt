@@ -315,6 +315,7 @@ class PlaybackPageInputTest {
                 assertTrue(fixture.input.rotary(1_200L, 0.6))
                 assertTrue(fixture.volumeSteps.isEmpty())
                 assertTrue(fixture.input.rotary(1_300L, 0.4))
+                fixture.settle()
                 assertEquals(1, fixture.volumeSteps.size)
                 assertEquals(1, fixture.volumeSteps.single().delta)
                 assertEquals(0, fixture.client.acquisitions)
@@ -377,6 +378,7 @@ class PlaybackPageInputTest {
             try {
                 fixture.onVolume = { changed }
                 assertTrue(fixture.input.rotary(1_000L, 1.0))
+                fixture.settle()
                 val (outcome, context) = fixture.applied.single()
                 assertEquals(changed, outcome.changed)
                 assertEquals(changed, RotaryHapticGate.evaluate(RotaryHapticState(), outcome, context,
@@ -392,11 +394,8 @@ class PlaybackPageInputTest {
                 true
             }
             assertTrue(movedFocus.input.rotary(1_000L, 1.0))
-            val (outcome, context) = movedFocus.applied.single()
-            assertNotEquals(outcome.step.focusToken, context.focusToken)
-            assertTrue(outcome.changed)
-            assertFalse(RotaryHapticGate.evaluate(RotaryHapticState(), outcome, context,
-                nowElapsedMs = 1_000L, enabled = true).requestPulse)
+            movedFocus.settle()
+            assertTrue(movedFocus.applied.isEmpty())
         } finally { movedFocus.close() }
     }
 
@@ -492,6 +491,156 @@ class PlaybackPageInputTest {
         } finally { fixture.close() }
     }
 
+    @Test(timeout = 30000L) fun pendingVolumeAcknowledgementOwnsTheSameSlotAsBothProgressSurfaces() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE, holdVolume = true)
+        try {
+            assertTrue(fixture.input.rotary(1_000L, 1.0))
+            fixture.volumeRequest()
+            assertTrue(fixture.input.busy)
+            assertTrue(fixture.input.rotaryPending.value)
+            assertTrue(fixture.input.ownsRotaryVolume)
+            assertTrue(fixture.applied.isEmpty())
+            for (surface in SeekGestureSurface.entries) assertNull(fixture.input.begin(surface))
+            assertFalse(fixture.input.rotary(1_100L, 1.0))
+            fixture.volumeResult.complete(true)
+            fixture.settle()
+            assertFalse(fixture.input.busy)
+            assertFalse(fixture.input.ownsRotaryVolume)
+            assertTrue(fixture.applied.single().first.changed)
+            assertEquals(1, fixture.volumeSteps.size)
+            assertEquals(0, fixture.client.acquisitions)
+        } finally { fixture.close() }
+    }
+
+    @Test(timeout = 30000L) fun retiredVolumeAcknowledgementsRemainOccupiedAndCannotProduceSuccess() = runBlocking {
+        val replacements = RETIRED_ROTARY_CONTEXTS.map { retired ->
+            retired.copy(controls = retired.controls.copy(rotaryAction = RotaryAction.MEDIA_VOLUME))
+        } + VOLUME_PAGE.copy(controls = CONTROLS)
+        for (replacement in replacements) {
+            val fixture = Fixture(this, initialContext = VOLUME_PAGE, holdVolume = true, ignoreVolumeCancellation = true)
+            try {
+                assertTrue(fixture.input.rotary(1_000L, 1.0))
+                fixture.volumeRequest()
+                fixture.context = replacement
+                fixture.input.contextChanged()
+                assertTrue(fixture.input.busy)
+                assertTrue(fixture.input.rotaryPending.value)
+                for (surface in SeekGestureSurface.entries) assertNull(fixture.input.begin(surface))
+                fixture.volumeResult.complete(true)
+                fixture.settle()
+                assertTrue(fixture.applied.isEmpty())
+                assertFalse(fixture.input.busy)
+                assertFalse(fixture.input.ownsRotaryVolume)
+                assertEquals(1, fixture.volumeSteps.size)
+                assertEquals(0, fixture.client.acquisitions)
+            } finally { fixture.close() }
+        }
+    }
+
+    @Test(timeout = 30000L) fun closingAnUnsettledVolumeRequestRetainsOccupancyUntilItsReply() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE, holdVolume = true, ignoreVolumeCancellation = true)
+        try {
+            assertTrue(fixture.input.rotary(1_000L, 1.0))
+            fixture.volumeRequest()
+            fixture.input.close()
+            assertTrue(fixture.input.busy)
+            assertTrue(fixture.input.ownsRotaryVolume)
+            assertFalse(fixture.input.rotary(1_100L, 1.0))
+            for (surface in SeekGestureSurface.entries) assertNull(fixture.input.begin(surface))
+            fixture.volumeResult.complete(true)
+            fixture.settle()
+            assertFalse(fixture.input.busy)
+            assertTrue(fixture.applied.isEmpty())
+            assertEquals(1, fixture.volumeSteps.size)
+        } finally { fixture.close() }
+    }
+
+    @Test(timeout = 30000L) fun ownerScopeCancellationDoesNotReleaseAnUncooperativeVolumeCallbackEarly() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE, holdVolume = true, ignoreVolumeCancellation = true)
+        try {
+            assertTrue(fixture.input.rotary(1_000L, 1.0))
+            fixture.volumeRequest()
+            fixture.cancelScope()
+            assertTrue(fixture.input.busy)
+            assertTrue(fixture.input.rotaryPending.value)
+            fixture.volumeResult.complete(true)
+            fixture.settle()
+            assertFalse(fixture.input.busy)
+            assertTrue(fixture.applied.isEmpty())
+        } finally { fixture.close() }
+    }
+
+    @Test(timeout = 30000L) fun aVolumeFailureDoesNotBecomeSuccessOrReacquireSeekAuthority() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE)
+        try {
+            fixture.onVolume = { throw IOException("volume reply failed") }
+            assertTrue(fixture.input.rotary(1_000L, 1.0))
+            fixture.settle()
+            assertFalse(fixture.input.busy)
+            assertTrue(fixture.applied.isEmpty())
+            assertEquals(1, fixture.volumeSteps.size)
+            assertEquals(0, fixture.client.acquisitions)
+            assertTrue(fixture.client.requests.isEmpty())
+        } finally { fixture.close() }
+    }
+
+    @Test(timeout = 30000L) fun pausedVolumeDoesNotRequireASeekOwnerOrKnownDuration() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE.copy(serviceOwnerId = null, durationMs = null))
+        try {
+            assertTrue(fixture.input.rotary(1_000L, -1.0))
+            fixture.settle()
+            assertEquals(-1, fixture.volumeSteps.single().delta)
+            assertTrue(fixture.applied.single().first.changed)
+            assertEquals(0, fixture.client.acquisitions)
+            assertTrue(fixture.client.requests.isEmpty())
+        } finally { fixture.close() }
+    }
+
+    @Test(timeout = 30000L) fun aPendingObserverCanCancelVolumeBeforeEnteringItsDispatcher() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE)
+        val observer = launch(context = Dispatchers.Unconfined, start = CoroutineStart.UNDISPATCHED) {
+            fixture.input.rotaryPending.first { pending ->
+                if (!pending) false else {
+                    fixture.input.invalidate()
+                    true
+                }
+            }
+        }
+        try {
+            assertTrue(fixture.input.rotary(1_000L, 1.0))
+            observer.join()
+            fixture.settle()
+            assertTrue(fixture.volumeSteps.isEmpty())
+            assertTrue(fixture.applied.isEmpty())
+            assertFalse(fixture.input.busy)
+        } finally {
+            observer.cancelAndJoin()
+            fixture.close()
+        }
+    }
+
+    @Test(timeout = 30000L) fun aFinalVolumeContextCallbackCannotPublishTheRetiredOwnersOutcome() = runBlocking {
+        val fixture = Fixture(this, initialContext = VOLUME_PAGE, holdVolume = true, ignoreVolumeCancellation = true)
+        var retired = false
+        try {
+            assertTrue(fixture.input.rotary(1_000L, 1.0))
+            fixture.volumeRequest()
+            fixture.onContextRead = {
+                if (!retired) {
+                    retired = true
+                    fixture.context = VOLUME_PAGE.copy(focusToken = "replacement-focus", rotaryFocused = false)
+                    fixture.input.contextChanged()
+                }
+            }
+            fixture.volumeResult.complete(true)
+            fixture.settle()
+            assertTrue(retired)
+            assertTrue(fixture.applied.isEmpty())
+            assertFalse(fixture.input.busy)
+            assertEquals(1, fixture.volumeSteps.size)
+        } finally { fixture.close() }
+    }
+
     @Test(timeout = 30000L) fun snapshotCallbackRetirementOrProgressOccupancyPreventsEitherRotaryOutput() = runBlocking {
         for (target in RotaryAction.entries) {
             for (retirement in SnapshotRetirement.entries) {
@@ -541,6 +690,8 @@ class PlaybackPageInputTest {
         holdSeek: Boolean = false,
         ignoreBindingCancellation: Boolean = false,
         ignoreSeekCancellation: Boolean = false,
+        holdVolume: Boolean = false,
+        ignoreVolumeCancellation: Boolean = false,
     ) {
         private val job = SupervisorJob(owner.coroutineContext[Job])
         private val scope = CoroutineScope(owner.coroutineContext + job)
@@ -548,7 +699,9 @@ class PlaybackPageInputTest {
         var expectedBinding = BINDING
         var beforeValidation: () -> Unit = {}
         var onContextRead: () -> Unit = {}
-        var onVolume: (RotaryStep) -> Boolean = { true }
+        var onVolume: suspend (RotaryStep) -> Boolean = { true }
+        val volumeEntered = CompletableDeferred<RotaryStep>()
+        val volumeResult = CompletableDeferred<Boolean>()
         val client = ControlledClient(ignoreBindingCancellation, ignoreSeekCancellation)
         val volumeSteps = mutableListOf<RotaryStep>()
         val applied = mutableListOf<Pair<RotaryAppliedStep, RotaryInputContext>>()
@@ -562,7 +715,10 @@ class PlaybackPageInputTest {
             }, client::seek,
             {
                 step -> volumeSteps.add(step)
-                onVolume(step)
+                volumeEntered.complete(step)
+                if (!holdVolume) onVolume(step)
+                else if (ignoreVolumeCancellation) withContext(NonCancellable) { volumeResult.await() }
+                else volumeResult.await()
             },
             { outcome, current -> applied.add(outcome to current) })
 
@@ -578,12 +734,14 @@ class PlaybackPageInputTest {
 
         suspend fun acquisition() = withTimeout(10_000L) { client.acquireEntered.await() }
         suspend fun request() = withTimeout(10_000L) { client.seekEntered.await() }
+        suspend fun volumeRequest() = withTimeout(10_000L) { volumeEntered.await() }
         suspend fun settle() = withTimeout(10_000L) { job.children.toList().forEach { it.join() } }
         fun cancelScope() = job.cancel()
         suspend fun close() {
             input.close()
             client.binding.complete(null)
             client.seekResult.complete(false)
+            volumeResult.complete(false)
             job.cancelAndJoin()
         }
     }
@@ -622,6 +780,7 @@ class PlaybackPageInputTest {
         val PAGE = PlaybackPageInputContext("service-owner", "page-focus", foreground = true,
             mainVisible = true, independentVisible = true, commandPending = false, positionMs = 10_000L,
             durationMs = 60_000L, controls = CONTROLS, controlsStateKey = "saved:normal:drag", settingsRevision = 1L)
+        val VOLUME_PAGE = PAGE.copy(controls = CONTROLS.copy(rotaryAction = RotaryAction.MEDIA_VOLUME))
         val RETIRED_ROTARY_CONTEXTS = listOf(
             PAGE.copy(serviceOwnerId = "replacement-service"), PAGE.copy(serviceOwnerId = null),
             PAGE.copy(focusToken = "replacement-focus"), PAGE.copy(focusToken = null),

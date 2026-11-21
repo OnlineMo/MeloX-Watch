@@ -26,6 +26,8 @@ import io.github.onlinemo.meloxwatch.model.PlaybackPreferenceLimits
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.playback.route.AndroidRoutingSources
+import io.github.onlinemo.meloxwatch.playback.route.PlaybackAudioRoute
 import java.io.FileNotFoundException
 import java.util.UUID
 import java.util.concurrent.Executor
@@ -44,12 +46,17 @@ import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-/** One platform player, a bounded queue window, and callbacks fenced by the physical-source generation. */
+/**
+ * 一个系统播放器及有界队列窗口，以物理来源代次隔离旧回调；生命周期操作归服务主线程。
+ *
+ * [route] 必须绑定同一内核 lease，仅观察此实例；reset、失败和释放前退役输出身份。
+ */
 @UnstableApi
 internal class SystemMediaPlayerAdapter(
     context: Context,
     private val io: LocalProviderIo,
     private val scope: CoroutineScope,
+    private val route: PlaybackAudioRoute,
     requestedSpeedTenths: Int = PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS,
     createPlayer: () -> MediaPlayer = { MediaPlayer() },
 ) : SimpleBasePlayer(Looper.getMainLooper()), PlaybackBackendOperations {
@@ -63,11 +70,15 @@ internal class SystemMediaPlayerAdapter(
     private val _speedState = MutableStateFlow(PlaybackSpeedState(requestedTenths = requestedSpeedTenths,
         pending = requestedSpeedTenths != PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS))
     val speedState = _speedState.asStateFlow()
-    private val platform = run { checkMain(); createPlayer() }
+    private val platform = run {
+        checkMain()
+        createPlayer()
+    }
     private var platformReleased = false
     override val player: Player get() = this
     private var currentIndex = C.INDEX_UNSET
     private var sourceGeneration = 0L
+    private var routingGeneration: Long? = null
     private var closed = false
     private var prepared = false
     private var preparing = false
@@ -225,7 +236,12 @@ internal class SystemMediaPlayerAdapter(
 
     override fun handleRelease(): ListenableFuture<*> {
         checkMain()
-        if (closed) { releasePlatformIfNeeded(); return immediate() }
+        route.close()
+        routingGeneration = null
+        if (closed) {
+            releasePlatformIfNeeded()
+            return immediate()
+        }
         var failure: Exception? = null
         fun attempt(operation: () -> Unit) {
             try { operation() }
@@ -234,7 +250,10 @@ internal class SystemMediaPlayerAdapter(
                 if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
             }
         }
-        attempt { capturedPositionMs = currentPositionSafely(); pausePlatform() }
+        attempt {
+            capturedPositionMs = currentPositionSafely()
+            pausePlatform()
+        }
         disconnectPosition(capturedPositionMs)
         playRequested = false
         closed = true
@@ -266,11 +285,16 @@ internal class SystemMediaPlayerAdapter(
     /** SimpleBasePlayer's released facade cannot retry a native release which threw. */
     fun releaseOwnedPlayer() {
         checkMain()
+        route.close()
+        routingGeneration = null
         try { release() } finally { releasePlatformIfNeeded() }
     }
 
     private fun releasePlatformIfNeeded() {
-        if (!platformReleased) { platform.release(); platformReleased = true }
+        if (!platformReleased) {
+            platform.release()
+            platformReleased = true
+        }
     }
 
     override fun handleSetVolume(volume: Float): ListenableFuture<*> {
@@ -333,7 +357,10 @@ internal class SystemMediaPlayerAdapter(
             currentIndex >= toIndex -> currentIndex - (toIndex - fromIndex)
             else -> currentIndex
         }
-        if (removedCurrent) { pendingPositionMs = 0L; capturedPositionMs = 0L }
+        if (removedCurrent) {
+            pendingPositionMs = 0L
+            capturedPositionMs = 0L
+        }
         return immediate()
     }
 
@@ -433,7 +460,10 @@ internal class SystemMediaPlayerAdapter(
                     val descriptor = applicationContext.contentResolver.openAssetFileDescriptor(uri, "r", cancellation)
                         ?: throw FileNotFoundException()
                     try { ValidatedAsset(descriptor, validateAssetRange(descriptor)) }
-                    catch (error: Exception) { descriptor.close(); throw error }
+                    catch (error: Exception) {
+                        descriptor.close()
+                        throw error
+                    }
                 }
             } catch (error: SourceReadException) {
                 if (error.issue != SourceReadIssue.BUSY || attempt == 2) throw error
@@ -489,6 +519,7 @@ internal class SystemMediaPlayerAdapter(
                 if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START || what == MediaPlayer.MEDIA_INFO_BUFFERING_END) {
                     capturedPositionMs = currentPositionSafely()
                     buffering = what == MediaPlayer.MEDIA_INFO_BUFFERING_START
+                    route.setRenderingActive(!buffering && playRequested && prepared && inFlightSeek == null && !ended)
                     if (!buffering && playRequested && prepared && inFlightSeek == null) {
                         applySpeed()
                         scheduleBoundaryCheck()
@@ -550,7 +581,9 @@ internal class SystemMediaPlayerAdapter(
         if (!prepared || closed || failure != null || inFlightSeek != null || !playRequested) return
         try {
             applySpeed()
+            observeRoutingForCurrentSource()
             platform.start()
+            route.setRenderingActive(true)
             scheduleBoundaryCheck()
         } catch (_: Exception) {
             fail(sourceError("OUTPUT_ERROR", PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED))
@@ -558,6 +591,8 @@ internal class SystemMediaPlayerAdapter(
     }
 
     private fun pausePlatform() {
+        route.setPlaybackActive(false)
+        route.setRenderingActive(false)
         stopBoundaryCheck()
         if (!prepared || closed || failure != null) return
         capturedPositionMs = currentPositionSafely()
@@ -600,6 +635,10 @@ internal class SystemMediaPlayerAdapter(
     }
 
     private fun resetSource() {
+        route.setPlaybackActive(false)
+        route.setRenderingActive(false)
+        route.sourceChanged()
+        routingGeneration = null
         capturedPositionMs = currentPositionSafely()
         disconnectPosition(capturedPositionMs)
         sourceGeneration += 1L
@@ -642,6 +681,10 @@ internal class SystemMediaPlayerAdapter(
     }
 
     private fun fail(error: PlaybackException) {
+        route.setPlaybackActive(false)
+        route.setRenderingActive(false)
+        route.sourceChanged()
+        routingGeneration = null
         capturedPositionMs = currentPositionSafely()
         playRequested = false
         pausePlatform()
@@ -696,7 +739,10 @@ internal class SystemMediaPlayerAdapter(
         handler.postDelayed(check, 1L)
     }
 
-    private fun stopBoundaryCheck() { boundaryCheck?.let(handler::removeCallbacks); boundaryCheck = null }
+    private fun stopBoundaryCheck() {
+        boundaryCheck?.let(handler::removeCallbacks)
+        boundaryCheck = null
+    }
 
     private fun disconnectPosition(finalPositionMs: Long) {
         livePosition?.disconnect(finalPositionMs.coerceAtLeast(0L))
@@ -794,6 +840,21 @@ internal class SystemMediaPlayerAdapter(
     }
 
     private fun isCurrent(generation: Long): Boolean = !closed && generation == sourceGeneration
+
+    private fun observeRoutingForCurrentSource() {
+        if (routingGeneration == sourceGeneration) return
+        val generation = sourceGeneration
+        val ownedPlayer = platform
+        routingGeneration = generation
+        val ticket = route.beginTrack() ?: return
+        // API 26/27 走工厂的 null 分支，不加载或调用 MediaPlayer 的 AudioRouting 接口。
+        val source = AndroidRoutingSources.mediaPlayer(ownedPlayer, handler) {
+            platform === ownedPlayer && !platformReleased && isCurrent(generation) && prepared &&
+                !preparing && !buffering && !ended && playRequested && inFlightSeek == null && failure == null
+        } ?: return
+        route.observe(ticket, source)
+    }
+
     private fun checkMain() = check(Looper.myLooper() == Looper.getMainLooper())
     private fun immediate(): ListenableFuture<Unit> = Futures.immediateFuture(Unit)
     private fun sourceError(message: String, @PlaybackException.ErrorCode code: Int) = PlaybackException(message, null, code)

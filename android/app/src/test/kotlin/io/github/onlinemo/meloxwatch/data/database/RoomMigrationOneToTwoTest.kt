@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.database
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
+import androidx.room.RoomDatabase
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.db.SupportSQLiteOpenHelper
@@ -12,6 +13,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackLocationEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningMetaEntity
+import io.github.onlinemo.meloxwatch.data.queue.QueueDao
 import io.github.onlinemo.meloxwatch.data.queue.QueueEntryEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueGenerationEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueHeadEntity
@@ -39,7 +41,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** Historical 1→2 structure and the application's complete 1→2→3 Room open are separate checks. */
+/** Frozen 1→2, historical-v3 observations and production-v5 repository behavior stay separate. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -71,7 +73,7 @@ class RoomMigrationOneToTwoTest {
     }
 
     @Test(timeout = 30000L)
-    fun applicationOpenMigratesASeededV1FileThroughV2ToV3AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
+    fun applicationOpenMigratesASeededV1FileThroughV2ToV5AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
         val context = RuntimeEnvironment.getApplication() as Context
         // Robolectric owns this application's database directory; the production filename and
         // applicationContext path are used so the test cannot bypass MeloXDatabase.open.
@@ -82,10 +84,31 @@ class RoomMigrationOneToTwoTest {
             seedVersionOne(file)
             val before = assertVersionOneFile(file)
 
+            // Observe the unchanged v3 declaration before opening today's production database.
+            val historical = HistoricalMeloXV3Database.open(context)
+            val historicalIdentity = try {
+                val persistedIdentity = assertVersionThreeSchema(historical, file)
+                assertLegacyQueueRows(historical, historical.queueDao(), before)
+                assertEquals(initialLibraryMeta, historical.libraryDao().meta())
+                assertEquals(initialListeningMeta, historical.listeningDao().meta())
+                assertNull(historical.libraryDao().track(repeatedTrack.trackId))
+                assertNull(historical.libraryDao().location(persistedLocation.locationId))
+                assertNull(historical.libraryDao().location(temporaryLocation.locationId))
+                assertVersionThreeSchema(historical, file, persistedIdentity)
+                persistedIdentity
+            } finally { historical.close() }
+            val historicalReopened = HistoricalMeloXV3Database.open(context)
+            try {
+                assertVersionThreeSchema(historicalReopened, file, historicalIdentity)
+                assertLegacyQueueRows(historicalReopened, historicalReopened.queueDao(), before)
+                assertEquals(initialLibraryMeta, historicalReopened.libraryDao().meta())
+                assertEquals(initialListeningMeta, historicalReopened.listeningDao().meta())
+            } finally { historicalReopened.close() }
+
             val migrated = MeloXDatabase.open(context)
             val identity = try {
-                val persistedIdentity = assertVersionThreeSchema(migrated, file)
-                assertLegacyQueueRows(migrated, before)
+                val persistedIdentity = assertCurrentSchema(migrated, file, historicalIdentity)
+                assertLegacyQueueRows(migrated, migrated.queueDao(), before)
                 assertQueueRestoration(migrated)
                 assertEquals(initialLibraryMeta, migrated.libraryDao().meta())
                 assertEquals(initialListeningMeta, migrated.listeningDao().meta())
@@ -100,8 +123,8 @@ class RoomMigrationOneToTwoTest {
                     assertEquals(1, migrated.libraryDao().updateMeta(updatedLibraryMeta))
                 }
                 assertNewLibraryRows(migrated)
-                assertLegacyQueueRows(migrated, before)
-                assertVersionThreeSchema(migrated, file, persistedIdentity)
+                assertLegacyQueueRows(migrated, migrated.queueDao(), before)
+                assertCurrentSchema(migrated, file, historicalIdentity, persistedIdentity)
                 persistedIdentity
             } finally {
                 migrated.close()
@@ -109,8 +132,8 @@ class RoomMigrationOneToTwoTest {
 
             val reopened = MeloXDatabase.open(context)
             try {
-                assertVersionThreeSchema(reopened, file, identity)
-                assertLegacyQueueRows(reopened, before)
+                assertCurrentSchema(reopened, file, historicalIdentity, identity)
+                assertLegacyQueueRows(reopened, reopened.queueDao(), before)
                 assertQueueRestoration(reopened)
                 assertNewLibraryRows(reopened)
                 assertEquals(initialListeningMeta, reopened.listeningDao().meta())
@@ -220,11 +243,10 @@ class RoomMigrationOneToTwoTest {
         assertIntegrity(sqlite.query("PRAGMA integrity_check"))
     }
 
-    private suspend fun assertVersionThreeSchema(database: MeloXDatabase, file: File, expectedIdentity: String? = null): String =
+    private suspend fun assertVersionThreeSchema(database: HistoricalMeloXV3Database, file: File, expectedIdentity: String? = null): String =
         database.withTestWriterSql {
-            // Forcing the actual application open runs both registered migrations and Room's
-            // generated validation of the current 39 entities. The v3 identity is checked for
-            // persisted stability, not presented as a separately pinned historical v3 export.
+            // The source-derived historical declaration keeps the original 39-entity v3
+            // validation and persisted-identity oracle. It is not a historical schema export.
             val mainPath = query("PRAGMA database_list") { rows ->
                 var path: String? = null
                 while (rows.step()) {
@@ -263,9 +285,38 @@ class RoomMigrationOneToTwoTest {
             identity
         }
 
-    private suspend fun assertLegacyQueueRows(database: MeloXDatabase, before: Map<String, FrozenTableRows>) {
+    private suspend fun assertCurrentSchema(
+        database: MeloXDatabase,
+        file: File,
+        historicalIdentity: String,
+        expectedIdentity: String? = null,
+    ): String = database.withTestWriterSql {
+        val mainPath = query("PRAGMA database_list") { rows ->
+            var path: String? = null
+            while (rows.step()) if (rows.getText(1) == "main") path = rows.getText(2)
+            requireNotNull(path)
+        }
+        assertEquals(file.canonicalPath, File(mainPath).canonicalPath)
+        assertEquals(5L, scalarLong("PRAGMA user_version"))
+        assertEquals(VERSION_THREE_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations"), query(TABLES_QUERY, block = ::applicationTables))
+        val identity = query(IDENTITY_QUERY) { rows ->
+            assertTrue(rows.step())
+            val value = rows.getText(0)
+            assertTrue(Regex("[0-9a-f]{32}").matches(value))
+            assertFalse(value == historicalIdentity || value == VERSION_ONE_IDENTITY || value == VERSION_TWO_IDENTITY)
+            if (expectedIdentity != null) assertEquals(expectedIdentity, value)
+            assertFalse(rows.step())
+            value
+        }
+        assertEquals(0L, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
+        assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
+        query("PRAGMA foreign_key_check", block = ::assertNoForeignKeyViolations)
+        query("PRAGMA integrity_check", block = ::assertIntegrity)
+        identity
+    }
+
+    private suspend fun assertLegacyQueueRows(database: RoomDatabase, dao: QueueDao, before: Map<String, FrozenTableRows>) {
         database.withTestReaderSql { schemaOne.assertRowsPreserved(before, this) }
-        val dao = database.queueDao()
         assertEquals(legacyGeneration, dao.generation(GENERATION_ID))
         assertEquals(legacyGeneration, dao.operation(legacyGeneration.operationId))
         assertEquals(legacyHead, dao.head())

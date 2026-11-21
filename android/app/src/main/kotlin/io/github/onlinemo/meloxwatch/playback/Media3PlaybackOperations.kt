@@ -20,7 +20,9 @@ import kotlin.coroutines.resumeWithException
 /** Media3 has a masking position; a playback-thread fence prevents treating that as a completed seek. */
 @UnstableApi
 class Media3PlaybackOperations(override val player: Player) : PlaybackBackendOperations {
-    private val exoPlayer = requireNotNull(player as? ExoPlayer)
+    private val exoPlayer = requireNotNull(
+        (if (player is RoutingPlaybackPlayer) player.wrappedPlayer else player) as? ExoPlayer,
+    )
     private val mainHandler = Handler(Looper.getMainLooper())
     private val waiters = LinkedHashMap<Player.Listener, () -> Unit>()
     private var closed = false
@@ -137,7 +139,10 @@ class Media3PlaybackOperations(override val player: Player) : PlaybackBackendOpe
                     if (Looper.myLooper() == Looper.getMainLooper()) cancel() else mainHandler.post(cancel)
                 }
                 try {
-                    message = start { acknowledged = true; inspect() }
+                    message = start {
+                        acknowledged = true
+                        inspect()
+                    }
                     inspect()
                 } catch (error: Exception) {
                     removeListener()

@@ -6,6 +6,7 @@ import os
 from pathlib import PurePosixPath
 import re
 import shutil
+import sys
 import time
 import xml.etree.ElementTree as ET
 
@@ -1236,6 +1237,11 @@ def bootstrap_dependencies(build_sha, missing, total_deadline=None):
 def build(mode):
     cloud_only()
     no_signing_secrets()
+    from package_contract import has_phone
+    if has_phone(ROOT):
+        from package_build import build_packages
+        return build_packages(mode, sys.modules[__name__])
+    require(mode != 'candidate', 'A full candidate requires both Android applications')
     request_path = ROOT / DEPENDENCY_MIGRATION_REQUEST
     has_migration_request = request_path.exists() or request_path.is_symlink()
     if has_migration_request:
@@ -1321,5 +1327,5 @@ def build(mode):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode', choices=['debug', 'release', 'diagnostic'])
+    parser.add_argument('mode', choices=['debug', 'release', 'diagnostic', 'candidate'])
     build(parser.parse_args().mode)

@@ -8,6 +8,7 @@ import android.util.Base64
 import androidx.room.Room
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
+import io.github.onlinemo.meloxwatch.data.database.HistoricalMeloXV3Database
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.TestDatabaseSql
 import io.github.onlinemo.meloxwatch.data.database.cursorStorageType
@@ -42,7 +43,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** 旧DDL只取历史云导出的Room schema；真实MeloXDatabase升级负责最终schema验证。 */
+/** 旧DDL只取历史云导出的1/2 schema；先独立观察历史v3，再验证生产v5仓储。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -54,9 +55,10 @@ class PlaylistMigrationTest {
         val file = File(folder.root, "playlist-from-v1.db")
         val before = createOldDatabase(file, version = 1)
         assertFalse(before.any { it.name == "library_meta" || it.name == "listening_meta" })
+        observeHistoricalVersionThree(file, before)
         val database = open(file)
         val accepted = try {
-            assertPreserved(database, before)
+            assertProductionPreserved(database, before)
             database.withTestWriterTransaction {
                 assertEquals(LibraryMetaEntity(), database.libraryDao().meta())
                 assertEquals(ListeningMetaEntity(), database.listeningDao().meta())
@@ -65,7 +67,7 @@ class PlaylistMigrationTest {
                 }
             }
             val result = exerciseAllPlaylistTables(database, "from-v1")
-            assertPreserved(database, before)
+            assertProductionPreserved(database, before)
             result
         } finally { database.close() }
         assertReopened(file, before, accepted, "from-v1")
@@ -77,9 +79,10 @@ class PlaylistMigrationTest {
         val before = createOldDatabase(file, version = 2)
         assertTrue(before.single { it.name == "local_track_versions" }.rows.isNotEmpty())
         assertTrue(before.single { it.name == "listening_history" }.rows.isNotEmpty())
+        observeHistoricalVersionThree(file, before)
         val database = open(file)
         val accepted = try {
-            assertPreserved(database, before)
+            assertProductionPreserved(database, before)
             database.withTestWriterTransaction {
                 query("SELECT rootObjectId FROM local_source_versions WHERE sourceId = ? AND validTo IS NULL", SOURCE_ID) {
                     assertTrue(it.step())
@@ -99,16 +102,62 @@ class PlaylistMigrationTest {
                 assertEquals("Asia/Shanghai", history.firstProgressZoneId)
             }
             val result = exerciseAllPlaylistTables(database, "from-v2")
-            assertPreserved(database, before)
+            assertProductionPreserved(database, before)
             result
         } finally { database.close() }
         assertReopened(file, before, accepted, "from-v2")
     }
 
-    private suspend fun exerciseAllPlaylistTables(database: MeloXDatabase, suffix: String): PlaylistCommit {
+    private suspend fun observeHistoricalVersionThree(file: File, before: List<TableRows>) {
+        val context = RuntimeEnvironment.getApplication() as Context
+        val historical = HistoricalMeloXV3Database.open(context, file.absolutePath)
+        val identity = try {
+            assertPreserved(historical, before)
+            assertInitialHistoricalPlaylistTables(historical)
+            historical.withTestWriterTransaction {
+                assertEquals(39L, scalarLong("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata')"))
+                val value = checkNotNull(scalarText("SELECT identity_hash FROM room_master_table WHERE id = 42"))
+                assertTrue(Regex("[0-9a-f]{32}").matches(value))
+                value
+            }
+        } finally { historical.close() }
+        val reopened = HistoricalMeloXV3Database.open(context, file.absolutePath)
+        try {
+            assertPreserved(reopened, before)
+            assertInitialHistoricalPlaylistTables(reopened)
+            reopened.withTestWriterTransaction {
+                assertEquals(identity, scalarText("SELECT identity_hash FROM room_master_table WHERE id = 42"))
+            }
+        } finally { reopened.close() }
+        SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
+            assertEquals(3, sqlite.version)
+            for (table in before) {
+                sqlite.rawQuery(select(table), null).use { assertEquals(table.name, table.rows, cells(it)) }
+            }
+            sqlite.rawQuery("PRAGMA foreign_key_check", null).use { assertFalse(it.moveToFirst()) }
+            sqlite.rawQuery("PRAGMA integrity_check", null).use {
+                assertTrue(it.moveToFirst())
+                assertEquals("ok", it.getString(0))
+            }
+        }
+    }
+
+    private suspend fun assertInitialHistoricalPlaylistTables(database: HistoricalMeloXV3Database) {
         database.withTestWriterTransaction {
             val sqlite = this
             assertEquals(3, sqlite.scalarLong("PRAGMA user_version").toInt())
+            val names = sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'playlist_%' ORDER BY name") { statement ->
+                buildList { while (statement.step()) add(statement.getText(0)) }
+            }
+            assertEquals(PLAYLIST_TABLES.sorted(), names)
+            for (table in PLAYLIST_TABLES) assertEquals(0L, count(sqlite, table))
+        }
+    }
+
+    private suspend fun exerciseAllPlaylistTables(database: MeloXDatabase, suffix: String): PlaylistCommit {
+        database.withTestWriterTransaction {
+            val sqlite = this
+            assertEquals(5, sqlite.scalarLong("PRAGMA user_version").toInt())
             val names = sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'playlist_%' ORDER BY name") { statement ->
                 buildList { while (statement.step()) add(statement.getText(0)) }
             }
@@ -160,7 +209,7 @@ class PlaylistMigrationTest {
     private suspend fun assertReopened(file: File, before: List<TableRows>, accepted: PlaylistCommit, suffix: String) {
         val database = open(file)
         try {
-            assertPreserved(database, before)
+            assertProductionPreserved(database, before)
             val repository = repository(database)
             repository.initialize()
             val snapshot = checkNotNull(accepted.snapshot)
@@ -174,10 +223,10 @@ class PlaylistMigrationTest {
                 PlaylistPageSource { _, _ -> throw AssertionError("DB reopen must replay the original durable receipt") })
             assertTrue(replay.wasReplay)
             assertEquals(snapshot, replay.snapshot)
-            assertPreserved(database, before)
+            assertProductionPreserved(database, before)
         } finally { database.close() }
         SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(3, sqlite.version)
+            assertEquals(5, sqlite.version)
             for (table in before) {
                 sqlite.rawQuery(select(table), null).use { assertEquals(table.name, table.rows, cells(it)) }
             }
@@ -201,7 +250,8 @@ class PlaylistMigrationTest {
     private fun open(file: File): MeloXDatabase = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
         MeloXDatabase::class.java, file.absolutePath)
         .setDriver(BundledSQLiteDriver())
-        .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3).build()
+        .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3,
+            MeloXDatabase.MIGRATION_3_4, MeloXDatabase.MIGRATION_4_5).build()
 
     private fun createOldDatabase(file: File, version: Int): List<TableRows> {
         val relative = "schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase/$version.json"
@@ -244,10 +294,27 @@ class PlaylistMigrationTest {
         }
     }
 
-    private suspend fun assertPreserved(database: MeloXDatabase, before: List<TableRows>) = database.withTestWriterTransaction {
+    private suspend fun assertPreserved(database: HistoricalMeloXV3Database, before: List<TableRows>) = database.withTestWriterTransaction {
         // Acquiring the writer opens Room's real upgrade path and generated validation.
         val sqlite = this
         assertEquals(3, sqlite.scalarLong("PRAGMA user_version").toInt())
+        for (table in before) sqlite.query(select(table)) { assertEquals(table.name, table.rows, cells(it)) }
+        sqlite.query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
+        sqlite.query("PRAGMA integrity_check") {
+            assertTrue(it.step())
+            assertEquals("ok", it.getText(0))
+        }
+        val queue = checkNotNull(database.queueDao().operation("kept-queue-operation"))
+        assertEquals("REPLACE", queue.operationKind)
+        assertEquals("", queue.operationFingerprint)
+        assertNull(queue.expectedCurrentEntryId)
+        assertEquals("PRESERVE_SUPPLIED", queue.orderPolicy)
+    }
+
+    private suspend fun assertProductionPreserved(database: MeloXDatabase, before: List<TableRows>) = database.withTestWriterTransaction {
+        // Acquiring the writer opens Room's real upgrade path and generated validation.
+        val sqlite = this
+        assertEquals(5, sqlite.scalarLong("PRAGMA user_version").toInt())
         for (table in before) sqlite.query(select(table)) { assertEquals(table.name, table.rows, cells(it)) }
         sqlite.query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
         sqlite.query("PRAGMA integrity_check") {

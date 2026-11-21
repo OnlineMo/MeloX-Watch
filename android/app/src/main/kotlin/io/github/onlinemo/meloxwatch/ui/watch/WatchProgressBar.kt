@@ -1,5 +1,7 @@
 package io.github.onlinemo.meloxwatch.ui.watch
 
+import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchThemeColors
+
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -50,6 +52,7 @@ fun WatchProgressBar(
     onSetProgress: (Double) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val colors = LocalWatchThemeColors.current
     val displayed = value?.takeIf { it.isFinite() }?.coerceIn(0.0, 1.0)
     val interactive = enabled && displayed != null
     val reason = disabledReason.ifBlank { "暂时无法调整进度" }
@@ -81,9 +84,9 @@ fun WatchProgressBar(
             if (size.width > inset * 2f) {
                 val start = Offset(inset, size.height / 2f)
                 val end = Offset(size.width - inset, start.y)
-                drawLine(WatchPalette.Focus, start, end, strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
+                drawLine(colors.focus, start, end, strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
                 displayed?.takeIf { it > 0.0 }?.let { fraction ->
-                    drawLine(if (interactive) WatchPalette.Text else WatchPalette.Disabled, start,
+                    drawLine(if (interactive) colors.text else colors.disabled, start,
                         Offset(start.x + (end.x - start.x) * fraction.toFloat(), start.y),
                         strokeWidth = 3.dp.toPx(), cap = StrokeCap.Round)
                 }

@@ -18,6 +18,11 @@
     <string name="input_volume_fixed">This output has fixed volume. Adjust it on the output device.</string>
     <string name="input_volume_remote">Adjust volume on the connected remote output.</string>
     <string name="input_volume_output_changed">The output or system volume changed. Choose a new volume.</string>
-    <string name="input_volume_unconfirmed">The volume change could not be confirmed. The current system value is shown.</string>
+    <string name="input_volume_unconfirmed">The volume change could not be confirmed. Refresh to read the current media volume.</string>
     <string name="input_volume_unavailable">Media volume is currently unavailable. Refresh to try again.</string>
+    <string name="input_volume_busy">Finishing the current media volume action.</string>
+    <string name="input_volume_route_unknown">The current output cannot be verified. Use the volume buttons; the slider is unavailable.</string>
+    <string name="input_volume_muted">The media output is muted.</string>
+    <string name="input_volume_at_limit">Media volume is at the current limit.</string>
+    <string name="input_volume_refresh">Refresh media volume</string>
 </resources>

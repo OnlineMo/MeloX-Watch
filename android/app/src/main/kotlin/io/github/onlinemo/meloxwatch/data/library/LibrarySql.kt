@@ -66,6 +66,72 @@ internal object LibrarySql {
             ))))
     """.trimIndent()
 
+    /** Scan payloads remain unchanged. Every query derives the same revisioned user layer. */
+    private fun displayCtes(revision: Long): String = """
+        scanned_tracks AS (
+            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1
+        ), artist_overrides AS (
+            SELECT link.trackId, groups.groupKey, groups.originalName, groups.originalSortKey,
+                groups.originalSectionKey, groups.originalSearchName, link.included
+            FROM display_artist_links link JOIN display_groups groups ON groups.entityId = link.groupId
+            WHERE groups.kind = 'ARTIST' AND ${valid("link", revision)}
+        ), raw_artists AS (
+            SELECT t.versionId, t.trackId, artists.artistKey, artists.displayName,
+                artists.artistKey AS originalSortKey, NULL AS originalSectionKey,
+                '' AS originalSearchName, artists.ordinal
+            FROM scanned_tracks t JOIN local_artist_values artists ON artists.versionId = t.versionId
+            WHERE artists.artistKey != '4:' AND NOT EXISTS (
+                SELECT 1 FROM artist_overrides changed WHERE changed.trackId = t.trackId
+                    AND changed.groupKey = artists.artistKey AND changed.included = 0)
+            UNION ALL
+            SELECT t.versionId, t.trackId, changed.groupKey, changed.originalName, changed.originalSortKey,
+                changed.originalSectionKey, changed.originalSearchName, 128
+            FROM scanned_tracks t JOIN artist_overrides changed ON changed.trackId = t.trackId
+            WHERE changed.included = 1 AND changed.groupKey != '4:' AND NOT EXISTS (
+                SELECT 1 FROM local_artist_values original WHERE original.versionId = t.versionId
+                    AND original.artistKey = changed.groupKey)
+        ), nonempty_artists AS (
+            SELECT raw.* FROM raw_artists raw
+            UNION ALL
+            SELECT t.versionId, t.trackId, '4:', NULL, '4:', 'UNKNOWN', '', 0
+            FROM scanned_tracks t WHERE NOT EXISTS (SELECT 1 FROM raw_artists raw WHERE raw.trackId = t.trackId)
+        ), display_artist_rows AS (
+            SELECT raw.versionId, raw.trackId, raw.artistKey, raw.ordinal,
+                COALESCE(names.displayName, raw.displayName) AS displayName,
+                COALESCE(names.sortKey, raw.originalSortKey) AS sortKey,
+                COALESCE(names.sectionKey, groups.originalSectionKey, raw.originalSectionKey,
+                    CASE substr(raw.artistKey, 1, 1) WHEN '1' THEN 'DIGITS' WHEN '2' THEN 'HAN'
+                        WHEN '3' THEN 'OTHER' WHEN '4' THEN 'UNKNOWN'
+                        ELSE upper(char((instr('0123456789abcdef', substr(raw.artistKey, 7, 1)) - 1) * 16
+                            + instr('0123456789abcdef', substr(raw.artistKey, 8, 1)) - 1)) END) AS sectionKey,
+                COALESCE(names.searchName, groups.originalSearchName, raw.originalSearchName) AS searchName
+            FROM nonempty_artists raw
+            LEFT JOIN display_groups groups ON groups.kind = 'ARTIST' AND groups.groupKey = raw.artistKey
+            LEFT JOIN display_names names ON names.groupId = groups.entityId AND ${valid("names", revision)}
+        ), display_tracks AS (
+            SELECT t.*, COALESCE(assigned.groupKey, t.albumKey) AS displayAlbumKey,
+                COALESCE(albumName.displayName, CASE WHEN albumLink.versionId IS NULL THEN t.album
+                    ELSE albumGroup.originalName END) AS displayAlbum,
+                CASE WHEN albumLink.versionId IS NULL THEN t.albumArtist ELSE albumGroup.originalSubtitle END AS displayAlbumSubtitle,
+                COALESCE(albumName.sortKey, CASE WHEN albumLink.versionId IS NULL THEN t.albumSortKey
+                    ELSE albumGroup.originalSortKey END, '4:') AS displayAlbumSortKey,
+                COALESCE(albumName.sectionKey, CASE WHEN albumLink.versionId IS NULL THEN t.albumSection
+                    ELSE albumGroup.originalSectionKey END, 'UNKNOWN') AS displayAlbumSection,
+                COALESCE(albumName.searchName, albumGroup.originalSearchName, '') AS displayAlbumSearchName,
+                primaryArtist.displayName AS displayArtist, primaryArtist.sortKey AS displayArtistSortKey,
+                primaryArtist.sectionKey AS displayArtistSection
+            FROM scanned_tracks t
+            LEFT JOIN display_album_links albumLink ON albumLink.trackId = t.trackId AND ${valid("albumLink", revision)}
+            LEFT JOIN display_groups assigned ON assigned.entityId = albumLink.groupId AND assigned.kind = 'ALBUM'
+            LEFT JOIN display_groups albumGroup ON albumGroup.kind = 'ALBUM'
+                AND albumGroup.groupKey = COALESCE(assigned.groupKey, t.albumKey)
+            LEFT JOIN display_names albumName ON albumName.groupId = albumGroup.entityId AND ${valid("albumName", revision)}
+            LEFT JOIN display_artist_rows primaryArtist ON primaryArtist.trackId = t.trackId
+                AND primaryArtist.artistKey = (SELECT artistKey FROM display_artist_rows candidate
+                    WHERE candidate.trackId = t.trackId ORDER BY ordinal, artistKey LIMIT 1)
+        )
+    """.trimIndent()
+
     private fun cte(view: LibraryViewToken): Pair<String, MutableList<Any?>> {
         val revision = view.revision
         val args = mutableListOf<Any?>()
@@ -95,18 +161,20 @@ internal object LibrarySql {
         if (view.query.readableOnly) filters += "a.availabilityRank = 0"
         if (!view.query.includeHidden) filters += "COALESCE(a.availabilityRank, 3) != 5"
         if (!view.query.includeHidden && view.shortAudioFilter) filters += "(t.durationMs IS NULL OR t.durationMs >= ${LibraryLimits.SHORT_AUDIO_MS})"
-        view.query.albumKey?.let { filters += "t.albumKey = ?"; args += it }
-        view.query.artistKey?.let { filters += "EXISTS (SELECT 1 FROM local_artist_values artist WHERE artist.versionId = t.versionId AND artist.artistKey = ?)"; args += it }
+        view.query.albumKey?.let { filters += "t.displayAlbumKey = ?"; args += it }
+        view.query.artistKey?.let { filters += "EXISTS (SELECT 1 FROM display_artist_rows artist WHERE artist.versionId = t.versionId AND artist.artistKey = ?)"; args += it }
         view.query.addedSinceEpochMs?.let { filters += "t.firstAddedEpochMs >= ?"; args += it }
         if (view.query.search.isNotBlank()) {
-            filters += "t.searchText LIKE ? ESCAPE '\\'"
+            filters += "(t.searchText LIKE ? ESCAPE '\\' OR t.displayAlbumSearchName LIKE ? ESCAPE '\\' " +
+                "OR EXISTS (SELECT 1 FROM display_artist_rows searched WHERE searched.trackId = t.trackId AND searched.searchName LIKE ? ESCAPE '\\'))"
             val escaped = LibrarySortKeys.normalize(view.query.search).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            args += "%$escaped%"
+            repeat(3) { args += "%$escaped%" }
         }
         val (primary, nullRank, section) = sortColumns(view.sort.field)
         // Choose the minimum scoped access through this track's relations, then join its exact version payload.
         val sql = """
-            WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""} alias_rows AS (
+            WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""}
+            ${displayCtes(revision)}, alias_rows AS (
                 SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
                     lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
@@ -133,7 +201,7 @@ internal object LibrarySql {
                     payloadSource.spec AS selectedSpec, payloadAccess.objectId AS selectedObjectId,
                     payloadLocation.contentToken AS selectedProviderContentToken, payloadLocation.verifiedContentToken AS selectedVerifiedContentToken,
                     payloadLocation.sizeBytes AS selectedSizeBytes
-                FROM local_track_versions t LEFT JOIN alias_rows a ON a.aliasVersionId = (
+                FROM display_tracks t LEFT JOIN alias_rows a ON a.aliasVersionId = (
                     SELECT ar.aliasVersionId FROM local_track_locations relation
                     JOIN alias_rows ar ON ar.locationId = relation.locationId
                     WHERE relation.trackId = t.trackId AND ${valid("relation", revision)}
@@ -155,8 +223,8 @@ internal object LibrarySql {
 
     private fun sortColumns(field: LibrarySortField): Triple<String, String, String> = when (field) {
         LibrarySortField.TITLE -> Triple("titleKey", "0", "titleSection")
-        LibrarySortField.ARTIST -> Triple("artistKey", "CASE WHEN artistKey LIKE '4:%' THEN 1 ELSE 0 END", "artistSection")
-        LibrarySortField.ALBUM -> Triple("albumSortKey", "CASE WHEN albumSortKey LIKE '4:%' THEN 1 ELSE 0 END", "albumSection")
+        LibrarySortField.ARTIST -> Triple("displayArtistSortKey", "CASE WHEN displayArtistSortKey LIKE '4:%' THEN 1 ELSE 0 END", "displayArtistSection")
+        LibrarySortField.ALBUM -> Triple("displayAlbumSortKey", "CASE WHEN displayAlbumSortKey LIKE '4:%' THEN 1 ELSE 0 END", "displayAlbumSection")
         LibrarySortField.FILENAME_NATURAL -> Triple("filenameKey", "0", "filenameSection")
         LibrarySortField.DURATION -> Triple("printf('%019d', COALESCE(durationMs, 0))", "CASE WHEN durationMs IS NULL THEN 1 ELSE 0 END", "''")
         LibrarySortField.ADDED -> Triple("printf('%019d', firstAddedSequence)", "0", "''")
@@ -196,6 +264,7 @@ internal object LibrarySql {
                 AND member.providerId = t.providerId AND member.trackId = t.trackId)
         """.trimIndent(), args.toTypedArray())
     }
+
     fun rows(view: LibraryViewToken, cursor: LibraryCursor?, limit: Int, before: Boolean = false): RoomRawQuery {
         val (sql, args) = cte(view)
         val where = if (cursor == null) "" else "WHERE ${boundary(view, cursor, before, args)}"
@@ -227,13 +296,48 @@ internal object LibrarySql {
     }
     fun groups(view: LibraryViewToken, kind: LibraryGroupKind, after: String?, limit: Int): RoomRawQuery {
         val (sql, args) = cte(view)
-        val group = when (kind) {
-            LibraryGroupKind.ALBUM -> "SELECT albumKey AS groupKey, MIN(album) AS title, MIN(albumArtist) AS subtitle, COUNT(*) AS trackCount FROM ordered GROUP BY albumKey"
-            LibraryGroupKind.ARTIST -> "SELECT artists.artistKey AS groupKey, MIN(artists.displayName) AS title, NULL AS subtitle, COUNT(DISTINCT ordered.trackId) AS trackCount FROM ordered JOIN local_artist_values artists ON artists.versionId = ordered.versionId GROUP BY artists.artistKey"
-        }
+        val group = groupSelection(view, kind, args)
         val where = if (after == null) "" else "WHERE groupKey > ?".also { args += after }
         args += limit
         return raw("$sql SELECT * FROM ($group) $where ORDER BY groupKey LIMIT ?", args.toTypedArray())
+    }
+
+    fun groupCount(view: LibraryViewToken, kind: LibraryGroupKind): RoomRawQuery {
+        val (sql, args) = cte(view)
+        val group = groupSelection(view, kind, args)
+        return raw("$sql SELECT COUNT(*) FROM ($group)", args.toTypedArray())
+    }
+
+    fun group(view: LibraryViewToken, kind: LibraryGroupKind, groupKey: String): RoomRawQuery {
+        val (sql, args) = cte(view)
+        val group = groupSelection(view, kind, args)
+        args += groupKey
+        return raw("$sql SELECT * FROM ($group) WHERE groupKey = ? LIMIT 2", args.toTypedArray())
+    }
+
+    private fun groupSelection(view: LibraryViewToken, kind: LibraryGroupKind, args: MutableList<Any?>): String {
+        val populated = when (kind) {
+            LibraryGroupKind.ALBUM -> "SELECT displayAlbumKey AS groupKey, MIN(displayAlbum) AS title, MIN(displayAlbumSubtitle) AS subtitle, COUNT(*) AS trackCount FROM ordered GROUP BY displayAlbumKey"
+            LibraryGroupKind.ARTIST -> "SELECT artists.artistKey AS groupKey, MIN(artists.displayName) AS title, NULL AS subtitle, COUNT(DISTINCT ordered.trackId) AS trackCount FROM ordered JOIN display_artist_rows artists ON artists.versionId = ordered.versionId GROUP BY artists.artistKey"
+        }
+        if (view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null ||
+            view.query.albumKey != null || view.query.artistKey != null || view.query.addedSinceEpochMs != null ||
+            view.query.readableOnly) return populated
+        val source = if (kind == LibraryGroupKind.ALBUM) "display_album_links" else "display_artist_links"
+        val search = if (view.query.search.isBlank()) "" else {
+            args += "%" + LibrarySortKeys.normalize(view.query.search).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            "AND COALESCE(names.searchName, groups.originalSearchName) LIKE ? ESCAPE '\\'"
+        }
+        // An explicitly edited empty group stays manageable; merely reading a group never creates it.
+        return """$populated UNION ALL
+            SELECT groups.groupKey, COALESCE(names.displayName, groups.originalName), groups.originalSubtitle, 0
+            FROM display_groups groups LEFT JOIN display_names names ON names.groupId = groups.entityId AND ${valid("names", view.revision)}
+            WHERE groups.kind = '${kind.name}' AND ((groups.editedFrom IS NOT NULL AND groups.editedFrom <= ${view.revision})
+                OR names.versionId IS NOT NULL OR EXISTS (
+                SELECT 1 FROM $source changed WHERE changed.groupId = groups.entityId AND ${valid("changed", view.revision)}))
+                AND NOT EXISTS (SELECT 1 FROM ($populated) populated WHERE populated.groupKey = groups.groupKey)
+                $search
+        """.trimIndent()
     }
     fun sections(view: LibraryViewToken): RoomRawQuery {
         val (sql, args) = cte(view)

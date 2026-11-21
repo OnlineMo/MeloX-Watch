@@ -728,7 +728,7 @@
       "source_scope": "范围已确认",
       "normal_acceptance": "AC-066-N",
       "error_acceptance": "AC-066-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {
@@ -739,7 +739,7 @@
       "source_scope": "范围已确认",
       "normal_acceptance": "AC-067-N",
       "error_acceptance": "AC-067-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {
@@ -1069,7 +1069,7 @@
       "source_scope": "范围已确认",
       "normal_acceptance": "AC-097-N",
       "error_acceptance": "AC-097-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {
@@ -1366,7 +1366,7 @@
       "source_scope": "范围已确认",
       "normal_acceptance": "AC-124-N",
       "error_acceptance": "AC-124-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {
@@ -1377,7 +1377,7 @@
       "source_scope": "范围已确认",
       "normal_acceptance": "AC-125-N",
       "error_acceptance": "AC-125-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {
@@ -1388,7 +1388,7 @@
       "source_scope": "范围已确认",
       "normal_acceptance": "AC-126-N",
       "error_acceptance": "AC-126-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {

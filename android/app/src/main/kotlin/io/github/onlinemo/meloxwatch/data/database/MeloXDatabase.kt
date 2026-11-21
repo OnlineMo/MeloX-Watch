@@ -9,6 +9,12 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.db.SupportSQLiteDatabase
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.library.LibraryAbsenceEntity
+import io.github.onlinemo.meloxwatch.data.library.DisplayAlbumLinkEntity
+import io.github.onlinemo.meloxwatch.data.library.DisplayArtistLinkEntity
+import io.github.onlinemo.meloxwatch.data.library.DisplayDao
+import io.github.onlinemo.meloxwatch.data.library.DisplayGroupEntity
+import io.github.onlinemo.meloxwatch.data.library.DisplayMigrations
+import io.github.onlinemo.meloxwatch.data.library.DisplayNameEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryArtistEntity
@@ -16,6 +22,9 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryDao
 import io.github.onlinemo.meloxwatch.data.library.LibraryFrontierEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryGrantEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryImportEntity
+import io.github.onlinemo.meloxwatch.data.library.LibraryTransferredImportEntity
+import io.github.onlinemo.meloxwatch.data.library.TransferredImportDao
+import io.github.onlinemo.meloxwatch.data.library.TransferredImportMigrations
 import io.github.onlinemo.meloxwatch.data.library.LibraryLocationEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryLocationVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
@@ -31,6 +40,9 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryTrackEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackLocationEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryViewEntity
+import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDao
+import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsMigrations
+import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackPreferencesEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningDao
 import io.github.onlinemo.meloxwatch.data.listening.ListeningDayEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningHistoryEntity
@@ -56,6 +68,12 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueEntryEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueGenerationEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueHeadEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueMigrations
+import io.github.onlinemo.meloxwatch.data.transfer.TransferDisplayPreviewEntity
+import io.github.onlinemo.meloxwatch.data.transfer.TransferRoomDao
+import io.github.onlinemo.meloxwatch.data.transfer.TransferRoomOperationEntity
+import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeCandidateDao
+import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeCandidateEntity
+import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
 
 /** Queue and local library share one database while retaining independent version domains. */
 @Database(
@@ -72,8 +90,12 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueMigrations
         PlaylistMetaEntity::class, PlaylistHeadEntity::class, PlaylistGenerationEntity::class,
         PlaylistMemberEntity::class, PlaylistViewEntity::class, PlaylistReceiptEntity::class,
         PlaylistExchangePreviewEntity::class, PlaylistExchangeRowEntity::class, PlaylistExportReceiptEntity::class,
+        LyricsTrackPreferencesEntity::class, LibraryTransferredImportEntity::class,
+        DisplayGroupEntity::class, DisplayNameEntity::class, DisplayAlbumLinkEntity::class,
+        DisplayArtistLinkEntity::class, TransferRoomOperationEntity::class, TransferDisplayPreviewEntity::class,
+        TransferredThemeCandidateEntity::class,
     ],
-    version = 3,
+    version = 6,
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
@@ -82,6 +104,11 @@ abstract class MeloXDatabase : RoomDatabase() {
     abstract fun listeningDao(): ListeningDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun playlistExchangeDao(): PlaylistExchangeDao
+    abstract fun lyricsDao(): LyricsDao
+    abstract fun transferredImportDao(): TransferredImportDao
+    abstract fun displayDao(): DisplayDao
+    abstract fun transferRoomDao(): TransferRoomDao
+    abstract fun transferredThemeCandidateDao(): TransferredThemeCandidateDao
 
     companion object {
         const val FILE_NAME = "melox.db"
@@ -102,10 +129,37 @@ abstract class MeloXDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                LyricsMigrations.applyV3ToV4(db)
+            }
+
+            override fun migrate(connection: SQLiteConnection) {
+                LyricsMigrations.applyV3ToV4(connection)
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) { TransferredImportMigrations.createTables(db) }
+            override fun migrate(connection: SQLiteConnection) { TransferredImportMigrations.createTables(connection) }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                DisplayMigrations.applyV5ToV6(db)
+                TransferredThemeMigrations.createTables(db)
+            }
+            override fun migrate(connection: SQLiteConnection) {
+                DisplayMigrations.applyV5ToV6(connection)
+                TransferredThemeMigrations.createTables(connection)
+            }
+        }
+
         fun open(context: Context): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
-        ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
+            MIGRATION_4_5, MIGRATION_5_6).build()
     }
 }

@@ -73,7 +73,7 @@ fun LazyListScope.playlistPickerContent(
             }
             items(state.replacements?.tracks.orEmpty(), key = { "playlist-entry:replacement:${it.trackKey.trackId}" }) { track ->
                 EntryButton(track.title, !state.loading && !state.saving) { model.previewReplacement(track) }
-                track.metadata.artist?.let { EntryText(it) }
+                track.displayArtist?.let { EntryText(it) }
                 EntryText(stringResource(entryAvailabilityText(track.availability)))
             }
             item(key = "playlist-entry:replacement-paging") {

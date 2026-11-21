@@ -3,6 +3,8 @@ package io.github.onlinemo.meloxwatch.ui
 import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.Intent
+import android.graphics.Point
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import android.provider.Settings
@@ -41,9 +43,13 @@ import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
@@ -60,9 +66,11 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontSynthesis
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
@@ -80,6 +88,8 @@ import io.github.onlinemo.meloxwatch.data.ProbeDocument
 import io.github.onlinemo.meloxwatch.data.ProbeFileIssue
 import io.github.onlinemo.meloxwatch.data.ProbeFiles
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrack
+import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
+import io.github.onlinemo.meloxwatch.data.themes.BackgroundRoundClip
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.ui.library.LibraryScreen
 import io.github.onlinemo.meloxwatch.ui.library.LibraryViewModel
@@ -97,7 +107,9 @@ import io.github.onlinemo.meloxwatch.playback.PlaybackBackendState
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import io.github.onlinemo.meloxwatch.playback.input.SeekGestureMode
 import io.github.onlinemo.meloxwatch.playback.input.SeekGestureSurface
-import io.github.onlinemo.meloxwatch.ui.playback.MediaVolumeIssue
+import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
+import io.github.onlinemo.meloxwatch.ui.playback.MediaVolumeClientPhase
+import io.github.onlinemo.meloxwatch.ui.playback.mediaVolumeSliderFraction
 import io.github.onlinemo.meloxwatch.ui.playback.PlaybackProgressInputIssue
 import io.github.onlinemo.meloxwatch.ui.playback.PlaybackProgressInputPhase
 import io.github.onlinemo.meloxwatch.ui.playback.SleepTimerControls
@@ -105,6 +117,7 @@ import io.github.onlinemo.meloxwatch.ui.playback.SleepTimerSummaryPreferences
 import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesControls
 import io.github.onlinemo.meloxwatch.ui.preferences.PreferencesViewModel
 import io.github.onlinemo.meloxwatch.ui.queue.QueueViewModel
+import io.github.onlinemo.meloxwatch.ui.queue.QueueEditAction
 import io.github.onlinemo.meloxwatch.ui.queue.queueContent
 import io.github.onlinemo.meloxwatch.ui.playlists.AuthorizedPlaylistDocument
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistDocumentPort
@@ -129,14 +142,41 @@ import io.github.onlinemo.meloxwatch.ui.watch.WatchPalette
 import io.github.onlinemo.meloxwatch.ui.watch.WatchNowPlayingPage
 import io.github.onlinemo.meloxwatch.ui.watch.WatchPlaybackPages
 import io.github.onlinemo.meloxwatch.ui.watch.WatchProgressBar
+import io.github.onlinemo.meloxwatch.ui.watch.WatchWindowRuntime
+import io.github.onlinemo.meloxwatch.ui.themes.AppearanceViewModel
+import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchAppearance
+import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchThemeColors
+import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchThemeFonts
+import io.github.onlinemo.meloxwatch.ui.themes.PlaybackBackgroundViewModel
+import io.github.onlinemo.meloxwatch.ui.themes.PlaybackBackgroundSurface
+import io.github.onlinemo.meloxwatch.ui.themes.WatchAppearanceSettings
+import io.github.onlinemo.meloxwatch.ui.themes.WatchThemeScope
+import io.github.onlinemo.meloxwatch.ui.fonts.ProbeFontPickerViewModel
+import io.github.onlinemo.meloxwatch.ui.fonts.WatchSystemFontControls
+import io.github.onlinemo.meloxwatch.ui.fonts.rememberProbeFontPickerLauncher
+import io.github.onlinemo.meloxwatch.ui.lyrics.entry.LyricsEntryViewModel
+import io.github.onlinemo.meloxwatch.ui.lyrics.entry.lyricsEntryViewModelFactory
+import io.github.onlinemo.meloxwatch.ui.lyrics.options.LyricsDisplayEditor
+import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsAssociationConfirmation
+import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsDisplaySettings
+import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsOffsetSettings
+import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsOptions
+import io.github.onlinemo.meloxwatch.ui.watch.compactPlaybackTitle
+import io.github.onlinemo.meloxwatch.ui.watch.lyricsDisplayOptions
+import io.github.onlinemo.meloxwatch.ui.watch.watchSpacing
 import io.github.onlinemo.meloxwatch.ui.watch.rememberRotaryAxisSteps
 import io.github.onlinemo.meloxwatch.ui.watch.rememberWatchRotaryScroll
 import io.github.onlinemo.meloxwatch.ui.watch.watchRotaryInput
 import java.net.URI
 import java.net.URISyntaxException
+import io.github.onlinemo.meloxwatch.ui.transfer.WatchTransferViewModel
+import io.github.onlinemo.meloxwatch.ui.transfer.watchTransferContent
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private lateinit var probeViewModel: ProbeViewModel
@@ -147,6 +187,19 @@ class MainActivity : ComponentActivity() {
     private lateinit var listeningViewModel: ListeningViewModel
     private lateinit var playlistsViewModel: PlaylistsViewModel
     private lateinit var playlistEntryViewModel: PlaylistEntryViewModel
+    private lateinit var appearanceViewModel: AppearanceViewModel
+    private lateinit var transferViewModel: WatchTransferViewModel
+    private lateinit var playbackBackgroundViewModel: PlaybackBackgroundViewModel
+    private lateinit var lyricsEntryViewModel: LyricsEntryViewModel
+    private lateinit var fontPickerViewModel: ProbeFontPickerViewModel
+    private lateinit var lyricsPickerViewModel: ProbeLyricsPickerViewModel
+    private lateinit var appearancePickerViewModel: ProbeAppearancePickerViewModel
+    private lateinit var lyricsDisplayViewModel: ProbeLyricsDisplayViewModel
+    private var watchWindowRuntime: WatchWindowRuntime? = null
+    private var pageRuntime: ProbePageRuntime? = null
+    private var uiPresentationBinding: ProbeUiPresentation.Binding? = null
+    private var transferPresentationBinding: AutoCloseable? = null
+    private var transferForeground = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -157,6 +210,32 @@ class MainActivity : ComponentActivity() {
         sourcesViewModel = ViewModelProvider(this)[SourcesViewModel::class.java]
         listeningViewModel = ViewModelProvider(this)[ListeningViewModel::class.java]
         val app = application as MeloXApplication
+        fontPickerViewModel = ViewModelProvider(this)[ProbeFontPickerViewModel::class.java]
+        lyricsPickerViewModel = ViewModelProvider(this)[ProbeLyricsPickerViewModel::class.java]
+        appearancePickerViewModel = ViewModelProvider(this)[ProbeAppearancePickerViewModel::class.java]
+        lyricsDisplayViewModel = ViewModelProvider(this)[ProbeLyricsDisplayViewModel::class.java]
+        appearanceViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer {
+                AppearanceViewModel(app.appearancePreferences, app.transferredThemes, app.playbackBackgrounds,
+                    app.localProviderIo, createSavedStateHandle(), receivedThemes = app.transferredThemes)
+            }
+        })[AppearanceViewModel::class.java]
+        transferViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer { WatchTransferViewModel(app.transferReceiver, app.transferredThemes) }
+        })[WatchTransferViewModel::class.java]
+        playbackBackgroundViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer {
+                PlaybackBackgroundViewModel(app.library::resolveLocalRead, app.artworks,
+                    app.appliedThemeResources, app.playbackBackgrounds, app.localProviderIo, app.themeBitmaps)
+            }
+        })[PlaybackBackgroundViewModel::class.java]
+        lyricsEntryViewModel = ViewModelProvider(this, lyricsEntryViewModelFactory { savedState ->
+            LyricsEntryViewModel(app.queues, app.lyricsContexts::resolve, app::validateLyricsContext,
+                app.lyricsTracks, app.lyricsDocuments, app.lyricsAuthority, app.lyricsLoader::load,
+                app.lyricsLoader::validate, probeViewModel.lyricsPlayback,
+                libraryChanges = app.library.observeOverview().map { it.revision }
+                    .distinctUntilChanged().drop(1).map { Unit }, savedStateHandle = savedState)
+        })[LyricsEntryViewModel::class.java]
         playlistsViewModel = ViewModelProvider(this, viewModelFactory {
             initializer {
                 PlaylistsViewModel(app.playlists, app.library, app.playlistQueueMapper, app.playlistFolders,
@@ -177,11 +256,56 @@ class MainActivity : ComponentActivity() {
                     }, app.playlistRecovery, closeLibraryView = app::closePlaylistView)
             }
         })[PlaylistEntryViewModel::class.java]
+        var exactCallbacks: ProbeActivityUiCallbacks? = null
+        val exactWindow = WatchWindowRuntime(this) {
+            exactCallbacks?.onWindowVisibilityChanged()
+            transferViewModel.visibilityChanged()
+        }
+        watchWindowRuntime = exactWindow
+        val exactRuntime = ProbePageRuntime(
+            uiState = { probeViewModel.uiState.value },
+            window = exactWindow,
+            activityPresentation = { uiPresentationBinding },
+            appearance = appearanceViewModel,
+            fonts = app.lyricsFontRuntime,
+            background = playbackBackgroundViewModel,
+        )
+        pageRuntime = exactRuntime
+        val callbacks = ProbeActivityUiCallbacks(exactRuntime, { uiPresentationBinding },
+            lyricsEntryViewModel, fontPickerViewModel, lyricsDisplayViewModel.events)
+        exactCallbacks = callbacks
+        // bind invokes its initial callback before returning; attach only after filling the cell.
+        val exactActivity = probeViewModel.bindUiPresentation(
+            update = { state ->
+                try { callbacks.onUiStateChanged(state) }
+                finally { transferViewModel.visibilityChanged() }
+            },
+            retire = {
+                try { callbacks.close() }
+                finally { transferPresentationBinding?.close() }
+            },
+        )
+        uiPresentationBinding = exactActivity
+        transferPresentationBinding = transferViewModel.bindPresentation {
+            transferForeground && exactActivity.isCurrent && exactWindow.visibility.value.visible &&
+                probeViewModel.uiState.value.page == ProbePage.TRANSFER
+        }
+        // The initial bind callback ran before this cell existed; record its real retained route now.
+        callbacks.noteActualRoute(probeViewModel.uiState.value)
+        exactRuntime.attachActivity(exactActivity)
         if (savedInstanceState == null) acceptLaunchIntent(intent)
         setContent {
-            ProbeTheme {
-                ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
-                    libraryViewModel, sourcesViewModel, listeningViewModel, playlistsViewModel, playlistEntryViewModel, this)
+            val appearanceState by appearanceViewModel.state.collectAsStateWithLifecycle()
+            val displayEditor = lyricsDisplayViewModel.editor
+            LaunchedEffect(exactRuntime, appearanceState.appearance) { exactRuntime.onAppearanceChanged() }
+            WatchThemeScope(appearanceState.theme.manifest.palette, appearanceState.appearance.effective) {
+                ProbeTheme {
+                    ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
+                        libraryViewModel, sourcesViewModel, listeningViewModel, playlistsViewModel,
+                        playlistEntryViewModel, appearanceViewModel, transferViewModel, playbackBackgroundViewModel,
+                        lyricsEntryViewModel, displayEditor, lyricsDisplayViewModel, fontPickerViewModel, lyricsPickerViewModel,
+                        appearancePickerViewModel, exactRuntime, exactWindow, exactActivity, this)
+                }
             }
         }
     }
@@ -194,20 +318,46 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        (application as MeloXApplication).onUiForeground()
-        probeViewModel.onForeground()
+        if (uiPresentationBinding?.isCurrent == true) {
+            transferForeground = true
+            transferViewModel.visibilityChanged()
+            (application as MeloXApplication).onUiForeground()
+            probeViewModel.onForeground()
+        }
     }
 
     override fun onStop() {
-        probeViewModel.onBackground()
-        sourcesViewModel.onBackground()
-        (application as MeloXApplication).onUiBackground()
+        if (uiPresentationBinding?.isCurrent == true) {
+            transferForeground = false
+            transferViewModel.visibilityChanged()
+            probeViewModel.onBackground()
+            sourcesViewModel.onBackground()
+            (application as MeloXApplication).onUiBackground()
+        }
         super.onStop()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (::probeViewModel.isInitialized) probeViewModel.setWindowFocused(hasFocus)
+        watchWindowRuntime?.windowFocusChanged(hasFocus)
+        if (::probeViewModel.isInitialized && uiPresentationBinding?.isCurrent == true) {
+            probeViewModel.setWindowFocused(hasFocus)
+        }
+    }
+
+    override fun onDestroy() {
+        try {
+            transferPresentationBinding?.close()
+            transferPresentationBinding = null
+            watchWindowRuntime?.close()
+        } finally {
+            try {
+                uiPresentationBinding?.close()
+            } finally {
+                pageRuntime?.close()
+                super.onDestroy()
+            }
+        }
     }
 
     private fun acceptLaunchIntent(source: Intent?) {
@@ -235,15 +385,23 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val Background = WatchPalette.Background
-private val Surface = WatchPalette.Row
-private val PrimaryText = WatchPalette.Text
-private val SecondaryText = WatchPalette.Secondary
-private val Accent = WatchPalette.Text
-private val OnAccent = WatchPalette.Background
+private val Background: Color
+    @Composable get() = LocalWatchThemeColors.current.background
+private val Surface: Color
+    @Composable get() = LocalWatchThemeColors.current.surface
+private val PrimaryText: Color
+    @Composable get() = LocalWatchThemeColors.current.text
+private val SecondaryText: Color
+    @Composable get() = LocalWatchThemeColors.current.secondary
+private val Accent: Color
+    @Composable get() = LocalWatchThemeColors.current.accent
+private val OnAccent: Color
+    @Composable get() = LocalWatchThemeColors.current.background
 
 @Composable
-private fun ProbeTheme(content: @Composable () -> Unit) {
+internal fun ProbeTheme(content: @Composable () -> Unit) {
+    val colors = LocalWatchThemeColors.current
+    val fontFamily = LocalWatchThemeFonts.current.originalFamily
     MaterialTheme(
         colorScheme = darkColorScheme(
             primary = Accent,
@@ -251,16 +409,18 @@ private fun ProbeTheme(content: @Composable () -> Unit) {
             background = Background,
             onBackground = PrimaryText,
             surface = Surface,
-            surfaceVariant = WatchPalette.Raised,
+            surfaceVariant = colors.raised,
             onSurface = PrimaryText,
             onSurfaceVariant = SecondaryText,
-            error = Color(0xffffb4ab),
+            error = colors.error,
         ),
         typography = Typography(
-            titleLarge = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
-            bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 22.sp),
-            bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp),
-            labelLarge = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium),
+            titleLarge = TextStyle(fontSize = 18.sp, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold,
+                fontFamily = fontFamily, fontSynthesis = FontSynthesis.None),
+            bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontFamily = fontFamily, fontSynthesis = FontSynthesis.None),
+            bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontFamily = fontFamily, fontSynthesis = FontSynthesis.None),
+            labelLarge = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.Medium,
+                fontFamily = fontFamily, fontSynthesis = FontSynthesis.None),
         ),
         shapes = Shapes(medium = RoundedCornerShape(12.dp)),
         content = {
@@ -280,9 +440,34 @@ private fun ProbeApp(
     listeningViewModel: ListeningViewModel,
     playlistsViewModel: PlaylistsViewModel,
     playlistEntryViewModel: PlaylistEntryViewModel,
+    appearanceViewModel: AppearanceViewModel,
+    transferViewModel: WatchTransferViewModel,
+    playbackBackgroundViewModel: PlaybackBackgroundViewModel,
+    lyricsEntryViewModel: LyricsEntryViewModel,
+    lyricsDisplayEditor: LyricsDisplayEditor,
+    lyricsDisplayViewModel: ProbeLyricsDisplayViewModel,
+    fontPickerViewModel: ProbeFontPickerViewModel,
+    lyricsPickerViewModel: ProbeLyricsPickerViewModel,
+    appearancePickerViewModel: ProbeAppearancePickerViewModel,
+    pageRuntime: ProbePageRuntime,
+    watchWindowRuntime: WatchWindowRuntime,
+    activityBinding: ProbeUiPresentation.Binding,
     activity: MainActivity,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val app = activity.application as MeloXApplication
+    val windowVisibility by watchWindowRuntime.visibility.collectAsStateWithLifecycle()
+    val appearance by appearanceViewModel.state.collectAsStateWithLifecycle()
+    val transfer by transferViewModel.state.collectAsStateWithLifecycle()
+    val displayState by lyricsDisplayEditor.state.collectAsStateWithLifecycle()
+    val displaySettings by lyricsDisplayEditor.settings.collectAsStateWithLifecycle()
+    val entryState by lyricsEntryViewModel.uiState.collectAsStateWithLifecycle()
+    // System result registrations remain mounted while the Window/page resource owners retire.
+    val launchFontPicker = rememberProbeFontPickerLauncher(fontPickerViewModel)
+    val launchLyricsPicker = rememberProbeLyricsPickerLauncher(lyricsPickerViewModel, lyricsEntryViewModel)
+    val launchAppearancePicker = rememberProbeAppearancePickerLauncher(appearancePickerViewModel, appearanceViewModel)
+    val physicalCircle = physicalRoundClipInWindow(activity)
+    val presented = activityBinding.isCurrent && windowVisibility.visible
     val mainProgress by viewModel.playbackInput.mainState.collectAsStateWithLifecycle()
     val independentProgress by viewModel.playbackInput.independentState.collectAsStateWithLifecycle()
     val rotaryPending by viewModel.playbackInput.rotaryPending.collectAsStateWithLifecycle()
@@ -303,44 +488,56 @@ private fun ProbeApp(
         preferences.effective.screenShape
     }
     LaunchedEffect(state.page) {
+        if (!activityBinding.isCurrent) return@LaunchedEffect
         if (state.page in setOf(ProbePage.SETTINGS, ProbePage.SLEEP_TIMER_NOTIFICATIONS)) preferencesViewModel.enterEditor()
         else if (preferences.isEditing) preferencesViewModel.clearDraft()
     }
     LifecycleStartEffect(state.page) {
         val queueVisible = state.page == ProbePage.QUEUE
         val libraryVisible = state.page == ProbePage.LIBRARY
-        if (queueVisible) queueViewModel.onVisible()
-        if (libraryVisible) libraryViewModel.onVisible()
+        if (activityBinding.isCurrent && queueVisible) queueViewModel.onVisible()
+        if (activityBinding.isCurrent && libraryVisible) libraryViewModel.onVisible()
         onStopOrDispose {
-            if (queueVisible) queueViewModel.onHidden()
-            if (libraryVisible) libraryViewModel.onHidden()
+            if (activityBinding.isCurrent && queueVisible) queueViewModel.onHidden()
+            if (activityBinding.isCurrent && libraryVisible) libraryViewModel.onHidden()
         }
     }
-    PlaylistPageLifecycle(playlistsViewModel, state.page == ProbePage.PLAYLISTS)
+    LifecycleStartEffect(playlistsViewModel, state.page) {
+        val visible = state.page == ProbePage.PLAYLISTS
+        if (activityBinding.isCurrent && visible) playlistsViewModel.onVisible()
+        onStopOrDispose {
+            if (activityBinding.isCurrent && visible) playlistsViewModel.onHidden()
+        }
+    }
     LifecycleStartEffect(state.page) {
-        playlistEntryViewModel.onVisible(when (state.page) {
+        if (activityBinding.isCurrent) playlistEntryViewModel.onVisible(when (state.page) {
             ProbePage.PLAYLISTS -> PlaylistEntrySurface.PLAYLISTS
             ProbePage.LIBRARY -> PlaylistEntrySurface.LIBRARY
             ProbePage.PLAYBACK -> PlaylistEntrySurface.PLAYBACK
             else -> PlaylistEntrySurface.OTHER
         })
-        onStopOrDispose { playlistEntryViewModel.onHidden() }
+        onStopOrDispose {
+            if (activityBinding.isCurrent) playlistEntryViewModel.onHidden()
+        }
     }
     LaunchedEffect(state.page, library.screen, library.detail) {
+        if (!activityBinding.isCurrent) return@LaunchedEffect
         playlistEntryViewModel.setLibraryFavorite(library.detail?.takeIf {
             state.page == ProbePage.LIBRARY && library.screen == LibraryScreen.DETAIL
         }?.playlistReference())
     }
-    LaunchedEffect(state.playback.mediaId) { playlistEntryViewModel.setPlayingEntry(state.playback.mediaId) }
+    LaunchedEffect(state.playback.mediaId) {
+        if (activityBinding.isCurrent) playlistEntryViewModel.setPlayingEntry(state.playback.mediaId)
+    }
     LifecycleStartEffect(state.page, library.screen) {
         val sourcesVisible = state.page == ProbePage.LIBRARY && library.screen == LibraryScreen.SOURCES
         val listeningVisible = state.page == ProbePage.LIBRARY &&
             library.screen in setOf(LibraryScreen.HISTORY, LibraryScreen.STATISTICS)
-        if (sourcesVisible) sourcesViewModel.onVisible()
-        if (listeningVisible) listeningViewModel.onVisible(library.screen)
+        if (activityBinding.isCurrent && sourcesVisible) sourcesViewModel.onVisible()
+        if (activityBinding.isCurrent && listeningVisible) listeningViewModel.onVisible(library.screen)
         onStopOrDispose {
-            if (sourcesVisible) sourcesViewModel.onHidden()
-            if (listeningVisible) listeningViewModel.onHidden()
+            if (activityBinding.isCurrent && sourcesVisible) sourcesViewModel.onHidden()
+            if (activityBinding.isCurrent && listeningVisible) listeningViewModel.onHidden()
         }
     }
     val savedPages = rememberSaveableStateHolder()
@@ -490,6 +687,24 @@ private fun ProbeApp(
     }
     val back = {
         when {
+            state.page in ProbeLyricsEntryRoutes && entryState.saving -> Unit
+            state.page == ProbePage.LYRICS_OFFSET -> {
+                lyricsEntryViewModel.cancelOffset()
+                viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+            }
+            state.page == ProbePage.LYRICS_ASSOCIATION -> {
+                entryState.associationPreview?.let { lyricsEntryViewModel.cancelAssociation(it.previewId) }
+                viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+            }
+            state.page == ProbePage.LYRICS_OPTIONS -> viewModel.showPage(ProbePage.LYRICS)
+            state.page == ProbePage.LYRICS -> viewModel.showPage(ProbePage.PLAYBACK)
+            state.page == ProbePage.LYRICS_SETTINGS && displayState.working -> Unit
+            state.page == ProbePage.LYRICS_SETTINGS -> {
+                lyricsDisplayEditor.cancel()
+                viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+            }
+            state.page == ProbePage.LYRICS_FONTS -> viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+            state.page == ProbePage.APPEARANCE && appearance.busy -> Unit
             state.page == ProbePage.PLAYLISTS && playlistEntryViewModel.back() -> Unit
             state.page == ProbePage.PLAYLISTS && playlists.playDraft != null -> {
                 if (playlists.playPending) viewModel.pause() else playlistsViewModel.cancelPlay()
@@ -511,118 +726,295 @@ private fun ProbeApp(
         }
     }
     BackHandler(enabled = state.page != ProbePage.HOME, onBack = back)
-    val renderPage: @Composable (ProbePage, Boolean) -> Unit = { page, visiblePage ->
+    val renderPage: @Composable (ProbePage, Boolean, ProbePageRuntime.SelectionBinding?) -> Unit = { page, active, selection ->
+        val exactPage = rememberProbePresentedPage(pageRuntime, page.presentationKind(), selection, active && presented)
+        val visiblePage = exactPage?.visibleNow == true
+        val entryPresentation = rememberProbeLyricsEntry(exactPage, page, lyricsEntryViewModel, viewModel)
         savedPages.SaveableStateProvider(page.name) {
+            val queuePanels = rememberSaveableStateHolder()
+            var visibleKeys by remember(page) { mutableStateOf<List<Any>>(emptyList()) }
+            val queueRowsIdentity = queue.rowsIdentity
+            val recordVisibleKeys = remember(exactPage, page, libraryViewModel, queueViewModel, queueRowsIdentity) {
+                { keys: List<Any> ->
+                    if (exactPage?.visibleNow == true) {
+                        visibleKeys = keys
+                        if (page == ProbePage.LIBRARY) libraryViewModel.setVisibleItemKeys(keys)
+                        if (page == ProbePage.QUEUE) queueViewModel.setVisibleItemKeys(queueRowsIdentity, keys)
+                    }
+                }
+            }
+            LaunchedEffect(exactPage, page, entryState.associationPreview?.previewId) {
+                if (page == ProbePage.LYRICS_OPTIONS && exactPage?.visibleNow == true &&
+                    entryState.associationPreview != null) viewModel.showPage(ProbePage.LYRICS_ASSOCIATION)
+            }
             val resetScroll = when (page) {
-                ProbePage.QUEUE -> queue.snapshot?.generationId to queue.pageStart
+                ProbePage.QUEUE -> {
+                    val draft = queue.editor
+                    val generation = queue.snapshot?.generationId
+                    val lane = if (draft == null || draft.action == QueueEditAction.CHOOSE_ENTRY) generation
+                        else "$generation:${draft.action}:${draft.operationId}"
+                    lane to queue.pageStart
+                }
                 ProbePage.LIBRARY -> "${library.screen}:${library.page?.view?.viewId}:${library.artworkRefreshPreview?.refreshId}" to library.pageStart
                 ProbePage.PLAYLISTS -> "${playlists.screen}:${playlists.view?.viewId}:${playlists.importDraft?.preview?.previewId}:" +
                     "${playlistEntry.screen}:${playlistEntry.folder?.nodeId}:${playlistEntry.replacements?.nextCursor}" to playlists.pageStart
                 else -> null
             }
-            if (page == ProbePage.PLAYBACK) {
+            val renderContent: @Composable () -> Unit = {
+            if (page == ProbePage.LYRICS) {
+                ProbeLyricsScreen(app, exactPage, entryPresentation, lyricsEntryViewModel, state, screenShape,
+                    presented = active && presented,
+                    onBack = { viewModel.showPage(ProbePage.PLAYBACK) },
+                    onOptions = { viewModel.showPage(ProbePage.LYRICS_OPTIONS) },
+                    confirmation = { play, cancel ->
+                        ProbePageContent(screenShape, null, visible = visiblePage, ownerKey = exactPage?.identity,
+                            physicalCircle = physicalCircle) {
+                            item { ProbeLyricsPlayControls(play, lyricsEntryViewModel, cancel) }
+                        }
+                    })
+            } else if (page == ProbePage.PLAYBACK) {
+                PlaybackBackgroundSurface(playbackBackgroundViewModel, appearance.theme, appearance.background.effective,
+                    appearance.customImageKey(useDraft = false), playlistEntry.playingTrack,
+                    preferences.effective.artworkReadPath, library.artworkRevision, exactPage, physicalCircle) {
                 NowPlayingContent(screenShape, state, viewModel, playlistEntry, playlistEntryViewModel,
                     preferences.effective.artworkReadPath, library.artworkRevision, visiblePage,
                     onMenu = returnHome, openDocument = openDocument,
                     onAddPlaying = { playlistEntryViewModel.addPlaying(showAddTargets) }, onPlaylists = openPlaylists)
-            } else ProbePageContent(screenShape, resetScroll, visible = visiblePage, ownerKey = page,
-                onInputFocus = { within, direct ->
-                    if (page == ProbePage.SEEK) viewModel.setPlaybackInputFocused(page, within, direct)
-                },
-                onVisibleKeys = if (page == ProbePage.LIBRARY && visiblePage) libraryViewModel::setVisibleItemKeys else null) {
-                if (page == ProbePage.QUEUE) {
-                    item(key = "player:menu") {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-                            WatchCircleButton(stringResource(R.string.watch_open_menu), WatchGlyph.MENU, onClick = returnHome)
-                        }
-                    }
-                    item { PageTitle(stringResource(R.string.playback_queue)) }
-                } else item { PageTitle(stringResource(pageTitle(page))) }
-                if (page != ProbePage.HOME && page !in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK)) {
-                    item { ProbeButton(stringResource(R.string.probe_back), onClick = back) }
                 }
-                item {
-                    OperationStatus(
-                        state,
-                        onCancel = viewModel::cancelFileRead,
-                        onRetryQueue = viewModel::retryQueueRestore,
-                    )
-                }
-                when (page) {
-                    ProbePage.HOME -> homeContent(state, viewModel, openDocument, openTree, openMedia, openSettings)
-                    ProbePage.MEDIA -> mediaContent(state, viewModel, openMedia, openSettings)
-                    ProbePage.TREE -> treeContent(state, viewModel, openTree)
-                    ProbePage.INPUT -> item { InputCheck() }
-                    ProbePage.PLAYBACK -> Unit // Dedicated viewport above; business actions keep the same owners.
-                    ProbePage.DEVICE -> item { DeviceDetails() }
-                    ProbePage.SEEK -> item { SeekControls(state, viewModel) }
-                    ProbePage.VOLUME -> item { MediaVolumeControls(viewModel) }
-                    ProbePage.SLEEP_TIMER -> item {
-                        SleepTimerControls(state, viewModel) { viewModel.showPage(ProbePage.SLEEP_TIMER_NOTIFICATIONS) }
-                    }
-                    ProbePage.SLEEP_TIMER_NOTIFICATIONS -> item {
-                        SleepTimerSummaryPreferences(preferencesViewModel) { viewModel.showPage(ProbePage.SLEEP_TIMER) }
-                    }
-                    ProbePage.SETTINGS -> item {
-                        PreferencesControls(preferencesViewModel, onCancel = { viewModel.showPage(ProbePage.HOME) })
-                    }
-                    ProbePage.QUEUE -> queueContent(
-                        state = queue,
-                        currentEntryId = state.playback.mediaId,
-                        playbackCommandPending = state.playbackCommandPending || !state.playback.isConnected,
-                        onSelect = viewModel::selectQueueEntry,
-                        model = queueViewModel,
-                        onMutation = { request ->
-                            viewModel.editQueue(request) { queueViewModel.finishEdit(request.operationId) }
+            } else {
+                val listContent: @Composable () -> Unit = {
+                    ProbePageContent(screenShape, resetScroll, visible = visiblePage, ownerKey = page,
+                        physicalCircle = physicalCircle,
+                        onInputFocus = { within, direct ->
+                            if (page in setOf(ProbePage.SEEK, ProbePage.VOLUME)) viewModel.setPlaybackInputFocused(page, within, direct)
                         },
-                        isPlaying = state.playback.isPlaying,
-                    )
-                    ProbePage.LIBRARY -> libraryContent(library, libraryViewModel, sources, sourcesViewModel,
-                        state.playbackCommandPending || !state.playback.isConnected,
-                        viewModel::playLibraryView, viewModel::playTemporaryEntry,
-                        chooseLibraryFile, chooseLibraryTree, addLibraryMedia,
-                        listening, listeningViewModel, openSettings, playlistEntry, playlistEntryViewModel, openPlaylists,
-                        onAddToPlaylist = { view, track, label -> playlistEntryViewModel.addFromLibrary(view, track, label, showAddTargets) })
-                    ProbePage.PLAYLISTS -> {
-                        if (playlistEntry.screen != PlaylistPickerScreen.NONE) {
-                            playlistPickerContent(playlistEntry, playlistEntryViewModel, openLibrarySources,
-                                onReauthorize = { source ->
-                                    sourcesViewModel.beginReauthorization(source)
-                                    viewModel.showPage(ProbePage.LIBRARY)
-                                    libraryViewModel.show(LibraryScreen.SOURCES)
-                                })
-                        } else {
-                            if (folderMaintenanceIssue != null) {
-                                item(key = "playlists:folder-maintenance") {
-                                    BodyText(stringResource(R.string.playlist_folder_maintenance_pending))
+                        onVisibleKeys = recordVisibleKeys) {
+                        if (page == ProbePage.QUEUE) {
+                            item(key = "player:menu") {
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                                    WatchCircleButton(stringResource(R.string.watch_open_menu), WatchGlyph.MENU, onClick = returnHome)
                                 }
                             }
-                            item(key = "playlists:entry-status") { PlaylistEntryStatus(playlistEntry, playlistEntryViewModel) }
-                            val binding = playlistEntry.queue
-                            val mode = playlistEntry.mode
-                            if (binding == null || mode == null) {
-                                item { BodyText(stringResource(R.string.playlist_entry_queue_waiting)) }
+                            item { PageTitle(stringResource(R.string.playback_queue)) }
+                        } else item { PageTitle(stringResource(pageTitle(page))) }
+                        if (page != ProbePage.HOME && page !in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK)) {
+                            item { ProbeButton(stringResource(R.string.probe_back), onClick = back) }
+                        }
+                        item {
+                            OperationStatus(
+                                state,
+                                onCancel = viewModel::cancelFileRead,
+                                onRetryQueue = viewModel::retryQueueRestore,
+                            )
+                        }
+                        when (page) {
+                            ProbePage.HOME -> homeContent(state, viewModel, openDocument, openTree, openMedia, openSettings)
+                            ProbePage.MEDIA -> mediaContent(state, viewModel, openMedia, openSettings)
+                            ProbePage.TREE -> treeContent(state, viewModel, openTree)
+                            ProbePage.INPUT -> item { InputCheck() }
+                            ProbePage.PLAYBACK -> Unit // Dedicated viewport above; business actions keep the same owners.
+                            ProbePage.LYRICS -> Unit
+                            ProbePage.LYRICS_OPTIONS -> item {
+                                var encodingName by rememberSaveable { mutableStateOf(LyricsEncodingChoice.AUTO_BOM_OR_UTF8.name) }
+                                val encoding = LyricsEncodingChoice.entries.firstOrNull { it.name == encodingName }
+                                    ?: LyricsEncodingChoice.AUTO_BOM_OR_UTF8
+                                WatchSystemFontControls {
+                                    WatchLyricsOptions(entryState, encoding, visiblePage,
+                                        onEncoding = { encodingName = it.name },
+                                        onChoose = { purpose, choice ->
+                                            if (exactPage?.visibleNow == true) {
+                                                lyricsEntryViewModel.requestDocument(purpose, choice)?.let { id ->
+                                                    lyricsEntryViewModel.uiState.value.documentRequest?.takeIf {
+                                                        it.requestId == id
+                                                    }?.let(launchLyricsPicker)
+                                                }
+                                            }
+                                        },
+                                        onClear = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.clearAssociation(it) },
+                                        onOffset = {
+                                            if (exactPage?.visibleNow == true && lyricsEntryViewModel.beginOffset()) {
+                                                viewModel.showPage(ProbePage.LYRICS_OFFSET)
+                                            }
+                                        },
+                                        onDisplay = { viewModel.showPage(ProbePage.LYRICS_SETTINGS) },
+                                        onFonts = { viewModel.showPage(ProbePage.LYRICS_FONTS) },
+                                        onRetry = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.retry() },
+                                        onBack = back)
+                                }
                             }
-                            playlistsContent(playlists, playlistsViewModel, binding, mode,
+                            ProbePage.LYRICS_ASSOCIATION -> item {
+                                WatchSystemFontControls {
+                                    WatchLyricsAssociationConfirmation(entryState, visiblePage,
+                                        onConfirm = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.confirmAssociation(it) },
+                                        onCancel = { id ->
+                                            if (exactPage?.visibleNow == true) {
+                                                lyricsEntryViewModel.cancelAssociation(id)
+                                                viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+                                            }
+                                        }, preview = { ProbeLyricsExcerpt(entryState) })
+                                    if (entryState.associationPreview == null) {
+                                        BodyText(stringResource(if (entryState.loading || entryState.saving) R.string.lyrics_settings_working
+                                            else if (entryState.notice == io.github.onlinemo.meloxwatch.ui.lyrics.entry.LyricsEntryNotice.SAVED)
+                                                R.string.lyrics_settings_saved else R.string.lyrics_entry_changed))
+                                    }
+                                }
+                            }
+                            ProbePage.LYRICS_OFFSET -> item {
+                                WatchSystemFontControls {
+                                    WatchLyricsOffsetSettings(entryState, visiblePage,
+                                        onAdjust = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.adjustOffset(it) },
+                                        onZero = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.resetOffset() },
+                                        onSave = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.saveOffset() },
+                                        onReview = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.reviewOffsetDraft() },
+                                        onRetry = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.retry() },
+                                        onCancel = back, preview = { ProbeLyricsExcerpt(entryState) })
+                                }
+                            }
+                            ProbePage.LYRICS_SETTINGS -> item {
+                                val events = rememberCoroutineScope()
+                                WatchSystemFontControls {
+                                    WatchLyricsDisplaySettings(displayState, displaySettings, visiblePage,
+                                        onBegin = { if (exactPage?.visibleNow == true) lyricsDisplayEditor.begin() },
+                                        onPreview = { if (exactPage?.visibleNow == true) lyricsDisplayEditor.preview(it) },
+                                        onDefaults = { if (exactPage?.visibleNow == true) lyricsDisplayEditor.previewDefaults() },
+                                        onSave = { if (exactPage != null) events.launch { lyricsDisplayViewModel.save(exactPage) } },
+                                        onReviewRetry = { if (exactPage?.visibleNow == true) lyricsDisplayEditor.reviewRetry() },
+                                        onRetryRead = { if (exactPage?.visibleNow == true) lyricsDisplayEditor.retryRead() },
+                                        onCancel = back, preview = { preview -> ProbeLyricsDisplayPreview(lyricsDisplayOptions(preview)) })
+                                }
+                            }
+                            ProbePage.LYRICS_FONTS -> item {
+                                if (exactPage != null) ProbeLyricsFontPage(app, exactPage, fontPickerViewModel, launchFontPicker,
+                                    onBack = { viewModel.showPage(ProbePage.LYRICS_OPTIONS) })
+                            }
+                            ProbePage.APPEARANCE -> {
+                                appearance.receivedTheme?.let { received ->
+                                    item { BodyText(stringResource(R.string.transfer_received_theme, received.displayName)) }
+                                    if (appearance.discardReceivedTheme?.operationId == received.operationId) {
+                                        item { BodyText(stringResource(R.string.transfer_received_discard_confirm)) }
+                                        item {
+                                            ProbeButton(stringResource(R.string.transfer_received_discard_yes), enabled = visiblePage && appearance.editable) {
+                                                if (exactPage?.visibleNow == true) appearanceViewModel.confirmDiscardReceivedTheme(received.operationId)
+                                            }
+                                        }
+                                        item {
+                                            ProbeButton(stringResource(R.string.transfer_received_discard_no), enabled = visiblePage && appearance.editable,
+                                                onClick = { appearanceViewModel.cancelDiscardReceivedTheme() })
+                                        }
+                                    } else {
+                                        item {
+                                            ProbeButton(stringResource(R.string.transfer_received_preview), enabled = visiblePage && appearance.editable) {
+                                                if (exactPage?.visibleNow == true) appearanceViewModel.previewReceivedTheme(received.operationId)
+                                            }
+                                        }
+                                        item {
+                                            ProbeButton(stringResource(R.string.transfer_received_discard), enabled = visiblePage && appearance.editable) {
+                                                if (exactPage?.visibleNow == true) appearanceViewModel.requestDiscardReceivedTheme(received.operationId)
+                                            }
+                                        }
+                                    }
+                                }
+                                item {
+                                    WatchSystemFontControls {
+                                        WatchAppearanceSettings(appearance, appearanceViewModel, visiblePage, launchAppearancePicker,
+                                            onOpenScreenShape = { viewModel.showPage(ProbePage.SETTINGS) }, onBack = back,
+                                            preview = {
+                                                if (exactPage != null) ProbeCandidateThemeFontPreview(app, exactPage, appearance, appearanceViewModel)
+                                            })
+                                    }
+                                }
+                            }
+                            ProbePage.TRANSFER -> watchTransferContent(transfer, transferViewModel, visiblePage,
+                                onAppearance = { viewModel.showPage(ProbePage.APPEARANCE) })
+                            ProbePage.DEVICE -> item { DeviceDetails() }
+                            ProbePage.SEEK -> item { SeekControls(state, viewModel) }
+                            ProbePage.VOLUME -> item { MediaVolumeControls(viewModel) }
+                            ProbePage.SLEEP_TIMER -> item {
+                                SleepTimerControls(state, viewModel) { viewModel.showPage(ProbePage.SLEEP_TIMER_NOTIFICATIONS) }
+                            }
+                            ProbePage.SLEEP_TIMER_NOTIFICATIONS -> item {
+                                SleepTimerSummaryPreferences(preferencesViewModel) { viewModel.showPage(ProbePage.SLEEP_TIMER) }
+                            }
+                            ProbePage.SETTINGS -> item {
+                                PreferencesControls(preferencesViewModel, onCancel = { viewModel.showPage(ProbePage.HOME) })
+                            }
+                            ProbePage.QUEUE -> queueContent(
+                                state = queue,
+                                currentEntryId = state.playback.mediaId,
+                                playbackCommandPending = state.playbackCommandPending || !state.playback.isConnected,
+                                onSelect = viewModel::selectQueueEntry,
+                                model = queueViewModel,
+                                onMutation = { request ->
+                                    viewModel.editQueue(request) { queueViewModel.finishEdit(request.operationId) }
+                                },
+                                isPlaying = state.playback.isPlaying,
+                                artworkPath = preferences.effective.artworkReadPath,
+                            )
+                            ProbePage.LIBRARY -> libraryContent(library, libraryViewModel, sources, sourcesViewModel,
                                 state.playbackCommandPending || !state.playback.isConnected,
-                                onPlay = { command -> viewModel.playPlaylistView(command) { issue ->
-                                    playlistsViewModel.acknowledgePlay(command.operationId, issue)
-                                } }, onChooseFolder = playlistEntryViewModel::chooseFolder,
-                                onChooseImport = playlistEntryViewModel::chooseImport,
-                                onChooseExport = playlistEntryViewModel::chooseExport,
-                                onRecover = playlistEntryViewModel::recover,
-                                onAddToPlaylist = playlistEntryViewModel::addFromMember)
+                                viewModel::playLibraryView, viewModel::playTemporaryEntry,
+                                chooseLibraryFile, chooseLibraryTree, addLibraryMedia,
+                                listening, listeningViewModel, openSettings, playlistEntry, playlistEntryViewModel, openPlaylists,
+                                onAddToPlaylist = { view, track, label -> playlistEntryViewModel.addFromLibrary(view, track, label, showAddTargets) })
+                            ProbePage.PLAYLISTS -> {
+                                if (playlistEntry.screen != PlaylistPickerScreen.NONE) {
+                                    playlistPickerContent(playlistEntry, playlistEntryViewModel, openLibrarySources,
+                                        onReauthorize = { source ->
+                                            sourcesViewModel.beginReauthorization(source)
+                                            viewModel.showPage(ProbePage.LIBRARY)
+                                            libraryViewModel.show(LibraryScreen.SOURCES)
+                                        })
+                                } else {
+                                    if (folderMaintenanceIssue != null) {
+                                        item(key = "playlists:folder-maintenance") {
+                                            BodyText(stringResource(R.string.playlist_folder_maintenance_pending))
+                                        }
+                                    }
+                                    item(key = "playlists:entry-status") { PlaylistEntryStatus(playlistEntry, playlistEntryViewModel) }
+                                    val binding = playlistEntry.queue
+                                    val mode = playlistEntry.mode
+                                    if (binding == null || mode == null) {
+                                        item { BodyText(stringResource(R.string.playlist_entry_queue_waiting)) }
+                                    }
+                                    playlistsContent(playlists, playlistsViewModel, binding, mode,
+                                        state.playbackCommandPending || !state.playback.isConnected,
+                                        onPlay = { command -> viewModel.playPlaylistView(command) { issue ->
+                                            playlistsViewModel.acknowledgePlay(command.operationId, issue)
+                                        } }, onChooseFolder = playlistEntryViewModel::chooseFolder,
+                                        onChooseImport = playlistEntryViewModel::chooseImport,
+                                        onChooseExport = playlistEntryViewModel::chooseExport,
+                                        onRecover = playlistEntryViewModel::recover,
+                                        onAddToPlaylist = playlistEntryViewModel::addFromMember)
+                                }
+                            }
                         }
                     }
                 }
+                if (page == ProbePage.QUEUE) {
+                    // 显式编辑页单独保存位置，返回浏览时保留原歌曲行锚点。
+                    val draft = queue.editor
+                    val lane = if (draft == null || draft.action == QueueEditAction.CHOOSE_ENTRY) "rows" else "editor"
+                    queuePanels.SaveableStateProvider(lane, listContent)
+                } else listContent()
             }
+            }
+            if (page in setOf(ProbePage.LYRICS, ProbePage.LYRICS_FONTS, ProbePage.APPEARANCE)) renderContent()
+            else ProbeThemeUiFonts(app, exactPage, appearance.theme,
+                probePageVisibleText(page, state, library, queue, playlists, playlistEntry, visibleKeys), renderContent)
         }
     }
-    if (state.page in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK)) {
+    if (state.page in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK, ProbePage.LYRICS)) {
+        var exactSelection by remember(pageRuntime) { mutableStateOf<ProbePageRuntime.SelectionBinding?>(null) }
         WatchPlaybackPages(state.page, !state.playbackCommandPending && !inputBusy && queue.editor == null,
-            onPage = { page -> if (page != state.page) viewModel.showPage(page) }, content = renderPage)
+            onPage = { page -> if (page != state.page) viewModel.showPage(page) }, presented = presented,
+            presentationOwner = pageRuntime, bindPresentation = pageRuntime::bindSelection,
+            onPresentationBound = { exactSelection = it },
+            onPresentationRetired = { retired -> if (exactSelection === retired) exactSelection = null }) { page, active ->
+            renderPage(page, active, exactSelection)
+        }
     } else {
-        renderPage(state.page, true)
+        val exactSelection = rememberProbeSingleSelection(pageRuntime, state.page, presented)
+        renderPage(state.page, presented, exactSelection)
     }
 }
 
@@ -632,22 +1024,37 @@ private fun ProbePageContent(
     resetScroll: Pair<String?, Long>?,
     visible: Boolean,
     ownerKey: Any?,
+    physicalCircle: BackgroundRoundClip?,
     onInputFocus: (Boolean, Boolean) -> Unit = { _, _ -> },
     onVisibleKeys: ((List<Any>) -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
+    val listState = rememberLazyListState()
+    var appliedScrollSource by rememberSaveable { mutableStateOf(resetScroll?.first) }
+    var appliedScrollPage by rememberSaveable { mutableStateOf(resetScroll?.second) }
+    if (!visible) {
+        Box(Modifier.fillMaxSize().clearAndSetSemantics { })
+        return
+    }
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
+    val appearance = LocalWatchAppearance.current
     val fullWindowSize = LocalWindowInfo.current.containerSize
-    val fullWindowHeight = with(density) { fullWindowSize.height.toDp() }
-    val listState = rememberLazyListState()
+    val fullWindowHeight = with(density) { (physicalCircle?.let { it.radius * 2f }
+        ?: fullWindowSize.height.toFloat()).toDp() }
     val scrollRotary = rememberWatchRotaryScroll(listState, visible)
     LaunchedEffect(onVisibleKeys, resetScroll) {
         if (onVisibleKeys != null) snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.key } }
             .distinctUntilChanged().collect(onVisibleKeys)
     }
     LaunchedEffect(resetScroll) {
-        if (resetScroll != null) listState.scrollToItem(0)
+        if (resetScroll != null &&
+            (appliedScrollSource != resetScroll.first || appliedScrollPage != resetScroll.second)
+        ) {
+            listState.scrollToItem(0)
+            appliedScrollSource = resetScroll.first
+            appliedScrollPage = resetScroll.second
+        }
     }
     BoxWithConstraints(
         modifier = Modifier.fillMaxSize().background(Background).safeDrawingPadding().imePadding(),
@@ -659,18 +1066,19 @@ private fun ProbePageContent(
         }
         // 手动矩形布局不能关闭真实圆屏的边界避让。
         val protectsRoundBounds = isRound || configuration.isScreenRound
-        val requestedWidth = if (protectsRoundBounds) maxWidth * 0.78f else maxWidth - 24.dp
+        val baseWidth = if (protectsRoundBounds) maxWidth * 0.78f else maxWidth - watchSpacing(24.dp)
+        val requestedWidth = baseWidth - appearance.horizontalMarginDp.dp * 2
         val minimumWidth = minOf(48.dp, maxWidth)
         val contentWidth = requestedWidth.coerceIn(minimumWidth, maxWidth)
         // 键盘只收缩可见滚动区域；顶部圆边避让仍以完整窗口计算。
         val roundInset = maxOf(fullWindowHeight, maxHeight) * 0.22f
-        val verticalInset = if (protectsRoundBounds) roundInset else 12.dp
+        val verticalInset = (if (protectsRoundBounds) roundInset else watchSpacing(12.dp)) + appearance.verticalMarginDp.dp
         LazyColumn(
             modifier = Modifier.width(contentWidth).align(Alignment.Center)
                 .watchRotaryInput(visible, ownerKey, onInputFocus, scrollRotary),
             state = listState,
-            contentPadding = PaddingValues(top = verticalInset, bottom = verticalInset + 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(top = verticalInset, bottom = verticalInset + watchSpacing(12.dp)),
+            verticalArrangement = Arrangement.spacedBy(watchSpacing(10.dp)),
             content = content,
         )
     }
@@ -689,6 +1097,9 @@ private fun LazyListScope.homeContent(
     item { ProbeButton(stringResource(R.string.playlist_heading)) { viewModel.showPage(ProbePage.PLAYLISTS) } }
     item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
     item { ProbeButton(stringResource(R.string.playback_settings), onClick = { viewModel.showPage(ProbePage.SETTINGS) }) }
+    item { ProbeButton(stringResource(R.string.appearance_title), onClick = { viewModel.showPage(ProbePage.APPEARANCE) }) }
+    item { ProbeButton(stringResource(R.string.transfer_title), onClick = { viewModel.showPage(ProbePage.TRANSFER) }) }
+    item { ProbeButton(stringResource(R.string.lyrics_settings), onClick = { viewModel.showPage(ProbePage.LYRICS_OPTIONS) }) }
     item { ProbeButton(stringResource(R.string.sleep_timer_title), onClick = { viewModel.showPage(ProbePage.SLEEP_TIMER) }) }
     item(key = "menu:device-checks") {
         var expanded by rememberSaveable { mutableStateOf(false) }
@@ -787,7 +1198,8 @@ private fun NowPlayingContent(
     val title = playback.title?.takeIf(String::isNotBlank) ?: track?.title ?: stringResource(R.string.probe_unnamed_audio)
     val artist = track?.metadata?.artist?.takeIf(String::isNotBlank) ?: playback.artist?.takeIf(String::isNotBlank)
         ?: stringResource(R.string.library_unknown_artist)
-    WatchNowPlayingPage(screenShape, title, artist.takeIf { playback.hasMedia },
+    val heroTitle = compactPlaybackTitle(title, LocalWatchAppearance.current.compactPlaybackTitle)
+    WatchNowPlayingPage(screenShape, heroTitle, artist.takeIf { playback.hasMedia },
         stringResource(R.string.watch_open_menu), onMenu,
         artwork = { size -> NowPlayingArtwork(track, artworkPath, artworkRevision, visible, size) },
         transport = { centerSize, horizontal -> WatchTransport(state, viewModel, centerSize, horizontal) },
@@ -829,6 +1241,7 @@ private fun PlaybackDetails(state: ProbeUiState, viewModel: ProbeViewModel, open
         ProbeButton(stringResource(R.string.playback_seek_open)) { viewModel.showPage(ProbePage.SEEK) }
         ProbeButton(stringResource(R.string.input_media_volume_title)) { viewModel.showPage(ProbePage.VOLUME) }
         ProbeButton(stringResource(R.string.sleep_timer_title)) { viewModel.showPage(ProbePage.SLEEP_TIMER) }
+        ProbeButton(stringResource(R.string.lyrics_settings)) { viewModel.showPage(ProbePage.LYRICS_OPTIONS) }
         BodyText(stringResource(R.string.watch_swipe_queue))
         ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) })
         if (selected != null && state.selectedQueueEntry?.queueEntryId != playback.mediaId) {
@@ -886,9 +1299,10 @@ private fun WatchTransport(state: ProbeUiState, viewModel: ProbeViewModel,
             enabled = playback.isConnected && playback.hasNext && !state.playbackCommandPending, onClick = viewModel::next)
     }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
-        val sideControlsFitRow = maxWidth >= 104.dp
+        val gap = watchSpacing(8.dp)
+        val sideControlsFitRow = maxWidth >= 96.dp + gap
         if (horizontal) {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically) {
                 previous()
                 center()
@@ -897,10 +1311,15 @@ private fun WatchTransport(state: ProbeUiState, viewModel: ProbeViewModel,
         } else {
             // Narrow windows keep full independent targets by placing the center above the two side controls.
             Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                verticalArrangement = Arrangement.spacedBy(gap)) {
                 center()
-                if (sideControlsFitRow) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { previous(); next() }
-                else Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { previous(); next() }
+                if (sideControlsFitRow) Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                    previous()
+                    next()
+                } else Column(verticalArrangement = Arrangement.spacedBy(gap)) {
+                    previous()
+                    next()
+                }
             }
         }
     }
@@ -984,27 +1403,34 @@ private fun MediaVolumeControls(model: ProbeViewModel) {
     val volume by model.mediaVolume.state.collectAsStateWithLifecycle()
     val maximum = volume.maximum
     val current = volume.current
-    val range = maximum?.minus(volume.minimum)?.takeIf { it > 0 }
-    val fraction = range?.let { ((volume.preview ?: current ?: volume.minimum) - volume.minimum).toDouble() / it.toDouble() }
-    val enabled = volume.adjustable
-    val reason = stringResource(volumeIssueText(volume.issue))
+    val fraction = mediaVolumeSliderFraction(volume)
+    val absoluteEnabled = volume.absoluteAdjustable
+    val relativeEnabled = volume.relativeAdjustable && !model.mediaVolume.busy
+    val reason = stringResource(when {
+        volume.issue == ServiceMediaVolumeIssue.UNAVAILABLE -> R.string.input_volume_unavailable
+        volume.phase !in setOf(MediaVolumeClientPhase.IDLE, MediaVolumeClientPhase.PREVIEW) -> R.string.input_volume_busy
+        volume.issue != null -> volumeIssueText(volume.issue)
+        volume.snapshot?.values?.adjustable == true && volume.snapshot?.route?.known == false -> R.string.input_volume_route_unknown
+        else -> R.string.input_volume_unavailable
+    })
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         BodyText(stringResource(R.string.input_volume_scope))
         if (current != null && maximum != null) BodyText(stringResource(R.string.input_volume_value, current, maximum), isPrimary = true)
-        WatchProgressBar(fraction, SeekGestureMode.DRAG_TO_COMMIT, enabled, volume.ownerId,
+        if (volume.muted) BodyText(stringResource(R.string.input_volume_muted))
+        WatchProgressBar(fraction, SeekGestureMode.DRAG_TO_COMMIT, absoluteEnabled, volume.ownerId,
             stringResource(R.string.input_media_volume_title), reason,
             onBegin = model.mediaVolume::begin, onDrag = model.mediaVolume::drag,
             onRelease = model.mediaVolume::release, onTap = model.mediaVolume::tap,
             onCancel = model.mediaVolume::cancel, onSetProgress = model.mediaVolume::setProgress)
         volume.preview?.let { BodyText(stringResource(R.string.input_volume_preview, it)) }
-        ProbeButton(stringResource(R.string.input_volume_less), enabled && !model.mediaVolume.busy && (current ?: 0) > volume.minimum) {
+        ProbeButton(stringResource(R.string.input_volume_less), relativeEnabled && current != null && current > volume.minimum) {
             model.mediaVolume.change(-1)
         }
-        ProbeButton(stringResource(R.string.input_volume_more), enabled && !model.mediaVolume.busy && (current ?: 0) < (maximum ?: 0)) {
+        ProbeButton(stringResource(R.string.input_volume_more), relativeEnabled && current != null && maximum != null && current < maximum) {
             model.mediaVolume.change(1)
         }
-        if (enabled && volume.issue != null) BodyText(reason, isError = true)
-        ProbeButton(stringResource(R.string.probe_refresh), onClick = model.mediaVolume::refresh)
+        if (absoluteEnabled && volume.issue != null) BodyText(reason, isError = volume.issue != ServiceMediaVolumeIssue.AT_LIMIT)
+        ProbeButton(stringResource(R.string.input_volume_refresh), onClick = model::refreshMediaVolume)
         volume.gestureId?.let { id -> ProbeButton(stringResource(R.string.probe_cancel)) { model.mediaVolume.cancel(id) } }
     }
 }
@@ -1015,12 +1441,13 @@ private fun progressIssueText(issue: PlaybackProgressInputIssue): Int = when (is
     PlaybackProgressInputIssue.SEEK_REJECTED, PlaybackProgressInputIssue.REQUEST_FAILED -> R.string.input_seek_unconfirmed
 }
 
-private fun volumeIssueText(issue: MediaVolumeIssue?): Int = when (issue) {
-    MediaVolumeIssue.FIXED -> R.string.input_volume_fixed
-    MediaVolumeIssue.REMOTE_OUTPUT -> R.string.input_volume_remote
-    MediaVolumeIssue.OUTPUT_CHANGED -> R.string.input_volume_output_changed
-    MediaVolumeIssue.SET_REJECTED -> R.string.input_volume_unconfirmed
-    MediaVolumeIssue.UNAVAILABLE, null -> R.string.input_volume_unavailable
+private fun volumeIssueText(issue: ServiceMediaVolumeIssue?): Int = when (issue) {
+    ServiceMediaVolumeIssue.FIXED -> R.string.input_volume_fixed
+    ServiceMediaVolumeIssue.REMOTE_OUTPUT -> R.string.input_volume_remote
+    ServiceMediaVolumeIssue.OUTPUT_CHANGED -> R.string.input_volume_output_changed
+    ServiceMediaVolumeIssue.SET_REJECTED -> R.string.input_volume_unconfirmed
+    ServiceMediaVolumeIssue.AT_LIMIT -> R.string.input_volume_at_limit
+    ServiceMediaVolumeIssue.UNAVAILABLE, null -> R.string.input_volume_unavailable
 }
 
 @Composable
@@ -1230,6 +1657,36 @@ private fun pageTitle(page: ProbePage): Int = when (page) {
     ProbePage.VOLUME -> R.string.input_media_volume_title
     ProbePage.SLEEP_TIMER -> R.string.sleep_timer_title
     ProbePage.SLEEP_TIMER_NOTIFICATIONS -> R.string.prefs_sleep_summary
+    ProbePage.LYRICS -> R.string.lyrics_current_line
+    ProbePage.LYRICS_OPTIONS -> R.string.lyrics_settings
+    ProbePage.LYRICS_ASSOCIATION -> R.string.lyrics_association_preview
+    ProbePage.LYRICS_OFFSET -> R.string.lyrics_offset_title
+    ProbePage.LYRICS_SETTINGS -> R.string.lyrics_display_title
+    ProbePage.LYRICS_FONTS -> R.string.lyrics_fonts_title
+    ProbePage.APPEARANCE -> R.string.appearance_title
+    ProbePage.TRANSFER -> R.string.transfer_title
+}
+
+/** Window metrics keep the physical circle fixed while IME/insets reduce the scrolling viewport. */
+@Composable
+private fun physicalRoundClipInWindow(activity: MainActivity): BackgroundRoundClip? {
+    val configuration = LocalConfiguration.current
+    val composedWindow = LocalWindowInfo.current.containerSize
+    return remember(activity, configuration, composedWindow) {
+        if (!configuration.isScreenRound) return@remember null
+        try {
+            val dimensions = if (Build.VERSION.SDK_INT >= 30) {
+                val bounds = activity.windowManager.currentWindowMetrics.bounds
+                Point(bounds.width(), bounds.height())
+            } else {
+                if (activity.isInMultiWindowMode) return@remember null
+                @Suppress("DEPRECATION")
+                Point().also { activity.windowManager.defaultDisplay.getSize(it) }
+            }
+            if (dimensions.x <= 0 || dimensions.y <= 0) null else BackgroundRoundClip(
+                dimensions.x / 2f, dimensions.y / 2f, minOf(dimensions.x, dimensions.y) / 2f)
+        } catch (_: RuntimeException) { null }
+    }
 }
 
 private fun queueIssueText(issue: QueuePlaybackIssue): Int = when (issue) {
@@ -1291,7 +1748,7 @@ private fun fileIssueText(issue: ProbeFileIssue): Int = when (issue) {
     ProbeFileIssue.SOURCE_BUSY -> R.string.probe_source_busy
 }
 
-private fun elapsedTime(positionMs: Long): String {
+internal fun elapsedTime(positionMs: Long): String {
     val totalSeconds = positionMs.coerceAtLeast(0L) / 1000L
     return String.format(Locale.ROOT, "%d:%02d", totalSeconds / 60L, totalSeconds % 60L)
 }
