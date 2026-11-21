@@ -18,7 +18,7 @@ jobs:
   preflight:
     name: preflight
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -36,26 +36,106 @@ jobs:
       run: python3 scripts/ci/workflow_policy.py
       env:
         PYTHONPATH: ${{ runner.temp }}/ci-python
+    - name: Read applicability and preserve the legacy single-APK route
+      id: applicability
+      run: |
+        python3 - <<'PY'
+        import json, os, re, subprocess, sys
+        from pathlib import Path
+        root = Path.cwd()
+        phone = any((root / 'android/companion' / name).exists() for name in ('build.gradle.kts', 'src/main/AndroidManifest.xml'))
+        required = ('package_build.py', 'package_contract.py', 'package_migration.py', 'package_test_evidence.py', 'build_applicability.py')
+        if phone and not all((root / 'scripts/ci' / name).is_file() for name in required):
+            raise SystemExit('A companion project requires the complete reviewed paired CI implementation.')
+        if (root / 'scripts/ci/build_applicability.py').is_file():
+            sys.path.insert(0, str(root / 'scripts/ci'))
+            from build_applicability import outputs
+            data = outputs(root)
+        else:
+            changed = None
+            event = os.environ.get('GITHUB_EVENT_NAME')
+            event_path = Path(os.environ['GITHUB_EVENT_PATH'])
+            if event in ('push', 'pull_request') and event_path.is_file() and event_path.stat().st_size <= 4 * 1024 * 1024:
+                payload = json.loads(event_path.read_text())
+                base = payload.get('pull_request', {}).get('base', {}).get('sha') if event == 'pull_request' else payload.get('before')
+                if type(base) is str and re.fullmatch(r'[0-9a-f]{40}', base) and base != '0' * 40:
+                    result = subprocess.run(['git', 'diff', '--name-only', '--no-renames', '-z', base, 'HEAD'], capture_output=True)
+                    if result.returncode == 0 and len(result.stdout) <= 4 * 1024 * 1024:
+                        changed = set(filter(None, result.stdout.decode().split('\0')))
+            applicable = changed is None or any(name.startswith('android/') or
+                name.startswith('scripts/ci/') and not Path(name).name.startswith('test_') or
+                name in ('version.properties', '.ci/toolchain.properties', '.ci/signing-certificates.json',
+                         '.ci/upstream-lock.json', '.ci/dependency-migration-request.json') for name in changed)
+            data = {'android-applicable': str(applicable).lower(), 'package-build': 'false',
+                    'package-input-collection': 'false', 'policy-tests-applicable': 'true'}
+        request = root / '.ci/dependency-migration-request.json'
+        if (request.exists() or request.is_symlink()) and not phone:
+            raise SystemExit('Legacy acquisition is report history; new acquisition requires both apps and request schema 3.')
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as stream:
+            for key in ('android-applicable', 'package-build', 'package-input-collection', 'policy-tests-applicable'):
+                stream.write(key + '=' + data[key] + '\n')
+        PY
     outputs:
       android-ready: ${{ steps.check.outputs.android-ready }}
+      android-applicable: ${{ steps.applicability.outputs.android-applicable }}
+      package-build: ${{ steps.applicability.outputs.package-build }}
+      package-input-collection: ${{ steps.applicability.outputs.package-input-collection }}
+      policy-tests-applicable: ${{ steps.applicability.outputs.policy-tests-applicable }}
   compile:
     name: android-compile
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 35
     permissions:
       contents: read
       actions: read
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
         persist-credentials: false
         fetch-depth: 0
     - uses: ./.github/actions/setup-build
+      with:
+        policy-checked: 'true'
     - name: Test, lint and compile without signing secrets
+      if: needs.preflight.outputs.package-build != 'true'
       run: python3 scripts/ci/build.py debug
+      id: legacy
+    - name: Admit exact package inputs and the shared cost deadline
+      if: needs.preflight.outputs.package-build == 'true'
+      id: start
+      run: python3 scripts/ci/package_build.py debug --stage start
+    - name: Acquire changed dependency or schema inputs without running tests
+      if: needs.preflight.outputs.package-input-collection == 'true'
+      id: acquire
+      run: python3 scripts/ci/package_build.py debug --stage acquire --session-sha256 "$SESSION_SHA"
       env:
-        SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-      id: compile
+        SESSION_SHA: ${{ steps.start.outputs.session-sha256 }}
+    - name: Run the complete watch and phone Debug test scopes once
+      if: needs.preflight.outputs.package-build == 'true' && needs.preflight.outputs.package-input-collection != 'true'
+      id: test-debug
+      run: python3 scripts/ci/package_build.py debug --stage test-debug --session-sha256 "$SESSION_SHA"
+      env:
+        SESSION_SHA: ${{ steps.start.outputs.session-sha256 }}
+    - name: Validate strict compiler and lint inputs without application tests or APK assembly
+      if: needs.preflight.outputs.package-input-collection == 'true'
+      id: strict-inputs
+      run: python3 scripts/ci/package_build.py debug --stage strict-inputs --session-sha256 "$SESSION_SHA"
+      env:
+        SESSION_SHA: ${{ steps.acquire.outputs.session-sha256 }}
+    - name: Lint and build the required outputs
+      if: needs.preflight.outputs.package-build == 'true' && needs.preflight.outputs.package-input-collection != 'true'
+      id: lint-build
+      run: python3 scripts/ci/package_build.py debug --stage lint-build --session-sha256 "$SESSION_SHA"
+      env:
+        SESSION_SHA: ${{ steps.test-debug.outputs.session-sha256 }}
+    - name: Seal exact APKs or deliberately reject unreviewed input reports
+      if: needs.preflight.outputs.package-build == 'true'
+      id: seal
+      run: python3 scripts/ci/package_build.py debug --stage seal --session-sha256 "$SESSION_SHA"
+      env:
+        SESSION_SHA: ${{ steps.strict-inputs.outputs.session-sha256 || steps.lint-build.outputs.session-sha256 }}
     - id: archive
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -75,14 +155,14 @@ jobs:
         retention-days: 7
     needs:
     - preflight
-    if: needs.preflight.outputs.android-ready == 'true' && (github.event_name == 'pull_request' || (github.repository == 'OnlineMo/MeloX-Watch' && github.actor == 'OnlineMo' && github.triggering_actor ==
+    if: needs.preflight.outputs.android-ready == 'true' && needs.preflight.outputs.android-applicable == 'true' && (github.event_name == 'pull_request' || (github.repository == 'OnlineMo/MeloX-Watch' && github.actor == 'OnlineMo' && github.triggering_actor ==
       'OnlineMo' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/contribution')))
     outputs:
       artifact-id: ${{ steps.archive.outputs.artifact-id }}
   sign-debug:
     name: sign-debug
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -124,7 +204,7 @@ jobs:
   gate:
     name: cloud-gate
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 2
     permissions:
       contents: read
       actions: read
@@ -132,7 +212,9 @@ jobs:
     - name: Require applicable compile and signing results
       run: |-
         test "$PREFLIGHT_RESULT" = success
-        if [ "$ANDROID_READY" = true ]; then
+        case "$ANDROID_READY" in true|false) ;; *) exit 1 ;; esac
+        case "$ANDROID_APPLICABLE" in true|false) ;; *) exit 1 ;; esac
+        if [ "$ANDROID_READY" = true ] && [ "$ANDROID_APPLICABLE" = true ]; then
           test "$COMPILE_RESULT" = success
           if [ "$EVENT" = pull_request ]; then
             test "$SIGN_RESULT" = skipped
@@ -140,11 +222,14 @@ jobs:
             test "$SIGN_RESULT" = success
           fi
         else
-          echo 'Infrastructure checks only. No Android build, APK signing or device validation.' >> "$GITHUB_STEP_SUMMARY"
+          test "$COMPILE_RESULT" = skipped
+          test "$SIGN_RESULT" = skipped
+          echo 'Policy/document checks only for this change. No Android build, APK signing or device validation.' >> "$GITHUB_STEP_SUMMARY"
         fi
       env:
         PREFLIGHT_RESULT: ${{ needs.preflight.result }}
         ANDROID_READY: ${{ needs.preflight.outputs.android-ready }}
+        ANDROID_APPLICABLE: ${{ needs.preflight.outputs.android-applicable }}
         COMPILE_RESULT: ${{ needs.compile.result }}
         SIGN_RESULT: ${{ needs.sign-debug.result }}
         EVENT: ${{ github.event_name }}
