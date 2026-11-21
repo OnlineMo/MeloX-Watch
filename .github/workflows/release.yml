@@ -31,7 +31,7 @@ name: Owner release
         description: 'Publication only: current main approval SHA'
         type: string
       confirmation:
-        description: 'Explicit publication approval: run/attempt/artifact:APK_SHA256'
+        description: 'Explicit publication approval: run/attempt/artifact:PACKAGE_SET_SHA256'
         type: string
 permissions:
   contents: read
@@ -42,7 +42,7 @@ jobs:
   authorize:
     name: verify-request
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -55,6 +55,16 @@ jobs:
       run: |-
         python3 -c "import sys; sys.path.insert(0, 'scripts/ci'); from ci_common import trusted_context; trusted_context('Owner release')"
         python3 scripts/ci/check.py
+    - name: Require paired candidate support before creating any snapshot
+      run: |
+        python3 - <<'PY'
+        from pathlib import Path
+        required = ('android/companion/build.gradle.kts', 'android/companion/src/main/AndroidManifest.xml',
+                    'scripts/ci/package_build.py', 'scripts/ci/package_contract.py',
+                    'scripts/ci/package_migration.py', 'scripts/ci/package_test_evidence.py')
+        if not all(Path(name).is_file() for name in required):
+            raise SystemExit('The first-release candidate requires the reviewed watch/phone project and paired CI; no snapshot was created.')
+        PY
     - name: Install the pinned policy-only YAML parser
       run: 'python3 -m pip install --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes --target "$RUNNER_TEMP/ci-python" -r .ci/policy-requirements.txt'
     - name: Verify workflow trust boundaries
@@ -65,7 +75,7 @@ jobs:
   prepare:
     name: prepare-snapshot
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -93,13 +103,16 @@ jobs:
     if: inputs.operation == 'prepare-candidate'
     outputs:
       artifact-id: ${{ steps.archive.outputs.artifact-id }}
-  compile-release:
-    name: compile-release
+  compile-candidate:
+    name: compile-candidate
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
       contents: read
       actions: read
+    env:
+      CANDIDATE_OPERATION: ${{ inputs.operation }}
+      SOURCE_SHA: ${{ github.sha }}
     steps:
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       with:
@@ -108,28 +121,48 @@ jobs:
     - name: Verify and restore original snapshot objects
       run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID" --checkout
       env:
-        CANDIDATE_OPERATION: ${{ inputs.operation }}
         GH_TOKEN: ${{ github.token }}
         SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
     - uses: ./.github/actions/setup-build
-    - name: Test, lint and compile optimized release
-      run: python3 scripts/ci/build.py release
+      with:
+        policy-checked: 'true'
+    - name: Admit the frozen paired snapshot and shared cost deadline
+      id: start
+      run: python3 scripts/ci/package_build.py candidate --stage start
+    - name: Run the complete watch and phone Debug test scopes once
+      id: test-debug
+      run: python3 scripts/ci/package_build.py candidate --stage test-debug --session-sha256 "$SESSION_SHA"
       env:
-        CANDIDATE_OPERATION: ${{ inputs.operation }}
-        SOURCE_SHA: ${{ github.sha }}
-      id: compile
-    - id: archive
+        SESSION_SHA: ${{ steps.start.outputs.session-sha256 }}
+    - name: Lint and build optimized Release and Diagnostic outputs
+      id: lint-build
+      run: python3 scripts/ci/package_build.py candidate --stage lint-build --session-sha256 "$SESSION_SHA"
+      env:
+        SESSION_SHA: ${{ steps.test-debug.outputs.session-sha256 }}
+    - name: Seal both variants from this exact snapshot
+      id: seal
+      run: python3 scripts/ci/package_build.py candidate --stage seal --session-sha256 "$SESSION_SHA"
+      env:
+        SESSION_SHA: ${{ steps.lint-build.outputs.session-sha256 }}
+    - id: release-archive
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: unsigned-release-${{ github.run_id }}-${{ github.run_attempt }}
-        path: artifacts/
+        path: artifacts/release/
+        if-no-files-found: error
+        retention-days: 90
+    - id: diagnostic-archive
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: unsigned-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
+        path: artifacts/diagnostic/
         if-no-files-found: error
         retention-days: 90
     - name: Preserve reports
       if: always()
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
-        name: reports-release-${{ github.run_id }}-${{ github.run_attempt }}
+        name: reports-candidate-${{ github.run_id }}-${{ github.run_attempt }}
         path: |
           android/**/build/reports/
           android/**/build/test-results/
@@ -140,12 +173,13 @@ jobs:
     - prepare
     if: inputs.operation == 'prepare-candidate'
     outputs:
-      artifact-id: ${{ steps.archive.outputs.artifact-id }}
-      has-instrumentation: ${{ steps.compile.outputs.has-instrumentation }}
+      release-artifact-id: ${{ steps.release-archive.outputs.artifact-id }}
+      diagnostic-artifact-id: ${{ steps.diagnostic-archive.outputs.artifact-id }}
+      has-instrumentation: ${{ steps.seal.outputs.has-instrumentation }}
   sign-release:
     name: sign-release
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -171,10 +205,11 @@ jobs:
     - name: Verify unsigned APKs before exposing the key
       run: python3 scripts/ci/sign.py prepare release --artifact-id "$ARTIFACT_ID" --snapshot snapshot-input/snapshot-manifest.json
       env:
+        CANDIDATE_COMPILE_JOB: compile-candidate
         CANDIDATE_OPERATION: ${{ inputs.operation }}
         GH_TOKEN: ${{ github.token }}
-        ARTIFACT_ID: ${{ needs.compile-release.outputs.artifact-id }}
-        HAS_INSTRUMENTATION: ${{ needs.compile-release.outputs.has-instrumentation }}
+        ARTIFACT_ID: ${{ needs.compile-candidate.outputs.release-artifact-id }}
+        HAS_INSTRUMENTATION: ${{ needs.compile-candidate.outputs.has-instrumentation }}
     - name: Sign verified release APKs
       run: python3 scripts/ci/sign.py sign release
       env:
@@ -191,63 +226,14 @@ jobs:
     needs:
     - authorize
     - prepare
-    - compile-release
+    - compile-candidate
     if: inputs.operation == 'prepare-candidate'
     outputs:
       artifact-id: ${{ steps.archive.outputs.artifact-id }}
-  compile-diagnostic:
-    name: compile-diagnostic
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-    permissions:
-      contents: read
-      actions: read
-    steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
-      with:
-        persist-credentials: false
-        fetch-depth: 0
-    - name: Verify and restore original snapshot objects
-      run: python3 scripts/ci/candidate.py fetch-snapshot --artifact-id "$SNAPSHOT_ID" --checkout
-      env:
-        CANDIDATE_OPERATION: ${{ inputs.operation }}
-        GH_TOKEN: ${{ github.token }}
-        SNAPSHOT_ID: ${{ needs.prepare.outputs.artifact-id }}
-    - uses: ./.github/actions/setup-build
-    - name: Test, lint and compile optimized diagnostic
-      run: python3 scripts/ci/build.py diagnostic
-      env:
-        CANDIDATE_OPERATION: ${{ inputs.operation }}
-        SOURCE_SHA: ${{ github.sha }}
-      id: compile
-    - id: archive
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: unsigned-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
-        path: artifacts/
-        if-no-files-found: error
-        retention-days: 90
-    - name: Preserve reports
-      if: always()
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: reports-diagnostic-${{ github.run_id }}-${{ github.run_attempt }}
-        path: |
-          android/**/build/reports/
-          android/**/build/test-results/
-        if-no-files-found: ignore
-        retention-days: 30
-    needs:
-    - authorize
-    - prepare
-    if: inputs.operation == 'prepare-candidate'
-    outputs:
-      artifact-id: ${{ steps.archive.outputs.artifact-id }}
-      has-instrumentation: ${{ steps.compile.outputs.has-instrumentation }}
   sign-diagnostic:
     name: sign-diagnostic
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -273,10 +259,11 @@ jobs:
     - name: Verify unsigned APKs before exposing the key
       run: python3 scripts/ci/sign.py prepare diagnostic --artifact-id "$ARTIFACT_ID" --snapshot snapshot-input/snapshot-manifest.json
       env:
+        CANDIDATE_COMPILE_JOB: compile-candidate
         CANDIDATE_OPERATION: ${{ inputs.operation }}
         GH_TOKEN: ${{ github.token }}
-        ARTIFACT_ID: ${{ needs.compile-diagnostic.outputs.artifact-id }}
-        HAS_INSTRUMENTATION: ${{ needs.compile-diagnostic.outputs.has-instrumentation }}
+        ARTIFACT_ID: ${{ needs.compile-candidate.outputs.diagnostic-artifact-id }}
+        HAS_INSTRUMENTATION: ${{ needs.compile-candidate.outputs.has-instrumentation }}
     - name: Sign verified diagnostic APKs
       run: python3 scripts/ci/sign.py sign diagnostic
       env:
@@ -293,14 +280,14 @@ jobs:
     needs:
     - authorize
     - prepare
-    - compile-diagnostic
+    - compile-candidate
     if: inputs.operation == 'prepare-candidate'
     outputs:
       artifact-id: ${{ steps.archive.outputs.artifact-id }}
   seal:
     name: seal-candidate
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read
@@ -330,7 +317,7 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         RELEASE_ID: ${{ needs.sign-release.outputs.artifact-id }}
         DIAGNOSTIC_ID: ${{ needs.sign-diagnostic.outputs.artifact-id }}
-        HAS_INSTRUMENTATION: ${{ needs.compile-diagnostic.outputs.has-instrumentation }}
+        HAS_INSTRUMENTATION: ${{ needs.compile-candidate.outputs.has-instrumentation }}
     - id: archive
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
@@ -365,12 +352,12 @@ jobs:
     - prepare
     - sign-release
     - sign-diagnostic
-    - compile-diagnostic
+    - compile-candidate
     if: inputs.operation == 'prepare-candidate'
   publish:
     name: publish-accepted-candidate
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 10
     permissions:
       contents: write
       actions: read
