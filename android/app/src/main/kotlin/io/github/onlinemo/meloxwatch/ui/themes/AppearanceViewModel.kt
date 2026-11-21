@@ -446,7 +446,7 @@ class AppearanceViewModel(
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) { backgroundFailure(task, error) }
-            catch (_: OutOfMemoryError) { backgroundFailure(task, io.github.onlinemo.meloxwatch.data.themes.PlaybackBackgroundException(PlaybackBackgroundIssue.LOW_MEMORY)) }
+            catch (_: OutOfMemoryError) { backgroundFailure(task, PlaybackBackgroundException(PlaybackBackgroundIssue.LOW_MEMORY)) }
             finally { preview?.token?.let(images::retirePreview) }
         }
     }
@@ -542,7 +542,7 @@ class AppearanceViewModel(
                 catch (error: Exception) { backgroundFailure(task, error)
                     readBackBackground(task) }
                 catch (_: OutOfMemoryError) { backgroundFailure(task,
-                    io.github.onlinemo.meloxwatch.data.themes.PlaybackBackgroundException(PlaybackBackgroundIssue.LOW_MEMORY))
+                    PlaybackBackgroundException(PlaybackBackgroundIssue.LOW_MEMORY))
                     readBackBackground(task) }
             }
         }

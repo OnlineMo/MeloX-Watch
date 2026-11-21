@@ -231,7 +231,7 @@ tasks.withType<Test>().configureEach {
         val total = measuredInteger("effective_memory_total_bytes")
         val available = measuredInteger("effective_memory_available_bytes")
         val complete = schemaMatches && resources?.get("measurement_complete") == true &&
-            resources?.get("cgroup_namespace_initial_verified") == true &&
+            resources.get("cgroup_namespace_initial_verified") == true &&
             cpu != null && cpu > 0.0 && total != null && total > 0L &&
             available != null && available <= total
         // A single Test task does not run application compilation in parallel. Before forking,

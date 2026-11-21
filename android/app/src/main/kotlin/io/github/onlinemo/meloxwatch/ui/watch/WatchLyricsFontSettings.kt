@@ -108,6 +108,7 @@ private fun fontIssueMessage(issue: LyricsFontIssue): Int = when (issue) {
     LyricsFontIssue.STORAGE_FULL -> R.string.lyrics_font_storage_full
     LyricsFontIssue.MISSING_GLYPHS -> R.string.lyrics_font_missing_glyphs
     LyricsFontIssue.LOW_MEMORY -> R.string.lyrics_settings_low_memory
+    LyricsFontIssue.FONT_BUDGET_UNAVAILABLE -> R.string.appearance_font_budget_unavailable
     LyricsFontIssue.SETTINGS_UNAVAILABLE -> R.string.lyrics_settings_read_required
     LyricsFontIssue.SAVE_FAILED -> R.string.lyrics_settings_save_failed
     LyricsFontIssue.SETTINGS_CONFLICT -> R.string.lyrics_settings_conflict

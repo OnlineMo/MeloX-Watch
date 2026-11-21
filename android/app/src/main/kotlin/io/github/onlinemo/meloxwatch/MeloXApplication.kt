@@ -94,12 +94,12 @@ class MeloXApplication : Application() {
     val localProviderIo by lazy { LocalProviderIo() }
     private val themeBitmapOwner = lazy { ThemeBitmapOwner() }
     val themeBitmaps get() = themeBitmapOwner.value
-    private val audioCopyQuota by lazy {
+    private val audioCopyQuota: AudioCopyQuota by lazy {
         AudioCopyQuota(this, localProviderIo,
             otherPendingBytes = { incomingThemeQuota.pendingBytesOnPhysicalWorker() },
             otherTransferTickets = { incomingThemeQuota.ticketsOnPhysicalWorker() })
     }
-    private val incomingThemeQuota by lazy {
+    private val incomingThemeQuota: ThemeTransferQuota by lazy {
         ThemeTransferQuota(this, localProviderIo,
             audioPendingBytes = { audioCopyQuota.pendingBytesOnPhysicalWorker() },
             audioTickets = { audioCopyQuota.transferTicketsOnPhysicalWorker() })

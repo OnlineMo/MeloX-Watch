@@ -53,7 +53,7 @@ internal fun rememberProbeLyricsEntry(
         val seek = if (exact != null && route == ProbePage.LYRICS) probe.bindLyricsSeekVisibility {
             page?.visibleNow == true && exact.isCurrent
         } else null
-        val close = {
+        val close: () -> Unit = {
             try { seek?.close() }
             finally { exact?.close() }
         }

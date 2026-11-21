@@ -298,7 +298,7 @@ class MainActivity : ComponentActivity() {
             val appearanceState by appearanceViewModel.state.collectAsStateWithLifecycle()
             val displayEditor = lyricsDisplayViewModel.editor
             LaunchedEffect(exactRuntime, appearanceState.appearance) { exactRuntime.onAppearanceChanged() }
-            WatchThemeScope(appearanceState.theme.manifest.palette, appearanceState.appearance.effective) {
+            WatchThemeScope(appearanceState.theme.effectiveManifest.palette, appearanceState.appearance.effective) {
                 ProbeTheme {
                     ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
                         libraryViewModel, sourcesViewModel, listeningViewModel, playlistsViewModel,

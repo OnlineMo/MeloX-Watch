@@ -447,9 +447,10 @@ class CompanionDocuments(
         val id = UUID.randomUUID().toString()
         val partial = store.audioFile(id, partial = true)
         val final = store.audioFile(id)
+        val outputDirectory = partial.parentFile ?: throw TransferException(TransferIssue.STORAGE_UNAVAILABLE)
         val otherBytes = store.audioBytes()
         val expected = metadata.second
-        if (expected != null) budget(partial.parentFile, expected, otherBytes)
+        if (expected != null) budget(outputDirectory, expected, otherBytes)
         var published = false
         var created = false
         var moved = false
@@ -469,7 +470,7 @@ class CompanionDocuments(
                 if (count < 0) break
                 if (count == 0 || count > CompanionLimits.STAGED_AUDIO_BYTES - otherBytes - written) throw TransferException(TransferIssue.QUOTA_EXCEEDED)
                 if (expected != null && count > expected - written) throw TransferException(TransferIssue.INTEGRITY_FAILED)
-                budget(partial.parentFile, count.toLong(), Math.addExact(otherBytes, written))
+                budget(outputDirectory, count.toLong(), Math.addExact(otherBytes, written))
                 output.write(buffer, 0, count)
                 hash.update(buffer, 0, count)
                 written += count
@@ -544,7 +545,8 @@ class CompanionDocuments(
             val png = output.toByteArray()
             val id = UUID.randomUUID().toString()
             val file = store.iconFile(id)
-            themeBudget(file.parentFile, png.size.toLong(), store.themeBytes())
+            val outputDirectory = file.parentFile ?: throw TransferException(TransferIssue.STORAGE_UNAVAILABLE)
+            themeBudget(outputDirectory, png.size.toLong(), store.themeBytes())
             var published = false
             var created = false
             var primary: Throwable? = null
@@ -588,7 +590,8 @@ class CompanionDocuments(
         val id = UUID.randomUUID().toString()
         val partial = store.packageFile(id, partial = true)
         val final = store.packageFile(id)
-        themeBudget(partial.parentFile, 16L * 1024 * 1024, store.themeBytes())
+        val outputDirectory = partial.parentFile ?: throw TransferException(TransferIssue.STORAGE_UNAVAILABLE)
+        themeBudget(outputDirectory, 16L * 1024 * 1024, store.themeBytes())
         var published = false
         var created = false
         var moved = false
