@@ -142,6 +142,42 @@ class LocalArtworkRepository(
 
     fun trimUnused() { bitmaps.trimUnused() }
 
+    /** Online thumbnails share the existing gate, bitmap owner and 32 MiB disk LRU; this method never accesses HTTP. */
+    internal suspend fun derived(key: String, targetPx: Int, encoded: ByteArray? = null): ThemeBitmapLease? {
+        require(key.matches(Regex("[0-9a-f]{64}")) && targetPx in 1..ArtworkLimits.OUTPUT_EDGE)
+        val ticket = gate.enter(ArtworkPriority.VISIBLE)
+        var decoded: PendingArtwork? = null
+        try {
+            currentCoroutineContext().ensureActive()
+            bitmaps.acquire(key)?.let { return it }
+            decoded = provider {
+                io.read(abandoned = { it?.close() }) { signal ->
+                    val bytes = encoded ?: try { disk.load(key, signal) }
+                        catch (cancelled: android.os.OperationCanceledException) { throw cancelled }
+                        catch (_: Exception) { null }
+                    bytes?.let {
+                        try { decodeOwned(it, targetPx, signal) }
+                        catch (error: ArtworkException) {
+                            if (encoded != null || error.issue == ArtworkIssue.LOW_MEMORY) throw error
+                            try { disk.discard(key, signal) }
+                            catch (cancelled: android.os.OperationCanceledException) { throw cancelled }
+                            catch (_: Exception) { }
+                            null
+                        }
+                    }
+                }
+            }
+            val ready = decoded ?: return null
+            if (encoded != null) persist(key, ready.bitmap)
+            currentCoroutineContext().ensureActive()
+            return ready.publish(bitmaps, key).also { decoded = null }
+        } finally {
+            decoded?.close()
+            try { withContext(NonCancellable) { io.awaitIdle() } }
+            finally { gate.exit(ticket) }
+        }
+    }
+
     private fun decodeOwned(bytes: ByteArray, targetPx: Int, signal: CancellationSignal, orientation: Int = 0): PendingArtwork {
         // Rotation can briefly own both source and output. Reserve before BitmapFactory/Matrix.
         val reservation = bitmaps.reserve(2L * ArtworkLimits.BITMAP_BYTES)

@@ -28,6 +28,9 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.playback.route.AndroidRoutingSources
 import io.github.onlinemo.meloxwatch.playback.route.PlaybackAudioRoute
+import io.github.onlinemo.meloxwatch.playback.resources.PlaybackDataSources
+import io.github.onlinemo.meloxwatch.playback.resources.RuntimeMediaDataSource
+import io.github.onlinemo.meloxwatch.playback.resources.RuntimePlaybackResources
 import java.io.FileNotFoundException
 import java.util.UUID
 import java.util.concurrent.Executor
@@ -59,6 +62,7 @@ internal class SystemMediaPlayerAdapter(
     private val route: PlaybackAudioRoute,
     requestedSpeedTenths: Int = PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS,
     createPlayer: () -> MediaPlayer = { MediaPlayer() },
+    private val remoteSources: PlaybackDataSources? = null,
 ) : SimpleBasePlayer(Looper.getMainLooper()), PlaybackBackendOperations {
     private data class WindowItem(val uid: String, val mediaItem: MediaItem, var durationMs: Long = C.TIME_UNSET)
     private data class SeekRequest(val positionMs: Long, val future: SettableFuture<Unit>)
@@ -94,6 +98,7 @@ internal class SystemMediaPlayerAdapter(
     private var failure: PlaybackException? = null
     private var loadJob: Job? = null
     private var providerCancellation: CancellationSignal? = null
+    private var remoteSource: RuntimeMediaDataSource? = null
     private var attemptedSpeedTenths: Int? = null
     private var prepareFuture: SettableFuture<Unit>? = null
     private var inFlightSeek: SeekRequest? = null
@@ -265,6 +270,8 @@ internal class SystemMediaPlayerAdapter(
         providerCancellation = null
         attempt { loading?.cancel() }
         attempt { provider?.cancel() }
+        attempt { remoteSource?.close() }
+        remoteSource = null
         preparing = false
         prepared = false
         prepareFuture?.cancel(false)
@@ -402,7 +409,7 @@ internal class SystemMediaPlayerAdapter(
         val uri = item.localConfiguration?.uri
         val future = SettableFuture.create<Unit>()
         prepareFuture = future
-        if (uri == null || uri.scheme != "content") {
+        if (uri == null || uri.scheme != "content" && (uri.scheme != RuntimePlaybackResources.SCHEME || remoteSources == null)) {
             fail(sourceError("LOCAL_URI_REQUIRED", PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED))
             return future
         }
@@ -414,14 +421,29 @@ internal class SystemMediaPlayerAdapter(
         installCallbacks(generation)
         loadJob = scope.launch(Dispatchers.Main.immediate) {
             try {
-                val asset = openValidatedAsset(uri, signal)
-                asset.descriptor.use { descriptor ->
+                if (uri.scheme == RuntimePlaybackResources.SCHEME) {
+                    val source = checkNotNull(remoteSources).platform(uri) { issue ->
+                        handler.post {
+                            if (isCurrent(generation)) fail(sourceError("RESOURCE_${issue.name}", PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
+                        }
+                    }
+                    remoteSource = source
                     currentCoroutineContext().ensureActive()
                     if (!isCurrent(generation)) throw CancellationException("Platform source changed")
-                    platform.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, asset.length)
-                    seekable = true
+                    platform.setDataSource(source)
+                    seekable = false
                     applySpeed()
                     platform.prepareAsync()
+                } else {
+                    val asset = openValidatedAsset(uri, signal)
+                    asset.descriptor.use { descriptor ->
+                        currentCoroutineContext().ensureActive()
+                        if (!isCurrent(generation)) throw CancellationException("Platform source changed")
+                        platform.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, asset.length)
+                        seekable = true
+                        applySpeed()
+                        platform.prepareAsync()
+                    }
                 }
             } catch (error: CancellationException) {
                 if (isCurrent(generation)) {
@@ -478,6 +500,7 @@ internal class SystemMediaPlayerAdapter(
             if (!isCurrent(generation) || mediaPlayer !== platform) return@setOnPreparedListener
             try {
                 physicalDurationMs = mediaPlayer.duration.toLong().takeIf { it > 0L } ?: C.TIME_UNSET
+                remoteSource?.let { seekable = it.supportsSeek }
                 val clip = currentItem().clippingConfiguration
                 if (clip.startPositionUs / 1000L > Int.MAX_VALUE.toLong() ||
                     physicalDurationMs != C.TIME_UNSET && (clip.startPositionUs >= physicalDurationMs * 1000L ||
@@ -646,6 +669,8 @@ internal class SystemMediaPlayerAdapter(
         loadJob = null
         providerCancellation?.cancel()
         providerCancellation = null
+        remoteSource?.close()
+        remoteSource = null
         stopBoundaryCheck()
         playRequested = false
         preparing = false
@@ -694,6 +719,8 @@ internal class SystemMediaPlayerAdapter(
         loadJob = null
         providerCancellation?.cancel()
         providerCancellation = null
+        remoteSource?.close()
+        remoteSource = null
         failure = error
         preparing = false
         prepared = false

@@ -356,7 +356,9 @@ dependencies {
     implementation(libs.datastore.preferences)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
+    implementation(libs.okhttp.android)
     implementation(libs.coroutines.android)
+    implementation(libs.zxing.core)
 
     testImplementation(libs.junit)
     testImplementation(libs.robolectric.test)

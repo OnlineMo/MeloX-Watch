@@ -86,6 +86,20 @@ internal class QueueSessionPlayer private constructor(
                 if (coordinator.canNavigate(-1)) commands.addAll(Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
                 if (coordinator.canNavigate(1)) commands.addAll(Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
             }
+            val reference = coordinator.sessionPausedOnlineReference()
+            if (reference != null) {
+                disconnectPositionClocks()
+                commands.addAll(Player.COMMAND_GET_CURRENT_MEDIA_ITEM, Player.COMMAND_GET_TIMELINE, Player.COMMAND_GET_METADATA)
+                val durationUs = reference.durationMs?.takeIf { it in 1..Long.MAX_VALUE / 1000L }?.times(1000L) ?: C.TIME_UNSET
+                return builder.setAvailableCommands(commands.build())
+                    .setPlaylist(listOf(MediaItemData.Builder(reference.mediaItem.mediaId).setMediaItem(reference.mediaItem)
+                        .setDurationUs(durationUs).setIsSeekable(false).build()))
+                    .setCurrentMediaItemIndex(0).setPlaybackState(Player.STATE_IDLE)
+                    .setPlayWhenReady(false, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
+                    .setContentPositionMs(PositionSupplier { reference.positionMs })
+                    .setContentBufferedPositionMs(PositionSupplier { reference.positionMs })
+                    .setTotalBufferedDurationMs(PositionSupplier.ZERO).build()
+            }
             val timeline = backend.currentTimeline
             val error = backend.playerError
             val playbackState = when {

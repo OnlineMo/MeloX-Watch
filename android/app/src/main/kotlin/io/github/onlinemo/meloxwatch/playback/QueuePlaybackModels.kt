@@ -4,6 +4,7 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
 import io.github.onlinemo.meloxwatch.model.QueueMode
 import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
+import io.github.onlinemo.meloxwatch.playback.resources.PlaybackResourceStatus
 
 enum class QueuePlaybackIssue {
     BUSY,
@@ -23,6 +24,20 @@ enum class QueuePlaybackIssue {
     SOURCE_DAMAGED,
     SOURCE_UNAVAILABLE,
     OUTPUT_ERROR,
+    NETWORK_UNAVAILABLE,
+    NETWORK_TIMEOUT,
+    NETWORK_CERTIFICATE,
+    NETWORK_RATE_LIMITED,
+    LOGIN_REQUIRED,
+    SESSION_UNAVAILABLE,
+    LOCAL_ONLY_ONLINE_SKIPPED,
+    RESOURCE_UNAVAILABLE,
+    RESOURCE_AUTH_REQUIRED,
+    RESOURCE_INVALID,
+    RESOURCE_EXPIRED,
+    RESOURCE_REDIRECT,
+    RESOURCE_RETRY_EXHAUSTED,
+    STREAM_STALLED,
 }
 
 data class QueuePlaybackFailure(
@@ -35,6 +50,7 @@ data class QueuePlaybackState(
     val snapshot: QueueSnapshot? = null,
     val preparing: Boolean = false,
     val failure: QueuePlaybackFailure? = null,
+    val resourceStatus: PlaybackResourceStatus? = null,
 )
 
 class QueuePlaybackException(val failure: QueuePlaybackFailure) : Exception(failure.issue.name)

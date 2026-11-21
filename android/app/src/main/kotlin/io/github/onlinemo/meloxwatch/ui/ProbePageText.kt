@@ -1,11 +1,14 @@
 package io.github.onlinemo.meloxwatch.ui
 
 import io.github.onlinemo.meloxwatch.ui.library.LibraryUiState
+import io.github.onlinemo.meloxwatch.ui.online.OnlineScreen
+import io.github.onlinemo.meloxwatch.ui.online.OnlineUiState
+import io.github.onlinemo.meloxwatch.ui.meting.MetingSettingsState
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryUiState
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistUiState
 import io.github.onlinemo.meloxwatch.ui.queue.QueueViewerState
 
-/** Local font coverage uses the bounded current page and visible keys, never the full library. */
+/** Font coverage uses bounded current-page text and visible keys, never a full music directory. */
 internal fun probePageVisibleText(
     page: ProbePage,
     state: ProbeUiState,
@@ -14,6 +17,8 @@ internal fun probePageVisibleText(
     playlists: PlaylistUiState,
     entry: PlaylistEntryUiState,
     visibleKeys: List<Any>,
+    online: OnlineUiState? = null,
+    meting: MetingSettingsState? = null,
 ): List<String> = buildList {
     val keys = visibleKeys.toSet()
     if (page == ProbePage.PLAYBACK) {
@@ -27,6 +32,30 @@ internal fun probePageVisibleText(
     }
     if (page == ProbePage.QUEUE) queue.entries.forEach { row ->
         if ("queue:entry:${row.queueEntryId}" in keys) row.displayName?.let(::add)
+    }
+    if (page == ProbePage.ONLINE && online != null) {
+        when (online.screen) {
+            OnlineScreen.HOME -> if ("online:account" in keys) online.account.account?.displayName?.let(::add)
+            OnlineScreen.SEARCH -> if ("online:search" in keys) add(online.searchDraft)
+            OnlineScreen.CATALOG -> {
+                if ("online:title" in keys) online.title?.let(::add)
+                val snapshotId = online.snapshot?.id
+                if (snapshotId != null) online.rows.forEach { row ->
+                    if ("online:item:$snapshotId:${row.order}" in keys) {
+                        row.title?.let(::add)
+                        row.artist?.let(::add)
+                    }
+                }
+            }
+            OnlineScreen.TRACK_ACTION -> if ("online:selection" in keys) online.selected?.let { row ->
+                row.title?.let(::add)
+                row.artist?.let(::add)
+            }
+            else -> Unit
+        }
+    }
+    if (page == ProbePage.METING && meting != null && "meting:settings" in keys) {
+        addAll(metingVisibleFontText(meting))
     }
     if (page == ProbePage.LIBRARY) {
         val tracks = library.page?.tracks.orEmpty()

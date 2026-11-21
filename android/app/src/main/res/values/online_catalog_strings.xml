@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="online_title">NetEase Music</string>
+    <string name="online_loading">Loading…</string>
+    <string name="online_progress_metadata">Song information: %1$d / %2$d</string>
+    <plurals name="online_progress">
+        <item quantity="one">Preparing %1$d item…</item>
+        <item quantity="other">Preparing %1$d items…</item>
+    </plurals>
+    <string name="online_cancel">Cancel</string>
+    <string name="online_account_signed_out">Sign in to your music</string>
+    <string name="online_account_unverified">Open a music list to verify this saved account.</string>
+    <string name="online_offline_cached">Offline · cached music lists remain available.</string>
+    <string name="online_sign_in">Sign in to NetEase</string>
+    <string name="online_sign_out">Sign out</string>
+    <string name="online_sign_out_confirmation">Sign out of this NetEase account?</string>
+    <string name="online_playlists">My playlists</string>
+    <string name="online_liked">Liked songs</string>
+    <string name="online_daily">Daily recommendations</string>
+    <string name="online_search">Search</string>
+    <string name="online_search_placeholder">Song or artist</string>
+    <string name="online_search_hint">Enter a song or artist, then search.</string>
+    <string name="online_meting">Meting settings</string>
+    <string name="online_qr_accessibility">NetEase sign-in QR code</string>
+    <string name="online_qr_instructions">Scan with the NetEase app on your phone, then confirm sign-in.</string>
+    <string name="online_qr_refresh">New QR code</string>
+    <string name="online_qr_generating">Creating QR code…</string>
+    <string name="online_qr_waiting_scan">Ready to scan</string>
+    <string name="online_qr_waiting_confirm">Confirm sign-in on your phone</string>
+    <string name="online_qr_verifying">Verifying and saving your account…</string>
+    <string name="online_qr_success">Signed in</string>
+    <string name="online_qr_expired">QR code expired. Request a new one.</string>
+    <string name="online_qr_failed">Sign-in could not finish.</string>
+    <plurals name="online_loaded_count">
+        <item quantity="one">%1$d item loaded</item>
+        <item quantity="other">%1$d items loaded</item>
+    </plurals>
+    <plurals name="online_track_count">
+        <item quantity="one">%1$d song</item>
+        <item quantity="other">%1$d songs</item>
+    </plurals>
+    <string name="online_unknown_count">Song count unavailable</string>
+    <string name="online_cache_time">Cached: %1$s</string>
+    <string name="online_more_pages">More content is available on the next page.</string>
+    <string name="online_missing_metadata">Some song information is unavailable.</string>
+    <string name="online_play_all">Play all</string>
+    <string name="online_complete_list_note">All pages are confirmed before replacing the queue.</string>
+    <string name="online_play_this_list">Play with this complete list</string>
+    <string name="online_insert_and_play">Insert and play</string>
+    <string name="online_play_next">Play next</string>
+    <string name="online_quality_standard">Standard quality</string>
+    <string name="online_quality_high">High quality</string>
+    <string name="online_unknown_title">Untitled song</string>
+    <string name="online_empty">No music items in this list.</string>
+    <string name="online_previous_page">Previous page</string>
+    <string name="online_next_page">Next page</string>
+    <string name="online_refresh">Refresh</string>
+    <string name="online_issue_offline">Network unavailable. Check the connection and retry.</string>
+    <string name="online_issue_timeout">The request timed out. Retry when ready.</string>
+    <string name="online_issue_certificate">A secure connection could not be verified.</string>
+    <string name="online_issue_rate_limited">Too many requests. Wait before retrying.</string>
+    <string name="online_issue_login">Sign in to continue.</string>
+    <string name="online_issue_session">This saved account is unavailable. Sign in again.</string>
+    <string name="online_issue_stale">The list or queue changed. Refresh and choose again.</string>
+    <string name="online_issue_incomplete">The complete list could not be confirmed. Your current queue is still available.</string>
+    <string name="online_issue_busy">Another operation is finishing. Retry shortly.</string>
+    <string name="online_issue_storage_full">More free space is needed.</string>
+    <string name="online_issue_storage">Music storage is unavailable.</string>
+    <string name="online_issue_closed">Reopen this music page to continue.</string>
+    <string name="online_issue_response">The music service returned an unusable response.</string>
+    <string name="online_issue_playback">This song could not start. Retry or choose another song.</string>
+</resources>

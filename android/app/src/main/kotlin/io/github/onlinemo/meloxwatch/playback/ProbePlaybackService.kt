@@ -12,6 +12,7 @@ import android.os.Process
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import androidx.media3.common.Player
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.DefaultMediaNotificationProvider
 import androidx.media3.session.MediaSession
@@ -40,12 +41,17 @@ import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerCommands
 import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerSessionState
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
+import io.github.onlinemo.meloxwatch.model.OnlineCatalogException
 import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeCommands
 import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeResult
 import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
+import io.github.onlinemo.meloxwatch.playback.resources.SourcePlaybackResolver
+import io.github.onlinemo.meloxwatch.playback.resources.toSessionExtras
 import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -82,6 +88,8 @@ class ProbePlaybackService : MediaSessionService() {
     private var routeStateObserver: Job? = null
     private var seekStateObserver: Job? = null
     private var commandPreferencesObserver: Job? = null
+    private var onlineAccountObserver: Job? = null
+    private var resourceStatusObserver: Job? = null
     private var initializing = true
     private var mediaButtonsEnabled = true
     private var destroyed = false
@@ -115,6 +123,7 @@ class ProbePlaybackService : MediaSessionService() {
             onFailure = { issue ->
                 mediaSession?.sendError(SessionError(SessionError.ERROR_INVALID_STATE, "BACKEND_${issue.name}"))
             },
+            runtimeResources = application.runtimePlaybackResources,
         )
         playbackOwner = owner
         val player = owner.initialPlayer
@@ -142,9 +151,24 @@ class ProbePlaybackService : MediaSessionService() {
             onManualTrackChange = { sleepTimer?.onManualTrackChange() },
             onRetainedTrackBinding = { previous, current -> sleepTimer?.onRetainedTrackBinding(previous, current) },
             beforeNaturalAdvance = { ending -> sleepTimer?.beforeNaturalAdvance(ending) ?: true },
+            sourceResolver = SourcePlaybackResolver(LocalPlaybackResolver(application)::resolve) {
+                application.onlineMusic().playbackResolver
+            },
+            resolveMetadata = { entry ->
+                val accountId = entry.accountId
+                if (entry.trackKey.providerId == "netease" && accountId != null) {
+                    application.existingOnlineCatalog()?.catalog?.presentation(accountId, entry.trackKey.trackId)?.let { metadata ->
+                        MediaMetadata.Builder().setTitle(metadata.title ?: entry.displayName).setArtist(metadata.artist)
+                            .setAlbumTitle(metadata.album).build()
+                    }
+                } else null
+            },
         )
         coordinator = queues
         owner.attach(queues, statistics)
+        onlineAccountObserver = serviceScope.launch {
+            application.onlineAccountChanges.revision.collect { if (!destroyed) queues.onAccountStateChanged() }
+        }
         var bootId: String? = null
         val timer = ServiceSleepTimer(SleepTimerStoreFactory.get(application), serviceScope,
             now = { SleepTimerClockSample(bootId, SystemClock.elapsedRealtime()) },
@@ -187,6 +211,11 @@ class ProbePlaybackService : MediaSessionService() {
         }
         seekStateObserver = serviceScope.launch {
             queues.seekState.collect { if (!destroyed) refreshSessionState() }
+        }
+        resourceStatusObserver = serviceScope.launch {
+            queues.state.map { it.resourceStatus }.distinctUntilChanged().collect {
+                if (!destroyed) refreshSessionState()
+            }
         }
         commandPreferencesObserver = serviceScope.launch {
             application.preferences.state.collect { saved ->
@@ -246,6 +275,8 @@ class ProbePlaybackService : MediaSessionService() {
         routeStateObserver?.cancel()
         seekStateObserver?.cancel()
         commandPreferencesObserver?.cancel()
+        onlineAccountObserver?.cancel()
+        resourceStatusObserver?.cancel()
         timerSaveCommand?.cancel()
         val session = mediaSession
         val owner = playbackOwner
@@ -364,6 +395,7 @@ class ProbePlaybackService : MediaSessionService() {
 
     private fun sessionExtras(): Bundle = Bundle(playbackOwner?.sessionExtras() ?: Bundle.EMPTY).apply {
         coordinator?.let { putAll(it.seekSessionState().toSessionExtras()) }
+        coordinator?.state?.value?.resourceStatus?.let { putAll(it.toSessionExtras()) }
         sleepTimer?.let { putAll(SleepTimerSessionState.fromService(it.state.value).toSessionExtras()) }
     }
 
@@ -439,6 +471,8 @@ class ProbePlaybackService : MediaSessionService() {
             } catch (error: QueueStoreException) {
                 val issue = if (error.issue == QueueStoreIssue.INVALID_INPUT) "CONFLICT" else error.issue.name
                 complete(failureResult(issue, error.issue.name))
+            } catch (error: OnlineCatalogException) {
+                complete(failureResult(error.issue.name))
             } catch (error: LibraryException) {
                 val issue = when (error.issue) {
                     LibraryIssue.BUSY -> "BUSY"
@@ -529,6 +563,7 @@ class ProbePlaybackService : MediaSessionService() {
         val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_COMMANDS.buildUpon()
         if (controller.uid == Process.myUid()) {
             commands.add(PlaybackCommands.replaceLocal).add(PlaybackCommands.replaceLibraryView)
+                .add(OnlineQueueCommands.play).add(OnlineQueueCommands.cancel)
                 .add(PlaybackCommands.playlistQueue)
                 .add(PlaybackCommands.selectEntry).add(PlaybackCommands.retryRestore).add(PlaybackCommands.mutateQueue)
                 .add(PlaybackCommands.beginSeek).add(PlaybackCommands.seekQueue)
@@ -580,6 +615,26 @@ class ProbePlaybackService : MediaSessionService() {
                 return Futures.immediateFuture(SessionResult(SessionError.ERROR_PERMISSION_DENIED))
             }
             return when (customCommand.customAction) {
+                OnlineQueueCommands.cancel.customAction -> {
+                    val operationId = try { OnlineQueueCommands.readCancellation(args) }
+                    catch (_: RuntimeException) { return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE)) }
+                    val cancelled = (application as MeloXApplication).onlineQueues.cancel(operationId)
+                    Futures.immediateFuture(if (cancelled) SessionResult(SessionResult.RESULT_SUCCESS) else failureResult("STALE_VIEW"))
+                }
+                OnlineQueueCommands.play.customAction -> {
+                    val command = try { OnlineQueueCommands.read(args) }
+                    catch (_: RuntimeException) { return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE)) }
+                    commandFuture(command.operationId) {
+                        val directory = (application as MeloXApplication).onlineQueues
+                        if (directory.wasAccepted(command)) return@commandFuture SessionResult(SessionResult.RESULT_SUCCESS)
+                        val owner = checkNotNull(currentCoroutineContext()[Job])
+                        val claimed = directory.claim(command) { owner.cancel() }
+                        try {
+                            claimed.commit(checkNotNull(coordinator))
+                            SessionResult(SessionResult.RESULT_SUCCESS)
+                        } finally { claimed.close() }
+                    }
+                }
                 SleepTimerCommands.arm.customAction -> timerResult { timer ->
                     val command = SleepTimerCommands.readArm(args)
                     timer.arm(command.minutes, command.mode, command.expectedGeneration)

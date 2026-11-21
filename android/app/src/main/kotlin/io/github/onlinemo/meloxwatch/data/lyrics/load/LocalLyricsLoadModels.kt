@@ -13,20 +13,22 @@ import io.github.onlinemo.meloxwatch.data.lyrics.LyricsDocument
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsLimits
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseIssue
+import io.github.onlinemo.meloxwatch.data.lyrics.LyricsSourceFence
+import io.github.onlinemo.meloxwatch.model.QueueSeekBinding
 import io.github.onlinemo.meloxwatch.model.TrackKey
 
 /** The caller must invalidate both generations when its track or selected lyric source changes. */
 data class LyricsLoadBinding(
-    val trackKey: TrackKey,
+    override val trackKey: TrackKey,
     val locationId: String,
     val contentRevision: Long,
     val sourceId: String,
     val sourceRevision: Long,
     val authorizationEpoch: Long,
     val requestGeneration: Long,
-    val sourceGeneration: Long,
+    override val sourceGeneration: Long,
     val documentIdentity: String? = null,
-) {
+) : LyricsSourceFence {
     init {
         require(trackKey.providerId == TrackKey.LOCAL_PROVIDER)
         require(locationId.isNotBlank() && locationId.length <= LocalInputLimits.URI_CHARACTERS)
@@ -34,6 +36,9 @@ data class LyricsLoadBinding(
         require(listOf(contentRevision, sourceRevision, authorizationEpoch, requestGeneration, sourceGeneration).all { it >= 0L })
         require(documentIdentity == null || documentIdentity.isNotBlank() && documentIdentity.length <= LocalInputLimits.URI_CHARACTERS)
     }
+
+    override fun matchesSeekBinding(binding: QueueSeekBinding): Boolean =
+        binding.locationId == locationId && binding.contentRevision == contentRevision
 }
 
 /** A picker preview or saved association supplies this input; loading never saves its URI grant. */

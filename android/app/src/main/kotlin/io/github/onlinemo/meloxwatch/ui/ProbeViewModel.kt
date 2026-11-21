@@ -47,6 +47,11 @@ import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.PlaybackControlsPreferences
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
+import io.github.onlinemo.meloxwatch.playback.OnlineQueueCommand
+import io.github.onlinemo.meloxwatch.playback.OnlineQueueCommands
+import io.github.onlinemo.meloxwatch.model.OnlineCatalogIssue
+import io.github.onlinemo.meloxwatch.ui.online.OnlineQueueSubmission
+import io.github.onlinemo.meloxwatch.ui.online.onlineQueueSubmission
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendState
 import io.github.onlinemo.meloxwatch.playback.LibraryQueueCommand
 import io.github.onlinemo.meloxwatch.playback.PlaylistQueueCommand
@@ -75,6 +80,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -88,6 +94,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 enum class ProbePage {
     HOME,
+    ONLINE,
+    METING,
     MEDIA,
     TREE,
     INPUT,
@@ -739,6 +747,26 @@ class ProbeViewModel(
         capturePlayback()
     }
 
+    /** A settings test addresses the existing current item, never a different browsed document or queue selection. */
+    internal suspend fun requestCurrentPlayback(expectedEntry: QueueEntry): Boolean =
+        kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
+            val active = controller ?: return@withContext false
+            if (!isForeground || !active.isConnected || playbackCommandJob != null || _uiState.value.playbackCommandPending ||
+                active.currentMediaItem?.mediaId != expectedEntry.queueEntryId || !active.isCommandAvailable(Player.COMMAND_PLAY_PAUSE)) {
+                return@withContext false
+            }
+            playbackInput.invalidate()
+            try {
+                publishUiState { it.copy(queueIssue = null) }
+                active.play()
+                capturePlayback()
+                true
+            } catch (_: IllegalStateException) {
+                publishUiState { it.copy(notice = ProbeNotice.COMMAND_REJECTED) }
+                false
+            }
+        }
+
     fun selectQueueEntry(snapshot: QueueSnapshot, entryId: String) {
         if (_uiState.value.playbackCommandPending) return
         publishUiState { state -> state.copy(selectedAudio = null, selectedQueueEntry = null) }
@@ -754,6 +782,38 @@ class ProbeViewModel(
             PlaybackCommands.replaceLibraryView to PlaybackCommands.libraryArguments(command)
         }
     }
+
+    /** Shares the existing UI command slot and controller; cancellation also reaches the service-owned ticket. */
+    internal suspend fun submitOnlineQueue(command: OnlineQueueCommand): OnlineQueueSubmission =
+        kotlinx.coroutines.withContext(Dispatchers.Main.immediate) {
+            val active = controller
+            if (active == null || !isForeground) return@withContext OnlineQueueSubmission(playbackIssue = QueuePlaybackIssue.SOURCE_UNAVAILABLE)
+            if (playbackCommandJob != null) return@withContext OnlineQueueSubmission(catalogIssue = OnlineCatalogIssue.BUSY)
+            val caller = checkNotNull(kotlinx.coroutines.currentCoroutineContext()[Job])
+            playbackInput.invalidate()
+            mediaVolume.invalidate()
+            playbackCommandGeneration += 1L
+            val generation = playbackCommandGeneration
+            playbackCommandJob = caller
+            publishUiState { it.copy(playbackCommandPending = true, queueIssue = null) }
+            var acknowledged = false
+            try {
+                val result = awaitResult(active.sendCustomCommand(OnlineQueueCommands.play, OnlineQueueCommands.arguments(command)))
+                if (generation != playbackCommandGeneration || controller !== active || !isForeground) {
+                    throw kotlinx.coroutines.CancellationException("Online command presentation changed")
+                }
+                acknowledged = true
+                capturePlayback()
+                onlineQueueSubmission(result, command.operationId)
+            } finally {
+                if (!acknowledged) (getApplication<Application>() as MeloXApplication).onlineQueues.cancel(command.operationId)
+                if (playbackCommandJob === caller) playbackCommandJob = null
+                if (generation == playbackCommandGeneration) {
+                    publishUiState { it.copy(playbackCommandPending = false) }
+                    mediaVolume.contextChanged()
+                }
+            }
+        }
 
     fun playPlaylistView(command: PlaylistQueueCommand, onResult: (PlaylistUiIssue?) -> Unit) {
         if (controller == null || !isForeground) {

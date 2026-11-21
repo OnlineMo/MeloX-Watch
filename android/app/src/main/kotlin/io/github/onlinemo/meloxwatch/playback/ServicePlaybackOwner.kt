@@ -12,8 +12,6 @@ import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.ContentDataSource
-import androidx.media3.datasource.DataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
@@ -30,6 +28,9 @@ import io.github.onlinemo.meloxwatch.playback.route.PlaybackRouteSessionState
 import io.github.onlinemo.meloxwatch.playback.route.RoutingRenderersFactory
 import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolume
 import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
+import io.github.onlinemo.meloxwatch.playback.resources.PlaybackDataSources
+import io.github.onlinemo.meloxwatch.playback.resources.NoAutomaticPlaybackLoadRetry
+import io.github.onlinemo.meloxwatch.playback.resources.RuntimePlaybackResources
 import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -62,6 +63,7 @@ internal class ServicePlaybackOwner(
     private val onFailure: (PlaybackBackendIssue) -> Unit,
     private val releaseGuard: PlaybackEngineReleaseGuard = PlaybackEngineReleaseGuard.process,
     musicVolumePort: MusicVolumePort = AndroidMusicVolume(context.applicationContext),
+    runtimeResources: RuntimePlaybackResources = RuntimePlaybackResources(),
 ) {
     private class Backend(
         val kind: PlaybackBackendKind,
@@ -86,6 +88,7 @@ internal class ServicePlaybackOwner(
     }
 
     private val applicationContext = context.applicationContext.also { checkMain() }
+    private val dataSources = PlaybackDataSources(applicationContext, runtimeResources)
     private val routeHandler = Handler(Looper.getMainLooper())
     private val routeExecutor = Executor { command -> routeHandler.post(command) }
     private val _state = MutableStateFlow(PlaybackBackendState())
@@ -260,6 +263,7 @@ internal class ServicePlaybackOwner(
         attempt { previous?.releaseLater() }
         if (retained !== previous) attempt { retained?.releaseLater() }
         attempt(pausedBackend::release)
+        attempt(dataSources::close)
         _state.value = _state.value.copy(actualBackend = null, switching = false, issue = PlaybackBackendIssue.CLOSED,
             gaplessAvailable = false, generation = _state.value.generation + 1L)
         failure?.let { throw it }
@@ -560,7 +564,7 @@ internal class ServicePlaybackOwner(
         route: PlaybackAudioRoute,
     ): Backend = when (kind) {
         PlaybackBackendKind.SYSTEM_MEDIA_PLAYER -> {
-            val platform = SystemMediaPlayerAdapter(applicationContext, localIo, scope, route, speedTenths)
+            val platform = SystemMediaPlayerAdapter(applicationContext, localIo, scope, route, speedTenths, remoteSources = dataSources)
             val backend = Backend(kind, platform, platform, releaseGuard, lease, route, system = platform)
             try {
                 platform.initializePlatform()
@@ -575,11 +579,12 @@ internal class ServicePlaybackOwner(
             }
         }
         PlaybackBackendKind.MEDIA3 -> {
-            val localDataSource = DataSource.Factory { ContentDataSource(applicationContext) }
             val renderers = RoutingRenderersFactory(applicationContext, route)
                 .setEnableAudioFloatOutput(false).setEnableAudioTrackPlaybackParams(false)
             val player = ExoPlayer.Builder(applicationContext).setRenderersFactory(renderers)
-                .setMediaSourceFactory(DefaultMediaSourceFactory(localDataSource)).setReleaseTimeoutMs(1500L).build()
+                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSources)
+                    .setLoadErrorHandlingPolicy(NoAutomaticPlaybackLoadRetry()))
+                .setReleaseTimeoutMs(1500L).build()
             val routedPlayer = RoutingPlaybackPlayer(player, route)
             val operations = Media3PlaybackOperations(routedPlayer)
             val backend = Backend(kind, routedPlayer, operations, releaseGuard, lease, route, media3 = operations)

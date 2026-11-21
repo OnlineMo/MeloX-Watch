@@ -1,6 +1,14 @@
 package io.github.onlinemo.meloxwatch
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.data.online.OnlineCatalogFeatureOwner
+import io.github.onlinemo.meloxwatch.data.online.OnlineQueueDirectory
+import io.github.onlinemo.meloxwatch.data.network.BoundedHttpGetClient
+import io.github.onlinemo.meloxwatch.data.meting.MetingRuntimeOwner
+import io.github.onlinemo.meloxwatch.data.netease.OnlineAccountChanges
+import io.github.onlinemo.meloxwatch.data.netease.OnlineMusicRuntime
+import io.github.onlinemo.meloxwatch.data.netease.OnlineMusicRuntimeOwner
+import io.github.onlinemo.meloxwatch.playback.resources.RuntimePlaybackResources
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.artwork.LocalArtworkRepository
 import io.github.onlinemo.meloxwatch.data.fonts.AndroidLyricsFontFiles
@@ -34,6 +42,8 @@ import io.github.onlinemo.meloxwatch.data.listening.RoomListeningRepository
 import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
 import io.github.onlinemo.meloxwatch.data.local.LocalMetadataReader
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
+import io.github.onlinemo.meloxwatch.data.lyrics.LyricsMemoryOwner
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsFeatureOwner
 import io.github.onlinemo.meloxwatch.data.lyrics.active.LocalLyricsContext
 import io.github.onlinemo.meloxwatch.data.lyrics.active.LyricsDocumentCopies
 import io.github.onlinemo.meloxwatch.data.lyrics.active.LyricsDocuments
@@ -87,6 +97,49 @@ import kotlinx.coroutines.withContext
 
 /** UI 和服务共享存储身份；播放内核只在唯一服务中建立。 */
 class MeloXApplication : Application() {
+    val runtimePlaybackResources by lazy { RuntimePlaybackResources() }
+    val onlineAccountChanges by lazy { OnlineAccountChanges() }
+    private val boundedHttpGetOwner = lazy { BoundedHttpGetClient(this) }
+    internal val boundedHttpGets get() = boundedHttpGetOwner.value
+    private val metingOwner = lazy { MetingRuntimeOwner(this, runtimePlaybackResources, { boundedHttpGets }) }
+    internal val metingRuntime get() = metingOwner.value
+    internal fun existingMetingRuntime() = if (metingOwner.isInitialized()) metingOwner.value else null
+    private val onlineRuntimeOwner = lazy { OnlineMusicRuntimeOwner(this, runtimePlaybackResources, onlineAccountChanges, metingRuntime) }
+    internal suspend fun onlineMusic(): OnlineMusicRuntime = onlineRuntimeOwner.value.get()
+    internal val onlineQueues by lazy { OnlineQueueDirectory() }
+    private val onlineCatalogOwner = lazy {
+        OnlineCatalogFeatureOwner(this, ::onlineMusic, { artworks }, { boundedHttpGets }, ::clearOnlineLyricsAccount)
+    }
+    val lyricsMemory by lazy { LyricsMemoryOwner() }
+    private val onlineLyricsOwner = lazy {
+        OnlineLyricsFeatureOwner(this, ::onlineMusic, runtimePlaybackResources, onlineAccountChanges, metingRuntime)
+    }
+    internal val onlineLyrics get() = onlineLyricsOwner.value
+    internal suspend fun clearOnlineLyricsAccount(accountId: String) = onlineLyrics.clearAccount(accountId)
+    internal suspend fun onlineCatalog() = onlineCatalogOwner.value.get()
+    internal fun existingOnlineCatalog() = if (onlineCatalogOwner.isInitialized()) onlineCatalogOwner.value.current() else null
+
+    /** Feature cleanup retains the single application-owned client until every online owner closes. */
+    internal fun closeOnlineResources() {
+        // Closing an application is not logout. Retire the lyrics observer before sessions so
+        // process shutdown preserves the same account's no-backup cache for an offline restart.
+        try { if (onlineLyricsOwner.isInitialized()) onlineLyricsOwner.value.close() }
+        finally {
+            try { if (onlineCatalogOwner.isInitialized()) onlineCatalogOwner.value.current()?.close() }
+            finally {
+                try { if (onlineRuntimeOwner.isInitialized()) onlineRuntimeOwner.value.close() }
+                finally {
+                    try { if (metingOwner.isInitialized()) metingOwner.value.close() }
+                    finally { if (boundedHttpGetOwner.isInitialized()) boundedHttpGetOwner.value.close() }
+                }
+            }
+        }
+    }
+
+    override fun onTerminate() {
+        try { closeOnlineResources() } finally { super.onTerminate() }
+    }
+
     private val database by lazy { MeloXDatabase.open(this) }
     val queues: QueueStore by lazy { RoomQueueStore(database) }
     val library by lazy { RoomLocalLibraryRepository(database) }

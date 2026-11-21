@@ -171,6 +171,13 @@ import java.net.URI
 import java.net.URISyntaxException
 import io.github.onlinemo.meloxwatch.ui.transfer.WatchTransferViewModel
 import io.github.onlinemo.meloxwatch.ui.transfer.watchTransferContent
+import io.github.onlinemo.meloxwatch.data.online.OnlineNetworkMonitor
+import io.github.onlinemo.meloxwatch.playback.OnlineQueueAction
+import io.github.onlinemo.meloxwatch.ui.online.OnlineViewModel
+import io.github.onlinemo.meloxwatch.ui.meting.MetingSettingsViewModel
+import io.github.onlinemo.meloxwatch.ui.watch.WatchMetingSettings
+import io.github.onlinemo.meloxwatch.ui.online.onlineContent
+import io.github.onlinemo.meloxwatch.ui.online.OnlineNowPlayingArtwork
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -189,6 +196,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var playlistEntryViewModel: PlaylistEntryViewModel
     private lateinit var appearanceViewModel: AppearanceViewModel
     private lateinit var transferViewModel: WatchTransferViewModel
+    private lateinit var onlineViewModel: OnlineViewModel
+    private lateinit var metingSettingsViewModel: MetingSettingsViewModel
     private lateinit var playbackBackgroundViewModel: PlaybackBackgroundViewModel
     private lateinit var lyricsEntryViewModel: LyricsEntryViewModel
     private lateinit var fontPickerViewModel: ProbeFontPickerViewModel
@@ -200,6 +209,7 @@ class MainActivity : ComponentActivity() {
     private var uiPresentationBinding: ProbeUiPresentation.Binding? = null
     private var transferPresentationBinding: AutoCloseable? = null
     private var transferForeground = false
+    private var onlineForeground = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -210,6 +220,17 @@ class MainActivity : ComponentActivity() {
         sourcesViewModel = ViewModelProvider(this)[SourcesViewModel::class.java]
         listeningViewModel = ViewModelProvider(this)[ListeningViewModel::class.java]
         val app = application as MeloXApplication
+        val playbackModel = probeViewModel
+        onlineViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer {
+                OnlineViewModel(app::onlineCatalog, app.queues::snapshot, app.onlineQueues, playbackModel::submitOnlineQueue,
+                    onAccepted = { action -> if (action != OnlineQueueAction.INSERT_NEXT) playbackModel.showPage(ProbePage.PLAYBACK) },
+                    networkFactory = { OnlineNetworkMonitor(app) })
+            }
+        })[OnlineViewModel::class.java]
+        metingSettingsViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer { createMetingSettingsModel(app, playbackModel) }
+        })[MetingSettingsViewModel::class.java]
         fontPickerViewModel = ViewModelProvider(this)[ProbeFontPickerViewModel::class.java]
         lyricsPickerViewModel = ViewModelProvider(this)[ProbeLyricsPickerViewModel::class.java]
         appearancePickerViewModel = ViewModelProvider(this)[ProbeAppearancePickerViewModel::class.java]
@@ -234,7 +255,8 @@ class MainActivity : ComponentActivity() {
                 app.lyricsTracks, app.lyricsDocuments, app.lyricsAuthority, app.lyricsLoader::load,
                 app.lyricsLoader::validate, probeViewModel.lyricsPlayback,
                 libraryChanges = app.library.observeOverview().map { it.revision }
-                    .distinctUntilChanged().drop(1).map { Unit }, savedStateHandle = savedState)
+                    .distinctUntilChanged().drop(1).map { Unit }, savedStateHandle = savedState,
+                memoryOwner = app.lyricsMemory, onlineLyrics = app.onlineLyrics)
         })[LyricsEntryViewModel::class.java]
         playlistsViewModel = ViewModelProvider(this, viewModelFactory {
             initializer {
@@ -260,6 +282,7 @@ class MainActivity : ComponentActivity() {
         val exactWindow = WatchWindowRuntime(this) {
             exactCallbacks?.onWindowVisibilityChanged()
             transferViewModel.visibilityChanged()
+            updateOnlineVisibility()
         }
         watchWindowRuntime = exactWindow
         val exactRuntime = ProbePageRuntime(
@@ -278,7 +301,10 @@ class MainActivity : ComponentActivity() {
         val exactActivity = probeViewModel.bindUiPresentation(
             update = { state ->
                 try { callbacks.onUiStateChanged(state) }
-                finally { transferViewModel.visibilityChanged() }
+                finally {
+                    transferViewModel.visibilityChanged()
+                    updateOnlineVisibility()
+                }
             },
             retire = {
                 try { callbacks.close() }
@@ -292,6 +318,7 @@ class MainActivity : ComponentActivity() {
         }
         // The initial bind callback ran before this cell existed; record its real retained route now.
         callbacks.noteActualRoute(probeViewModel.uiState.value)
+        updateOnlineVisibility()
         exactRuntime.attachActivity(exactActivity)
         if (savedInstanceState == null) acceptLaunchIntent(intent)
         setContent {
@@ -302,7 +329,7 @@ class MainActivity : ComponentActivity() {
                 ProbeTheme {
                     ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
                         libraryViewModel, sourcesViewModel, listeningViewModel, playlistsViewModel,
-                        playlistEntryViewModel, appearanceViewModel, transferViewModel, playbackBackgroundViewModel,
+                        playlistEntryViewModel, appearanceViewModel, transferViewModel, onlineViewModel, metingSettingsViewModel, playbackBackgroundViewModel,
                         lyricsEntryViewModel, displayEditor, lyricsDisplayViewModel, fontPickerViewModel, lyricsPickerViewModel,
                         appearancePickerViewModel, exactRuntime, exactWindow, exactActivity, this)
                 }
@@ -320,7 +347,9 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         if (uiPresentationBinding?.isCurrent == true) {
             transferForeground = true
+            onlineForeground = true
             transferViewModel.visibilityChanged()
+            updateOnlineVisibility()
             (application as MeloXApplication).onUiForeground()
             probeViewModel.onForeground()
         }
@@ -329,7 +358,9 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         if (uiPresentationBinding?.isCurrent == true) {
             transferForeground = false
+            onlineForeground = false
             transferViewModel.visibilityChanged()
+            updateOnlineVisibility()
             probeViewModel.onBackground()
             sourcesViewModel.onBackground()
             (application as MeloXApplication).onUiBackground()
@@ -342,10 +373,13 @@ class MainActivity : ComponentActivity() {
         watchWindowRuntime?.windowFocusChanged(hasFocus)
         if (::probeViewModel.isInitialized && uiPresentationBinding?.isCurrent == true) {
             probeViewModel.setWindowFocused(hasFocus)
+            updateOnlineVisibility()
         }
     }
 
     override fun onDestroy() {
+        if (uiPresentationBinding?.isCurrent == true && ::onlineViewModel.isInitialized) onlineViewModel.setVisible(false)
+        if (uiPresentationBinding?.isCurrent == true && ::metingSettingsViewModel.isInitialized) metingSettingsViewModel.setVisible(false)
         try {
             transferPresentationBinding?.close()
             transferPresentationBinding = null
@@ -358,6 +392,14 @@ class MainActivity : ComponentActivity() {
                 super.onDestroy()
             }
         }
+    }
+
+    private fun updateOnlineVisibility() {
+        if (!::onlineViewModel.isInitialized || uiPresentationBinding?.isCurrent != true) return
+        val visible = onlineForeground && watchWindowRuntime?.visibility?.value?.visible == true
+        val page = probeViewModel.uiState.value.page
+        onlineViewModel.setVisible(visible && page == ProbePage.ONLINE)
+        if (::metingSettingsViewModel.isInitialized) metingSettingsViewModel.setVisible(visible && page == ProbePage.METING)
     }
 
     private fun acceptLaunchIntent(source: Intent?) {
@@ -442,6 +484,8 @@ private fun ProbeApp(
     playlistEntryViewModel: PlaylistEntryViewModel,
     appearanceViewModel: AppearanceViewModel,
     transferViewModel: WatchTransferViewModel,
+    onlineViewModel: OnlineViewModel,
+    metingSettingsViewModel: MetingSettingsViewModel,
     playbackBackgroundViewModel: PlaybackBackgroundViewModel,
     lyricsEntryViewModel: LyricsEntryViewModel,
     lyricsDisplayEditor: LyricsDisplayEditor,
@@ -459,6 +503,8 @@ private fun ProbeApp(
     val windowVisibility by watchWindowRuntime.visibility.collectAsStateWithLifecycle()
     val appearance by appearanceViewModel.state.collectAsStateWithLifecycle()
     val transfer by transferViewModel.state.collectAsStateWithLifecycle()
+    val online by onlineViewModel.state.collectAsStateWithLifecycle()
+    val meting by metingSettingsViewModel.state.collectAsStateWithLifecycle()
     val displayState by lyricsDisplayEditor.state.collectAsStateWithLifecycle()
     val displaySettings by lyricsDisplayEditor.settings.collectAsStateWithLifecycle()
     val entryState by lyricsEntryViewModel.uiState.collectAsStateWithLifecycle()
@@ -692,6 +738,7 @@ private fun ProbeApp(
                 lyricsEntryViewModel.cancelOffset()
                 viewModel.showPage(ProbePage.LYRICS_OPTIONS)
             }
+            state.page == ProbePage.ONLINE && onlineViewModel.back() -> Unit
             state.page == ProbePage.LYRICS_ASSOCIATION -> {
                 entryState.associationPreview?.let { lyricsEntryViewModel.cancelAssociation(it.previewId) }
                 viewModel.showPage(ProbePage.LYRICS_OPTIONS)
@@ -756,6 +803,7 @@ private fun ProbeApp(
                     lane to queue.pageStart
                 }
                 ProbePage.LIBRARY -> "${library.screen}:${library.page?.view?.viewId}:${library.artworkRefreshPreview?.refreshId}" to library.pageStart
+                ProbePage.ONLINE -> "${online.screen}:${online.snapshot?.id}" to online.pageStart
                 ProbePage.PLAYLISTS -> "${playlists.screen}:${playlists.view?.viewId}:${playlists.importDraft?.preview?.previewId}:" +
                     "${playlistEntry.screen}:${playlistEntry.folder?.nodeId}:${playlistEntry.replacements?.nextCursor}" to playlists.pageStart
                 else -> null
@@ -809,6 +857,11 @@ private fun ProbeApp(
                         }
                         when (page) {
                             ProbePage.HOME -> homeContent(state, viewModel, openDocument, openTree, openMedia, openSettings)
+                            ProbePage.ONLINE -> onlineContent(online, onlineViewModel, visiblePage, visibleKeys = visibleKeys,
+                                onMetingSettings = { viewModel.showPage(ProbePage.METING) })
+                            ProbePage.METING -> item(key = "meting:settings") {
+                                WatchMetingSettings(meting, visiblePage, metingSettingsViewModel, onBack = back)
+                            }
                             ProbePage.MEDIA -> mediaContent(state, viewModel, openMedia, openSettings)
                             ProbePage.TREE -> treeContent(state, viewModel, openTree)
                             ProbePage.INPUT -> item { InputCheck() }
@@ -1000,7 +1053,8 @@ private fun ProbeApp(
             }
             if (page in setOf(ProbePage.LYRICS, ProbePage.LYRICS_FONTS, ProbePage.APPEARANCE)) renderContent()
             else ProbeThemeUiFonts(app, exactPage, appearance.theme,
-                probePageVisibleText(page, state, library, queue, playlists, playlistEntry, visibleKeys), renderContent)
+                probePageVisibleText(page, state, library, queue, playlists, playlistEntry, visibleKeys,
+                    online = online, meting = meting), renderContent)
         }
     }
     if (state.page in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK, ProbePage.LYRICS)) {
@@ -1094,6 +1148,8 @@ private fun LazyListScope.homeContent(
 ) {
     item { ProbeButton(stringResource(R.string.probe_playback), primary = true) { viewModel.showPage(ProbePage.PLAYBACK) } }
     item { ProbeButton(stringResource(R.string.library_title), primary = true) { viewModel.showPage(ProbePage.LIBRARY) } }
+    item { ProbeButton(stringResource(R.string.online_title)) { viewModel.showPage(ProbePage.ONLINE) } }
+    item { ProbeButton(stringResource(R.string.online_meting)) { viewModel.showPage(ProbePage.METING) } }
     item { ProbeButton(stringResource(R.string.playlist_heading)) { viewModel.showPage(ProbePage.PLAYLISTS) } }
     item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
     item { ProbeButton(stringResource(R.string.playback_settings), onClick = { viewModel.showPage(ProbePage.SETTINGS) }) }
@@ -1201,7 +1257,10 @@ private fun NowPlayingContent(
     val heroTitle = compactPlaybackTitle(title, LocalWatchAppearance.current.compactPlaybackTitle)
     WatchNowPlayingPage(screenShape, heroTitle, artist.takeIf { playback.hasMedia },
         stringResource(R.string.watch_open_menu), onMenu,
-        artwork = { size -> NowPlayingArtwork(track, artworkPath, artworkRevision, visible, size) },
+        artwork = { size ->
+            if (track == null && playback.mediaId != null) OnlineNowPlayingArtwork(playback.mediaId, visible, size)
+            else NowPlayingArtwork(track, artworkPath, artworkRevision, visible, size)
+        },
         transport = { centerSize, horizontal -> WatchTransport(state, viewModel, centerSize, horizontal) },
         visible = visible,
         onInputFocus = { within, direct -> viewModel.setPlaybackInputFocused(ProbePage.PLAYBACK, within, direct) },
@@ -1644,6 +1703,8 @@ private fun ProbeButton(
 
 private fun pageTitle(page: ProbePage): Int = when (page) {
     ProbePage.HOME -> R.string.app_name
+    ProbePage.ONLINE -> R.string.online_title
+    ProbePage.METING -> R.string.meting_title
     ProbePage.MEDIA -> R.string.probe_media_title
     ProbePage.TREE -> R.string.probe_tree_title
     ProbePage.INPUT -> R.string.probe_input
@@ -1707,6 +1768,20 @@ private fun queueIssueText(issue: QueuePlaybackIssue): Int = when (issue) {
     QueuePlaybackIssue.SOURCE_DAMAGED -> R.string.playback_source_damaged
     QueuePlaybackIssue.SOURCE_UNAVAILABLE -> R.string.playback_source_unavailable
     QueuePlaybackIssue.OUTPUT_ERROR -> R.string.playback_output_error
+    QueuePlaybackIssue.NETWORK_UNAVAILABLE -> R.string.online_network_unavailable
+    QueuePlaybackIssue.NETWORK_TIMEOUT -> R.string.online_network_timeout
+    QueuePlaybackIssue.NETWORK_CERTIFICATE -> R.string.online_certificate_error
+    QueuePlaybackIssue.NETWORK_RATE_LIMITED -> R.string.online_rate_limited
+    QueuePlaybackIssue.LOGIN_REQUIRED -> R.string.online_login_required
+    QueuePlaybackIssue.SESSION_UNAVAILABLE -> R.string.online_session_unavailable
+    QueuePlaybackIssue.LOCAL_ONLY_ONLINE_SKIPPED -> R.string.playback_local_only_skipped_online
+    QueuePlaybackIssue.RESOURCE_UNAVAILABLE -> R.string.online_resource_unavailable
+    QueuePlaybackIssue.RESOURCE_AUTH_REQUIRED -> R.string.online_resource_auth_required
+    QueuePlaybackIssue.RESOURCE_INVALID -> R.string.online_resource_invalid
+    QueuePlaybackIssue.RESOURCE_EXPIRED -> R.string.online_resource_expired
+    QueuePlaybackIssue.RESOURCE_REDIRECT -> R.string.online_redirect_limit
+    QueuePlaybackIssue.RESOURCE_RETRY_EXHAUSTED -> R.string.online_retry_limit
+    QueuePlaybackIssue.STREAM_STALLED -> R.string.online_stream_stalled
 }
 
 private fun accessText(access: ProbeAccess): Int = when (access) {

@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
@@ -23,6 +25,7 @@
         </intent>
     </queries>
 
+    <!-- 自填 HTTP 主机需要静态平台开关；实际 HTTP 请求仍由共享门禁默认拒绝并逐跳核验。 -->
     <application
         android:name=".MeloXApplication"
         android:allowBackup="false"
@@ -31,6 +34,7 @@
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.MeloXWatch">
         <activity
             android:name=".ui.MainActivity"
@@ -67,5 +71,13 @@
             android:authorities="${applicationId}.owned-audio"
             android:exported="false"
             android:grantUriPermissions="false" />
+        <!-- Local entry points stay independent of OkHttp platform initialization. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data android:name="okhttp3.internal.platform.PlatformInitializer" tools:node="remove" />
+        </provider>
     </application>
 </manifest>

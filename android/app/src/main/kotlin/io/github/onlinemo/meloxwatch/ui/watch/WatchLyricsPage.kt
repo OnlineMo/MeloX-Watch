@@ -106,6 +106,8 @@ fun WatchLyricsPage(
     onChooseLyrics: (() -> Unit)? = null,
     onSettings: (() -> Unit)? = null,
     onRetry: (() -> Unit)? = null,
+    /** Localized fixed status text from the source owner, never raw responses or credentials. */
+    statusLabel: String? = null,
 ) {
     val ready = content as? LyricsPageContent.Ready
     val document = ready?.document
@@ -252,7 +254,7 @@ fun WatchLyricsPage(
                     item(key = "lyrics:context") {
                         Column(contextModifier, verticalArrangement = Arrangement.spacedBy(contextGap)) {
                             LyricsContext(content, visible, browsing, canSeek && onPreviewPlayFromLine != null,
-                                onChooseLyrics, onSettings, onRetry)
+                                onChooseLyrics, onSettings, onRetry, statusLabel)
                             if (onBack != null) WatchActionRow(backLabel, enabled = visible, onClick = onBack)
                             if (browsing) WatchActionRow(returnLabel, enabled = visible, primary = true,
                                 onClick = pageState::returnToCurrent)
@@ -343,6 +345,7 @@ private fun LyricsContext(
     onChoose: (() -> Unit)?,
     onSettings: (() -> Unit)?,
     onRetry: (() -> Unit)?,
+    statusLabel: String?,
 ) {
     val message = when (content) {
         LyricsPageContent.Loading -> R.string.lyrics_loading
@@ -360,18 +363,20 @@ private fun LyricsContext(
             LyricsKind.SYNCHRONIZED -> if (browsing) R.string.lyrics_browsing else R.string.lyrics_following
         }
     }
-    WatchText(stringResource(message), Modifier.fillMaxWidth(), primary = true,
+    WatchText(if (content is LyricsPageContent.Ready) stringResource(message)
+        else statusLabel ?: stringResource(message), Modifier.fillMaxWidth(), primary = true,
         error = content is LyricsPageContent.Failed)
     if (content is LyricsPageContent.Ready) {
         val source = content.sourceLabel
         if (!source.isNullOrBlank()) WatchText(source, Modifier.fillMaxWidth())
+        if (!statusLabel.isNullOrBlank()) WatchText(statusLabel, Modifier.fillMaxWidth(), error = true)
         if (content.document.kind == LyricsKind.SYNCHRONIZED && canPreviewPlay) {
             WatchText(stringResource(R.string.lyrics_play_warning), Modifier.fillMaxWidth())
         }
     }
     if (onChoose != null) WatchActionRow(stringResource(R.string.lyrics_choose), enabled = visible, onClick = onChoose)
     if (onSettings != null) WatchActionRow(stringResource(R.string.lyrics_settings), enabled = visible, onClick = onSettings)
-    if (content is LyricsPageContent.Failed && onRetry != null) {
+    if ((content is LyricsPageContent.Failed || content is LyricsPageContent.Ready && !statusLabel.isNullOrBlank()) && onRetry != null) {
         WatchActionRow(stringResource(R.string.lyrics_retry), enabled = visible, onClick = onRetry)
     }
 }

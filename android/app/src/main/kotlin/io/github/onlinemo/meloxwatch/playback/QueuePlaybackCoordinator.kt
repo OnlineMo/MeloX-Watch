@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.playback
 
 import androidx.core.net.toUri
 import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -25,6 +26,13 @@ import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.QueueWindow
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.playback.sleep.SleepTimerTrackBinding
+import io.github.onlinemo.meloxwatch.playback.resources.PlaybackResolutionBudget
+import io.github.onlinemo.meloxwatch.playback.resources.PlaybackSourceIntent
+import io.github.onlinemo.meloxwatch.playback.resources.PreparedPlaybackWindow
+import io.github.onlinemo.meloxwatch.playback.resources.RuntimePlaybackResource
+import io.github.onlinemo.meloxwatch.playback.resources.SourcePlaybackResolver
+import io.github.onlinemo.meloxwatch.playback.resources.StreamingQuality
+import io.github.onlinemo.meloxwatch.playback.resources.mediaTransportIssue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -46,6 +54,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.IdentityHashMap
 
 /**
  * 唯一主 Looper 后端的队列所有者。数据库有全部引用，内存只有当前窗口与一个合并写入。
@@ -67,6 +76,8 @@ class QueuePlaybackCoordinator(
     private val onManualTrackChange: () -> Unit = {},
     private val onRetainedTrackBinding: (SleepTimerTrackBinding, SleepTimerTrackBinding) -> Unit = { _, _ -> },
     private val beforeNaturalAdvance: (SleepTimerTrackBinding) -> Boolean = { false },
+    private val sourceResolver: SourcePlaybackResolver? = null,
+    private val resolveMetadata: suspend (QueueEntry) -> MediaMetadata? = { null },
 ) {
     private var backend: Player = backend
     private var operations: PlaybackBackendOperations = operations
@@ -93,6 +104,18 @@ class QueuePlaybackCoordinator(
     private var checkpointEpoch = 0L
     private var detachedIntentRevision = 0L
     private var loadedWindow: QueueWindow? = null
+    private var pausedOnlineReference: QueuePausedOnlineReference? = null
+    private var loadedResources: Map<String, RuntimePlaybackResource> = emptyMap()
+    private var loadedMetadata: Map<String, MediaMetadata> = emptyMap()
+    private val preparedWindows = mutableSetOf<PreparedPlaybackWindow>()
+    private val preparedMetadata = IdentityHashMap<PreparedPlaybackWindow, Map<String, MediaMetadata>>()
+    private var sourceIntent = PlaybackSourceIntent.LOCAL_ONLY
+    private var streamingQuality = StreamingQuality.STANDARD
+    private var streamWatchdog: Job? = null
+    private var watchedMediaUri: String? = null
+    private var watchedBackendGeneration = -1L
+    private var loadingOnlineForPlay = false
+    private var resolutionAttempt: ResolutionAttempt? = null
     private var applyingWindow = false
     private var resumeIntent = false
     private var playbackCycle = 0L
@@ -160,7 +183,7 @@ class QueuePlaybackCoordinator(
             requestCheckpoint()
             report(failure)
             if (!wasApplying && wantedPlay && isRecoverableResourceIssue(failure.issue) && !switchingBackend) {
-                pendingRecovery = RecoveryRequest(failure, playbackCycle, backendGeneration)
+                pendingRecovery = RecoveryRequest(failure, playbackCycle, backendGeneration, failureBudget(failure))
                 startPendingCommands()
             } else if (!wasApplying) {
                 resumeIntent = false
@@ -196,6 +219,7 @@ class QueuePlaybackCoordinator(
 
     suspend fun initialize(): QueueSnapshot? = action { token ->
         resumeIntent = false
+        sourceIntent = PlaybackSourceIntent.LOCAL_ONLY
         pauseForWindowChange()
         val saved = queueStore.initialize()
         val preferenceState = preferences.state.first { it !is PreferencesState.Loading }
@@ -212,22 +236,36 @@ class QueuePlaybackCoordinator(
         } else {
             val entryId = saved.currentEntryId ?: throw QueueStoreException(QueueStoreIssue.RECOVERY_REQUIRED)
             val window = queueStore.window(saved.generationId, entryId)
-            if (!isDetached && token == intentRevision) applyWindow(saved, window, if (restorePosition) saved.positionMs else 0L, explicitPlay = false, token)
+            if (!isDetached && token == intentRevision) {
+                if (window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER) {
+                    restoreOnlineReference(saved, window, if (restorePosition) saved.positionMs else 0L)
+                }
+                else applyWindow(saved, window, if (restorePosition) saved.positionMs else 0L, explicitPlay = false, token)
+            }
         }
         saved
     }
 
-    suspend fun replace(request: QueueReplacementRequest, source: QueuePageSource, explicitPlay: Boolean): QueueCommit = action(clearFailure = false) { token ->
-        var prepared: QueueWindow? = null
+    suspend fun replace(
+        request: QueueReplacementRequest,
+        source: QueuePageSource,
+        explicitPlay: Boolean,
+        sourceIntent: PlaybackSourceIntent = PlaybackSourceIntent.LOCAL_ONLY,
+        quality: StreamingQuality = StreamingQuality.STANDARD,
+    ): QueueCommit = action(clearFailure = false) { token ->
+        var prepared: PreparedPlaybackWindow? = null
         val commit = queueStore.replace(request, source) { candidate ->
             onUserIntentChanged()
             resetRecoveryBudget()
-            prepared = candidate?.let { prepareWindow(it) }
+            prepared = candidate?.let { prepareWindow(it, intent = sourceIntent, quality = quality) }
+            prepared?.resources?.values?.forEach(RuntimePlaybackResource::checkCurrent)
             currentCoroutineContext().ensureActive()
             if (isDetached || token != intentRevision) throw CancellationException("Queue preparation intent changed")
         }
         // 历史 operation 的确认不能重装窗口，也不代表修复了此前的加载失败。
         if (commit.wasReplay) return@action commit
+        this@QueuePlaybackCoordinator.sourceIntent = sourceIntent
+        streamingQuality = quality
         onManualTrackChange()
         checkpointEpoch += 1L
         publishSnapshot(commit.snapshot)
@@ -256,7 +294,12 @@ class QueuePlaybackCoordinator(
                     } catch (error: Exception) {
                         // A partial backend mutation can retain the old URI under the same entry
                         // ID. Clear that window so explicit retry loads the accepted queue again.
-                        if (!isDetached) clearBackend()
+                        if (!isDetached) {
+                            clearBackend()
+                            if (window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER) {
+                                restoreOnlineReference(commit.snapshot, window.window, commit.snapshot.positionMs)
+                            }
+                        }
                         report(if (error is QueuePlaybackException) error.failure else
                             QueuePlaybackFailure(QueuePlaybackIssue.OUTPUT_ERROR, commit.snapshot.currentEntryId))
                     }
@@ -266,11 +309,17 @@ class QueuePlaybackCoordinator(
         commit
     }
 
-    suspend fun select(generationId: String, expectedQueueRevision: Long, entryId: String, explicitPlay: Boolean): QueueSnapshot = action { token ->
+    suspend fun select(
+        generationId: String,
+        expectedQueueRevision: Long,
+        entryId: String,
+        explicitPlay: Boolean,
+        sourceIntent: PlaybackSourceIntent? = null,
+    ): QueueSnapshot = action { token ->
         onUserIntentChanged()
         resetRecoveryBudget()
         selectInternal(generationId, expectedQueueRevision, entryId, explicitPlay, completedCycles = 0, token,
-            manualTrackChange = true)
+            manualTrackChange = true, selectedIntent = sourceIntent)
     }
 
     /** 构造代次时旧音频继续；纯编辑只更新有界邻项，当前交接才暂停/准备/seek。 */
@@ -278,12 +327,17 @@ class QueuePlaybackCoordinator(
         request: QueueMutationRequest,
         source: QueuePageSource? = null,
         explicitPlay: Boolean = false,
+        sourceIntent: PlaybackSourceIntent? = null,
+        streamingQuality: StreamingQuality? = null,
     ): QueueCommit = action(clearFailure = false) { token ->
-        var prepared: QueueWindow? = null
+        var prepared: PreparedPlaybackWindow? = null
         var keepsLoadedCurrent = false
         var keepsCurrent = false
         var currentRemoved = false
         var retainedFailure: QueuePlaybackFailure? = null
+        val pausedReference = sessionPausedOnlineReference()
+        val pausedBinding = if (pausedReference != null) sleepTimerTrackBinding() else null
+        var keptReferenceWindow: QueueWindow? = null
         val commit = queueStore.mutate(request, source) { candidate ->
             currentRemoved = candidate.currentRemoved
             keepsCurrent = candidate.keepsCurrent
@@ -299,8 +353,13 @@ class QueuePlaybackCoordinator(
             if (candidate.keepsCurrent) {
                 val window = candidate.window
                 if (window != null) {
-                    try {
-                        prepared = prepareWindow(window)
+                    if (pausedReference != null && loaded != null && loaded.generationId == candidate.previous?.generationId &&
+                        loaded.current.queueEntryId == pausedReference.mediaItem.mediaId && sameSource(loaded.current, window.current)) {
+                        keptReferenceWindow = window
+                    } else try {
+                        prepared = prepareWindow(window, retainCurrent = keepsLoadedCurrent,
+                            intent = sourceIntent ?: this@QueuePlaybackCoordinator.sourceIntent,
+                            quality = streamingQuality ?: this@QueuePlaybackCoordinator.streamingQuality)
                         if (keepsLoadedCurrent && !sameSource(requireNotNull(loaded).current, requireNotNull(prepared).current)) {
                             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, liveCurrent))
                         }
@@ -313,7 +372,8 @@ class QueuePlaybackCoordinator(
                 // 失效引用仍可管理删除；最多默认后项和三个候选，不绕回前方无限扫描。
                 for (window in candidate.windows) {
                     try {
-                        prepared = prepareWindow(window)
+                        prepared = prepareWindow(window, intent = sourceIntent ?: this@QueuePlaybackCoordinator.sourceIntent,
+                            quality = streamingQuality ?: this@QueuePlaybackCoordinator.streamingQuality)
                         break
                     } catch (error: QueuePlaybackException) {
                         if (retainedFailure == null) retainedFailure = error.failure
@@ -321,12 +381,17 @@ class QueuePlaybackCoordinator(
                 }
                 if (prepared != null) retainedFailure = null
             } else {
-                prepared = candidate.window?.let { prepareWindow(it) }
+                prepared = candidate.window?.let { prepareWindow(it,
+                    intent = sourceIntent ?: this@QueuePlaybackCoordinator.sourceIntent,
+                    quality = streamingQuality ?: this@QueuePlaybackCoordinator.streamingQuality) }
             }
             currentCoroutineContext().ensureActive()
             if (isDetached || token != intentRevision || !backendBound) throw CancellationException("Queue edit intent changed")
             val current = prepared?.current
-            if (candidate.keepsCurrent && keepsLoadedCurrent) {
+            if (keptReferenceWindow != null) {
+                val cycles = if (candidate.preservesCycles) _state.value.snapshot?.checkpoint?.completedCycles ?: 0 else 0
+                QueueCheckpoint(candidate.defaultCheckpoint.queueEntryId, requireNotNull(pausedReference).positionMs, cycles)
+            } else if (candidate.keepsCurrent && keepsLoadedCurrent) {
                 val position = backend.currentPosition.coerceAtLeast(0L)
                 val cycles = if (candidate.preservesCycles) _state.value.snapshot?.checkpoint?.completedCycles ?: 0 else 0
                 QueueCheckpoint(candidate.defaultCheckpoint.queueEntryId, position, cycles)
@@ -337,6 +402,8 @@ class QueuePlaybackCoordinator(
             }
         }
         if (commit.wasReplay) return@action commit
+        sourceIntent?.let { this@QueuePlaybackCoordinator.sourceIntent = it }
+        streamingQuality?.let { this@QueuePlaybackCoordinator.streamingQuality = it }
         if (!keepsCurrent) onManualTrackChange()
         checkpointEpoch += 1L
         publishSnapshot(commit.snapshot)
@@ -346,6 +413,16 @@ class QueuePlaybackCoordinator(
                 if (commit.snapshot.entryCount == 0L) {
                     onUserIntentChanged()
                     clearBackend()
+                } else if (keptReferenceWindow != null) {
+                    val referenceWindow = requireNotNull(keptReferenceWindow)
+                    if (referenceWindow.generationId != commit.snapshot.generationId ||
+                        referenceWindow.queueRevision != commit.snapshot.queueRevision ||
+                        referenceWindow.current.queueEntryId != commit.snapshot.currentEntryId) {
+                        throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.RECOVERY_REQUIRED, commit.snapshot.currentEntryId))
+                    }
+                    restoreOnlineReference(commit.snapshot, referenceWindow, commit.snapshot.positionMs)
+                    if (pausedBinding != null) onRetainedTrackBinding(pausedBinding,
+                        SleepTimerTrackBinding(sessionId, referenceWindow.generationId, referenceWindow.current.queueEntryId, playbackCycle))
                 } else if (window == null) {
                     clearBackend()
                     retainedFailure?.let(::report)
@@ -404,9 +481,14 @@ class QueuePlaybackCoordinator(
         val current = requireNotNull(loadedWindow).current
         onUserIntentChanged()
         resetRecoveryBudget()
-        val resolved = resolveEntry(current)
-        currentCoroutineContext().ensureActive()
-        if (!sameSource(current, resolved)) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, current.queueEntryId))
+        if (current.trackKey.providerId == TrackKey.LOCAL_PROVIDER) {
+            val resolved = resolveEntry(current)
+            currentCoroutineContext().ensureActive()
+            if (!sameSource(current, resolved)) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, current.queueEntryId))
+        } else {
+            loadedResources[current.queueEntryId]?.checkCurrent()
+                ?: throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.NOT_READY, current.queueEntryId))
+        }
         validateSeekBinding(request.binding)
         val wantedPlay = request.explicitPlay || resumeIntent || backend.playWhenReady
         checkpointEpoch += 1L
@@ -506,6 +588,7 @@ class QueuePlaybackCoordinator(
                 QueueBackendCheckpoint(
                     saved, position, saved?.checkpoint?.completedCycles ?: 0, playbackCycle, handledNaturalCycle,
                     checkpointEpoch, intentRevision, backendGeneration,
+                    mediaMetadata = sessionBridge.mediaMetadata,
                 ).also { activeBackendSwitch = it }
             }
         } catch (error: Exception) {
@@ -532,6 +615,7 @@ class QueuePlaybackCoordinator(
         invalidateSeekOwner()
         ticker?.cancel()
         ticker = null
+        releaseRuntimeWindows()
         loadedWindow = null
         try {
             old.removeListener(listener)
@@ -569,10 +653,13 @@ class QueuePlaybackCoordinator(
         try {
             if (live == null || live.entryCount == 0L) clearBackend() else {
                 val window = queueStore.window(live.generationId, requireNotNull(live.currentEntryId))
-                val prepared = prepareWindow(window)
-                currentCoroutineContext().ensureActive()
-                requireBackendSwitch(checkpoint)
-                applyPreparedWindow(live, prepared, checkpoint.positionMs, explicitPlay = false, intentRevision, newRound = false)
+                if (window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER) restoreOnlineReference(live, window, checkpoint.positionMs, checkpoint.mediaMetadata)
+                else {
+                    val prepared = prepareWindow(window)
+                    currentCoroutineContext().ensureActive()
+                    requireBackendSwitch(checkpoint)
+                    applyPreparedWindow(live, prepared, checkpoint.positionMs, explicitPlay = false, intentRevision, newRound = false)
+                }
             }
             currentCoroutineContext().ensureActive()
             requireBackendSwitch(checkpoint)
@@ -691,6 +778,10 @@ class QueuePlaybackCoordinator(
         assertMain()
         if (isDetached) return null
         val window = loadedWindow
+        val reference = sessionPausedOnlineReference()
+        if (window != null && reference != null) {
+            return SleepTimerTrackBinding(sessionId, window.generationId, reference.mediaItem.mediaId, playbackCycle)
+        }
         if (backendBound && window != null && backend.currentMediaItem?.mediaId == window.current.queueEntryId && backend.playerError == null) {
             return SleepTimerTrackBinding(sessionId, window.generationId, window.current.queueEntryId, playbackCycle)
         }
@@ -715,6 +806,7 @@ class QueuePlaybackCoordinator(
     internal fun prepareFromSession() {
         assertMain()
         if (!acceptsSessionCommands() || _state.value.preparing) return
+        if (sessionPausedOnlineReference() != null) return
         if (backend.playbackState == Player.STATE_READY && backend.playerError == null) return
         launchCommand {
             action { token ->
@@ -722,7 +814,8 @@ class QueuePlaybackCoordinator(
                 val entryId = live.currentEntryId ?: return@action
                 val window = queueStore.window(live.generationId, entryId)
                 pauseForWindowChange()
-                applyWindow(live, window, live.positionMs, explicitPlay = false, token, newRound = false)
+                if (window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER) restoreOnlineReference(live, window)
+                else applyWindow(live, window, live.positionMs, explicitPlay = false, token, newRound = false)
             }
         }
     }
@@ -753,6 +846,7 @@ class QueuePlaybackCoordinator(
             backendBound = false
             backendGeneration += 1L
             loadedWindow = null
+            cleanup(::releaseRuntimeWindows)
             resumeIntent = false
             switchingBackend = false
             activeBackendSwitch = null
@@ -831,7 +925,24 @@ class QueuePlaybackCoordinator(
         if (!acceptsSessionCommands()) return
         val active = _state.value.snapshot ?: return
         val entryId = active.currentEntryId ?: return
+        // 显式播放按实际音源放行网络意图；可用适配器及账户权限仍由 SourcePlaybackResolver 核验。
+        val provider = loadedWindow?.current?.trackKey?.providerId
+        if (provider != null && provider != TrackKey.LOCAL_PROVIDER) sourceIntent = PlaybackSourceIntent.ONLINE_ALLOWED
         if (_state.value.preparing) return
+        val reference = sessionPausedOnlineReference()
+        if (reference != null) {
+            resetRecoveryBudget()
+            launchCommand {
+                action { token ->
+                    if (sessionPausedOnlineReference() !== reference) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, entryId))
+                    val live = activeSnapshot()
+                    val window = queueStore.window(live.generationId, entryId)
+                    pauseForWindowChange()
+                    applyWindow(live, window, reference.positionMs, explicitPlay = true, token, newRound = false)
+                }
+            }
+            return
+        }
         val atEnd = backend.playbackState == Player.STATE_ENDED ||
             (backend.duration != C.TIME_UNSET && backend.duration > 0L && backend.currentPosition >= backend.duration)
         resetRecoveryBudget()
@@ -957,6 +1068,7 @@ class QueuePlaybackCoordinator(
         onCheckpointCommitted: () -> Unit = {},
         manualTrackChange: Boolean = false,
         naturalSettlement: NaturalSettlement? = null,
+        selectedIntent: PlaybackSourceIntent? = null,
     ): QueueSnapshot {
         val active = activeSnapshot()
         if (active.generationId != generationId || active.queueRevision != expectedQueueRevision) throw QueueStoreException(QueueStoreIssue.CONFLICT)
@@ -985,6 +1097,7 @@ class QueuePlaybackCoordinator(
                 queueStore.saveCheckpoint(generationId, live.checkpointRevision, checkpoint).also {
                     checkpointEpoch += 1L
                     publishSnapshot(it)
+                    selectedIntent?.let { selected -> sourceIntent = selected }
                     onCheckpointCommitted()
                     if (manualTrackChange) onManualTrackChange()
                 }
@@ -1035,6 +1148,7 @@ class QueuePlaybackCoordinator(
         catch (error: QueuePlaybackException) {
             if (!beforeHandover()) return
             clearBackend()
+            if (window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER) restoreOnlineReference(saved, window, positionMs)
             report(error.failure)
             requestRecovery(error.failure, explicitPlay && token == intentRevision)
             return
@@ -1045,6 +1159,7 @@ class QueuePlaybackCoordinator(
         catch (error: QueueStoreException) { throw error }
         catch (error: Exception) {
             clearBackend()
+            if (window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER) restoreOnlineReference(saved, window, positionMs)
             val failure = playbackFailure(error, saved.currentEntryId)
             report(failure)
             requestRecovery(failure, explicitPlay && token == intentRevision)
@@ -1052,60 +1167,98 @@ class QueuePlaybackCoordinator(
     }
 
     /** A current-resource failure rejects a staged replacement before publication; neighbors remain durable. */
-    private suspend fun prepareWindow(window: QueueWindow): QueueWindow {
+    private suspend fun prepareWindow(
+        window: QueueWindow,
+        retainCurrent: Boolean = false,
+        budget: PlaybackResolutionBudget? = null,
+        intent: PlaybackSourceIntent = sourceIntent,
+        quality: StreamingQuality = streamingQuality,
+    ): PreparedPlaybackWindow {
         currentCoroutineContext().ensureActive()
         if (isDetached) throw CancellationException("Playback owner detached")
         val current = window.current
-        val failure = localFailure(current)
+        val failure = referenceFailure(current)
         if (failure != null) throw QueuePlaybackException(failure)
-        val resolved = mutableMapOf<String, QueueEntry>()
-        // Current audio gets the channel before adjacent items; a failed neighbour cannot block it.
-        val candidates = listOf(current) + window.entries.filter { it.queueEntryId != current.queueEntryId }
-        for (entry in candidates) {
-            currentCoroutineContext().ensureActive()
-            if (localFailure(entry) != null) continue
-            try {
-                val validated = resolveEntry(entry)
+        val resolved = mutableMapOf<String, RuntimePlaybackResource>()
+        val metadata = mutableMapOf<String, MediaMetadata>()
+        var transferred = false
+        // An online current item gets first sound without neighbor HTTP or physical reads.
+        val candidates = if (current.trackKey.providerId == TrackKey.LOCAL_PROVIDER) {
+            listOf(current) + window.entries.filter {
+                it.queueEntryId != current.queueEntryId && it.trackKey.providerId == TrackKey.LOCAL_PROVIDER
+            }
+        } else listOf(current)
+        try {
+            for (entry in candidates) {
                 currentCoroutineContext().ensureActive()
-                if (validated.queueEntryId != entry.queueEntryId || validated.trackKey != entry.trackKey ||
-                    validated.accountId != entry.accountId || validated.originalOrder != entry.originalOrder ||
-                    validated.playbackOrder != entry.playbackOrder) {
-                    throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, entry.queueEntryId))
-                }
-                localFailure(validated)?.let { throw QueuePlaybackException(it) }
-                resolved[entry.queueEntryId] = validated
-            } catch (error: CancellationException) { throw error }
-            catch (error: QueuePlaybackException) {
-                currentCoroutineContext().ensureActive()
-                if (entry.queueEntryId == current.queueEntryId) {
-                    throw error
+                if (referenceFailure(entry) != null) continue
+                try {
+                    val resource = if (entry.trackKey.providerId == TrackKey.LOCAL_PROVIDER) {
+                        RuntimePlaybackResource(resolveEntry(entry))
+                    } else if (retainCurrent && entry.queueEntryId == current.queueEntryId && loadedResources[entry.queueEntryId]?.isOnline == true) {
+                        requireNotNull(loadedResources[entry.queueEntryId]).retain(entry)
+                    } else {
+                        val resolver = sourceResolver ?: throw QueuePlaybackException(
+                            QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_UNSUPPORTED, entry.queueEntryId))
+                        val operation = budget ?: PlaybackResolutionBudget()
+                        resolutionAttempt = ResolutionAttempt(window.generationId, entry.queueEntryId, operation)
+                        resolver.resolve(entry, intent, operation, quality)
+                    }
+                    resolved[entry.queueEntryId] = resource
+                    val validated = resource.entry
+                    currentCoroutineContext().ensureActive()
+                    if (validated.queueEntryId != entry.queueEntryId || validated.trackKey != entry.trackKey ||
+                        validated.accountId != entry.accountId || validated.originalOrder != entry.originalOrder ||
+                        validated.playbackOrder != entry.playbackOrder) {
+                        throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, entry.queueEntryId))
+                    }
+                    referenceFailure(validated)?.let { throw QueuePlaybackException(it) }
+                    resource.checkCurrent()
+                    // Ancillary cached metadata cannot delay first sound for an HTTP request or fail an accepted resource.
+                    val presentation = if (retainCurrent) loadedMetadata[entry.queueEntryId] else null
+                    try {
+                        (presentation ?: resolveMetadata(validated))?.let { metadata[entry.queueEntryId] = it }
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { }
+                } catch (error: CancellationException) { throw error }
+                catch (error: QueuePlaybackException) {
+                    currentCoroutineContext().ensureActive()
+                    if (entry.queueEntryId == current.queueEntryId) throw error
+                    resolved.remove(entry.queueEntryId)?.close()
                 }
             }
-        }
-        currentCoroutineContext().ensureActive()
-        if (isDetached) throw CancellationException("Playback owner detached")
-        val wanted = window.entries.mapNotNull { resolved[it.queueEntryId] }
-        val targetIndex = wanted.indexOfFirst { it.queueEntryId == current.queueEntryId }
-        check(targetIndex >= 0)
-        return window.copy(entries = wanted, currentIndex = targetIndex)
+            currentCoroutineContext().ensureActive()
+            if (isDetached) throw CancellationException("Playback owner detached")
+            val wanted = window.entries.mapNotNull { resolved[it.queueEntryId]?.entry }
+            val targetIndex = wanted.indexOfFirst { it.queueEntryId == current.queueEntryId }
+            check(targetIndex >= 0)
+            return PreparedPlaybackWindow(window.copy(entries = wanted, currentIndex = targetIndex), resolved.toMap()).also {
+                preparedWindows.add(it)
+                preparedMetadata[it] = metadata.toMap()
+                transferred = true
+            }
+        } finally { if (!transferred) resolved.values.forEach(RuntimePlaybackResource::close) }
     }
 
     private fun sameSource(left: QueueEntry, right: QueueEntry): Boolean = left.queueEntryId == right.queueEntryId &&
         left.trackKey == right.trackKey && left.accountId == right.accountId && left.location == right.location
 
-    private fun windowMatches(window: QueueWindow, saved: QueueSnapshot): Boolean = window.generationId == saved.generationId &&
+    private fun windowMatches(window: PreparedPlaybackWindow, saved: QueueSnapshot): Boolean = window.generationId == saved.generationId &&
         window.queueRevision == saved.queueRevision && window.totalCount == saved.entryCount &&
         window.current.queueEntryId == saved.currentEntryId && window.current.originalOrder == saved.currentOriginalOrder &&
         window.current.playbackOrder == saved.currentPlaybackOrder
 
     /** 当前实例不执行 pause/seek/prepare，也不创建新一轮；窗口排列仍由持久序列决定。 */
-    private fun applyKeptWindow(saved: QueueSnapshot, window: QueueWindow) {
+    private fun applyKeptWindow(saved: QueueSnapshot, prepared: PreparedPlaybackWindow) {
+        val window = prepared.window
         val previous = loadedWindow ?: throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.NOT_READY))
         val currentId = window.current.queueEntryId
         val previousTimerBinding = SleepTimerTrackBinding(sessionId, previous.generationId, currentId, playbackCycle)
         if (backend.currentMediaItem?.mediaId != currentId || !sameSource(previous.current, window.current)) {
             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, currentId))
         }
+        prepared.resources.values.forEach(RuntimePlaybackResource::checkCurrent)
+        adoptRuntimeWindow(prepared)
         val oldById = previous.entries.associateBy { it.queueEntryId }
         val wantedById = window.entries.associateBy { it.queueEntryId }
         applyingWindow = true
@@ -1175,7 +1328,7 @@ class QueuePlaybackCoordinator(
     /** No provider/database resource reads after queue acceptance; ownership and play intent still apply. */
     private suspend fun applyPreparedWindow(
         saved: QueueSnapshot,
-        window: QueueWindow,
+        prepared: PreparedPlaybackWindow,
         positionMs: Long,
         explicitPlay: Boolean,
         token: Long,
@@ -1184,6 +1337,8 @@ class QueuePlaybackCoordinator(
     ) {
         currentCoroutineContext().ensureActive()
         if (isDetached) return
+        val window = prepared.window
+        prepared.resources.values.forEach(RuntimePlaybackResource::checkCurrent)
         val wanted = window.entries
         val current = window.current
         val targetIndex = window.currentIndex
@@ -1192,7 +1347,7 @@ class QueuePlaybackCoordinator(
             val previous = previousEntries[entry.queueEntryId] ?: return false
             return existing.mediaId == entry.queueEntryId && previous.trackKey == entry.trackKey &&
                 previous.location == entry.location && previous.displayName == entry.displayName &&
-                existing.localConfiguration?.uri.toString() == entry.location?.uri
+                existing.localConfiguration?.uri == prepared.resources[entry.queueEntryId]?.mediaUri
         }
         applyingWindow = true
         try {
@@ -1205,8 +1360,13 @@ class QueuePlaybackCoordinator(
             // Pause can flush synchronous callbacks. Check the timer after those callbacks,
             // immediately before replacing the old loaded traversal, including a repeated item.
             if (!beforeHandover()) return
+            prepared.resources.values.forEach(RuntimePlaybackResource::checkCurrent)
+            adoptRuntimeWindow(prepared)
             loadedWindow = window.copy(entries = wanted, currentIndex = targetIndex)
-            _state.value = _state.value.copy(snapshot = saved, failure = null)
+            _state.value = _state.value.copy(snapshot = saved, failure = null,
+                resourceStatus = prepared.resources[current.queueEntryId]?.status)
+            loadingOnlineForPlay = explicitPlay && prepared.resources[current.queueEntryId]?.isOnline == true
+            updateStreamWatchdog()
             if (existingIndex == null) {
                 backend.setMediaItems(wanted.map(::mediaItem), targetIndex, 0L)
             } else {
@@ -1254,6 +1414,7 @@ class QueuePlaybackCoordinator(
             throw error
         } finally {
             applyingWindow = false
+            loadingOnlineForPlay = false
             if (!isDetached && backendBound) sessionBridge.positionSourceChanged()
         }
         updateTicker()
@@ -1278,6 +1439,7 @@ class QueuePlaybackCoordinator(
         try {
             resumeIntent = false
             loadedWindow = null
+            releaseRuntimeWindows()
             _state.value = _state.value.copy(failure = null)
             sessionBridge.positionSourceChanging()
             backend.pause()
@@ -1355,7 +1517,7 @@ class QueuePlaybackCoordinator(
         if (wantedPlay && !isDetached && backendBound && !switchingBackend && isRecoverableResourceIssue(failure.issue) &&
             failure.entryId != null && failure.entryId == _state.value.snapshot?.currentEntryId) {
             resumeIntent = true
-            pendingRecovery = RecoveryRequest(failure, playbackCycle, backendGeneration)
+            pendingRecovery = RecoveryRequest(failure, playbackCycle, backendGeneration, failureBudget(failure))
             startPendingCommands()
         } else resumeIntent = false
     }
@@ -1373,8 +1535,10 @@ class QueuePlaybackCoordinator(
         val position = if (backend.currentMediaItem?.mediaId == active.currentEntryId) backend.currentPosition.coerceAtLeast(0L) else active.positionMs
         if (!resourceRefreshUsed) {
             resourceRefreshUsed = true
-            try {
-                val prepared = prepareWindow(queueStore.window(active.generationId, requireNotNull(active.currentEntryId)))
+            val current = queueStore.window(active.generationId, requireNotNull(active.currentEntryId))
+            val canRefresh = current.current.trackKey.providerId == TrackKey.LOCAL_PROVIDER || request.budget?.mayRefreshNative() == true
+            if (canRefresh) try {
+                val prepared = prepareWindow(current, budget = request.budget)
                 applyPreparedWindow(active, prepared, position, explicitPlay = true, token, newRound = false)
                 return@action
             } catch (error: CancellationException) { throw error }
@@ -1387,6 +1551,13 @@ class QueuePlaybackCoordinator(
                     return@action
                 }
             }
+        }
+        if (failure.issue == QueuePlaybackIssue.RESOURCE_EXPIRED) {
+            // Exhausted/expired resolution budgets require an explicit new operation for this same item.
+            resumeIntent = false
+            pauseForWindowChange()
+            report(failure)
+            return@action
         }
         var order = active.currentPlaybackOrder ?: return@action
         while (consecutiveSkipped < MAX_CONSECUTIVE_SKIPS && order < active.entryCount - 1L) {
@@ -1430,14 +1601,17 @@ class QueuePlaybackCoordinator(
         resourceRefreshUsed = false
         consecutiveSkipped = 0
         pendingRecovery = null
+        resolutionAttempt = null
     }
 
     private fun isRecoverableResourceIssue(issue: QueuePlaybackIssue): Boolean = issue in listOf(
         QueuePlaybackIssue.SOURCE_UNSUPPORTED, QueuePlaybackIssue.LOCATION_MISSING, QueuePlaybackIssue.PERMISSION_DENIED,
         QueuePlaybackIssue.FILE_MISSING, QueuePlaybackIssue.SOURCE_DAMAGED, QueuePlaybackIssue.SOURCE_UNAVAILABLE,
+        QueuePlaybackIssue.RESOURCE_UNAVAILABLE, QueuePlaybackIssue.RESOURCE_EXPIRED, QueuePlaybackIssue.LOCAL_ONLY_ONLINE_SKIPPED,
     )
 
     private fun updateTicker() {
+        updateStreamWatchdog()
         if (isDetached || !backendBound || !backend.isPlaying) {
             ticker?.cancel()
             ticker = null
@@ -1451,9 +1625,131 @@ class QueuePlaybackCoordinator(
         }
     }
 
+    private fun adoptRuntimeWindow(prepared: PreparedPlaybackWindow) {
+        if (!preparedWindows.remove(prepared)) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.CONFLICT))
+        val previous = loadedResources
+        loadedResources = prepared.resources
+        loadedMetadata = preparedMetadata.remove(prepared).orEmpty()
+        pausedOnlineReference = null
+        previous.values.forEach(RuntimePlaybackResource::close)
+    }
+
+    private fun releaseRuntimeWindows() {
+        streamWatchdog?.cancel()
+        streamWatchdog = null
+        watchedMediaUri = null
+        loadingOnlineForPlay = false
+        pausedOnlineReference = null
+        val previous = loadedResources
+        loadedResources = emptyMap()
+        loadedMetadata = emptyMap()
+        previous.values.forEach(RuntimePlaybackResource::close)
+        preparedWindows.toList().forEach(PreparedPlaybackWindow::close)
+        preparedWindows.clear()
+        preparedMetadata.clear()
+        _state.value = _state.value.copy(resourceStatus = null)
+    }
+
+    /** Restoring a stable online reference builds metadata only; it cannot warm HTTP or an account client. */
+    private fun restoreOnlineReference(saved: QueueSnapshot, window: QueueWindow, positionMs: Long = saved.positionMs, retainedMetadata: MediaMetadata? = null) {
+        val entry = window.current
+        val metadata = retainedMetadata ?: pausedOnlineReference?.mediaItem?.takeIf { it.mediaId == entry.queueEntryId }?.mediaMetadata
+            ?: loadedMetadata[entry.queueEntryId] ?: MediaMetadata.Builder().setTitle(entry.displayName).build()
+        clearBackend()
+        // ExoPlayer cannot create a MediaSource for a URI-less item. The session facade owns this paused projection.
+        pausedOnlineReference = QueuePausedOnlineReference(MediaItem.Builder().setMediaId(entry.queueEntryId)
+            .setMediaMetadata(metadata).build(), positionMs.coerceAtLeast(0L), entry.durationMs)
+        loadedWindow = window.copy(entries = listOf(entry), currentIndex = 0)
+        _state.value = _state.value.copy(snapshot = saved, failure = referenceFailure(entry), resourceStatus = null)
+        sessionBridge.logicalStateChanged()
+    }
+
+    internal fun sessionPausedOnlineReference(): QueuePausedOnlineReference? {
+        if (isDetached || !backendBound) return null
+        val reference = pausedOnlineReference ?: return null
+        val saved = _state.value.snapshot ?: return null
+        val window = loadedWindow ?: return null
+        return reference.takeIf { window.generationId == saved.generationId && window.queueRevision == saved.queueRevision &&
+            window.current.queueEntryId == saved.currentEntryId && it.mediaItem.mediaId == saved.currentEntryId }
+    }
+
+    /** Logout/revalidation never touches a local traversal or its persistent queue/library. */
+    internal fun onAccountStateChanged() {
+        assertMain()
+        if (isDetached || !backendBound) return
+        val current = loadedWindow?.current ?: return
+        val resource = loadedResources[current.queueEntryId]?.takeIf { it.isOnline } ?: return
+        try { resource.checkCurrent() } catch (failure: QueuePlaybackException) {
+            if (_state.value.snapshot?.currentEntryId != current.queueEntryId) {
+                // A local handover may already be committed while the old online item is still loaded.
+                // Pause that old item without cancelling the accepted local command.
+                pauseForWindowChange()
+                return
+            }
+            onUserIntentChanged()
+            val saved = _state.value.snapshot ?: return
+            val window = loadedWindow ?: return
+            pauseForInterruption()
+            val position = backend.currentPosition.coerceAtLeast(0L)
+            restoreOnlineReference(saved, window, position)
+            requestCheckpoint()
+            report(failure.failure)
+        }
+    }
+
+    private fun failureBudget(failure: QueuePlaybackFailure): PlaybackResolutionBudget? =
+        failure.entryId?.let { loadedResources[it]?.budget } ?: resolutionAttempt?.takeIf {
+            it.entryId == failure.entryId && it.generationId == _state.value.snapshot?.generationId
+        }?.budget
+
+    /** This is a service audio watchdog, independent of the hidden page's zero visual tick contract. */
+    private fun updateStreamWatchdog() {
+        val entry = loadedWindow?.current
+        val resource = entry?.let { loadedResources[it.queueEntryId] }
+        val wanted = !isDetached && backendBound && resource?.isOnline == true &&
+            (loadingOnlineForPlay || resumeIntent || backend.playWhenReady)
+        val mediaUri = if (wanted) resource?.mediaUri?.toString() else null
+        if (mediaUri == null) {
+            streamWatchdog?.cancel()
+            streamWatchdog = null
+            watchedMediaUri = null
+            return
+        }
+        if (streamWatchdog?.isActive == true && watchedMediaUri == mediaUri && watchedBackendGeneration == backendGeneration) return
+        streamWatchdog?.cancel()
+        watchedMediaUri = mediaUri
+        watchedBackendGeneration = backendGeneration
+        val generation = backendGeneration
+        val entryId = requireNotNull(entry).queueEntryId
+        streamWatchdog = serviceScope.launch(Dispatchers.Main.immediate) {
+            var lastProgress = SystemClock.elapsedRealtime()
+            var lastPosition = backend.currentPosition.coerceAtLeast(0L)
+            while (isActive) {
+                delay(1_000L)
+                if (isDetached || !backendBound || backendGeneration != generation ||
+                    loadedResources[entryId]?.mediaUri?.toString() != mediaUri ||
+                    !(loadingOnlineForPlay || resumeIntent || backend.playWhenReady)) break
+                val now = SystemClock.elapsedRealtime()
+                val position = backend.currentPosition.coerceAtLeast(0L)
+                if (backend.isPlaying && position > lastPosition) lastProgress = now
+                lastPosition = position
+                if (now < lastProgress || now - lastProgress >= 15_000L) {
+                    onUserIntentChanged()
+                    pauseForInterruption()
+                    backend.stop()
+                    report(QueuePlaybackFailure(QueuePlaybackIssue.STREAM_STALLED, entryId))
+                    break
+                }
+            }
+        }
+    }
+
     private fun capture(): CapturedCheckpoint? {
         if (isDetached || !backendBound || applyingWindow) return null
         val saved = _state.value.snapshot ?: return null
+        val reference = sessionPausedOnlineReference()
+        if (reference != null) return CapturedCheckpoint(saved.generationId, saved.queueRevision, intentRevision, checkpointEpoch,
+            QueueCheckpoint(reference.mediaItem.mediaId, reference.positionMs, saved.checkpoint.completedCycles))
         val entryId = backend.currentMediaItem?.mediaId ?: return null
         if (loadedWindow?.generationId != saved.generationId || saved.currentEntryId != entryId) return null
         return CapturedCheckpoint(saved.generationId, saved.queueRevision, intentRevision, checkpointEpoch, QueueCheckpoint(entryId, backend.currentPosition.coerceAtLeast(0L), saved.checkpoint.completedCycles))
@@ -1584,6 +1880,9 @@ class QueuePlaybackCoordinator(
             report(failure)
             throw QueuePlaybackException(failure)
         } finally {
+            preparedWindows.toList().forEach(PreparedPlaybackWindow::close)
+            preparedWindows.clear()
+            preparedMetadata.clear()
             currentOperation = null
             actions.unlock()
             if (preserveSeekOwner) seeking = false
@@ -1602,6 +1901,14 @@ class QueuePlaybackCoordinator(
 
     private fun authorizePlay(): Boolean {
         if (isDetached || !backendBound || switchingBackend) return false
+        if (sessionPausedOnlineReference() != null) return false
+        try { loadedWindow?.current?.queueEntryId?.let { loadedResources[it]?.checkCurrent() } }
+        catch (error: QueuePlaybackException) {
+            resumeIntent = false
+            pauseForWindowChange()
+            report(error.failure)
+            return false
+        }
         val allowed = requestPlay?.invoke() ?: run { backend.play(); backend.playWhenReady }
         resumeIntent = allowed && backend.playWhenReady
         if (!resumeIntent) {
@@ -1691,7 +1998,10 @@ class QueuePlaybackCoordinator(
             duration, playbackCycle, seekActionId)
     }
 
-    private fun localFailure(entry: QueueEntry): QueuePlaybackFailure? {
+    private fun referenceFailure(entry: QueueEntry): QueuePlaybackFailure? {
+        if (entry.trackKey.providerId == "netease" && sourceResolver != null) {
+            return if (entry.location != null || entry.accountId == null) QueuePlaybackFailure(QueuePlaybackIssue.RESOURCE_INVALID, entry.queueEntryId) else null
+        }
         if (entry.trackKey.providerId != TrackKey.LOCAL_PROVIDER) return QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_UNSUPPORTED, entry.queueEntryId)
         val location = entry.location ?: return QueuePlaybackFailure(QueuePlaybackIssue.LOCATION_MISSING, entry.queueEntryId)
         val uri = location.uri.toUri()
@@ -1700,11 +2010,11 @@ class QueuePlaybackCoordinator(
 
     private fun mediaItem(entry: QueueEntry): MediaItem = MediaItem.Builder()
         .setMediaId(entry.queueEntryId)
-        .setUri(entry.location?.uri ?: error("Validated local location required"))
-        .setMediaMetadata(MediaMetadata.Builder().setTitle(entry.displayName).build())
+        .setUri(loadedResources[entry.queueEntryId]?.mediaUri ?: error("Validated runtime resource required"))
+        .setMediaMetadata(loadedMetadata[entry.queueEntryId] ?: MediaMetadata.Builder().setTitle(entry.displayName).build())
         .build()
 
-    private fun errorIssue(error: PlaybackException): QueuePlaybackIssue = when (error.errorCode) {
+    private fun errorIssue(error: PlaybackException): QueuePlaybackIssue = mediaTransportIssue(error) ?: when (error.errorCode) {
         PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> QueuePlaybackIssue.PERMISSION_DENIED
         PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> QueuePlaybackIssue.FILE_MISSING
         PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED, PlaybackException.ERROR_CODE_DECODING_FAILED -> QueuePlaybackIssue.SOURCE_DAMAGED
@@ -1740,10 +2050,14 @@ class QueuePlaybackCoordinator(
         val endingCheckpoint: QueueCheckpoint,
         var submittedCheckpoint: QueueCheckpoint? = null,
     )
-    private data class RecoveryRequest(val failure: QueuePlaybackFailure, val cycle: Long, val backendGeneration: Long)
+    private data class RecoveryRequest(val failure: QueuePlaybackFailure, val cycle: Long, val backendGeneration: Long,
+        val budget: PlaybackResolutionBudget?)
+    private data class ResolutionAttempt(val generationId: String, val entryId: String, val budget: PlaybackResolutionBudget)
 
     companion object {
         private const val CHECKPOINT_INTERVAL_MS = 5000L
         private const val MAX_CONSECUTIVE_SKIPS = 3
     }
 }
+
+internal data class QueuePausedOnlineReference(val mediaItem: MediaItem, val positionMs: Long, val durationMs: Long?)

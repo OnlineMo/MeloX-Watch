@@ -10,6 +10,7 @@ import io.github.onlinemo.meloxwatch.data.lyrics.LyricsClockMapping
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsKind
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsLimits
+import io.github.onlinemo.meloxwatch.data.lyrics.LyricsMemoryOwner
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseException
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsTranslation
@@ -29,6 +30,11 @@ import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsLoadRequest
 import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsLoadSelection
 import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsLoadedSource
 import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsSourceOrigin
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsIssue
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsOrigin
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsPort
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsRequest
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsResult
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackCommitResult
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackPreferences
@@ -40,6 +46,7 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueStore
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.model.onlineOpaqueHash
 import io.github.onlinemo.meloxwatch.ui.lyrics.LyricsPageContent
 import io.github.onlinemo.meloxwatch.ui.lyrics.LyricsPageFailure
 import io.github.onlinemo.meloxwatch.ui.lyrics.LyricsPageIdentity
@@ -96,6 +103,9 @@ data class LyricsEntryUiState(
     val offsetDraftMs: Int? = null,
     val offsetDraftNeedsReview: Boolean = false,
     val canReviewOffsetDraft: Boolean = false,
+    val onlineOrigin: OnlineLyricsOrigin? = null,
+    val onlineIssue: OnlineLyricsIssue? = null,
+    val onlineFromCache: Boolean = false,
 ) {
     val mapping: LyricsClockMapping get() = LyricsClockMapping(userOffset = LyricsUserOffset(
         offsetDraftMs ?: preferences?.userDelayMs ?: 0,
@@ -124,6 +134,8 @@ class LyricsEntryViewModel(
     private val scopeOverride: CoroutineScope? = null,
     private val awaitDisplayFrame: suspend () -> Unit = ::awaitLyricsDisplayFrame,
     savedStateHandle: SavedStateHandle = SavedStateHandle(),
+    private val memoryOwner: LyricsMemoryOwner = LyricsMemoryOwner(),
+    private val onlineLyrics: OnlineLyricsPort? = null,
 ) : ViewModel() {
     private val scope: CoroutineScope get() = scopeOverride ?: viewModelScope
     private val savedDrafts = LyricsEntrySavedDrafts(savedStateHandle)
@@ -149,6 +161,10 @@ class LyricsEntryViewModel(
     private var acquisition: LyricsLoadRequest? = null
     private var owner: Owner? = null
     private var loaded: Loaded? = null
+    private var onlineLoaded: OnlineLyricsResult.Loaded? = null
+    private val onlineAcquisition = AtomicReference<OnlineLyricsRequest?>()
+    private var observedProvider: String? = null
+    private var displayMemory: LyricsMemoryOwner.Lease? = null
     private var pendingPicker: Picker? = null
     private var pendingPreview: AssociationPreview? = null
     private var entryRoute: EntryRoute? = null
@@ -156,8 +172,11 @@ class LyricsEntryViewModel(
     private var sampler: Job? = null
     private var wordEmphasis = false
     private var visibleLines: List<Int> = emptyList()
+    private var timelinePresented = false
+    private var deferredLoad = false
     private var presentation: Presentation? = null
-    val playConfirmation = LyricsPlayConfirmation(scope, ::playContext, playback, ::validatePlayContext)
+    val playConfirmation = LyricsPlayConfirmation(scope, ::playContext, playback, ::validatePlayContext,
+        retainContext = { memoryOwner.acquire(this) })
 
     private val worker = scope.launch {
         work.collectLatest { next -> if (next != null) perform(next) }
@@ -178,13 +197,25 @@ class LyricsEntryViewModel(
                     }
                 }
                 launch {
+                    val changes = onlineLyrics?.changes ?: return@launch
+                    changes.collect {
+                        if (visible && visibility.value === visibilityTicket && observedProvider == "netease") {
+                            retry(sourceChanged = true)
+                        }
+                    }
+                }
+                launch {
                     try {
                         libraryChanges.collect {
-                            if (visible && visibility.value === visibilityTicket && latestKey != null) retry(sourceChanged = true)
+                            if (visible && visibility.value === visibilityTicket && observedProvider == TrackKey.LOCAL_PROVIDER) {
+                                retry(sourceChanged = true)
+                            }
                         }
                     } catch (error: CancellationException) { throw error }
                     catch (_: Exception) {
-                        if (visible && visibility.value === visibilityTicket) failCurrent(LyricsLoadIssue.SOURCE_UNAVAILABLE)
+                        if (visible && visibility.value === visibilityTicket && observedProvider == TrackKey.LOCAL_PROVIDER) {
+                            failCurrent(LyricsLoadIssue.SOURCE_UNAVAILABLE)
+                        }
                     }
                 }
             }
@@ -241,16 +272,20 @@ class LyricsEntryViewModel(
     fun onVisible(nextSurface: LyricsEntrySurface) {
         if (closed) return
         surface = nextSurface
+        timelinePresented = nextSurface == LyricsEntrySurface.PAGE
         if (!visible) {
             visible = true
             visibility.value = Visibility(true)
         }
         playConfirmation.contextChanged()
         updateSampler()
+        resumeDeferredLoad()
     }
 
     fun onHidden(preservePicker: Boolean = true) {
         visible = false
+        timelinePresented = false
+        deferredLoad = false
         visibility.value = Visibility(false)
         replaceWork(null)
         sampler?.cancel()
@@ -260,8 +295,11 @@ class LyricsEntryViewModel(
         pendingPreview = null
         if (!preservePicker || pendingPicker?.launched != true) pendingPicker = null
         mutableState.value = mutableState.value.copy(loading = false, saving = false, associationPreview = null,
+            content = LyricsPageContent.Missing, documentId = null, onlineOrigin = null, onlineIssue = null, onlineFromCache = false,
             offsetDraftMs = null, canChoose = false, documentRequest = pendingPicker?.request,
             pickerLaunched = pendingPicker?.launched == true)
+        displayMemory?.close()
+        displayMemory = null
         playConfirmation.contextChanged()
     }
 
@@ -271,6 +309,8 @@ class LyricsEntryViewModel(
         latestQueue = null
         owner = null
         loaded = null
+        onlineLoaded = null
+        observedProvider = null
         mutableState.value = LyricsEntryUiState()
     }
 
@@ -281,7 +321,7 @@ class LyricsEntryViewModel(
         suspendedDraft = null
         pendingPreview = null
         pendingPicker = null
-        replaceWork(Work(UUID.randomUUID().toString(), queue.key() ?: return, sourceGeneration, Action.Load))
+        requestLoad(queue.key() ?: return)
     }
 
     fun requestDocument(purpose: LyricsDocumentPurpose, encoding: LyricsEncodingChoice = LyricsEncodingChoice.AUTO_BOM_OR_UTF8): String? {
@@ -410,7 +450,36 @@ class LyricsEntryViewModel(
         return true
     }
 
-    fun previewPlay(preview: LyricsPlayPreview): String? = playConfirmation.begin(preview)
+    fun previewPlay(preview: LyricsPlayPreview): String? {
+        val confirmation = playConfirmation.begin(preview)
+        if (confirmation != null) setTimelinePresented(false)
+        return confirmation
+    }
+
+    /** The original document stays owned for confirmation; its replaced visual body does no work. */
+    fun setTimelinePresented(presented: Boolean) {
+        if (closed) return
+        timelinePresented = presented
+        updateSampler()
+        resumeDeferredLoad()
+    }
+
+    private fun requestLoad(key: QueueKey) {
+        if (surface == LyricsEntrySurface.PAGE && !timelinePresented) {
+            deferredLoad = true
+            replaceWork(null)
+            mutableState.value = mutableState.value.copy(content = LyricsPageContent.Loading, documentId = null,
+                onlineOrigin = null, onlineIssue = null, onlineFromCache = false)
+            return
+        }
+        deferredLoad = false
+        replaceWork(Work(UUID.randomUUID().toString(), key, sourceGeneration, Action.Load))
+    }
+
+    private fun resumeDeferredLoad() {
+        if (!deferredLoad || !visible || surface != LyricsEntrySurface.PAGE || !timelinePresented) return
+        latestKey?.let(::requestLoad)
+    }
 
     fun setWordEmphasis(enabled: Boolean) {
         if (wordEmphasis == enabled) return
@@ -433,6 +502,8 @@ class LyricsEntryViewModel(
             if (pendingPicker?.key != key) pendingPicker = null
             owner = null
             loaded = null
+            onlineLoaded = null
+            observedProvider = null
             if (key?.sourceKey() != lastSourceKey) {
                 lastSourceKey = key?.sourceKey()
                 if (!advanceSourceGeneration()) return
@@ -441,10 +512,10 @@ class LyricsEntryViewModel(
                 replaceWork(null)
                 mutableState.value = LyricsEntryUiState()
             } else if (!consumePicker() && !consumeDraft()) {
-                replaceWork(Work(UUID.randomUUID().toString(), key, sourceGeneration, Action.Load))
+                requestLoad(key)
             }
         } else if (!consumePicker() && !consumeDraft() && owner == null && work.value == null && key != null) {
-            replaceWork(Work(UUID.randomUUID().toString(), key, sourceGeneration, Action.Load))
+            requestLoad(key)
         }
         playConfirmation.contextChanged()
         updateSampler()
@@ -505,8 +576,10 @@ class LyricsEntryViewModel(
         writeAuthority.set(null)
         acquisition?.let(authority::retire)
         acquisition = null
+        onlineAcquisition.set(null)
         owner = null
         loaded = null
+        onlineLoaded = null
         mutableState.value = mutableState.value.copy(loading = next != null,
             saving = next?.action is Action.Associate || next?.action is Action.Offset || next?.action is Action.Clear,
             canChoose = false)
@@ -518,14 +591,21 @@ class LyricsEntryViewModel(
 
     private suspend fun perform(operation: Work) {
         var primaryRequest: LyricsLoadRequest? = null
+        var operationMemory: LyricsMemoryOwner.Lease? = null
         try {
             if (!isCurrent(operation)) return
+            // PAGE and OPTIONS share this gate; cancellation must finish before a new document owns the budget.
+            playConfirmation.awaitCleanup()
+            ensureCurrent(operation)
+            val reserved: LyricsMemoryOwner.Lease = memoryOwner.acquire(this) ?: return failCurrent(LyricsLoadIssue.BUSY)
+            operationMemory = reserved
+            if (displayMemory == null) displayMemory = reserved.retain()
             owner = null
             loaded = null
             mutableState.value = mutableState.value.copy(loading = true,
                 saving = operation.action is Action.Associate || operation.action is Action.Offset || operation.action is Action.Clear,
                 content = LyricsPageContent.Loading, associationPreview = null, failure = null, translationFailure = null,
-                trackIssue = null, notice = operation.noticeAfterLoad, canChoose = false, documentRequest = pendingPicker?.request,
+                onlineOrigin = null, onlineIssue = null, onlineFromCache = false, trackIssue = null, notice = operation.noticeAfterLoad, canChoose = false, documentRequest = pendingPicker?.request,
                 pickerLaunched = pendingPicker?.launched == true)
             val queue = queues.snapshot()
             // A provider may finish after retirement; only the current Work may publish or commit.
@@ -536,7 +616,13 @@ class LyricsEntryViewModel(
             if (window.generationId != queue.generationId || window.queueRevision != queue.queueRevision ||
                 window.current.queueEntryId != operation.key.entryId) return failCurrent(LyricsLoadIssue.STALE_REQUEST)
             val entry = window.current
+            observedProvider = entry.trackKey.providerId
+            if (entry.trackKey.providerId == "netease") {
+                performOnline(operation, queue, entry, reserved.maxAccountedBytes)
+                return
+            }
             if (entry.trackKey.providerId != TrackKey.LOCAL_PROVIDER) return failCurrent(LyricsLoadIssue.INVALID_INPUT)
+            if (reserved.maxAccountedBytes <= VALIDATION_SCRATCH_BYTES) return failCurrent(LyricsLoadIssue.MEMORY_LIMIT)
             val context = resolveContext(entry)
             ensureCurrent(operation)
             val saved = tracks.read(entry.trackKey)
@@ -626,7 +712,8 @@ class LyricsEntryViewModel(
             ensureCurrent(operation)
             primaryRequest = LyricsLoadRequest(binding.copy(documentIdentity = selected?.documentId),
                 if (selected == null) LyricsLoadSelection.Automatic(siblingScope = context.siblingScope)
-                else LyricsLoadSelection.TextDocument(selected), PRIMARY_ACCOUNTED_BYTES)
+                else LyricsLoadSelection.TextDocument(selected),
+                minOf(PRIMARY_ACCOUNTED_BYTES, reserved.maxAccountedBytes - VALIDATION_SCRATCH_BYTES))
             acquisition = primaryRequest
             authority.install(primaryRequest)
             val primary = load(primaryRequest)
@@ -648,7 +735,7 @@ class LyricsEntryViewModel(
                     val translationInput = selectedTranslation ?: next.translation?.let { documents.resolve(it, operation.sourceGeneration) }
                     ensureCurrent(operation)
                     if (translationInput != null) {
-                        val available = LyricsLimits.ACCOUNTED_BYTES - VALIDATION_SCRATCH_BYTES - primary.accountedBytes -
+                        val available = reserved.maxAccountedBytes - VALIDATION_SCRATCH_BYTES - primary.accountedBytes -
                             TRANSLATION_RESULT_ALLOWANCE_BYTES - primary.document.timeline.size.toLong() * Int.SIZE_BYTES
                         if (available <= 0L) throw LyricsParseException(LyricsParseIssue.MEMORY_LIMIT)
                         translationRequest = LyricsLoadRequest(binding.copy(documentIdentity = translationInput.documentId),
@@ -750,13 +837,62 @@ class LyricsEntryViewModel(
         }
         catch (_: OutOfMemoryError) { if (isCurrent(operation)) failCurrent(LyricsLoadIssue.MEMORY_LIMIT) }
         finally {
-            if (!isCurrent(operation) || loaded?.primaryRequest !== primaryRequest) primaryRequest?.let(authority::retire)
-            if (isCurrent(operation)) {
-                mutableState.value = mutableState.value.copy(loading = false, saving = false,
-                    canChoose = owner != null && pendingPreview == null && mutableState.value.offsetDraftMs == null)
-                updateSampler()
-            }
+            try {
+                if (!isCurrent(operation) || loaded?.primaryRequest !== primaryRequest) primaryRequest?.let(authority::retire)
+                if (isCurrent(operation)) {
+                    mutableState.value = mutableState.value.copy(loading = false, saving = false,
+                        canChoose = owner != null && pendingPreview == null && mutableState.value.offsetDraftMs == null)
+                    updateSampler()
+                }
+            } finally { operationMemory?.close() }
         }
+    }
+
+    private suspend fun performOnline(operation: Work, queue: QueueSnapshot, entry: QueueEntry, maxBytes: Long) {
+        if (operation.action !== Action.Load) return failCurrent(LyricsLoadIssue.INVALID_INPUT)
+        val identity = LyricsPageIdentity(entry.trackKey, queue.generationId, entry.queueEntryId, operation.sourceGeneration)
+        val port = onlineLyrics ?: return publishOnlineUnavailable(OnlineLyricsIssue.UNSUPPORTED, identity)
+        mutableState.value = LyricsEntryUiState(identity = identity, content = LyricsPageContent.Loading, loading = true)
+        val accountId = entry.accountId ?: return publishOnlineUnavailable(OnlineLyricsIssue.LOGIN_REQUIRED, identity)
+        // A saved local offset is not an online source or an authority to replay an old proposal.
+        restoredOffset = null
+        savedDrafts.clearOffset()
+        val available = maxBytes - VALIDATION_SCRATCH_BYTES
+        if (available <= 0L) return publishOnlineUnavailable(OnlineLyricsIssue.MEMORY_LIMIT, identity)
+        val request = OnlineLyricsRequest(entry.trackKey, queue.generationId, queue.queueRevision, entry.queueEntryId,
+            operation.sourceGeneration, accountId, available, allowNetwork = visible && surface == LyricsEntrySurface.PAGE &&
+                timelinePresented && playConfirmation.state.value.phase == LyricsPlayPhase.IDLE)
+        onlineAcquisition.set(request)
+        val result = port.load(request) { onlineAcquisition.get() === request }
+        ensureCurrent(operation)
+        when (result) {
+            is OnlineLyricsResult.Loaded -> {
+                val fence = result.fence
+                if (result.accountedBytes > available) return publishOnlineUnavailable(OnlineLyricsIssue.MEMORY_LIMIT, identity)
+                if (fence.trackKey != entry.trackKey || fence.queueGenerationId != queue.generationId ||
+                    fence.queueRevision != queue.queueRevision || fence.queueEntryId != entry.queueEntryId ||
+                    fence.sourceGeneration != operation.sourceGeneration || fence.ownerHash != onlineOpaqueHash("netease:$accountId")) {
+                    return publishOnlineUnavailable(OnlineLyricsIssue.SOURCE_CHANGED, identity)
+                }
+                onlineLoaded = result
+                mutableState.value = LyricsEntryUiState(identity = identity, documentId = result.document.documentId,
+                    content = LyricsPageContent.Ready(result.document, result.translation), onlineOrigin = fence.origin,
+                    onlineFromCache = result.fromCache, onlineIssue = result.translationIssue)
+            }
+            is OnlineLyricsResult.Unavailable -> publishOnlineUnavailable(result.issue, identity)
+        }
+    }
+
+    private fun publishOnlineUnavailable(issue: OnlineLyricsIssue, identity: LyricsPageIdentity? = mutableState.value.identity) {
+        onlineLoaded = null
+        val content = when (issue) {
+            OnlineLyricsIssue.NO_LYRICS -> LyricsPageContent.Missing
+            OnlineLyricsIssue.INPUT_LIMIT, OnlineLyricsIssue.MEMORY_LIMIT -> LyricsPageContent.Failed(LyricsPageFailure.INPUT_LIMIT)
+            OnlineLyricsIssue.INVALID_ENCODING -> LyricsPageContent.Failed(LyricsPageFailure.INVALID_ENCODING)
+            OnlineLyricsIssue.UNSUPPORTED -> LyricsPageContent.Failed(LyricsPageFailure.UNSUPPORTED)
+            else -> LyricsPageContent.Failed(LyricsPageFailure.READ_FAILED)
+        }
+        mutableState.value = LyricsEntryUiState(identity = identity, content = content, onlineIssue = issue)
     }
 
     private suspend fun selectedInput(action: Action, purpose: LyricsDocumentPurpose): LyricsDocumentInput? = when (action) {
@@ -941,18 +1077,34 @@ class LyricsEntryViewModel(
     }
 
     private fun playContext(): LyricsPlayContext? {
-        val current = loaded ?: return null
         val state = mutableState.value
         val clock = playback.clock() ?: return null
         val duration = clock.durationMs?.takeIf { it > 0L } ?: return null
         if (!visible || surface != LyricsEntrySurface.PAGE || state.loading || state.saving ||
-            state.associationPreview != null || state.offsetDraftMs != null || pendingPicker != null || current.owner.key != latestKey ||
-            clock.queueEntryId != current.owner.key.entryId) return null
-        return LyricsPlayContext(current.owner.identity, current.owner.key.revision, current.primaryRequest.binding,
-            current.primary.document, state.mapping, duration, visible = true, canSeek = clock.canSeek)
+            state.associationPreview != null || state.offsetDraftMs != null || pendingPicker != null) return null
+        val local = loaded
+        if (local != null) {
+            if (local.owner.key != latestKey || clock.queueEntryId != local.owner.key.entryId) return null
+            return LyricsPlayContext(local.owner.identity, local.owner.key.revision, local.primaryRequest.binding,
+                local.primary.document, state.mapping, duration, visible = true, canSeek = clock.canSeek)
+        }
+        val current = onlineLoaded ?: return null
+        val identity = state.identity ?: return null
+        val fence = current.fence
+        if (clock.queueEntryId != fence.queueEntryId || latestKey != QueueKey(fence.queueGenerationId, fence.queueRevision,
+                fence.queueEntryId) || identity.sourceGeneration != fence.sourceGeneration) return null
+        return LyricsPlayContext(identity, fence.queueRevision, fence, current.document, state.mapping, duration,
+            visible = true, canSeek = clock.canSeek)
     }
 
     private suspend fun validatePlayContext(context: LyricsPlayContext): Boolean {
+        val online = onlineLoaded
+        if (online != null) {
+            if (playContext()?.identity != context.identity || online.document !== context.document || online.fence != context.audio) return false
+            val valid = onlineLyrics?.validate(online) == true
+            currentCoroutineContext().ensureActive()
+            return valid && onlineLoaded === online && playContext()?.identity == context.identity
+        }
         val current = loaded ?: return false
         if (playContext()?.identity != context.identity || current.primary.document !== context.document) return false
         if (!validate(current.primaryRequest, current.primary)) return false
@@ -968,15 +1120,15 @@ class LyricsEntryViewModel(
         sampler = null
         val state = mutableState.value
         val document = (state.content as? LyricsPageContent.Ready)?.document
-        if (!visible || surface != LyricsEntrySurface.PAGE || state.loading || state.saving ||
-            document?.kind != LyricsKind.SYNCHRONIZED || loaded?.primary?.document !== document) {
+        if (!visible || surface != LyricsEntrySurface.PAGE || !timelinePresented || playConfirmation.state.value.phase != LyricsPlayPhase.IDLE || state.loading || state.saving ||
+            document?.kind != LyricsKind.SYNCHRONIZED || (loaded?.primary?.document ?: onlineLoaded?.document) !== document) {
             mutableClock.value = null
             return
         }
         mutableClock.value = playback.clock()?.takeIf { it.queueEntryId == latestKey?.entryId }
         if (mutableClock.value?.isPlaying != true) return
         sampler = scope.launch {
-            while (visible && surface == LyricsEntrySurface.PAGE &&
+            while (visible && surface == LyricsEntrySurface.PAGE && timelinePresented && playConfirmation.state.value.phase == LyricsPlayPhase.IDLE &&
                 (mutableState.value.content as? LyricsPageContent.Ready)?.document === document) {
                 val sample = playback.clock()?.takeIf { it.queueEntryId == latestKey?.entryId } ?: break
                 mutableClock.value = sample
@@ -1028,7 +1180,8 @@ class LyricsEntryViewModel(
             documentId = null, loading = false, saving = false, canChoose = false,
             associationPreview = null, documentRequest = null, pickerLaunched = false,
             offsetDraftMs = restoredOffset?.value, offsetDraftNeedsReview = restoredOffset != null,
-            canReviewOffsetDraft = false, sourceOrigin = null, translationFailure = null, notice = null)
+            canReviewOffsetDraft = false, sourceOrigin = null, translationFailure = null, notice = null,
+            onlineOrigin = null, onlineIssue = null, onlineFromCache = false)
         playConfirmation.contextChanged()
         updateSampler()
     }

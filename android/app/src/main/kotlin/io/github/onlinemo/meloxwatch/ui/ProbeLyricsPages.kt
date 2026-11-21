@@ -15,6 +15,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsKind
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsIssue
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsOrigin
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDisplayPreferences
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDisplayState
 import io.github.onlinemo.meloxwatch.model.ScreenShape
@@ -105,8 +107,16 @@ internal fun ProbeLyricsScreen(
     val options = display.confirmedPreferences()?.let(::lyricsDisplayOptions) ?: LyricsDisplayOptions()
     val lyricsState = rememberLyricsPageState(current.identity, current.documentId)
     val ready = current.content as? LyricsPageContent.Ready
+    val sourceLabel = when (current.onlineOrigin) {
+        OnlineLyricsOrigin.NETEASE_LRC -> stringResource(R.string.online_lyrics_native)
+        OnlineLyricsOrigin.OPENED_METING_LRC -> stringResource(R.string.online_lyrics_service)
+        null -> null
+    }?.let { label -> if (current.onlineFromCache) stringResource(R.string.online_lyrics_cached, label) else label }
+    val content = if (ready != null && sourceLabel != null) ready.copy(sourceLabel = sourceLabel) else current.content
+    val statusLabel = current.onlineIssue?.let { stringResource(onlineLyricsIssueText(it)) }
     LaunchedEffect(page, presentation, options.emphasizeWords, showConfirmation) {
         if (page?.visibleNow == true && presentation?.isCurrent == true) {
+            entry.setTimelinePresented(!showConfirmation)
             entry.setWordEmphasis(options.emphasizeWords && !showConfirmation)
         }
     }
@@ -130,15 +140,15 @@ internal fun ProbeLyricsScreen(
         }
     } else {
         val body: @Composable (LyricsFonts) -> Unit = { fonts ->
-            WatchLyricsPage(identity = current.identity, content = current.content,
+            WatchLyricsPage(identity = current.identity, content = content,
                 mediaPositionMs = clock?.positionMs ?: state.playback.positionMs,
                 mediaDurationMs = clock?.durationMs ?: state.playback.durationMs,
                 screenShape = shape, visible = page?.visibleNow == true && presentation?.isCurrent == true,
                 clockMapping = current.mapping, options = options, fonts = fonts, state = lyricsState,
                 canSeek = state.playback.canSeek && !state.playbackCommandPending && !current.loading && !current.saving,
                 onPreviewPlayFromLine = { if (page?.visibleNow == true) entry.previewPlay(it) },
-                onBack = onBack, onChooseLyrics = onOptions, onSettings = onOptions,
-                onRetry = { if (page?.visibleNow == true) entry.retry() })
+                onBack = onBack, onChooseLyrics = onOptions.takeIf { current.identity?.trackKey?.providerId != "netease" }, onSettings = onOptions,
+                onRetry = { if (page?.visibleNow == true) entry.retry() }, statusLabel = statusLabel)
         }
         if (ready != null) ProbePersonalLyricsFonts(app, page, ready) { body(it.fonts) }
         else body(LyricsFonts())
@@ -182,4 +192,23 @@ internal fun ProbeLyricsPlayControls(state: LyricsPlayState, entry: LyricsEntryV
             onClick = { entry.playConfirmation.confirm(id) })
     } else if (state.phase != LyricsPlayPhase.IDLE) WatchText(stringResource(R.string.lyrics_settings_working))
     WatchActionRow(stringResource(R.string.lyrics_settings_cancel), onClick = onCancel)
+}
+
+/** Only fixed localized issue resources cross into the shared round/rectangular renderer. */
+private fun onlineLyricsIssueText(issue: OnlineLyricsIssue): Int = when (issue) {
+    OnlineLyricsIssue.NO_LYRICS -> R.string.online_lyrics_missing
+    OnlineLyricsIssue.OFFLINE -> R.string.online_lyrics_offline
+    OnlineLyricsIssue.LOGIN_REQUIRED -> R.string.online_lyrics_login_required
+    OnlineLyricsIssue.SESSION_UNAVAILABLE -> R.string.online_lyrics_session_unavailable
+    OnlineLyricsIssue.TIMEOUT -> R.string.online_lyrics_timeout
+    OnlineLyricsIssue.CERTIFICATE -> R.string.online_lyrics_certificate
+    OnlineLyricsIssue.RATE_LIMITED -> R.string.online_lyrics_rate_limited
+    OnlineLyricsIssue.SOURCE_CHANGED -> R.string.online_lyrics_source_changed
+    OnlineLyricsIssue.UNSUPPORTED -> R.string.online_lyrics_unsupported
+    OnlineLyricsIssue.INPUT_LIMIT -> R.string.lyrics_input_limit
+    OnlineLyricsIssue.INVALID_ENCODING -> R.string.lyrics_invalid_encoding
+    OnlineLyricsIssue.READ_FAILED -> R.string.online_lyrics_read_failed
+    OnlineLyricsIssue.MEMORY_LIMIT -> R.string.online_lyrics_memory_limit
+    OnlineLyricsIssue.BUSY -> R.string.online_lyrics_busy
+    OnlineLyricsIssue.CLOSED -> R.string.online_lyrics_closed
 }

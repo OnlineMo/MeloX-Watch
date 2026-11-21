@@ -3,7 +3,7 @@ package io.github.onlinemo.meloxwatch.ui.lyrics.entry
 import androidx.annotation.MainThread
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsClockMapping
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsDocument
-import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsLoadBinding
+import io.github.onlinemo.meloxwatch.data.lyrics.LyricsSourceFence
 import io.github.onlinemo.meloxwatch.model.QueueSeekBinding
 import io.github.onlinemo.meloxwatch.model.QueueSeekRequest
 import io.github.onlinemo.meloxwatch.ui.lyrics.LyricsPageIdentity
@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
 data class LyricsPlayContext(
     val identity: LyricsPageIdentity,
     val queueRevision: Long,
-    val audio: LyricsLoadBinding,
+    val audio: LyricsSourceFence,
     val document: LyricsDocument,
     val mapping: LyricsClockMapping,
     val durationMs: Long,
@@ -59,7 +59,12 @@ class LyricsPlayConfirmation(
     private val currentContext: () -> LyricsPlayContext?,
     private val playback: LyricsPlaybackPort,
     private val verifyCurrentSource: suspend (LyricsPlayContext) -> Boolean,
+    private val retainContext: (LyricsPlayContext) -> AutoCloseable?,
 ) {
+    constructor(scope: CoroutineScope, currentContext: () -> LyricsPlayContext?, playback: LyricsPlaybackPort,
+        verifyCurrentSource: suspend (LyricsPlayContext) -> Boolean) :
+        this(scope, currentContext, playback, verifyCurrentSource, { EmptyLyricsContextReference })
+
     private val mutableState = MutableStateFlow(LyricsPlayState())
     val state = mutableState.asStateFlow()
     private var active: Action? = null
@@ -67,11 +72,17 @@ class LyricsPlayConfirmation(
     private var closed = false
     val busy: Boolean get() = inFlight != null
 
+    /** Cancelling a waiter cannot release the original action's retained verification input. */
+    internal suspend fun awaitCleanup() {
+        inFlight?.job?.join()
+    }
+
     fun begin(preview: LyricsPlayPreview): String? {
         if (closed || !scope.isActive || busy || playback.busy) return null
         val context = currentContext() ?: return null
         if (!matchesPreview(context, preview) || !eligible(context)) return null
-        val action = Action(UUID.randomUUID().toString(), context, preview)
+        val reference = retainContext(context) ?: return null
+        val action = Action(UUID.randomUUID().toString(), context, preview, reference)
         active = action
         inFlight = action
         mutableState.value = LyricsPlayState(LyricsPlayPhase.ACQUIRING, action.id, preview)
@@ -136,11 +147,14 @@ class LyricsPlayConfirmation(
         } catch (_: Exception) {
             if (active === action && stillCurrent(action, action.binding)) fail(action, LyricsPlayIssue.REQUEST_FAILED)
         } finally {
-            if (active === action) active = null
-            if (inFlight === action) {
-                inFlight = null
-                // Retirement retains the input slot until the actual child, including IO cleanup, ends.
-                if (mutableState.value.confirmationId == action.id) mutableState.value = LyricsPlayState()
+            try { action.reference.close() }
+            finally {
+                if (active === action) active = null
+                if (inFlight === action) {
+                    inFlight = null
+                    // Idle becomes visible after the input release; waiters join the whole child.
+                    if (mutableState.value.confirmationId == action.id) mutableState.value = LyricsPlayState()
+                }
             }
         }
     }
@@ -172,8 +186,8 @@ class LyricsPlayConfirmation(
 
     private fun bindingMatches(context: LyricsPlayContext, binding: QueueSeekBinding): Boolean =
         binding.generationId == context.identity.queueGenerationId && binding.queueRevision == context.queueRevision &&
-            binding.queueEntryId == context.identity.queueEntryId && binding.locationId == context.audio.locationId &&
-            binding.contentRevision == context.audio.contentRevision && binding.durationMs == context.durationMs
+            binding.queueEntryId == context.identity.queueEntryId && context.audio.matchesSeekBinding(binding) &&
+            binding.durationMs == context.durationMs
 
     private fun sameIntent(left: LyricsPlayContext, right: LyricsPlayContext): Boolean =
         left.identity == right.identity && left.queueRevision == right.queueRevision && left.audio == right.audio &&
@@ -188,10 +202,15 @@ class LyricsPlayConfirmation(
         return timeline.seekTarget(index, context.durationMs, context.mapping) == preview.target
     }
 
-    private class Action(val id: String, val context: LyricsPlayContext, val preview: LyricsPlayPreview) {
+    private class Action(val id: String, val context: LyricsPlayContext, val preview: LyricsPlayPreview,
+        val reference: AutoCloseable) {
         val confirmed = CompletableDeferred<Unit>()
         var binding: QueueSeekBinding? = null
         var job: Job? = null
         var retired = false
     }
+}
+
+private object EmptyLyricsContextReference : AutoCloseable {
+    override fun close() = Unit
 }
