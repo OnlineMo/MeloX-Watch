@@ -1,0 +1,128 @@
+{
+  "admin_enforced": true,
+  "audited_remote_heads": {
+    "contribution": "a7ee0aab8aa62ce5b650c8e13a8d09c4a718cd79",
+    "development/local-library": "0e73b63d7fe424d9a61b338261fc2188ab832a65",
+    "development/local-player": "4e651f0afabff646e1a8eaa3334b34e9b562b37f",
+    "development/p0-probe": "873c2e36f9c51b2246867add625d9c2abed1ca43",
+    "development/p1-state": "64f34a93257079851c0d020b1104bf20ad466328",
+    "main": "9f56e8fb881ebb175a5bca563d227809db5fd8ce"
+  },
+  "bypass_actors": [],
+  "candidate": null,
+  "conversation_resolution": true,
+  "force_push_and_deletion_forbidden": true,
+  "fork_approval_policy": "all_external_contributors",
+  "github_actions_app_id": 15368,
+  "immutable_tag_pattern": "v*",
+  "new_tag_creation_allowed": true,
+  "normal_pr_evidence": [
+    {
+      "admin_bypass_used": false,
+      "head": "86ad5920e45181c8078326b87748f1b4af448df6",
+      "merge_sha": "6c591d2f5d934066cea53ed2ed8b8786a8424544",
+      "normal_protected_merge": true,
+      "pr": 33,
+      "receipt_sha256": "0d8aa058e66b83f880f7e402976b29e9b2e358ce247085228012dfa419a14631",
+      "required_checks": [
+        {
+          "app_id": 15368,
+          "conclusion": "success",
+          "head_sha": "86ad5920e45181c8078326b87748f1b4af448df6",
+          "job_id": 137182320772,
+          "name": "cloud-gate",
+          "run_id": 45014001624
+        },
+        {
+          "app_id": 15368,
+          "conclusion": "success",
+          "head_sha": "86ad5920e45181c8078326b87748f1b4af448df6",
+          "job_id": 137182277778,
+          "name": "pr-policy",
+          "run_id": 45014001691
+        }
+      ]
+    },
+    {
+      "admin_bypass_used": false,
+      "head": "6c591d2f5d934066cea53ed2ed8b8786a8424544",
+      "merge_sha": "a88ccdfe565d94d514dad320a554f48da1b5861b",
+      "normal_protected_merge": true,
+      "pr": 34,
+      "receipt_sha256": "1d81ac362a1828b536eb079eeaeca094857c70503297c2da08f3cea10aabc1a1",
+      "required_checks": [
+        {
+          "app_id": 15368,
+          "conclusion": "success",
+          "head_sha": "6c591d2f5d934066cea53ed2ed8b8786a8424544",
+          "job_id": 137189359673,
+          "name": "cloud-gate",
+          "run_id": 45015859579
+        },
+        {
+          "app_id": 15368,
+          "conclusion": "success",
+          "head_sha": "6c591d2f5d934066cea53ed2ed8b8786a8424544",
+          "job_id": 137187910106,
+          "name": "pr-policy",
+          "run_id": 45015859541
+        }
+      ]
+    },
+    {
+      "admin_bypass_used": false,
+      "head": "a88ccdfe565d94d514dad320a554f48da1b5861b",
+      "merge_sha": "b0a9b9f04b8621afcd0766d72b7be1c2d95507ba",
+      "normal_protected_merge": true,
+      "pr": 35,
+      "receipt_sha256": "8a7edd4a74e5a3f269c980da38602dd350338de6dd462d1ffd8ad3d392450469",
+      "required_checks": [
+        {
+          "app_id": 15368,
+          "conclusion": "success",
+          "head_sha": "a88ccdfe565d94d514dad320a554f48da1b5861b",
+          "job_id": 137204910762,
+          "name": "cloud-gate",
+          "run_id": 45021376944
+        },
+        {
+          "app_id": 15368,
+          "conclusion": "success",
+          "head_sha": "a88ccdfe565d94d514dad320a554f48da1b5861b",
+          "job_id": 137204827552,
+          "name": "pr-policy",
+          "run_id": 45021376969
+        }
+      ]
+    }
+  ],
+  "normal_pr_final_heads": {
+    "contribution": "b0a9b9f04b8621afcd0766d72b7be1c2d95507ba",
+    "main": "a88ccdfe565d94d514dad320a554f48da1b5861b"
+  },
+  "normal_pr_validation": "PASSED_NORMAL_PROTECTED_PR_MERGES",
+  "open_privacy_findings": 0,
+  "owner_visibility_authorized": true,
+  "privacy_gate_sha256": "a7f060966a4ecad1e39912ccd041fb4f1bf635f1135e045197b903807f30eb26",
+  "protected_branches": [
+    "main",
+    "contribution"
+  ],
+  "public_development_repository": true,
+  "pull_request_required": true,
+  "readiness_values_changed": false,
+  "recovery_isolation": "PRIVATE_ACTIONS_DISABLED_OWNER_ONLY_VERIFIED",
+  "release_publication_authorized": false,
+  "repository": "OnlineMo/MeloX-Watch",
+  "required_approvals": 0,
+  "required_checks": [
+    "cloud-gate",
+    "pr-policy"
+  ],
+  "schema_version": 1,
+  "strict": true,
+  "tag_rule_id": 27836353,
+  "unreviewed_public_objects": 0,
+  "visibility_and_protection_receipt_sha256": "b197c38a3697fb671ec248d11fed99f825d70bbcde4e8fbcd6e3b2c36931954d",
+  "workflow_token_default": "read"
+}
