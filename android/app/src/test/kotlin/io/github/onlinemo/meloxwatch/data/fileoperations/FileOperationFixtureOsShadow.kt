@@ -26,6 +26,8 @@ class FileOperationFixtureOsShadow {
     private data class Descriptor(val number: Int, val channel: FileChannel)
 
     companion object {
+        // Linux O_PATH is 010000000; Android's public OsConstants has no matching field.
+        private const val LINUX_O_PATH = 0x200000
         private val descriptors = IdentityHashMap<FileDescriptor, Descriptor>()
 
         fun register(descriptor: ParcelFileDescriptor, writable: Boolean) {
@@ -82,12 +84,32 @@ class FileOperationFixtureOsShadow {
 
         @JvmStatic
         @Implementation
+        fun read(fd: FileDescriptor, bytes: ByteArray, offset: Int, count: Int): Int =
+            probeAccess("read", fd, bytes, offset, count, writable = false)
+
+        @JvmStatic
+        @Implementation
+        fun write(fd: FileDescriptor, bytes: ByteArray, offset: Int, count: Int): Int =
+            probeAccess("write", fd, bytes, offset, count, writable = true)
+
+        @JvmStatic
+        @Implementation(minSdk = 30)
         fun fcntlInt(fd: FileDescriptor, command: Int, argument: Int): Int = exact("fcntl", fd) { known ->
             if (command != OsConstants.F_GETFL || argument != 0) throw ErrnoException("fcntl", OsConstants.EINVAL)
             val flags = Files.readAllLines(Paths.get("/proc/self/fdinfo", known.number.toString()))
                 .singleOrNull { it.startsWith("flags:") }?.substringAfter(':')?.trim()
                 ?: throw IOException("Native descriptor flags absent")
             flags.toLong(8).toInt()
+        }
+
+        private fun probeAccess(operation: String, fd: FileDescriptor, bytes: ByteArray, offset: Int,
+            count: Int, writable: Boolean): Int {
+            if (bytes.size != 1 || offset != 0 || count != 0) throw ErrnoException(operation, OsConstants.EINVAL)
+            val flags = fcntlInt(fd, OsConstants.F_GETFL, 0)
+            val mode = flags and OsConstants.O_ACCMODE
+            val allowed = mode == OsConstants.O_RDWR || mode == if (writable) OsConstants.O_WRONLY else OsConstants.O_RDONLY
+            if (!allowed || flags and LINUX_O_PATH != 0) throw ErrnoException(operation, OsConstants.EBADF)
+            return 0
         }
 
         @JvmStatic

@@ -118,8 +118,8 @@
     <string name="dsp_backend_unsupported">Switch to Media3 to apply these sound effects.</string>
     <string name="dsp_output_unsupported">The current audio output cannot apply these effects.</string>
     <string name="dsp_no_player">Playback is closed. Saved settings will be used when it starts again.</string>
-    <string name="dsp_format">Output: %1$d Hz / %2$d channels</string>
-    <string name="dsp_actual_eq">EQ on · %1$d available bands</string>
+    <string name="dsp_format">Output: %1$d Hz · Channels: %2$d</string>
+    <string name="dsp_actual_eq">EQ on · Available bands: %1$d</string>
     <string name="dsp_actual_eq_off">EQ off</string>
     <string name="dsp_actual_limiter_on">Limiter on</string>
     <string name="dsp_actual_limiter_off">Limiter off</string>

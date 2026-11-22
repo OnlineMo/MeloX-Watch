@@ -1,7 +1,7 @@
 <resources>
     <string name="file_manage">File management</string>
     <string name="file_select">Select tracks</string>
-    <string name="file_selection_count">Selected %1$d of %2$d tracks in this complete view.</string>
+    <string name="file_selection_count">Selected: %1$d / %2$d</string>
     <string name="file_select_track">Select %1$s</string>
     <string name="file_select_all">Select the complete view</string>
     <string name="file_select_none">Clear selection</string>
@@ -16,7 +16,7 @@
     <string name="file_preview_impact">Affected tracks: %1$d · access aliases: %2$d · CUE segments: %3$d</string>
     <string name="file_index_scope">The file and user relationships stay. The track remains ignored by scanning until you explicitly restore it to the visible library.</string>
     <string name="file_source_scope">Remove app access to this source. External files, favorites and playlist relationships stay.</string>
-    <string name="file_source_impact">This source supplies %1$d related tracks through %2$d access aliases. Favorites and playlists keep their identities; playback may need another location.</string>
+    <string name="file_source_impact">Related tracks: %1$d · Access aliases: %2$d. Favorites and playlists keep their identities; playback may need another location.</string>
     <string name="file_delete_scope">Delete the exact original files listed here. This affects their related tracks, access aliases and CUE segments. Deletion cannot be undone here. Other copies and user relationships stay.</string>
     <string name="file_copy_delete_scope">Delete only the listed complete app audio copies. External originals and playlist relationships stay. Removing an app copy is separate from removing a library reference.</string>
     <string name="file_tag_scope">Write the reviewed fields to the actual audio file. A complete candidate is checked before replacement. File failure keeps or restores the original when its recorded identity is proven.</string>
@@ -45,7 +45,7 @@
     <string name="file_destination_scope">Move to the selected authorized root and preserve each file name. Add another folder through Sources first if needed. Existing names are never overwritten.</string>
     <string name="file_prepare_changes">Review file changes</string>
     <string name="file_result_counts">Completed: %1$d · failed: %2$d · not executed: %3$d · recovery required: %4$d</string>
-    <string name="file_copy_retained">%1$d verified copies have their originals retained.</string>
+    <string name="file_copy_retained">Verified copies with originals retained: %1$d</string>
     <string name="file_review_source_delete">Review deletion of copied originals</string>
     <string name="file_keep_source">Keep originals and completed copies</string>
     <string name="file_observe_recovery">Inspect and coordinate recorded results</string>
@@ -59,7 +59,7 @@
     <string name="file_first_results">First result page</string>
     <string name="file_more_results">Next result page</string>
     <string name="file_pending">Read pending file operations</string>
-    <string name="file_pending_operation">%1$s · %2$d selected tracks</string>
+    <string name="file_pending_operation">%1$s · Selected tracks: %2$d</string>
     <string name="file_more_pending">More pending operations</string>
     <string name="file_retry_records">Retry opening operation records</string>
     <string name="file_empty_selection">Select at least one track.</string>

@@ -151,7 +151,7 @@ class MetingMediaTransportTest {
         }
     }
 
-    @Test fun httpCrossOriginAndHttpsDowngradeResourcesAreRejectedBeforeTheyReachTransport() = runBlocking {
+    @Test fun httpCrossOriginAndHttpsDowngradeResourcesAreRejectedBeforeTheyReachTransport(): Unit = runBlocking {
         val repository = repository()
         try {
             val use = checkNotNull(repository.capture(true))

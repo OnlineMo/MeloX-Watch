@@ -55,7 +55,7 @@ class ProbePlaybackStartupRecoveryTest {
     private var serviceController: ServiceController<ProbePlaybackService>? = null
 
     @Before fun awaitActualApplicationStartup() = runBlocking {
-        application = RuntimeEnvironment.getApplication()
+        application = RuntimeEnvironment.getApplication() as MeloXApplication
         Shadows.shadowOf(application).grantPermissions(
             application.packageName + ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
         )

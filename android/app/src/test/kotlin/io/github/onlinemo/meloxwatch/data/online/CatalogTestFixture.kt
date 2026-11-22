@@ -17,7 +17,7 @@ internal fun catalogFields(request: HttpRequest): JsonObject {
     val plain = cipher.doFinal(encoded).toString(Charsets.UTF_8)
     val pieces = plain.split("-36cd479b6b5-")
     check(pieces.size == 3)
-    return StrictJson.parse(pieces[1].toByteArray(Charsets.UTF_8)) as JsonObject
+    return StrictJson.decode(pieces[1].toByteArray(Charsets.UTF_8)) as JsonObject
 }
 
 internal fun catalogJson(value: String): HttpResponse = HttpResponse(200, emptyList(), value.toByteArray(Charsets.UTF_8))

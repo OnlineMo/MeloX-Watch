@@ -19,6 +19,7 @@ object FileOperationLimits {
     const val ARTIST_VALUES = 128
     const val JOURNAL_ROW_BYTES = 128 * 1024
     const val JOURNAL_REQUEST_BYTES = 4 * 1024 * 1024
+    const val ANCESTRY_DOCUMENTS = 4096
 }
 
 enum class FileOperationKind {

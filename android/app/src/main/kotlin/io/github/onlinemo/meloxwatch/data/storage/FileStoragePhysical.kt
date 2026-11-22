@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.data.storage
 
 import android.content.Context
 import android.net.Uri
+import androidx.core.net.toUri
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.os.StatFs
@@ -24,7 +25,7 @@ internal object FileStoragePhysical {
         catch (_: Exception) { null }
 
     fun reference(context: Context, descriptor: LocalReadDescriptor, signal: CancellationSignal): Long? {
-        val uri = Uri.parse(descriptor.location.uri)
+        val uri = descriptor.location.uri.toUri()
         if (uri.scheme != "content" || uri.query != null || uri.fragment != null ||
             descriptor.source.spec.authority != null && descriptor.source.spec.authority != uri.authority) {
             throw StorageException(StorageIssue.SOURCE_CHANGED)
@@ -36,8 +37,8 @@ internal object FileStoragePhysical {
     }
 
     fun recovery(context: Context, document: WrittenDocument, signal: CancellationSignal): Long? {
-        val uri = Uri.parse(document.proof.uri)
-        if (uri.scheme != "content" || uri.authority != Uri.parse(document.treeUri).authority ||
+        val uri = document.proof.uri.toUri()
+        if (uri.scheme != "content" || uri.authority != document.treeUri.toUri().authority ||
             DocumentsContract.getDocumentId(uri) != document.proof.objectId) throw StorageException(StorageIssue.SOURCE_CHANGED)
         return openedBytes(context, uri, signal, document)
     }

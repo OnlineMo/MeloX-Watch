@@ -1,6 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.fileoperations
 
-import android.net.Uri
+import androidx.core.net.toUri
 import android.content.Intent
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteStatement
@@ -275,7 +275,7 @@ class RoomFileOperationLibrary(
                 // 弱 SOURCE 身份不能悄悄扩成跨 SAF 根的共享身份；
                 // 同根操作和跨提供方复制仍有实际正常路径。
                 if (descriptor != null && descriptor.source.spec.sourceId != destination.sourceId &&
-                    Uri.parse(descriptor.source.spec.uri).authority == Uri.parse(destination.treeUri).authority &&
+                    descriptor.source.spec.uri.toUri().authority == destination.treeUri.toUri().authority &&
                     (descriptor.source.spec.providerIncarnation == null || current.spec.providerIncarnation == null ||
                         descriptor.source.spec.providerIncarnation != current.spec.providerIncarnation)) fail(FileOperationIssue.INCOMPLETE_SCOPE)
             }
@@ -330,7 +330,7 @@ class RoomFileOperationLibrary(
             val oldLocation = dao.location(descriptor.location.locationId) ?: fail(FileOperationIssue.RECOVERY_REQUIRED)
             val published = item.artifacts.published
             val isCopy = command.kind == FileOperationKind.MOVE && published != null &&
-                Uri.parse(descriptor.source.spec.uri).authority != Uri.parse(published.treeUri).authority
+                descriptor.source.spec.uri.toUri().authority != published.treeUri.toUri().authority
             val location = if (published != null && isCopy) installCopyLocation(item, published, revision)
                 else if (published != null) updateOriginalLocation(item, published, revision)
                 else if (item.artifacts.originalDeleted) invalidateLocation(item, oldLocation, revision)
@@ -400,12 +400,12 @@ class RoomFileOperationLibrary(
 
     private suspend fun checkIndependentAliases(target: FileOperationTarget) {
         val descriptor = target.descriptor ?: return
-        val authority = descriptor.source.spec.authority ?: Uri.parse(descriptor.source.spec.uri).authority
+        val authority = descriptor.source.spec.authority ?: descriptor.source.spec.uri.toUri().authority
         var after: String? = null
         do {
             val page = library.sourcesPage(after, FileOperationLimits.PAGE_SIZE)
             for (other in page.sources) if (other.spec.kind == LocalSourceKind.TREE &&
-                (other.spec.authority ?: Uri.parse(other.spec.uri).authority) == authority) {
+                (other.spec.authority ?: other.spec.uri.toUri().authority) == authority) {
                 library.libraryTransaction {
                     val alias = dao.alias(other.spec.sourceId, descriptor.objectId)
                     if (alias != null && alias.locationId != descriptor.location.locationId) fail(FileOperationIssue.INCOMPLETE_SCOPE)

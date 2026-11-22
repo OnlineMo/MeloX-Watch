@@ -9,6 +9,7 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import androidx.core.net.toUri
 import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.SystemClock
@@ -57,7 +58,7 @@ class FileOperationNativeInstrumentation : Instrumentation() {
         try {
             val documentId = tree.putAudio("fixture.$extension", originalBytes, mime)
             val base = fixtureFileTarget(context, authority, tree, documentId)
-            grantUri = Uri.parse(checkNotNull(base.descriptor).source.spec.uri)
+            grantUri = (checkNotNull(base.descriptor).source.spec.uri).toUri()
             val adapter = SafOriginalFileAdapter(context)
             val signal = CancellationSignal()
             val command = FileOperationCommand.writeTags(AudioTagPatch(mapOf(
@@ -65,7 +66,7 @@ class FileOperationNativeInstrumentation : Instrumentation() {
                 AudioTagField.TRACK_NUMBER to listOf("8/16"), AudioTagField.DISC_NUMBER to listOf("2"),
             )))
             val target = base.copy(proof = adapter.inspect(base, command.kind, signal))
-            val beforeDecode = decode(context, Uri.parse(checkNotNull(target.proof).uri))
+            val beforeDecode = decode(context, (checkNotNull(target.proof).uri).toUri())
             val before = IndependentAudioTagReader.read(originalBytes)
             val saved = ArrayList<FileOperationItem>()
             val applied = adapter.apply(FileOperationItem(UUID.randomUUID().toString(), 0L, target), command, false, signal) { saved += it }
@@ -78,13 +79,13 @@ class FileOperationNativeInstrumentation : Instrumentation() {
             check(after.fields["TRACKNUMBER"] == listOf("8/16"))
             val metadata = MediaMetadataRetriever()
             try {
-                metadata.setDataSource(context, Uri.parse(published.proof.uri))
+                metadata.setDataSource(context, published.proof.uri.toUri())
                 check(metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) == "After")
                 check(metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.let { it > 0L } == true)
             } finally {
                 metadata.release()
             }
-            val afterDecode = decode(context, Uri.parse(published.proof.uri))
+            val afterDecode = decode(context, published.proof.uri.toUri())
             check(beforeDecode == afterDecode && afterDecode.pcmBytes > 0L)
             check(saved.isNotEmpty() && saved.last() == applied)
             adapter.finishArtifacts(applied.copy(phase = io.github.onlinemo.meloxwatch.data.fileoperations.FileItemPhase.INDEX_RECONCILED), signal)

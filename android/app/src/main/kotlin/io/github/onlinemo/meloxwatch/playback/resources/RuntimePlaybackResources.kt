@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.playback.resources
 
 import android.net.Uri
+import androidx.core.net.toUri
 import io.github.onlinemo.meloxwatch.data.network.HttpTransportGate
 import io.github.onlinemo.meloxwatch.data.network.NetworkException
 import io.github.onlinemo.meloxwatch.data.network.NetworkIssue
@@ -136,7 +137,7 @@ class RuntimePlaybackResource internal constructor(
     val isOnline: Boolean get() = online != null
     val status: PlaybackResourceStatus? get() = online?.status
     val budget: PlaybackResolutionBudget? get() = online?.budget
-    val mediaUri: Uri get() = if (online == null) Uri.parse(requireNotNull(entry.location).uri)
+    val mediaUri: Uri get() = if (online == null) (requireNotNull(entry.location).uri).toUri()
         else Uri.Builder().scheme(RuntimePlaybackResources.SCHEME).authority("resource").appendPath(online.key).build()
 
     fun retain(forEntry: QueueEntry = entry): RuntimePlaybackResource {

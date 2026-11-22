@@ -1,7 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.fileoperations
 
 import android.content.Context
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.CancellationSignal
 import android.provider.DocumentsContract
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -27,7 +27,7 @@ class SafOriginalFileAdapter(context: Context, private val tags: AudioTagFileCod
         SafDocumentFileAccess.providerCall {
             val original = originalRoute(target)
             files.requireParent(original.treeUri, original.parentObjectId, cancellation, create = kind == FileOperationKind.WRITE_TAGS)
-            val row = files.document(Uri.parse(original.uri), cancellation)
+            val row = files.document(original.uri.toUri(), cancellation)
             when (kind) {
                 FileOperationKind.DELETE_ORIGINAL -> files.requireFlags(row, DocumentsContract.Document.FLAG_SUPPORTS_DELETE)
                 FileOperationKind.WRITE_TAGS -> files.requireFlags(row, DocumentsContract.Document.FLAG_SUPPORTS_WRITE, DocumentsContract.Document.FLAG_SUPPORTS_RENAME,
@@ -204,7 +204,7 @@ class SafOriginalFileAdapter(context: Context, private val tags: AudioTagFileCod
     override fun verifyPublishedRoute(source: LibrarySource, document: WrittenDocument, cancellation: CancellationSignal): FilePublishedRoute = try {
         SafDocumentFileAccess.providerCall {
             if (source.spec.kind != LocalSourceKind.TREE || source.state != LibrarySourceState.ACTIVE ||
-                Uri.parse(source.spec.uri).authority != Uri.parse(document.treeUri).authority) {
+                source.spec.uri.toUri().authority != document.treeUri.toUri().authority) {
                 throw FileOperationException(FileOperationIssue.SOURCE_CHANGED)
             }
             files.requireReadableDescendant(source.spec.uri, document.proof.objectId, cancellation)
@@ -236,7 +236,7 @@ class SafOriginalFileAdapter(context: Context, private val tags: AudioTagFileCod
     private fun writeTags(state: FileUnitWriter, patch: AudioTagPatch, cancellation: CancellationSignal) {
         val original = checkedOriginal(state.item.target, cancellation)
         files.requireParent(original.treeUri, original.parentObjectId, cancellation, create = true)
-        files.requireFlags(files.document(Uri.parse(original.proof.uri), cancellation), DocumentsContract.Document.FLAG_SUPPORTS_RENAME,
+        files.requireFlags(files.document(original.proof.uri.toUri(), cancellation), DocumentsContract.Document.FLAG_SUPPORTS_RENAME,
             DocumentsContract.Document.FLAG_SUPPORTS_DELETE, DocumentsContract.Document.FLAG_SUPPORTS_WRITE)
         files.requireWritableAccess(original, cancellation)
         val stagedName = privateName(state.item, "part")
@@ -274,12 +274,12 @@ class SafOriginalFileAdapter(context: Context, private val tags: AudioTagFileCod
         val original = checkedOriginal(state.item.target, cancellation)
         val destination = requestedDestination.copy(displayName = requestedDestination.displayName ?: original.proof.displayName)
         files.requireParent(destination.treeUri, destination.parentObjectId, cancellation, create = true)
-        val sameAuthority = Uri.parse(original.treeUri).authority == Uri.parse(destination.treeUri).authority
+        val sameAuthority = original.treeUri.toUri().authority == destination.treeUri.toUri().authority
         if (sameAuthority) {
             val sameParent = original.parentObjectId == destination.parentObjectId
             files.requireNameFree(destination.treeUri, destination.parentObjectId, checkNotNull(destination.displayName), cancellation,
                 original.proof.objectId.takeIf { sameParent })
-            if (!sameParent) files.requireFlags(files.document(Uri.parse(original.proof.uri), cancellation), DocumentsContract.Document.FLAG_SUPPORTS_MOVE)
+            if (!sameParent) files.requireFlags(files.document(original.proof.uri.toUri(), cancellation), DocumentsContract.Document.FLAG_SUPPORTS_MOVE)
             state.change(phase = FileItemPhase.APPLYING)
             val moved = if (sameParent) original.copy(sourceId = destination.sourceId, treeUri = destination.treeUri)
                 else files.move(original, destination, cancellation)
@@ -340,7 +340,7 @@ class SafOriginalFileAdapter(context: Context, private val tags: AudioTagFileCod
 
     private fun observeMove(state: FileUnitWriter, original: WrittenDocument, destination: FileOperationDestination, cancellation: CancellationSignal) {
         val expectedName = destination.displayName ?: original.proof.displayName
-        if (Uri.parse(original.treeUri).authority == Uri.parse(destination.treeUri).authority) {
+        if (original.treeUri.toUri().authority == destination.treeUri.toUri().authority) {
             val candidate = original.copy(sourceId = destination.sourceId, treeUri = destination.treeUri, parentObjectId = destination.parentObjectId)
             val moved = files.findRetained(candidate, cancellation)
             if (moved != null && (moved.proof.uri != original.proof.uri || moved.parentObjectId != original.parentObjectId ||
@@ -416,7 +416,7 @@ class SafOriginalFileAdapter(context: Context, private val tags: AudioTagFileCod
             target.parentObjectId ?: throw FileOperationException(FileOperationIssue.INCOMPLETE_SCOPE), descriptor.location.uri)
     }
 
-    private fun isCrossProvider(left: WrittenDocument, right: WrittenDocument) = Uri.parse(left.treeUri).authority != Uri.parse(right.treeUri).authority
+    private fun isCrossProvider(left: WrittenDocument, right: WrittenDocument) = left.treeUri.toUri().authority != right.treeUri.toUri().authority
     private fun requireDifferentObject(left: WrittenDocument, right: WrittenDocument) {
         if (left.proof.device == right.proof.device && left.proof.inode == right.proof.inode) throw FileOperationException(FileOperationIssue.INTEGRITY_FAILED)
     }

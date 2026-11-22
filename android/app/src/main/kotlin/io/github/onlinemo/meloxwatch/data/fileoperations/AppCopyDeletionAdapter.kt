@@ -1,7 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.fileoperations
 
 import android.content.Context
-import android.net.Uri
+import androidx.core.net.toUri
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.system.Os
@@ -75,7 +75,7 @@ class AppCopyDeletionAdapter(private val context: Context) : FileOperationPhysic
         if (target.ownership != FileResourceOwnership.APP_COPY || descriptor.source.spec.kind != LocalSourceKind.APP_OWNED) {
             throw FileOperationException(FileOperationIssue.INVALID_INPUT)
         }
-        val uri = Uri.parse(descriptor.location.uri)
+        val uri = descriptor.location.uri.toUri()
         if (uri.scheme != "content" || uri.authority != OwnedAudioProvider.authority(context) || uri.pathSegments.size != 1 ||
             uri.query != null || uri.fragment != null || descriptor.objectId != uri.pathSegments.single()) {
             throw FileOperationException(FileOperationIssue.SOURCE_CHANGED)

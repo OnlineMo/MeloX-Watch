@@ -83,7 +83,7 @@ class OnlineCatalogRepositoryTest {
                 request.url.endsWith("/eapi/v6/playlist/detail") -> catalogJson(
                     "{\"code\":200,\"playlist\":{\"id\":991,\"trackCount\":3,\"trackIds\":[{\"id\":201},{\"id\":202},{\"id\":201}],\"tracks\":[${catalogSong(201)}]}}")
                 request.url.endsWith("/eapi/v3/song/detail") -> {
-                    val ids = (StrictJson.parse(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
+                    val ids = (StrictJson.decode(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
                         .values.map { it.jsonObject()["id"].jsonLong() }
                     val songs = ids.filter { !omitDetails }.joinToString(",") { catalogSong(it) }
                     catalogJson("{\"code\":200,\"songs\":[$songs]}")
@@ -316,7 +316,7 @@ class OnlineCatalogRepositoryTest {
                     catalogJson("{\"code\":200,\"ids\":[${ids.joinToString(",")}]}")
                 }
                 request.url.endsWith("/eapi/v3/song/detail") -> {
-                    val selected = (StrictJson.parse(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
+                    val selected = (StrictJson.decode(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
                         .values.map { it.jsonObject()["id"].jsonLong() }
                     detailIds.add(selected)
                     catalogJson("{\"code\":200,\"songs\":[${selected.joinToString(",") { catalogSong(it) }}]}")
@@ -376,7 +376,7 @@ class OnlineCatalogRepositoryTest {
                     catalogJson("{\"code\":200,\"playlist\":{\"id\":991,\"trackCount\":10001,\"trackIds\":[$index],\"tracks\":[]}}")
                 }
                 request.url.endsWith("/eapi/v3/song/detail") -> {
-                    val selected = (StrictJson.parse(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
+                    val selected = (StrictJson.decode(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
                         .values.map { it.jsonObject()["id"].jsonLong() }
                     detailIds.add(selected)
                     catalogJson("{\"code\":200,\"songs\":[${selected.joinToString(",") { catalogSong(it) }}]}")

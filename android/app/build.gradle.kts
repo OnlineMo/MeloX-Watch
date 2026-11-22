@@ -342,6 +342,8 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.exifinterface)
+    // The manifest configures this provider directly; its class must also be on the compile path.
+    implementation(libs.androidx.startup.runtime)
     // 直接消费已使用的Android runtime API，此声明不经过available-at转发。
     implementation(libs.compose.runtime)
     implementation(libs.compose.ui)

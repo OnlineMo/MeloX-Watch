@@ -8,8 +8,8 @@
     <string name="storage_artwork">Artwork cache</string>
     <string name="storage_lyrics">Fetched lyrics cache</string>
     <string name="storage_recovery">Recovery and transfer staging</string>
-    <string name="storage_category">%1$s: %2$s · %3$d observed files</string>
-    <string name="storage_unknown_files">Unknown capacity for %1$d references or entries.</string>
+    <string name="storage_category">%1$s: %2$s · Files observed: %3$d</string>
+    <string name="storage_unknown_files">References or entries with unknown capacity: %1$d</string>
     <string name="storage_incomplete">Some capacities could not be measured. Retry after access or pending work is resolved.</string>
     <string name="storage_available">Observed available space: %1$s</string>
     <string name="storage_available_change">Observed available space: %1$s → %2$s</string>

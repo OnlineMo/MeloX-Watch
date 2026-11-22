@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.fileoperations
 
 import io.github.onlinemo.meloxwatch.data.fileoperations.fixture.AudioWriteFixtures
+import io.github.onlinemo.meloxwatch.model.TrackKey
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import java.io.File
 import kotlinx.coroutines.runBlocking
@@ -28,7 +29,7 @@ class FileSelectionDraftOwnerTest : FileOperationRoomTestFixture() {
             val producer = owner.producer(draft)
             try {
                 var offset = 0L
-                val observed = HashSet<io.github.onlinemo.meloxwatch.model.TrackKey>()
+                val observed = HashSet<TrackKey>()
                 while (offset < draft.selectedCount) {
                     val page = producer.read(offset, 100)
                     assertEquals(draft.selection, page.selection)
@@ -58,7 +59,7 @@ class FileSelectionDraftOwnerTest : FileOperationRoomTestFixture() {
         assertTrue(selected.allSelected)
         assertEquals(20_001L, selected.selectedCount)
         assertEquals(0L, io.read { draftRows(selected.draftId) })
-        val tail = io.github.onlinemo.meloxwatch.model.TrackKey(io.github.onlinemo.meloxwatch.model.TrackKey.LOCAL_PROVIDER, "tail-20000")
+        val tail = TrackKey(TrackKey.LOCAL_PROVIDER, "tail-20000")
         val excluded = io.read { journal.toggleSelectionDraft(initial.draftId, selected.revision, FileSelectedTrack(tail, null, null)) }
         assertEquals(20_000L, excluded.selectedCount)
         assertEquals(1L, io.read { draftRows(selected.draftId) })

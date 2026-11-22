@@ -220,7 +220,7 @@ class LocalThemeRepository private constructor(
             archive.extract(index, manifest, payload.root, { next ->
                 signal.throwIfCanceled()
                 if (next < 0L || next > ThemeLimits.UNPACKED_BYTES - written) themeFail(ThemeIssue.EXPANDED_TOO_LARGE)
-                val available = payload.root.usableSpace
+                val available = Files.getFileStore(payload.root.toPath()).usableSpace
                 if (available < ThemeLimits.FREE_RESERVE_BYTES || next > available - ThemeLimits.FREE_RESERVE_BYTES) themeFail(ThemeIssue.STORAGE_FULL)
                 written += next
             }, signal::throwIfCanceled)

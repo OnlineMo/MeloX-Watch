@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import androidx.core.net.toUri
+import android.os.Build
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.os.Process
@@ -32,7 +34,7 @@ internal class SafDocumentFileAccess(private val context: Context) {
     private val resolver get() = context.contentResolver
 
     fun requireTree(treeText: String, write: Boolean) {
-        val tree = Uri.parse(treeText)
+        val tree = treeText.toUri()
         if (tree.scheme != "content" || !DocumentsContract.isTreeUri(tree) || tree.authority.isNullOrBlank() ||
             tree.query != null || tree.fragment != null) fail(FileOperationIssue.UNSUPPORTED_PROVIDER)
         val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or if (write) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0
@@ -44,11 +46,11 @@ internal class SafDocumentFileAccess(private val context: Context) {
         }
     }
 
-    fun route(treeText: String, objectId: String): Uri = DocumentsContract.buildDocumentUriUsingTree(Uri.parse(treeText), objectId)
+    fun route(treeText: String, objectId: String): Uri = DocumentsContract.buildDocumentUriUsingTree(treeText.toUri(), objectId)
 
     fun requireRoute(treeText: String, uriText: String, objectId: String) {
-        val tree = Uri.parse(treeText)
-        val uri = Uri.parse(uriText)
+        val tree = treeText.toUri()
+        val uri = uriText.toUri()
         if (uri.scheme != "content" || uri.authority != tree.authority || uri.query != null || uri.fragment != null ||
             !DocumentsContract.isDocumentUri(context, uri) || DocumentsContract.getDocumentId(uri) != objectId) {
             fail(FileOperationIssue.SOURCE_CHANGED)
@@ -58,10 +60,26 @@ internal class SafDocumentFileAccess(private val context: Context) {
     fun requireReadableDescendant(treeText: String, objectId: String, cancellation: CancellationSignal) {
         requireTree(treeText, write = false)
         cancellation.throwIfCanceled()
-        val tree = Uri.parse(treeText)
-        val root = route(treeText, DocumentsContract.getTreeDocumentId(tree))
-        val child = route(treeText, objectId)
-        if (root != child && !DocumentsContract.isChildDocument(resolver, root, child)) fail(FileOperationIssue.SOURCE_CHANGED)
+        val tree = treeText.toUri()
+        if (!isDescendant(tree, objectId, cancellation)) fail(FileOperationIssue.SOURCE_CHANGED)
+    }
+
+    /** Older SDKs prove the tree-relative path through the public provider API, never URI prefixes. */
+    private fun isDescendant(tree: Uri, objectId: String, cancellation: CancellationSignal): Boolean {
+        cancellation.throwIfCanceled()
+        val rootId = DocumentsContract.getTreeDocumentId(tree)
+        if (rootId == objectId) return true
+        val child = DocumentsContract.buildDocumentUriUsingTree(tree, objectId)
+        val contained = if (Build.VERSION.SDK_INT >= 29) {
+            val root = DocumentsContract.buildDocumentUriUsingTree(tree, rootId)
+            DocumentsContract.isChildDocument(resolver, root, child)
+        } else {
+            val path = DocumentsContract.findDocumentPath(resolver, child)?.path
+            path != null && path.size in 2..FileOperationLimits.ANCESTRY_DOCUMENTS &&
+                path.first() == rootId && path.last() == objectId
+        }
+        cancellation.throwIfCanceled()
+        return contained
     }
 
     fun document(uri: Uri, cancellation: CancellationSignal): SafFileDocument {
@@ -86,10 +104,9 @@ internal class SafDocumentFileAccess(private val context: Context) {
 
     fun requireParent(treeText: String, parentId: String, cancellation: CancellationSignal, create: Boolean): SafFileDocument {
         requireTree(treeText, write = true)
-        val tree = Uri.parse(treeText)
+        val tree = treeText.toUri()
         val parentUri = route(treeText, parentId)
-        val root = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
-        if (parentUri != root && !DocumentsContract.isChildDocument(resolver, root, parentUri)) fail(FileOperationIssue.UNSUPPORTED_PROVIDER)
+        if (!isDescendant(tree, parentId, cancellation)) fail(FileOperationIssue.UNSUPPORTED_PROVIDER)
         val parent = document(parentUri, cancellation)
         if (parent.mime != DocumentsContract.Document.MIME_TYPE_DIR ||
             create && parent.flags and DocumentsContract.Document.FLAG_DIR_SUPPORTS_CREATE == 0) fail(FileOperationIssue.UNSUPPORTED_PROVIDER)
@@ -99,7 +116,7 @@ internal class SafDocumentFileAccess(private val context: Context) {
     /** 只持一个游标；不物化完整目录，也不设产品条数上限。 */
     private fun <T> children(treeText: String, parentId: String, cancellation: CancellationSignal,
         action: (String, String?) -> T?): T? {
-        val uri = DocumentsContract.buildChildDocumentsUriUsingTree(Uri.parse(treeText), parentId)
+        val uri = DocumentsContract.buildChildDocumentsUriUsingTree(treeText.toUri(), parentId)
         val cursor = resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME), null, null, null, cancellation)
             ?: fail(FileOperationIssue.SOURCE_UNAVAILABLE)
@@ -132,14 +149,29 @@ internal class SafDocumentFileAccess(private val context: Context) {
     }
 
     fun requireWritableAccess(resource: WrittenDocument, cancellation: CancellationSignal) {
-        val descriptor = resolver.openFileDescriptor(Uri.parse(resource.proof.uri), "rw", cancellation)
+        val descriptor = resolver.openFileDescriptor(resource.proof.uri.toUri(), "rw", cancellation)
             ?: fail(FileOperationIssue.PERMISSION_DENIED)
         descriptor.use {
             val stat = regular(it)
-            val mode = Os.fcntlInt(it.fileDescriptor, OsConstants.F_GETFL, 0) and OsConstants.O_ACCMODE
-            if (mode != OsConstants.O_RDWR) fail(FileOperationIssue.PERMISSION_DENIED)
+            if (!hasReadWriteAccess(it)) fail(FileOperationIssue.PERMISSION_DENIED)
             if (stat.st_dev != resource.proof.device || stat.st_ino != resource.proof.inode || stat.st_size != resource.proof.bytes ||
                 stat.st_ctime != resource.proof.changedTime) fail(FileOperationIssue.SOURCE_CHANGED)
+        }
+    }
+
+    /** Zero-count native I/O checks both access modes without reading, writing or seeking bytes. */
+    private fun hasReadWriteAccess(descriptor: ParcelFileDescriptor): Boolean {
+        if (Build.VERSION.SDK_INT >= 30) {
+            return Os.fcntlInt(descriptor.fileDescriptor, OsConstants.F_GETFL, 0) and
+                OsConstants.O_ACCMODE == OsConstants.O_RDWR
+        }
+        // A nonempty buffer avoids the JNI empty-array pointer edge; each native count stays zero.
+        val probe = ByteArray(1)
+        return try {
+            Os.read(descriptor.fileDescriptor, probe, 0, 0) == 0 &&
+                Os.write(descriptor.fileDescriptor, probe, 0, 0) == 0
+        } catch (failure: ErrnoException) {
+            if (failure.errno == OsConstants.EBADF) false else throw failure
         }
     }
 
@@ -162,7 +194,7 @@ internal class SafDocumentFileAccess(private val context: Context) {
     fun <T> read(treeText: String, parentId: String, uriText: String, cancellation: CancellationSignal,
         action: (InputStream) -> T): CheckedFileRead<T> {
         requireTree(treeText, write = false)
-        val uri = Uri.parse(uriText)
+        val uri = uriText.toUri()
         val row = document(uri, cancellation)
         requireRoute(treeText, uriText, row.objectId)
         requireChild(treeText, parentId, row.objectId, cancellation)
@@ -203,7 +235,7 @@ internal class SafDocumentFileAccess(private val context: Context) {
     fun <T> writeEmpty(candidate: WrittenDocument, cancellation: CancellationSignal, action: (OutputStream, () -> Unit, (Int) -> Unit) -> T): T {
         if (candidate.proof.bytes != 0L) fail(FileOperationIssue.INTEGRITY_FAILED)
         requireTree(candidate.treeUri, write = true)
-        val descriptor = resolver.openFileDescriptor(Uri.parse(candidate.proof.uri), "rw", cancellation)
+        val descriptor = resolver.openFileDescriptor(candidate.proof.uri.toUri(), "rw", cancellation)
             ?: fail(FileOperationIssue.SOURCE_UNAVAILABLE)
         return ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { output ->
             val before = regular(descriptor)
@@ -224,7 +256,7 @@ internal class SafDocumentFileAccess(private val context: Context) {
         requireParent(resource.treeUri, resource.parentObjectId, cancellation, create = false)
         val current = proof(resource.treeUri, resource.parentObjectId, resource.proof.uri, cancellation)
         requireExact(resource.proof, current)
-        val row = document(Uri.parse(current.uri), cancellation)
+        val row = document(current.uri.toUri(), cancellation)
         requireFlags(row, DocumentsContract.Document.FLAG_SUPPORTS_RENAME)
         requireNameFree(resource.treeUri, resource.parentObjectId, name, cancellation, current.objectId)
         cancellation.throwIfCanceled()
@@ -240,7 +272,7 @@ internal class SafDocumentFileAccess(private val context: Context) {
         if (oldParent.uri.authority != newParent.uri.authority) fail(FileOperationIssue.UNSUPPORTED_PROVIDER)
         val current = proof(resource.treeUri, resource.parentObjectId, resource.proof.uri, cancellation)
         requireExact(resource.proof, current)
-        val row = document(Uri.parse(current.uri), cancellation)
+        val row = document(current.uri.toUri(), cancellation)
         requireFlags(row, DocumentsContract.Document.FLAG_SUPPORTS_MOVE)
         requireNameFree(destination.treeUri, destination.parentObjectId, checkNotNull(destination.displayName), cancellation)
         requireNameFree(destination.treeUri, destination.parentObjectId, current.displayName, cancellation)
@@ -256,9 +288,9 @@ internal class SafDocumentFileAccess(private val context: Context) {
         requireParent(resource.treeUri, resource.parentObjectId, cancellation, create = false)
         val current = proof(resource.treeUri, resource.parentObjectId, resource.proof.uri, cancellation)
         requireExact(resource.proof, current)
-        requireFlags(document(Uri.parse(current.uri), cancellation), DocumentsContract.Document.FLAG_SUPPORTS_DELETE)
+        requireFlags(document(current.uri.toUri(), cancellation), DocumentsContract.Document.FLAG_SUPPORTS_DELETE)
         cancellation.throwIfCanceled()
-        if (!DocumentsContract.deleteDocument(resolver, Uri.parse(current.uri))) fail(FileOperationIssue.RECOVERY_REQUIRED)
+        if (!DocumentsContract.deleteDocument(resolver, current.uri.toUri())) fail(FileOperationIssue.RECOVERY_REQUIRED)
         // API 成功回应不证明实际删除，也不能授权删除另一同名对象。
         if (!absent(resource.treeUri, resource.parentObjectId, current.objectId, cancellation)) fail(FileOperationIssue.RECOVERY_REQUIRED)
     }

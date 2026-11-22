@@ -178,7 +178,8 @@ internal fun syncBackupDirectory(directory: File) {
 /** New private output stops before consuming the same reserve used by other local imports. */
 internal fun requireBackupSpace(directory: File, incomingBytes: Long) {
     if (incomingBytes < 0L) throw BackupException(BackupIssue.INVALID_INPUT)
-    val available = directory.usableSpace
+    // Count currently writable filesystem bytes; cache reclamation does not enlarge this budget.
+    val available = Files.getFileStore(directory.toPath()).usableSpace
     if (available <= 0L) throw BackupException(BackupIssue.IO)
     if (available < BackupLimits.FREE_RESERVE_BYTES || incomingBytes > available - BackupLimits.FREE_RESERVE_BYTES) {
         throw BackupException(BackupIssue.STORAGE_FULL)

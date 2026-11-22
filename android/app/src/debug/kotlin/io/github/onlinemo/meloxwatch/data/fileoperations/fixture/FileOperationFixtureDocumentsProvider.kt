@@ -41,6 +41,9 @@ class FileOperationFixtureDocumentsProvider : DocumentsProvider() {
 
     override fun isChildDocument(parentDocumentId: String, documentId: String): Boolean = tree().isChild(parentDocumentId, documentId)
 
+    override fun findDocumentPath(parentDocumentId: String?, childDocumentId: String): DocumentsContract.Path =
+        tree().documentPath(parentDocumentId, childDocumentId)
+
     override fun openDocument(documentId: String, mode: String, signal: CancellationSignal?): ParcelFileDescriptor =
         tree().open(documentId, mode, signal)
 
@@ -131,6 +134,20 @@ class FixtureDocumentTree(val root: File) : AutoCloseable {
             parent = documents[parent]?.parentId
         }
         false
+    }
+
+    fun documentPath(parentId: String?, id: String): DocumentsContract.Path = synchronized(lock) {
+        requireReadable()
+        val path = ArrayList<String>()
+        val visited = HashSet<String>()
+        var current = requireDocument(id)
+        while (true) {
+            if (!visited.add(current.id)) throw FileNotFoundException("Fixture ancestry is cyclic")
+            path += current.id
+            if (current.id == parentId || current.parentId == null && parentId == null) break
+            current = requireDocument(current.parentId ?: throw FileNotFoundException("Fixture is outside the selected tree"))
+        }
+        DocumentsContract.Path(null, path.asReversed())
     }
 
     fun query(ids: List<String>, projection: Array<out String>?): Cursor = synchronized(lock) {

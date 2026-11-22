@@ -6,6 +6,8 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
+import androidx.core.net.toUri
+import android.os.Build
 import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import android.os.ParcelFileDescriptor
@@ -125,7 +127,7 @@ internal class LocalArtifactDocuments internal constructor(
                 requireReadableFile(document)
                 if (document.displayName != planned.partName || document.sizeBytes != 0L ||
                     (document.flags and DOCUMENT_WRITE_FLAGS) != DOCUMENT_WRITE_FLAGS ||
-                    !DocumentsContract.isChildDocument(resolver, parent, created)) {
+                    !isOutputChild(destination.uri, created, document, signal)) {
                     throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
                 }
                 val descriptor = openDescriptor(created, "rw", signal)
@@ -305,11 +307,10 @@ internal class LocalArtifactDocuments internal constructor(
     }
 
     private fun verifyDocumentBytes(tree: Uri, uri: Uri, pending: PendingDocument, signal: CancellationSignal, finalName: Boolean) {
-        val parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
         val metadata = readDocument(uri, signal) ?: throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
         requireReadableFile(metadata)
         if (metadata.displayName != (if (finalName) pending.finalName else pending.partName) || metadata.sizeBytes != pending.receipt.bytes ||
-            !DocumentsContract.isChildDocument(resolver, parent, uri)) throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
+            !isOutputChild(tree, uri, metadata, signal)) throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
         openDescriptor(uri, "r", signal).let { descriptor ->
             ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
                 val identity = checkNotNull(pending.identity)
@@ -389,6 +390,20 @@ internal class LocalArtifactDocuments internal constructor(
             return result
         }
         throw LocalArtifactException(LocalArtifactIssue.IO)
+    }
+
+    /** Exports stay in the selected directory; the older-SDK proof uses its actual child cursor. */
+    private fun isOutputChild(tree: Uri, uri: Uri, metadata: DocumentMetadata, signal: CancellationSignal): Boolean {
+        signal.throwIfCanceled()
+        if (uri.authority != tree.authority || DocumentsContract.getDocumentId(uri) != metadata.id) return false
+        val contained = if (Build.VERSION.SDK_INT >= 29) {
+            val parent = DocumentsContract.buildDocumentUriUsingTree(tree, DocumentsContract.getTreeDocumentId(tree))
+            DocumentsContract.isChildDocument(resolver, parent, uri)
+        } else {
+            findChild(tree, metadata.displayName, signal)?.id == metadata.id
+        }
+        signal.throwIfCanceled()
+        return contained
     }
 
     private fun findChild(tree: Uri, name: String, signal: CancellationSignal): DocumentMetadata? {
@@ -523,11 +538,11 @@ private class DocumentOutputJournal(val directory: ArtifactPrivateDirectory) {
             if (input.readInt() != JOURNAL_MAGIC || input.readInt() != 1) throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
             val kind = LocalArtifactKind.entries.getOrNull(input.readInt()) ?: throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
             val phase = DocumentPhase.entries.getOrNull(input.readInt()) ?: throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
-            val tree = Uri.parse(input.text(LocalInputLimits.URI_CHARACTERS))
+            val tree = (input.text(LocalInputLimits.URI_CHARACTERS)).toUri()
             val partName = input.text(128)
             val finalName = input.text(128)
             val receipt = LocalArtifactReceipt(input.text(36), input.text(64), input.readLong())
-            val uri = if (input.canonicalBoolean()) Uri.parse(input.text(LocalInputLimits.URI_CHARACTERS)) else null
+            val uri = if (input.canonicalBoolean()) (input.text(LocalInputLimits.URI_CHARACTERS)).toUri() else null
             val identity = if (input.canonicalBoolean()) DocumentFileIdentity(input.readLong(), input.readLong()) else null
             if (input.read() != -1) throw LocalArtifactException(LocalArtifactIssue.OUTPUT_CLEANUP_REQUIRED)
             requireUri(tree)

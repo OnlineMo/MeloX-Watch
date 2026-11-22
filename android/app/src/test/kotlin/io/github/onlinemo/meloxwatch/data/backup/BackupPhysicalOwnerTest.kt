@@ -185,7 +185,7 @@ class BackupPhysicalOwnerTest {
         val scope = CoroutineScope(SupervisorJob() + caller)
         val operation = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             try {
-                openBackupPhysicalOwner(io, onCloseFailure = { owner, _ -> pending.set(owner) }) { _, _ ->
+                openBackupPhysicalOwner<AutoCloseable>(io, onCloseFailure = { owner, _ -> pending.set(owner) }) { _, _ ->
                     val journal = BackupRestoreJournal.open(root)
                     AutoCloseable {
                         if (failFirstClose.getAndSet(false)) throw closingFailure
