@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="queue_loading">正在读取队列…</string>
+    <string name="queue_previous_data">上次加载的队列页</string>
+    <string name="queue_reload">重载队列</string>
+    <string name="queue_page_range">第 %1$d–%2$d 项，共 %3$d 项</string>
+    <string name="queue_saved_position">保存的当前项：第 %1$d 项，共 %2$d 项</string>
+    <string name="queue_saved_modes">保存的播放模式</string>
+    <string name="queue_order">顺序：%1$s</string>
+    <string name="queue_order_shuffle">随机顺序</string>
+    <string name="queue_order_sequence">原始顺序</string>
+    <string name="queue_repeat">循环：%1$s</string>
+    <string name="queue_repeat_off">关闭</string>
+    <string name="queue_repeat_list">完整队列</string>
+    <string name="queue_repeat_single">当前项</string>
+    <string name="queue_repeat_limit_off">保存的重复次数限制：关闭</string>
+    <string name="queue_empty">队列为空。选择音频文件或歌曲开始播放。</string>
+    <string name="queue_selection_hint">点选队列项会从头播放该实例。</string>
+    <string name="queue_command_pending">正在等待播放命令完成…</string>
+    <string name="queue_previous_page">上一页</string>
+    <string name="queue_next_page">下一页</string>
+    <string name="queue_unnamed_entry">未命名音频</string>
+    <string name="queue_instance_order">队列第 %1$d 项</string>
+    <string name="queue_current_entry">当前播放项</string>
+    <string name="queue_saved_current_entry">保存的当前项</string>
+    <string name="queue_duration">时长：%1$s</string>
+    <string name="queue_missing_location">没有保存的文件位置，暂时无法播放此项。</string>
+    <string name="queue_source_placeholder">该来源暂时无法在此播放，队列项仍保留。</string>
+    <string name="queue_access_temporary">临时文件授权，之后可能需要重新授权。</string>
+    <string name="queue_access_persisted">已保存文件授权，播放时会检查是否仍可访问。</string>
+    <string name="queue_access_media_permission">需要设备的音频读取权限。</string>
+    <string name="queue_access_not_persisted">文件提供方未保留授权，播放时会检查当前权限。</string>
+    <string name="queue_failure_conflict">加载期间队列已改变，请重载后再选择当前队列中的项目。</string>
+    <string name="queue_failure_storage_full">存储空间已满，请释放一些空间后重载队列。</string>
+    <string name="queue_failure_storage_unavailable">队列暂时无法读取，请检查设备存储后重载。</string>
+    <string name="queue_failure_recovery">无法核验保存的队列，队列仍保留，请重载重试。</string>
+    <string name="queue_failure_read">无法读取此队列页，请重载重试。</string>
+    <plurals name="queue_entry_count">
+        <item quantity="other">%1$d 个队列项</item>
+    </plurals>
+    <plurals name="queue_repeat_limit">
+        <item quantity="other">保存的限制：每项完整播放 %1$d 次</item>
+    </plurals>
+    <plurals name="queue_completed_cycles">
+        <item quantity="other">当前项已记录完整播放 %1$d 次</item>
+    </plurals>
+</resources>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playback_queue">Queue</string>
+    <string name="playback_settings">Settings</string>
+    <string name="playback_replace_with_selection">Replace queue with this file and play</string>
+    <string name="playback_preparing_queue">Preparing the complete queue. Current playback is kept until preparation succeeds.</string>
+    <string name="playback_cancel_prepare">Cancel preparation and pause</string>
+    <string name="playback_previous">Previous track</string>
+    <string name="playback_next">Next track</string>
+    <string name="playback_reload_queue">Reload saved queue, paused</string>
+    <string name="playback_queue_busy">Another queue change is still in progress. Try again when it finishes.</string>
+    <string name="playback_queue_conflict">The queue changed before this action completed. Reload it and select again.</string>
+    <string name="playback_queue_not_ready">The saved queue is still loading. Playback waits for it to be ready.</string>
+    <string name="playback_queue_closed">The playback service has stopped. Reconnect before trying again.</string>
+    <string name="playback_storage_full">There is not enough space to save this change. The previous complete queue is kept.</string>
+    <string name="playback_storage_unavailable">Queue storage is unavailable. The last confirmed queue is kept; this change is not confirmed as saved.</string>
+    <string name="playback_recovery_required">The saved queue needs recovery or a compatible app version. Its storage is kept.</string>
+    <string name="playback_source_unsupported">This queue item needs a playback source that is not available here yet. The item is kept.</string>
+    <string name="playback_location_missing">This item has no readable file location. Select its file again; the queue is kept.</string>
+    <string name="playback_permission_denied">File access was denied or revoked. Grant access again before retrying.</string>
+    <string name="playback_file_missing">The file could not be found. Select it again; the queue is kept.</string>
+    <string name="playback_source_damaged">The audio is damaged or cannot be decoded. The queue is kept; choose another track or retry.</string>
+    <string name="playback_source_unavailable">This audio source is unavailable. The queue is kept; choose another track or retry.</string>
+    <string name="playback_output_error">Audio output failed. Check the current audio route before retrying.</string>
+</resources>
