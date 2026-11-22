@@ -52,7 +52,9 @@ class FileOperationFixtureDocumentsProvider : DocumentsProvider() {
     override fun moveDocument(sourceDocumentId: String, sourceParentDocumentId: String, targetParentDocumentId: String): String =
         tree().move(sourceDocumentId, sourceParentDocumentId, targetParentDocumentId)
 
-    override fun deleteDocument(documentId: String) = tree().delete(documentId)
+    override fun deleteDocument(documentId: String) {
+        tree().delete(documentId)
+    }
 }
 
 internal object FileOperationFixtureRegistry {

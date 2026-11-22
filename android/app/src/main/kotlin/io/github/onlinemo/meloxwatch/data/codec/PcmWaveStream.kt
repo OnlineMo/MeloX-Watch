@@ -43,7 +43,7 @@ internal class PcmWaveStream(private val decoder: PcmFrameDecoder) : AutoCloseab
             pendingStart = 0
             pendingEnd = frames * format.pcm.frameBytes
         }
-        val read = minOf(count, pendingEnd - pendingStart, (length - position).coerceAtMost(Int.MAX_VALUE).toInt())
+        val read = minOf(count, pendingEnd - pendingStart, (length - position).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
         codecRequire(read > 0)
         pending.copyInto(bytes, offset, pendingStart, pendingStart + read)
         pendingStart += read

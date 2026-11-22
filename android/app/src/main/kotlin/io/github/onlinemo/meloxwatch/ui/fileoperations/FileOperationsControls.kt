@@ -14,7 +14,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.fileoperations.AudioTagField
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileItemPhase
@@ -31,10 +30,11 @@ import io.github.onlinemo.meloxwatch.ui.watch.WatchActionRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchChoiceRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchSwitchRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchText
+import io.github.onlinemo.meloxwatch.ui.watch.rememberWatchViewModel
 
 /** Activity 管理可见性；滚动导致 lazy 行摘除时不丢弃选择。 */
 @Composable
-fun FileOperationsControls(viewId: String?, model: FileOperationsViewModel = viewModel()) {
+fun FileOperationsControls(viewId: String?, model: FileOperationsViewModel = rememberWatchViewModel(FileOperationsViewModel::class.java)) {
     val state by model.state.collectAsStateWithLifecycle()
     var expanded by remember { mutableStateOf(false) }
     val idle = !state.working
@@ -161,14 +161,14 @@ fun FileOperationsControls(viewId: String?, model: FileOperationsViewModel = vie
 }
 
 @Composable
-fun FileSelectionTrackChoice(track: LibraryTrack, model: FileOperationsViewModel = viewModel()) {
+fun FileSelectionTrackChoice(track: LibraryTrack, model: FileOperationsViewModel = rememberWatchViewModel(FileOperationsViewModel::class.java)) {
     val state by model.state.collectAsStateWithLifecycle()
     if (state.draft != null) WatchSwitchRow(stringResource(R.string.file_select_track, track.title), track.trackKey in state.visibleSelected,
         !state.working, { model.toggle(track.trackKey) })
 }
 
 @Composable
-fun FileTrackActions(track: LibraryTrack, revision: Long, model: FileOperationsViewModel = viewModel()) {
+fun FileTrackActions(track: LibraryTrack, revision: Long, model: FileOperationsViewModel = rememberWatchViewModel(FileOperationsViewModel::class.java)) {
     val state by model.state.collectAsStateWithLifecycle()
     val idle = !state.working && state.draft == null
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

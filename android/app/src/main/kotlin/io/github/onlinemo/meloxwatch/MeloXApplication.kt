@@ -208,7 +208,7 @@ class MeloXApplication : Application() {
     val listening by lazy { RoomListeningRepository(library) }
     val localProviderIo by lazy { LocalProviderIo() }
     internal val filePlaybackHost by lazy { FileOperationPlaybackHost() }
-    val fileOperations by lazy {
+    val fileOperations: FileOperationsRuntime by lazy {
         FileOperationsRuntime(this, library, roomQueues, localProviderIo, filePlaybackHost,
             cancelScan = { scanId -> if (scansOwner.isInitialized()) scans.cancelAndAwait(scanId) },
             validateRead = localSources::validateRead,

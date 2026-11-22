@@ -11,16 +11,16 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewmodel.compose.viewModel
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
 import io.github.onlinemo.meloxwatch.data.storage.StorageIssue
 import io.github.onlinemo.meloxwatch.ui.watch.WatchActionRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchText
+import io.github.onlinemo.meloxwatch.ui.watch.rememberWatchViewModel
 import java.util.Locale
 
 @Composable
-fun StorageControls(model: StorageViewModel = viewModel()) {
+fun StorageControls(model: StorageViewModel = rememberWatchViewModel(StorageViewModel::class.java)) {
     val state by model.state.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(model, lifecycle) {

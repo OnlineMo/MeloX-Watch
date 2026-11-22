@@ -25,7 +25,7 @@ class BackupResourceProvider : ContentProvider() {
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor {
         requireInternalCaller()
         if (mode != "r") throw SecurityException("Backup resources are read-only")
-        val resource = BackupResourceSession.resolve(requireContext(), uri)
+        val resource = BackupResourceSession.resolve(requireProviderContext(), uri)
         val descriptor = Os.open(resource.file.absolutePath, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
         try {
             val facts = Os.fstat(descriptor)
@@ -37,7 +37,7 @@ class BackupResourceProvider : ContentProvider() {
     override fun openAssetFile(uri: Uri, mode: String, signal: CancellationSignal?): AssetFileDescriptor {
         requireInternalCaller()
         signal?.throwIfCanceled()
-        val resource = BackupResourceSession.resolve(requireContext(), uri)
+        val resource = BackupResourceSession.resolve(requireProviderContext(), uri)
         val descriptor = openFile(uri, mode)
         try { signal?.throwIfCanceled(); return AssetFileDescriptor(descriptor, 0L, resource.descriptor.bytes) }
         catch (failure: Throwable) { descriptor.close(); throw failure }
@@ -45,7 +45,7 @@ class BackupResourceProvider : ContentProvider() {
 
     override fun getType(uri: Uri): String {
         requireInternalCaller()
-        return when (BackupResourceSession.resolve(requireContext(), uri).descriptor.kind) {
+        return when (BackupResourceSession.resolve(requireProviderContext(), uri).descriptor.kind) {
             BackupResourceKind.LYRICS -> "text/plain"
             BackupResourceKind.FONT -> "font/sfnt"
             BackupResourceKind.IMAGE -> "application/octet-stream"
@@ -55,7 +55,7 @@ class BackupResourceProvider : ContentProvider() {
 
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor {
         requireInternalCaller()
-        val resource = BackupResourceSession.resolve(requireContext(), uri)
+        val resource = BackupResourceSession.resolve(requireProviderContext(), uri)
         val columns = projection ?: arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)
         return MatrixCursor(columns, 1).apply { addRow(columns.map { column -> when (column) {
             OpenableColumns.DISPLAY_NAME -> "resource.bin"
@@ -67,7 +67,7 @@ class BackupResourceProvider : ContentProvider() {
     override fun insert(uri: Uri, values: ContentValues?): Uri = throw UnsupportedOperationException("Read-only provider")
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = throw UnsupportedOperationException("Read-only provider")
     override fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<out String>?): Int = throw UnsupportedOperationException("Read-only provider")
-    private fun requireContext(): Context = context ?: throw FileNotFoundException("Provider unavailable")
+    private fun requireProviderContext(): Context = context ?: throw FileNotFoundException("Provider unavailable")
     private fun requireInternalCaller() { if (Binder.getCallingUid() != Process.myUid()) throw SecurityException("Internal resource access only") }
 }
 

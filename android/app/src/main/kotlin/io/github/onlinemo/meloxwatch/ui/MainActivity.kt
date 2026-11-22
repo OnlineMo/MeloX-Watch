@@ -88,6 +88,7 @@ import io.github.onlinemo.meloxwatch.data.ProbeAccess
 import io.github.onlinemo.meloxwatch.data.ProbeDocument
 import io.github.onlinemo.meloxwatch.data.ProbeFileIssue
 import io.github.onlinemo.meloxwatch.data.ProbeFiles
+import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrack
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.data.themes.BackgroundRoundClip
@@ -144,6 +145,7 @@ import io.github.onlinemo.meloxwatch.ui.watch.WatchNowPlayingPage
 import io.github.onlinemo.meloxwatch.ui.watch.WatchPlaybackPages
 import io.github.onlinemo.meloxwatch.ui.watch.WatchProgressBar
 import io.github.onlinemo.meloxwatch.ui.watch.WatchWindowRuntime
+import io.github.onlinemo.meloxwatch.ui.watch.WatchText
 import io.github.onlinemo.meloxwatch.ui.themes.AppearanceViewModel
 import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchAppearance
 import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchThemeColors
@@ -840,7 +842,7 @@ private fun ProbeApp(
         openSources = openLibrarySources,
         openAppearance = { viewModel.showPage(ProbePage.APPEARANCE) },
         retryStorage = backupViewModel::retryStorage)
-    val back = {
+    val back: () -> Unit = {
         when {
             state.page == ProbePage.BACKUP && backup.targetPickerPending -> {
                 backupViewModel.pendingRelinkTargetRequest?.let { backupViewModel.relinkTargetPicked(it, null) }

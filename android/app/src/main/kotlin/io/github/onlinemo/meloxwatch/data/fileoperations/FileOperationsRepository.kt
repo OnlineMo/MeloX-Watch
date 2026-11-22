@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.fileoperations
 import android.os.CancellationSignal
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
+import io.github.onlinemo.meloxwatch.data.library.LibrarySourceState
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
@@ -329,9 +330,9 @@ class FileOperationsRepository(
                 }
                 stopScans(original.operationId)
                 if (original.command.kind == FileOperationKind.REMOVE_SOURCE) {
-                    visit(original.operationId) { if (it.phase == FileItemPhase.REQUESTED) worker { journal.updateItem(it.copy(phase = FileItemPhase.APPLYING)) } }
+                    visit(original.operationId) { item -> if (item.phase == FileItemPhase.REQUESTED) worker { journal.updateItem(item.copy(phase = FileItemPhase.APPLYING)) } }
                     library.removeSource(checkNotNull(original.command.removedSourceId), checkNotNull(original.command.removedSourceAuthEpoch))
-                    visit(original.operationId) { worker { journal.updateItem(it.copy(phase = FileItemPhase.INDEX_RECONCILED)) } }
+                    visit(original.operationId) { item -> worker { journal.updateItem(item.copy(phase = FileItemPhase.INDEX_RECONCILED)) } }
                 } else visit(original.operationId) { item -> if (item.phase == FileItemPhase.REQUESTED) reconcileIndex(item, original.command) }
                 finish(original.operationId, cancelled = false)
             } catch (failure: CancellationException) {
@@ -537,8 +538,8 @@ class FileOperationsRepository(
             val source = library.source(checkNotNull(record.command.removedSourceId))
             visit(record.operationId) { item ->
                 if (item.phase in setOf(FileItemPhase.APPLYING, FileItemPhase.NEEDS_RECOVERY) ||
-                    source.state == io.github.onlinemo.meloxwatch.data.library.LibrarySourceState.REMOVED && item.phase == FileItemPhase.REQUESTED) {
-                    val removed = source.state == io.github.onlinemo.meloxwatch.data.library.LibrarySourceState.REMOVED
+                    source.state == LibrarySourceState.REMOVED && item.phase == FileItemPhase.REQUESTED) {
+                    val removed = source.state == LibrarySourceState.REMOVED
                     worker {
                         journal.updateItem(item.copy(phase = if (removed) FileItemPhase.INDEX_RECONCILED else FileItemPhase.CANCELLED,
                             issue = if (removed) null else item.issue ?: FileOperationIssue.CANCELLED))
@@ -584,8 +585,8 @@ class FileOperationsRepository(
         worker { journal.updateItem(current.copy(phase = phase, issue = issue)) }
     }
 
-    private suspend fun cancelRemaining(operationId: String) { visit(operationId) { if (it.phase == FileItemPhase.REQUESTED)
-        worker { journal.updateItem(it.copy(phase = FileItemPhase.CANCELLED, issue = FileOperationIssue.CANCELLED)) } } }
+    private suspend fun cancelRemaining(operationId: String) { visit(operationId) { item -> if (item.phase == FileItemPhase.REQUESTED)
+        worker { journal.updateItem(item.copy(phase = FileItemPhase.CANCELLED, issue = FileOperationIssue.CANCELLED)) } } }
 
     private suspend fun finish(operationId: String, cancelled: Boolean) {
         val record = worker { journal.record(operationId) } ?: return
@@ -593,7 +594,7 @@ class FileOperationsRepository(
         val uncoordinated = worker { journal.hasUncoordinatedWork(operationId) }
         // 空来源也有实际移除结果；不能由零条曲目推定命令成功。
         val sourceNotRemoved = record.command.kind == FileOperationKind.REMOVE_SOURCE &&
-            library.source(checkNotNull(record.command.removedSourceId)).state != io.github.onlinemo.meloxwatch.data.library.LibrarySourceState.REMOVED
+            library.source(checkNotNull(record.command.removedSourceId)).state != LibrarySourceState.REMOVED
         val phase = when {
             uncoordinated || counts.needsRecovery > 0L -> FileOperationPhase.NEEDS_RECOVERY
             counts.waitingSourceDeletion > 0L && !record.sourceDeletionConfirmed && !cancelled -> FileOperationPhase.WAITING_SOURCE_CONFIRMATION
