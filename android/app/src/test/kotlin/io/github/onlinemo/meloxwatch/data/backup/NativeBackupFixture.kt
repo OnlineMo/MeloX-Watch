@@ -45,7 +45,7 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
         override fun getNoBackupFilesDir(): File = File(root, "no-backup").apply { mkdirs() }
         override fun getFilesDir(): File = File(root, "files").apply { mkdirs() }
         override fun getCacheDir(): File = File(root, "cache").apply { mkdirs() }
-        override fun getDatabasePath(name: String): File = File(root, "databases/$name").apply { parentFile.mkdirs() }
+        override fun getDatabasePath(name: String): File = File(root, "databases/$name").apply { checkNotNull(parentFile).mkdirs() }
     }
     val context: Context = PrivateContext(base, root)
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -67,7 +67,7 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
         validateRead = sources::validateRead, requireFileMutationReady = barrier::requireReadyForFileMutation,
         progressScope = progressScope)
     private fun store(name: String) = PreferenceDataStoreFactory.create(scope = scope) {
-        File(root, "preferences/$name.preferences_pb").apply { parentFile.mkdirs() }
+        File(root, "preferences/$name.preferences_pb").apply { checkNotNull(parentFile).mkdirs() }
     }
     val preferences = DataStoreUserPreferencesRepository(store("player"), scope, barrier)
     val appearance = DataStoreAppearancePreferencesStore(store("appearance"), barrier)

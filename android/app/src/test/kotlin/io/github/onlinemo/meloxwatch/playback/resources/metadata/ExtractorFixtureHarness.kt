@@ -16,6 +16,7 @@ import androidx.media3.extractor.mp3.Mp3Extractor
 import androidx.media3.extractor.mp4.FragmentedMp4Extractor
 import androidx.media3.extractor.mp4.Mp4Extractor
 import androidx.media3.extractor.ogg.OggExtractor
+import androidx.media3.extractor.text.SubtitleParser
 import androidx.media3.extractor.ts.AdtsExtractor
 import androidx.media3.extractor.wav.WavExtractor
 import java.io.ByteArrayOutputStream
@@ -94,8 +95,9 @@ internal class ExtractorFixtureHarness(
             GuardedContainer.MP3 -> Mp3Extractor()
             GuardedContainer.FLAC -> FlacExtractor()
             GuardedContainer.OGG -> OggExtractor()
-            GuardedContainer.MP4 -> Mp4Extractor()
-            GuardedContainer.FRAGMENTED_MP4 -> FragmentedMp4Extractor()
+            GuardedContainer.MP4 -> Mp4Extractor(SubtitleParser.Factory.UNSUPPORTED, Mp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA)
+            GuardedContainer.FRAGMENTED_MP4 -> FragmentedMp4Extractor(SubtitleParser.Factory.UNSUPPORTED,
+                FragmentedMp4Extractor.FLAG_EMIT_RAW_SUBTITLE_DATA)
             GuardedContainer.WAVE -> WavExtractor()
             GuardedContainer.ADTS -> AdtsExtractor()
         }
