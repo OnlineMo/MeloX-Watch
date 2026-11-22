@@ -21,7 +21,7 @@ data class AudioTextTags(
 
 /** Bounded ID3v2.3/v2.4 and FLAC/Vorbis text. Unknown formats remain native-reader inputs. */
 object AudioTagReader {
-    const val PARSER_VERSION = 1
+    const val PARSER_VERSION = 2
     const val MAX_TEXT_BYTES = 1024 * 1024
     const val MAX_PICTURE_BYTES = 16 * 1024 * 1024
     private const val MAX_TAG_SPAN = 32 * 1024 * 1024

@@ -1069,6 +1069,7 @@ class RoomLocalLibraryRepository(
             filename = filename, displayTitle = title, title = metadata.title, artist = metadata.artist, artists = LibraryCodec.strings(metadata.artists),
             album = metadata.album, albumArtist = metadata.albumArtist, durationMs = metadata.durationMs, discNumber = metadata.discNumber,
             trackNumber = metadata.trackNumber, compilation = metadata.compilation, mimeType = metadata.mimeType, parserVersion = metadata.parserVersion,
+            codecParameters = metadata.codecParameters?.let(LocalCodecParametersCodec::encode),
             metadataIssue = issue, titleKey = LibrarySortKeys.text(title), artistKey = LibrarySortKeys.text(primaryArtist), albumSortKey = LibrarySortKeys.text(metadata.album),
             filenameKey = LibrarySortKeys.natural(filename), albumKey = LibrarySortKeys.album(metadata.copy(artists = artists)),
             searchText = LibrarySortKeys.normalize(listOfNotNull(title, metadata.artist, artists.joinToString(" "), metadata.album, filename).joinToString("\n")),

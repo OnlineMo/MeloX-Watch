@@ -233,7 +233,7 @@ class TransferRoomMigrationTest {
         assertEquals(before.catalog, query(oldCatalog(before.tables), block = ::statementCells))
         for ((table, rows) in before.rows) assertEquals(table, rows, query(select(table), block = ::statementCells))
     }
-    private suspend fun assertTransferredRows(database: MeloXDatabase, before: Before) {
+    private suspend fun assertTransferredRows(database: HistoricalMeloXV6Database, before: Before) {
         assertEquals(before.audioRows.map(::operationCells), database.withTestWriterSql { query(transferRows, block = ::statementCells) })
         for (original in before.audioRows) {
             val migrated = checkNotNull(database.transferredImportDao().transferredImportRecord(original.operationId))
@@ -274,8 +274,8 @@ class TransferRoomMigrationTest {
             }
         } finally { historical.close() }
     }
-    private fun open(file: File, last: Migration = MeloXDatabase.MIGRATION_5_6): MeloXDatabase = Room.databaseBuilder(
-        context, MeloXDatabase::class.java, file.absolutePath,
+    private fun open(file: File, last: Migration = MeloXDatabase.MIGRATION_5_6): HistoricalMeloXV6Database = Room.databaseBuilder(
+        context, HistoricalMeloXV6Database::class.java, file.absolutePath,
     ).setDriver(BundledSQLiteDriver()).addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3,
         MeloXDatabase.MIGRATION_3_4, MeloXDatabase.MIGRATION_4_5, last).build()
     private fun supportOpen(file: File, fail: Boolean): SupportSQLiteOpenHelper {

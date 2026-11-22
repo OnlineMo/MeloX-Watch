@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.local
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.os.CancellationSignal
+import io.github.onlinemo.meloxwatch.data.codec.LocalCodecMetadata
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import java.io.EOFException
 import java.io.File
@@ -27,37 +28,42 @@ class LocalMetadataReader(
         val uri = AndroidLocalSources.contentUri(candidate.uri)
         context.contentResolver.openAssetFileDescriptor(uri, "r", signal)?.use { descriptor ->
             descriptor.createInputStream().use { stream ->
-                val tags = readTags(stream, signal)
-                val retriever = MediaMetadataRetriever()
-                try {
-                    if (descriptor.declaredLength >= 0) {
-                        retriever.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.declaredLength)
-                    } else if (descriptor.startOffset == 0L) {
-                        retriever.setDataSource(descriptor.fileDescriptor)
-                    } else {
-                        throw SourceReadException(SourceReadIssue.UNSUPPORTED_FORMAT)
-                    }
-                    extract(retriever, tags, signal)
-                } catch (error: IllegalArgumentException) {
-                    throw SourceReadException(SourceReadIssue.UNSUPPORTED_FORMAT, error)
-                } catch (error: OutOfMemoryError) {
-                    throw SourceReadException(SourceReadIssue.METADATA_UNREADABLE, error)
-                } finally { retriever.release() }
+                LocalCodecMetadata.read(stream, descriptor.startOffset, descriptor.declaredLength, signal) { nativeInput ->
+                    val tags = readTags(nativeInput, signal)
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        if (descriptor.declaredLength >= 0) {
+                            retriever.setDataSource(descriptor.fileDescriptor, descriptor.startOffset, descriptor.declaredLength)
+                        } else if (descriptor.startOffset == 0L) {
+                            retriever.setDataSource(descriptor.fileDescriptor)
+                        } else {
+                            throw SourceReadException(SourceReadIssue.UNSUPPORTED_FORMAT)
+                        }
+                        extract(retriever, tags, signal)
+                    } catch (error: IllegalArgumentException) {
+                        throw SourceReadException(SourceReadIssue.UNSUPPORTED_FORMAT, error)
+                    } catch (error: OutOfMemoryError) {
+                        throw SourceReadException(SourceReadIssue.METADATA_UNREADABLE, error)
+                    } finally { retriever.release() }
+                }
             }
         } ?: throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
     }
 
     /** Import validation uses a private staging file; it never publishes a staging content URI. */
-    internal fun readPrivateFile(file: File, signal: CancellationSignal): LocalAudioMetadata {
-        val tags = FileInputStream(file).use { readTags(it, signal) }
-        val retriever = MediaMetadataRetriever()
-        try {
-            return FileInputStream(file).use { retriever.setDataSource(it.fd); extract(retriever, tags, signal) }
-        } catch (error: IllegalArgumentException) {
-            throw SourceReadException(SourceReadIssue.UNSUPPORTED_FORMAT, error)
-        } catch (error: OutOfMemoryError) {
-            throw SourceReadException(SourceReadIssue.METADATA_UNREADABLE, error)
-        } finally { retriever.release() }
+    internal fun readPrivateFile(file: File, signal: CancellationSignal): LocalAudioMetadata = try {
+        FileInputStream(file).use { stream ->
+            LocalCodecMetadata.read(stream, 0L, stream.channel.size(), signal) { nativeInput ->
+                val tags = readTags(nativeInput, signal)
+                val retriever = MediaMetadataRetriever()
+                try { retriever.setDataSource(stream.fd); extract(retriever, tags, signal) }
+                finally { retriever.release() }
+            }
+        }
+    } catch (error: IllegalArgumentException) {
+        throw SourceReadException(SourceReadIssue.UNSUPPORTED_FORMAT, error)
+    } catch (error: OutOfMemoryError) {
+        throw SourceReadException(SourceReadIssue.METADATA_UNREADABLE, error)
     }
 
     private fun readTags(input: java.io.InputStream, signal: CancellationSignal): AudioTextTags = try {

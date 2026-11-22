@@ -11,8 +11,6 @@ import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.library.LibraryAbsenceEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryAliasVersionEntity
-import io.github.onlinemo.meloxwatch.data.library.LibraryArtistEntity
-import io.github.onlinemo.meloxwatch.data.library.LibraryDao
 import io.github.onlinemo.meloxwatch.data.library.LibraryFrontierEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryGrantEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryImportEntity
@@ -32,7 +30,6 @@ import io.github.onlinemo.meloxwatch.data.library.LibrarySourceEntity
 import io.github.onlinemo.meloxwatch.data.library.LibrarySourceVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackLocationEntity
-import io.github.onlinemo.meloxwatch.data.library.LibraryTrackVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryViewEntity
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDao
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsMigrations
@@ -72,7 +69,7 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueMigrations
         QueueGenerationEntity::class, QueueEntryEntity::class, QueueHeadEntity::class,
         LibraryMetaEntity::class, LibrarySourceEntity::class, LibraryGrantEntity::class, LibrarySourceVersionEntity::class,
         LibraryLocationEntity::class, LibraryLocationVersionEntity::class, LibraryTrackEntity::class,
-        LibraryTrackLocationEntity::class, LibraryTrackVersionEntity::class, LibraryArtistEntity::class,
+        LibraryTrackLocationEntity::class, HistoricalTrackVersionEntity::class, HistoricalArtistEntity::class,
         LibraryNodeEntity::class, LibraryNodeVersionEntity::class, LibraryAliasEntity::class, LibraryAliasVersionEntity::class,
         LibraryScanEntity::class, LibrarySeenEntity::class, LibraryFrontierEntity::class, LibraryAbsenceEntity::class,
         LibraryRuleEntity::class, LibraryViewEntity::class, LibraryImportEntity::class,
@@ -88,7 +85,7 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueMigrations
 )
 abstract class HistoricalMeloXV5Database : RoomDatabase() {
     abstract fun queueDao(): QueueDao
-    abstract fun libraryDao(): LibraryDao
+    abstract fun libraryDao(): HistoricalLibraryDao
     abstract fun listeningDao(): ListeningDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun playlistExchangeDao(): PlaylistExchangeDao

@@ -28,6 +28,7 @@ data class LocalAudioMetadata(
     val compilation: Boolean = false,
     val mimeType: String? = null,
     val parserVersion: Int = 1,
+    val codecParameters: LocalCodecParameters? = null,
 ) {
     init {
         require(durationMs == null || durationMs > 0L)
@@ -37,6 +38,25 @@ data class LocalAudioMetadata(
         require(artists.size <= 128)
         require(listOf(title, artist, album, albumArtist, mimeType).all { it == null || it.length <= 4096 })
         require(artists.all { it.length <= 4096 })
+    }
+}
+
+/** Observed input and converted PCM parameters; this does not declare a verified device/backend. */
+data class LocalCodecParameters(
+    val container: String,
+    val encoding: String,
+    val inputSampleRateHz: Int,
+    val inputBitsPerSample: Int,
+    val channels: Int,
+    val pcmSampleRateHz: Int,
+    val pcmBitsPerSample: Int,
+    val version: Int? = null,
+    val compressionLevel: Int? = null,
+) {
+    init {
+        require(container.isNotBlank() && container.length <= 64 && encoding.isNotBlank() && encoding.length <= 64)
+        require(inputSampleRateHz > 0 && pcmSampleRateHz > 0 && inputBitsPerSample in 1..64 && pcmBitsPerSample in 1..64)
+        require(channels in 1..8 && (version == null || version > 0) && (compressionLevel == null || compressionLevel > 0))
     }
 }
 

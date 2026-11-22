@@ -95,7 +95,7 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
         DisplayArtistLinkEntity::class, TransferRoomOperationEntity::class, TransferDisplayPreviewEntity::class,
         TransferredThemeCandidateEntity::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
@@ -164,11 +164,21 @@ abstract class MeloXDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE local_track_versions ADD COLUMN codecParameters TEXT DEFAULT NULL")
+            }
+            override fun migrate(connection: SQLiteConnection) {
+                connection.prepare("ALTER TABLE local_track_versions ADD COLUMN codecParameters TEXT DEFAULT NULL")
+                    .use { it.step() }
+            }
+        }
+
         fun open(context: Context): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
         ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-            MIGRATION_4_5, MIGRATION_5_6).build()
+            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build()
     }
 }

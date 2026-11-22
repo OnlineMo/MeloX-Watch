@@ -673,7 +673,7 @@
       "source_scope": "范围待明确",
       "normal_acceptance": "AC-061-N",
       "error_acceptance": "AC-061-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {
@@ -684,7 +684,7 @@
       "source_scope": "范围待明确",
       "normal_acceptance": "AC-062-N",
       "error_acceptance": "AC-062-E",
-      "implementation_status": "not_started",
+      "implementation_status": "in_progress",
       "acceptance_status": "not_run"
     },
     {

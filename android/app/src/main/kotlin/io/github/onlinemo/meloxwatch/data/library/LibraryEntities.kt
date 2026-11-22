@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.library
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -181,6 +182,7 @@ data class LibraryTrackVersionEntity(
     val playCount: Long,
     val listeningMs: Long,
     val statisticsEpoch: Long = 0L,
+    @ColumnInfo(defaultValue = "NULL") val codecParameters: String? = null,
 )
 
 @Entity(

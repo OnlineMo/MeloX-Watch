@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.playback.resources
 
 import android.content.Context
 import android.media.MediaDataSource
+import android.os.PowerManager
 import android.net.Uri
 import androidx.media3.common.C
 import androidx.media3.common.util.UnstableApi
@@ -13,6 +14,9 @@ import androidx.media3.datasource.TransferListener
 import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
 import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
+import io.github.onlinemo.meloxwatch.data.codec.LocalPcmDataSources
+import io.github.onlinemo.meloxwatch.data.codec.CodecReadException
+import io.github.onlinemo.meloxwatch.data.codec.CodecReadIssue
 
 /** No backend gets a raw remote URL; both use the same app-controlled acquisition policy. */
 @UnstableApi
@@ -20,13 +24,24 @@ internal class PlaybackDataSources(
     context: Context,
     resources: RuntimePlaybackResources,
     controlledStreams: HttpsMediaStreams? = null,
+    controlledLocalRaw: DataSource.Factory? = null,
 ) : DataSource.Factory, AutoCloseable {
     private val application = context.applicationContext
     // Tests supply the same bounded transport with deterministic responses; service construction uses the production client.
     private val streams = controlledStreams ?: HttpsMediaStreams(application, resources)
-    override fun createDataSource(): DataSource = RoutedDataSource(application, streams)
+    private val power = application.getSystemService(PowerManager::class.java)
+    private val localPcm = LocalPcmDataSources(controlledLocalRaw ?: DataSource.Factory { ContentDataSource(application) },
+        powerSaveMode = { power?.isPowerSaveMode == true })
+    override fun createDataSource(): DataSource = RoutedDataSource(localPcm, streams)
     fun platform(uri: Uri, onFailure: (QueuePlaybackIssue) -> Unit): RuntimeMediaDataSource = RuntimeMediaDataSource(uri, streams, onFailure)
-    override fun close() = streams.close()
+    override fun close() {
+        var failure: Exception? = null
+        try { localPcm.close() } catch (error: Exception) { failure = error }
+        try { streams.close() } catch (error: Exception) {
+            if (failure == null) failure = error else if (failure !== error) failure.addSuppressed(error)
+        }
+        failure?.let { throw it }
+    }
 }
 
 /** The coordinator owns the refresh allowance; Loader cannot independently reopen failed media. */
@@ -36,7 +51,7 @@ internal class NoAutomaticPlaybackLoadRetry : DefaultLoadErrorHandlingPolicy(0) 
 }
 
 @UnstableApi
-private class RoutedDataSource(private val context: Context, private val streams: HttpsMediaStreams) : DataSource {
+private class RoutedDataSource(private val localPcm: LocalPcmDataSources, private val streams: HttpsMediaStreams) : DataSource {
     private val listeners = mutableListOf<TransferListener>()
     private var active: DataSource? = null
     override fun addTransferListener(transferListener: TransferListener) {
@@ -46,24 +61,35 @@ private class RoutedDataSource(private val context: Context, private val streams
     override fun open(dataSpec: DataSpec): Long {
         check(active == null)
         val source = when (dataSpec.uri.scheme) {
-            "content" -> ContentDataSource(context)
+            "content" -> localPcm.createDataSource()
             RuntimePlaybackResources.SCHEME -> RuntimeHttpDataSource(streams)
             else -> throw MediaTransportException(QueuePlaybackIssue.RESOURCE_INVALID)
         }
         active = source
         listeners.forEach(source::addTransferListener)
         return try { source.open(dataSpec) } catch (failure: Exception) {
-            close()
-            throw failure
+            try { close() } catch (cleanup: Exception) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+            throw if (failure is CodecReadException) codecFailure(failure) else failure
         }
     }
-    override fun read(buffer: ByteArray, offset: Int, length: Int): Int = checkNotNull(active).read(buffer, offset, length)
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int = try {
+        checkNotNull(active).read(buffer, offset, length)
+    } catch (failure: CodecReadException) { throw codecFailure(failure) }
+    private fun codecFailure(failure: CodecReadException): MediaTransportException {
+        val issue = when (failure.issue) {
+            CodecReadIssue.INVALID_CONTAINER -> QueuePlaybackIssue.SOURCE_DAMAGED
+            CodecReadIssue.SOURCE_CHANGED -> QueuePlaybackIssue.SOURCE_CHANGED
+            else -> QueuePlaybackIssue.SOURCE_UNSUPPORTED
+        }
+        return MediaTransportException(issue).also { it.initCause(failure) }
+    }
     override fun getUri(): Uri? = active?.uri
     override fun getResponseHeaders(): Map<String, List<String>> = active?.responseHeaders.orEmpty()
     override fun close() {
         val previous = active
-        active = null
         previous?.close()
+        // A failed provider close keeps the exact owner reachable for a subsequent close retry.
+        active = null
     }
 }
 
