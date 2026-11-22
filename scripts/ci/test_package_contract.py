@@ -58,6 +58,7 @@ def debug_test_fixture(binding=None):
 
 
 def manifest(mode='release', signing='stable', binding=None):
+    from test_apk_licenses import fixture_license_report
     binding = copy.deepcopy(BINDING if binding is None else binding)
     entries = []
     for layout in artifact_layout(mode, PLAN):
@@ -71,7 +72,8 @@ def manifest(mode='release', signing='stable', binding=None):
     _, evidence = debug_test_fixture(binding)
     return {'schema_version': 2, **binding, **copy.deepcopy(PLAN), 'mode': mode,
             'version': VERSION, 'artifacts': entries, 'test_scope': 'full-debug-once',
-            'debug_test_evidence': evidence}
+            'debug_test_evidence': evidence,
+            'license_assets': {role: fixture_license_report() for role in ('watch', 'phone')}}
 
 
 def xml(extra=False, digest='a'):

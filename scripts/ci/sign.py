@@ -8,6 +8,7 @@ import shutil
 import tempfile
 
 from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk, require_unsigned
+from apk_licenses import require_license_evidence
 from artifact_io import GitHub, fetch_artifact, verify_checksums
 from ci_common import (ROOT, expected_identity, properties, require, run_tool, sha256,
                        trusted_context, write_checksums, write_json)
@@ -104,6 +105,8 @@ def sign(mode):
         for entry in manifest['artifacts']:
             apk = ROOT / 'signing-input' / entry['file']
             require(sha256(apk) == entry['sha256'], 'Signing input changed after verification')
+            if manifest.get('schema_version') == 2 and entry['kind'] == 'application':
+                require_license_evidence(apk, entry['role'], manifest)
             run_tool([str(tools / 'zipalign'), '-P', '16', '-f', '4', str(apk), str(directory / entry['file'])])
         keystore = directory / 'signing.p12'
         keystore.write_bytes(base64.b64decode(os.environ['SIGNING_KEY_B64'], validate=True))
@@ -120,6 +123,8 @@ def sign(mode):
                          signing='stable', certificate_sha256=digest)
             if manifest.get('schema_version') == 2:
                 require(native_abis(target) == entry['abis'], 'Signing changed the APK ABI inventory')
+                if entry['kind'] == 'application':
+                    require_license_evidence(target, entry['role'], manifest)
     manifest['input_artifact'] = verified['input_artifact']
     # 默认v4会额外写.idsig旁文件；归档契约只包含声明APK、manifest及校验和。
     require({path.name for path in output.iterdir()} == {entry['file'] for entry in manifest['artifacts']},
@@ -159,6 +164,7 @@ def prepare_packages(mode, artifact_id, version, build_sha, plan):
             identity = actual
         else:
             inspect_apk(apk, tools, identity)
+            require_license_evidence(apk, entry['role'], manifest)
         require_unsigned(apk, tools)
         entry['identity'] = identity
     write_json(ROOT / 'verified-signing-input.json', {'manifest': manifest, 'input_artifact': provenance})

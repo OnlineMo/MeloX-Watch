@@ -23,7 +23,8 @@ DEPENDENCY_FILES = ('gradle/verification-metadata.xml', 'app/gradle.lockfile',
 DATABASE_SOURCE = 'android/app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/database/MeloXDatabase.kt'
 SCHEMA_DIRECTORY = 'app/schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase'
 ONLINE_DATABASE_SOURCE = 'android/app/src/main/kotlin/io/github/onlinemo/meloxwatch/data/online/cache/OnlineCatalogDatabase.kt'
-HISTORICAL_SCHEMA_VERSIONS = (1, 2, 3)
+# Schema 6 keeps its admitted bytes when the later current schema is collected.
+HISTORICAL_SCHEMA_VERSIONS = (1, 2, 3, 6)
 ROOM_DECLARATIONS = (
     (DATABASE_SOURCE, 'io.github.onlinemo.meloxwatch.data.database.MeloXDatabase', None, True),
     (ONLINE_DATABASE_SOURCE, 'io.github.onlinemo.meloxwatch.data.online.cache.OnlineCatalogDatabase', 1, True),
@@ -232,7 +233,8 @@ def input_hashes(root=ROOT):
 
 def required_inputs(root=ROOT):
     current = current_schemas(root)
-    if len(current) == 1:
+    # Later main schemas retain every admitted predecessor even without the online cache.
+    if len(current) == 1 and int(PurePosixPath(current[0]).stem) <= max(HISTORICAL_SCHEMA_VERSIONS):
         return ('gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile',
                 SCHEMA_DIRECTORY + '/1.json', current[0])
     history = {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in HISTORICAL_SCHEMA_VERSIONS}

@@ -20,8 +20,11 @@ PLAN = {'application_roles': ['watch', 'phone'], 'instrumentation_roles': ['watc
         'protocol': {'schema': 2, 'source_hashes': {name: 'd' * 64 for name in contract.PROTOCOL_FILES}}}
 OWNER = {'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch', 'GITHUB_ACTOR': 'OnlineMo',
          'GITHUB_ACTOR_ID': '143324986', 'GITHUB_TRIGGERING_ACTOR': 'OnlineMo'}
-MAIN_SCHEMA = contract.SCHEMA_DIRECTORY + '/6.json'
+HISTORY_SCHEMA_SIX = contract.SCHEMA_DIRECTORY + '/6.json'
+MAIN_SCHEMA = contract.SCHEMA_DIRECTORY + '/7.json'
 CACHE_SCHEMA = 'app/schemas/io.github.onlinemo.meloxwatch.data.online.cache.OnlineCatalogDatabase/1.json'
+ADMITTED_SIX = b'synthetic admitted schema six bytes'
+ADMITTED_SEVEN = b'synthetic admitted schema seven bytes'
 VERIFICATION = (b'<verification-metadata xmlns="https://schema.gradle.org/dependency-verification">'
                 b'<configuration><verify-metadata>true</verify-metadata><verify-signatures>false</verify-signatures>'
                 b'</configuration><components><component group="x" name="old" version="1">'
@@ -40,6 +43,25 @@ def declaration(qualified, version, exported, modifier=''):
 
 
 class MultiCurrentSchemaTests(unittest.TestCase):
+    def test_new_current_retains_admitted_schema_six_without_inventing_four_or_five(self):
+        admitted = ADMITTED_SIX
+        legacy = self.write('android/' + HISTORY_SCHEMA_SIX, admitted)
+        self.write(contract.DATABASE_SOURCE, declaration(
+            'io.github.onlinemo.meloxwatch.data.database.MeloXDatabase', 7, True))
+        current = contract.SCHEMA_DIRECTORY + '/7.json'
+        allowed = contract.allowed_schema_paths(self.root)
+        self.assertIn(HISTORY_SCHEMA_SIX, allowed)
+        self.assertIn(current, allowed)
+        self.assertEqual(contract.input_hashes(self.root)[HISTORY_SCHEMA_SIX], digest(admitted))
+        self.assertEqual(legacy.read_bytes(), admitted)
+        for version in (4, 5):
+            self.assertNotIn(contract.SCHEMA_DIRECTORY + '/' + str(version) + '.json', allowed)
+        foreign = self.write('android/' + contract.SCHEMA_DIRECTORY + '/5.json', b'unregistered bytes')
+        with self.assertRaisesRegex(ValueError, 'Unregistered or noncurrent Room schema output'):
+            contract.input_hashes(self.root)
+        self.assertEqual(legacy.read_bytes(), admitted)
+        self.assertEqual(foreign.read_bytes(), b'unregistered bytes')
+
     def setUp(self):
         parent = os.environ.get('CI_POLICY_FIXTURE_ROOT')
         self.temporary = tempfile.TemporaryDirectory(prefix='package-multischema-', dir=parent)
@@ -57,6 +79,8 @@ class MultiCurrentSchemaTests(unittest.TestCase):
         self.write('android/gradle/verification-metadata.xml', VERIFICATION)
         for relative in ('app/gradle.lockfile', 'companion/gradle.lockfile'):
             self.write('android/' + relative, b'x:old:1=debug\n')
+        self.base_inputs = {'android/' + name: (self.root / 'android' / name).read_bytes()
+                            for name in contract.input_hashes(self.root)}
 
     def tearDown(self):
         # The temporary target was resolved within its explicit parent before recursive cleanup.
@@ -68,9 +92,26 @@ class MultiCurrentSchemaTests(unittest.TestCase):
         path.write_bytes(raw)
         return path
 
-    def add_cache(self):
+    def admit_input(self, relative, raw):
+        self.write(relative, raw)
+        self.base_inputs[relative] = raw
+
+    def add_cache(self, *, main_version=7, admitted_six=True):
+        if admitted_six:
+            self.admit_input('android/' + HISTORY_SCHEMA_SIX, ADMITTED_SIX)
+        self.write(contract.DATABASE_SOURCE, declaration(
+            'io.github.onlinemo.meloxwatch.data.database.MeloXDatabase', main_version, True))
         self.write(contract.ONLINE_DATABASE_SOURCE, declaration(
             'io.github.onlinemo.meloxwatch.data.online.cache.OnlineCatalogDatabase', 1, True, 'internal '))
+
+    def base_bytes(self, root, name, revision=None, *, optional=False):
+        self.assertEqual((root, revision), (self.root, BASE))
+        if name not in self.base_inputs and not optional:
+            raise ValueError('Synthetic frozen base input is absent')
+        return self.base_inputs.get(name)
+
+    def base_hash(self, root, name, base=BASE):
+        return digest(self.base_bytes(root, name, base))
 
     def frozen(self):
         result = {name: digest(name.encode()) for name in migration.TOOLS + migration.GRAPH_FILES}
@@ -80,8 +121,8 @@ class MultiCurrentSchemaTests(unittest.TestCase):
 
     def make_request(self, **kwargs):
         with patch.object(migration, 'project_plan', return_value=copy.deepcopy(PLAN)), \
-                patch.object(migration, 'committed_hash', side_effect=lambda root, name, base=BASE:
-                             digest((self.root / name).read_bytes())), \
+                patch.object(migration, 'committed_hash', side_effect=self.base_hash), \
+                patch.object(migration, 'data_bytes', side_effect=self.base_bytes), \
                 patch.object(migration, 'source_hashes', return_value=self.frozen()), \
                 patch.object(migration, 'runtime_components', return_value={'fixture': ['x', 'y', '1']}):
             return migration.make_request(self.root, BASE, **kwargs)
@@ -96,7 +137,7 @@ class MultiCurrentSchemaTests(unittest.TestCase):
                 'overall_limit_seconds': 1800, 'deadline_monotonic_seconds': 1800,
                 'started_monotonic_seconds': 0}
 
-    def acquire(self, state):
+    def acquire(self, state, *, change_history_six=False):
         outputs = {name: ('synthetic current schema ' + name).encode()
                    for name in migration.request_collected_schemas(state['collection']['request'])}
 
@@ -104,6 +145,8 @@ class MultiCurrentSchemaTests(unittest.TestCase):
             self.assertFalse(any(':test' in name or ':assemble' in name or ':package' in name for name in command))
             for name, raw in outputs.items():
                 self.write('android/' + name, raw)
+            if change_history_six:
+                self.write('android/' + HISTORY_SCHEMA_SIX, b'synthetic changed historical six')
             self.write(migration.REPORT + '/acquisition.json', b'{}\n')
 
         legacy = SimpleNamespace(gradle_environment=lambda **kwargs: {}, gradle_command=lambda tasks: tasks,
@@ -117,13 +160,94 @@ class MultiCurrentSchemaTests(unittest.TestCase):
     def test_single_current_preserves_v3_names_and_required_tuple(self):
         request = self.make_request()
         self.assertEqual(request['schema_version'], 3)
-        self.assertEqual((request['current_schema'], request['schema_to_collect']), (MAIN_SCHEMA, MAIN_SCHEMA))
+        self.assertEqual((request['current_schema'], request['schema_to_collect']),
+                         (HISTORY_SCHEMA_SIX, HISTORY_SCHEMA_SIX))
         self.assertFalse({'current_schemas', 'schemas_to_collect'} & set(request))
-        self.assertEqual(contract.current_schemas(self.root), [MAIN_SCHEMA])
+        self.assertEqual(contract.current_schemas(self.root), [HISTORY_SCHEMA_SIX])
+        self.assertNotIn('android/' + HISTORY_SCHEMA_SIX, self.base_inputs)
         self.assertEqual(contract.required_inputs(self.root),
                          ('gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile',
-                          contract.SCHEMA_DIRECTORY + '/1.json', MAIN_SCHEMA))
-        self.assertEqual(migration.schema_export_name(request, 'acquire', MAIN_SCHEMA), 'schema-exports/acquire/6.json')
+                          contract.SCHEMA_DIRECTORY + '/1.json', HISTORY_SCHEMA_SIX))
+        self.assertEqual(migration.schema_export_name(request, 'acquire', HISTORY_SCHEMA_SIX),
+                         'schema-exports/acquire/6.json')
+
+    def test_v4_first_generation_six_requires_a_base_without_six(self):
+        self.add_cache(main_version=6, admitted_six=False)
+        before = copy.deepcopy(self.base_inputs)
+        request = self.make_request()
+        self.assertEqual(request['schema_version'], 4)
+        self.assertEqual(request['current_schemas'], sorted([HISTORY_SCHEMA_SIX, CACHE_SCHEMA]))
+        self.assertEqual(request['schemas_to_collect'], request['current_schemas'])
+        self.assertNotIn(HISTORY_SCHEMA_SIX, request['reviewed_input_hashes'])
+        self.assertNotIn('android/' + HISTORY_SCHEMA_SIX, before)
+        outputs = self.acquire(self.state(request))
+        self.assertEqual(set(outputs), {HISTORY_SCHEMA_SIX, CACHE_SCHEMA})
+        for name, raw in before.items():
+            self.assertEqual((self.root / name).read_bytes(), raw)
+        self.assertEqual(self.base_inputs, before)
+
+    def test_admitted_six_cannot_be_removed_and_recollected_by_v3_or_v4(self):
+        self.admit_input('android/' + HISTORY_SCHEMA_SIX, ADMITTED_SIX)
+        path = self.root / 'android' / HISTORY_SCHEMA_SIX
+        for version in (3, 4):
+            if version == 4:
+                self.add_cache(main_version=6)
+            before = copy.deepcopy(self.base_inputs)
+            path.unlink()
+            try:
+                with self.subTest(request_version=version), self.assertRaisesRegex(
+                        ValueError, 'Admitted Watch history cannot be removed or recollected'):
+                    self.make_request(schema_version=version)
+                self.assertFalse(path.exists())
+                self.assertFalse((self.root / packages.REQUEST_FILE).exists())
+                self.assertEqual(self.base_inputs, before)
+                for name, raw in before.items():
+                    if name != 'android/' + HISTORY_SCHEMA_SIX:
+                        self.assertEqual((self.root / name).read_bytes(), raw)
+            finally:
+                path.write_bytes(ADMITTED_SIX)
+
+    def test_seven_requires_full_history_with_one_or_two_current_databases(self):
+        history = {contract.SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in (1, 2, 3, 6)}
+        for with_cache in (False, True):
+            if with_cache:
+                self.add_cache(admitted_six=False)
+            else:
+                self.write(contract.DATABASE_SOURCE, declaration(
+                    'io.github.onlinemo.meloxwatch.data.database.MeloXDatabase', 7, True))
+            expected = history | {MAIN_SCHEMA, 'gradle/verification-metadata.xml',
+                                  'app/gradle.lockfile', 'companion/gradle.lockfile'}
+            if with_cache:
+                expected.add(CACHE_SCHEMA)
+            with self.subTest(current_count=2 if with_cache else 1):
+                self.assertEqual(set(contract.required_inputs(self.root)), expected)
+                self.assertNotIn('android/' + HISTORY_SCHEMA_SIX, self.base_inputs)
+                with self.assertRaisesRegex(ValueError, 'retain admitted Watch history1/2/3/6'):
+                    self.make_request()
+
+    def test_admitted_six_rebinding_and_writer_changes_reject_with_original_bytes_retained(self):
+        self.add_cache()
+        path = self.root / 'android' / HISTORY_SCHEMA_SIX
+        path.write_bytes(b'synthetic rebound historical six')
+        with self.assertRaisesRegex(ValueError, 'Reviewed package preimage differs from the base'):
+            self.make_request()
+        self.assertEqual(self.base_inputs['android/' + HISTORY_SCHEMA_SIX], ADMITTED_SIX)
+        path.write_bytes(ADMITTED_SIX)
+        state = self.state(self.make_request())
+        with self.assertRaisesRegex(ValueError, 'An old Room schema changed') as caught:
+            self.acquire(state, change_history_six=True)
+        with patch.object(migration.time, 'monotonic', return_value=10):
+            migration.record_failure(self.root, state, 'acquire', caught.exception)
+        report = json.loads((self.root / migration.REPORT / 'failure-manifest.json').read_bytes())
+        changed = b'synthetic changed historical six'
+        self.assertEqual(report['partial_input_hashes'][HISTORY_SCHEMA_SIX], digest(changed))
+        self.assertFalse(report['accepted'])
+        self.assertFalse(report['apk_exported'])
+        self.assertEqual((self.root / migration.REPORT / 'reviewed-inputs' / HISTORY_SCHEMA_SIX).read_bytes(),
+                         ADMITTED_SIX)
+        self.assertEqual((self.root / migration.REPORT / 'failed-partial-inputs' / HISTORY_SCHEMA_SIX).read_bytes(),
+                         changed)
+        self.assertEqual(path.read_bytes(), changed)
 
     def test_internal_cache_requires_both_current_outputs_and_all_history(self):
         self.add_cache()
@@ -134,7 +258,7 @@ class MultiCurrentSchemaTests(unittest.TestCase):
         self.assertFalse({'current_schema', 'schema_to_collect'} & set(request))
         self.assertEqual(request['room_declarations'][contract.ONLINE_DATABASE_SOURCE]['version'], 1)
         self.assertTrue(request['room_declarations'][contract.ONLINE_DATABASE_SOURCE]['export_schema'])
-        history = {contract.SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in (1, 2, 3)}
+        history = {contract.SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in (1, 2, 3, 6)}
         self.assertEqual(set(contract.required_inputs(self.root)), history | {MAIN_SCHEMA, CACHE_SCHEMA,
                          'gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile'})
         with self.assertRaises(ValueError):
@@ -177,7 +301,7 @@ class MultiCurrentSchemaTests(unittest.TestCase):
 
     def test_source_inventory_excludes_only_registered_inputs_and_still_hashes_sources(self):
         self.add_cache()
-        self.write('android/' + MAIN_SCHEMA, b'synthetic admitted six')
+        self.write('android/' + MAIN_SCHEMA, ADMITTED_SEVEN)
         self.write('android/' + CACHE_SCHEMA, b'synthetic admitted cache')
         names = sorted(contract.room_declarations(self.root)) + [
             'android/' + name for name in contract.schema_output_paths(self.root)]
@@ -204,8 +328,8 @@ class MultiCurrentSchemaTests(unittest.TestCase):
         frozen = self.frozen()
         frozen.pop(contract.ONLINE_DATABASE_SOURCE)
         with patch.object(migration, 'project_plan', return_value=copy.deepcopy(PLAN)), \
-                patch.object(migration, 'committed_hash', side_effect=lambda root, name, base=BASE:
-                             digest((self.root / name).read_bytes())), \
+                patch.object(migration, 'committed_hash', side_effect=self.base_hash), \
+                patch.object(migration, 'data_bytes', side_effect=self.base_bytes), \
                 patch.object(migration, 'source_hashes', return_value=frozen), \
                 self.assertRaisesRegex(ValueError, 'exact committed source inputs'):
             migration.make_request(self.root, BASE)
@@ -244,7 +368,7 @@ class MultiCurrentSchemaTests(unittest.TestCase):
     def complete_collection(self, existing_main):
         self.add_cache()
         if existing_main:
-            self.write('android/' + MAIN_SCHEMA, b'synthetic admitted six')
+            self.admit_input('android/' + MAIN_SCHEMA, ADMITTED_SEVEN)
         request = self.make_request()
         state = self.state(request)
         outputs = self.acquire(state)
@@ -254,7 +378,8 @@ class MultiCurrentSchemaTests(unittest.TestCase):
             migration.before_strict(self.root, state, 'strict-inputs')
         self.assertTrue(all(not (self.root / 'android' / name).exists() for name in outputs))
         if existing_main:
-            self.assertEqual((self.root / 'android' / MAIN_SCHEMA).read_bytes(), b'synthetic admitted six')
+            self.assertEqual((self.root / 'android' / MAIN_SCHEMA).read_bytes(), ADMITTED_SEVEN)
+        self.assertEqual((self.root / 'android' / HISTORY_SCHEMA_SIX).read_bytes(), ADMITTED_SIX)
         for name, raw in outputs.items():
             self.write('android/' + name, raw)
         migration.after_strict(self.root, state, 'strict-inputs')
@@ -269,6 +394,7 @@ class MultiCurrentSchemaTests(unittest.TestCase):
         self.assertEqual(report['apk_assembly'], 'NOT_RUN')
         self.assertFalse(report['accepted'])
         self.assertFalse(report['apk_exported'])
+        self.assertEqual((self.root / 'android' / HISTORY_SCHEMA_SIX).read_bytes(), ADMITTED_SIX)
         for name, raw in outputs.items():
             for phase in ('acquire', 'strict-inputs'):
                 self.assertEqual((self.root / migration.REPORT /
@@ -277,7 +403,7 @@ class MultiCurrentSchemaTests(unittest.TestCase):
     def test_two_new_current_schemas_have_independent_namespace_exports_and_hashes(self):
         self.complete_collection(existing_main=False)
 
-    def test_only_new_cache_is_regenerated_when_main_six_is_already_reviewed(self):
+    def test_only_new_cache_is_regenerated_when_current_seven_is_already_reviewed(self):
         self.complete_collection(existing_main=True)
 
     def test_missing_or_different_second_export_rejects_and_preserves_rejected_bytes(self):

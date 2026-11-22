@@ -12,7 +12,7 @@ import tomllib
 from build import dependency_lock_snapshot, migration_json, verification_snapshot
 from ci_common import require, sha256, write_json
 from package_contract import (DEPENDENCY_FILES, HISTORICAL_SCHEMA_VERSIONS, ROLES, SCHEMA_DIRECTORY, SPECS,
-                              committed_hash, current_schema, current_schemas, exact_data, input_hashes,
+                              committed_hash, current_schema, current_schemas, data_bytes, exact_data, input_hashes,
                               project_plan, required_inputs, room_declarations, safe_path, schema_output_paths)
 from package_build import REQUEST_FILE, source_hashes
 
@@ -88,13 +88,22 @@ def make_request(root, base, variants=('debug',), *, schema_version=None):
     for name, digest in reviewed.items():
         require(committed_hash(root, 'android/' + name, base) == digest, 'Reviewed package preimage differs from the base')
     current = current_schemas(root)
+    main = current_schema(root)
+    history = {SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in HISTORICAL_SCHEMA_VERSIONS}
+    # Frozen base bytes distinguish first generation from removal of an admitted export.
+    base_history = {name: data_bytes(root, 'android/' + name, base, optional=True) for name in sorted(history)}
+    require(all(raw is None or reviewed.get(name) == hashlib.sha256(raw).hexdigest()
+                for name, raw in base_history.items()), 'Admitted Watch history cannot be removed or recollected')
     version = (4 if len(current) > 1 else 3) if schema_version is None else schema_version
     require(type(version) is int and version in (3, 4), 'Package schema request must be v3 or v4')
     if version == 3:
-        require(len(current) == 1 and current[0] == current_schema(root), 'Request v3 binds only one actual current database')
-    else:
-        history = {SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in HISTORICAL_SCHEMA_VERSIONS}
-        require(history <= set(reviewed), 'Request v4 must retain all admitted Watch history1/2/3')
+        require(len(current) == 1 and current[0] == main, 'Request v3 binds only one actual current database')
+    if version == 4 or int(Path(main).stem) > max(HISTORICAL_SCHEMA_VERSIONS):
+        required_history = history
+        schema_six = SCHEMA_DIRECTORY + '/6.json'
+        if main == schema_six and base_history[schema_six] is None and schema_six not in reviewed:
+            required_history = history - {schema_six}
+        require(required_history <= set(reviewed), 'Request must retain admitted Watch history1/2/3/6')
     collected = [name for name in current if name not in reviewed]
     for name in collected:
         require(not safe_path(root, 'android/' + name).exists(), 'Unreviewed schema output cannot be reused')

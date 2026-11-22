@@ -11,6 +11,7 @@ import subprocess
 import time
 
 from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk, require_unsigned
+from apk_licenses import verify_license_assets
 from ci_common import ROOT, cloud_only, expected_identity, no_signing_secrets, properties, require, run_tool, sha256, write_checksums, write_json
 from package_contract import (DEPENDENCY_FILES, ROLES, SPECS, allowed_schema_paths, artifact_layout, committed_hash, exact_data, input_hashes,
                               native_abis, project_plan, required_inputs, room_declarations, safe_path, validate_artifacts)
@@ -277,6 +278,7 @@ def export(root, state):
         destination.mkdir(exist_ok=True)
         shutil.copyfile(debug_archive, destination / ARCHIVE_FILE)
         entries = []
+        license_assets = {}
         for layout in artifact_layout(variant, state['plan']):
             role = layout['role']
             spec = SPECS[role]
@@ -293,6 +295,12 @@ def export(root, state):
                 actual['target_package'] = expected['package']
             else:
                 actual = inspect_apk(apk, tools, expected)
+                notices = verify_license_assets(apk)
+                for asset, digest in notices['file_sha256'].items():
+                    source = 'android/' + spec['module'] + '/src/main/' + asset
+                    require(state['source_input_hashes'].get(source) == digest,
+                            'APK license bytes differ from their frozen source input')
+                license_assets[role] = notices
             entry = {**layout, **actual, 'abis': native_abis(apk), 'sha256': sha256(apk)}
             if state['binding']['event'] == 'pull_request':
                 digest = certificate(apk, tools)
@@ -308,6 +316,7 @@ def export(root, state):
                     'source_input_hashes': state['source_input_hashes'], 'strict_input_hashes': state['input_hashes'],
                     'room_declarations': state['room_declarations'],
                     'debug_test_evidence': state['debug_test_evidence'],
+                    'license_assets': license_assets,
                     'tasks': tasks_debug_tests(state['plan']) + tasks_outputs(state) if 'test-debug' in state['completed'] else tasks_outputs(state),
                     'test_scope': 'full-debug-once',
                     'device_validation': 'NOT RUN',

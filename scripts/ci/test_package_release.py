@@ -18,6 +18,7 @@ from package_contract import package_identity
 from package_test_evidence import ARCHIVE_FILE
 from release_evidence import GATES, validate_approval
 from test_package_contract import PLAN, VERSION, debug_test_fixture, manifest
+from test_apk_licenses import license_fixture_bytes
 
 ENV = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
        'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Cloud build',
@@ -26,10 +27,7 @@ ENV = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/Me
 
 
 def apk_bytes():
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, 'w') as archive:
-        archive.writestr('AndroidManifest.xml', b'fixture metadata, never executed')
-    return buffer.getvalue()
+    return license_fixture_bytes()
 
 
 class PairedSigningTests(unittest.TestCase):

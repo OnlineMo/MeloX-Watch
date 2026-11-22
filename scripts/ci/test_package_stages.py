@@ -242,7 +242,7 @@ class PackageStageTests(unittest.TestCase):
                 self.write('android/app/schemas/io.github.onlinemo.meloxwatch.data.database.HistoricalMeloXV4Database/4.json',
                            'unexpected export under its original namespace\n')
             self.legacy.run_gradle.side_effect = process
-            with self.assertRaisesRegex(ValueError, 'Unexpected Room schema namespace'):
+            with self.assertRaisesRegex(ValueError, 'Unregistered or noncurrent Room schema output'):
                 package_build.run_stage('acquire', digest, self.root, self.legacy)
         report = json.loads((self.root / package_migration.REPORT / 'failure-manifest.json').read_text())
         foreign = 'app/schemas/io.github.onlinemo.meloxwatch.data.database.HistoricalMeloXV4Database/4.json'
@@ -298,7 +298,8 @@ class PackageStageTests(unittest.TestCase):
             with self.subTest(name=name):
                 try:
                     self.write(name, b'unreviewed prior output\n')
-                    with patch.dict(os.environ, self.environment(), clear=True), self.assertRaisesRegex(ValueError, 'commit'):
+                    expected = 'Unregistered or noncurrent Room schema output' if name.endswith('/7.json') else 'commit'
+                    with patch.dict(os.environ, self.environment(), clear=True), self.assertRaisesRegex(ValueError, expected):
                         package_build.start('debug', self.root, self.legacy)
                     self.assertFalse((self.root / package_build.SESSION_FILE).exists())
                 finally:
