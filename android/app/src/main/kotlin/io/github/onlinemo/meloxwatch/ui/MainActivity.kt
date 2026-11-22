@@ -196,6 +196,8 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryAvailability
 import io.github.onlinemo.meloxwatch.ui.watch.WatchContentRow
 import io.github.onlinemo.meloxwatch.data.about.ProjectChannels
 import io.github.onlinemo.meloxwatch.data.about.ProjectVersion
+import io.github.onlinemo.meloxwatch.ui.debugmask.DebugRoundMaskFrame
+import io.github.onlinemo.meloxwatch.ui.debugmask.debugRoundMaskRequested
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -204,6 +206,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private val debugRoundMask = mutableStateOf(false)
     private lateinit var probeViewModel: ProbeViewModel
     private lateinit var preferencesViewModel: PreferencesViewModel
     private lateinit var aboutViewModel: AboutViewModel
@@ -235,6 +238,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        debugRoundMask.value = debugRoundMaskRequested(intent)
         probeViewModel = ViewModelProvider(this)[ProbeViewModel::class.java]
         preferencesViewModel = ViewModelProvider(this)[PreferencesViewModel::class.java]
         aboutViewModel = ViewModelProvider(this)[AboutViewModel::class.java]
@@ -365,16 +369,18 @@ class MainActivity : ComponentActivity() {
         exactRuntime.attachActivity(exactActivity)
         if (savedInstanceState == null) acceptLaunchIntent(intent)
         setContent {
-            val appearanceState by appearanceViewModel.state.collectAsStateWithLifecycle()
-            val displayEditor = lyricsDisplayViewModel.editor
-            LaunchedEffect(exactRuntime, appearanceState.appearance) { exactRuntime.onAppearanceChanged() }
-            WatchThemeScope(appearanceState.theme.effectiveManifest.palette, appearanceState.appearance.effective) {
-                ProbeTheme {
-                    ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
-                        libraryViewModel, sourcesViewModel, fileOperationsViewModel, listeningViewModel, playlistsViewModel,
-                        playlistEntryViewModel, appearanceViewModel, transferViewModel, onlineViewModel, metingSettingsViewModel, dspViewModel, aboutViewModel, backupViewModel, playbackBackgroundViewModel,
-                        lyricsEntryViewModel, displayEditor, lyricsDisplayViewModel, fontPickerViewModel, lyricsPickerViewModel,
-                        appearancePickerViewModel, exactRuntime, exactWindow, exactActivity, this)
+            DebugRoundMaskFrame(debugRoundMask.value) {
+                val appearanceState by appearanceViewModel.state.collectAsStateWithLifecycle()
+                val displayEditor = lyricsDisplayViewModel.editor
+                LaunchedEffect(exactRuntime, appearanceState.appearance) { exactRuntime.onAppearanceChanged() }
+                WatchThemeScope(appearanceState.theme.effectiveManifest.palette, appearanceState.appearance.effective) {
+                    ProbeTheme {
+                        ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
+                            libraryViewModel, sourcesViewModel, fileOperationsViewModel, listeningViewModel, playlistsViewModel,
+                            playlistEntryViewModel, appearanceViewModel, transferViewModel, onlineViewModel, metingSettingsViewModel, dspViewModel, aboutViewModel, backupViewModel, playbackBackgroundViewModel,
+                            lyricsEntryViewModel, displayEditor, lyricsDisplayViewModel, fontPickerViewModel, lyricsPickerViewModel,
+                            appearancePickerViewModel, exactRuntime, exactWindow, exactActivity, this)
+                    }
                 }
             }
         }
@@ -383,6 +389,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        debugRoundMask.value = debugRoundMaskRequested(intent)
         acceptLaunchIntent(intent)
     }
 

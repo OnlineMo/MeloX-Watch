@@ -1,0 +1,65 @@
+package io.github.onlinemo.meloxwatch.ui.debugmask
+
+import android.content.Intent
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalWindowInfo
+import io.github.onlinemo.meloxwatch.BuildConfig
+
+internal const val DEBUG_ROUND_MASK_ACTION = "io.github.onlinemo.meloxwatch.debug.ROUND_MASK"
+internal const val DEBUG_ROUND_MASK_ENABLED = "io.github.onlinemo.meloxwatch.debug.round_mask_enabled"
+
+internal fun debugRoundMaskRequested(intent: Intent?): Boolean {
+    if (!BuildConfig.DEBUG) return false
+    val source = intent ?: return false
+    if (source.action != DEBUG_ROUND_MASK_ACTION) return false
+    return try { source.getBooleanExtra(DEBUG_ROUND_MASK_ENABLED, false) }
+    catch (_: RuntimeException) { false }
+}
+
+/** Keep the Debug composition stable while toggling the crop; Release uses the original content. */
+@Composable
+internal fun DebugRoundMaskFrame(
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    if (!BuildConfig.DEBUG) {
+        content()
+        return
+    }
+    val window = LocalWindowInfo.current.containerSize
+    var origin by remember { mutableStateOf(Offset.Zero) }
+    Box(modifier.fillMaxSize().onGloballyPositioned { origin = it.positionInWindow() }
+        .drawWithCache {
+            val radius = minOf(window.width, window.height) / 2f
+            val center = Offset(window.width / 2f, window.height / 2f) - origin
+            val outside = Path().apply {
+                fillType = PathFillType.EvenOdd
+                addRect(Rect(Offset.Zero, size))
+                if (radius > 0f) addOval(Rect(center.x - radius, center.y - radius,
+                    center.x + radius, center.y + radius))
+            }
+            onDrawWithContent {
+                drawContent()
+                if (enabled && radius > 0f) clipRect { drawPath(outside, Color.Black) }
+            }
+        }) {
+        content()
+    }
+}
