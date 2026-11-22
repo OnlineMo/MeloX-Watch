@@ -5,6 +5,7 @@ import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 import org.gradle.api.artifacts.component.ModuleComponentIdentifier
 import org.gradle.api.artifacts.result.UnresolvedDependencyResult
+import org.gradle.api.artifacts.verification.DependencyVerificationMode
 import org.gradle.api.tasks.testing.Test
 import org.gradle.api.internal.project.ProjectInternal
 
@@ -14,14 +15,23 @@ requireMigration(System.getenv('GITHUB_ACTIONS') == 'true' && System.getenv('CI'
     System.getenv('GITHUB_EVENT_NAME') == 'pull_request' && System.getenv('CI_UNSIGNED_APK') == 'true' &&
     System.getenv('GITHUB_REPOSITORY') == 'OnlineMo/MeloX-Watch' && System.getenv('GITHUB_ACTOR') == 'OnlineMo' &&
     System.getenv('GITHUB_ACTOR_ID') == '143324986' && System.getenv('GITHUB_TRIGGERING_ACTOR') == 'OnlineMo' &&
-    phase == 'package-acquire' && !System.getenv('CANDIDATE_OPERATION'),
+    ['package-acquire', 'package-strict-inputs'].contains(phase) && !System.getenv('CANDIDATE_OPERATION'),
     'Package acquisition requires its explicit unsigned owner PR phase')
-requireMigration(gradle.startParameter.writeDependencyVerifications == ['sha256'] &&
-    gradle.startParameter.writeDependencyLocks && gradle.startParameter.rerunTasks &&
-    !gradle.startParameter.buildCacheEnabled && gradle.startParameter.excludedTaskNames.isEmpty(),
-    'Package acquisition requires real consumers and strict writer flags')
+def acquirePhase = phase == 'package-acquire'
+if (acquirePhase) {
+    requireMigration(gradle.startParameter.writeDependencyVerifications == ['sha256'] &&
+        gradle.startParameter.writeDependencyLocks && gradle.startParameter.rerunTasks &&
+        !gradle.startParameter.buildCacheEnabled && gradle.startParameter.excludedTaskNames.isEmpty(),
+        'Package acquisition requires real consumers and strict writer flags')
+} else {
+    requireMigration(gradle.startParameter.writeDependencyVerifications.isEmpty() &&
+        !gradle.startParameter.writeDependencyLocks && gradle.startParameter.excludedTaskNames.isEmpty() &&
+        gradle.startParameter.dependencyVerificationMode == DependencyVerificationMode.STRICT,
+        'Independent strict graph validation cannot write locks/pins or exclude tasks')
+}
 def acquireId = ':ciAcquirePackageDependencyFiles'
 def collectorId = ':ciResolveAndLockAll'
+def strictGraphId = ':ciReadPackageDependencyGraph'
 def binding = [repository: 'OnlineMo/MeloX-Watch']
 ['source_sha': 'SOURCE_SHA', 'build_sha': 'GITHUB_SHA', 'event': 'GITHUB_EVENT_NAME', 'ref': 'GITHUB_REF'].each { key, variable ->
     binding[key] = System.getenv(variable)
@@ -75,13 +85,29 @@ requireMigration(requestDigest != null && requestDigest ==~ /[0-9a-f]{64}/ &&
     Arrays.equals(rawBytes(reportRoot.resolve('dependency-migration-request.json')), requestBytes),
     'Package acquisition request differs from the wrapper original')
 def request = new groovy.json.JsonSlurper().parse(requestBytes)
-requireMigration(request instanceof Map && request.schema_version instanceof Integer && [3, 4].contains(request.schema_version) &&
-    request.kind == 'owner-pr-package-input-acquire-strict-compile' && request.owner_login == 'OnlineMo' &&
+def upgradeMode = request instanceof Map && request.schema_version instanceof Integer && request.schema_version == 6 &&
+    request.kind == 'owner-pr-package-dependency-upgrade-acquire-strict-compile'
+def earlierMode = request instanceof Map && request.schema_version instanceof Integer && [3, 4].contains(request.schema_version) &&
+    request.kind == 'owner-pr-package-input-acquire-strict-compile'
+requireMigration((upgradeMode || earlierMode) && (acquirePhase || upgradeMode) && request.owner_login == 'OnlineMo' &&
     request.owner_id == 143324986 && request.plan.application_roles == ['watch', 'phone'] &&
     request.variants instanceof List && !request.variants.isEmpty() && request.variants[0] == 'debug' &&
     request.variants == request.variants.toSet().toList() &&
     ['debug', 'release', 'diagnostic'].containsAll(request.variants),
-    'Explicit integer package request v3/v4 is required')
+    'Package acquisition/strict graph requires its explicit integer request and independent kind')
+def binaryModules = ['com.squareup.okio:okio-jvm': 'jar', 'androidx.annotation:annotation-jvm': 'jar',
+    'androidx.startup:startup-runtime': 'aar']
+if (upgradeMode) {
+    def fields = ['package_role', 'module', 'configuration', 'from_version', 'to_version'] as Set
+    def modules = (binaryModules.keySet() + ['com.squareup.okio:okio', 'androidx.annotation:annotation']) as Set
+    requireMigration(request.allowed_dependency_upgrades instanceof List && !request.allowed_dependency_upgrades.isEmpty() &&
+        request.allowed_dependency_upgrades.size() <= 256 && request.allowed_dependency_upgrades.every { item ->
+            item instanceof Map && item.keySet() == fields && item.package_role == 'watch' && modules.contains(item.module) &&
+                item.configuration instanceof String && item.configuration ==~ /(?:watchAndroid(?:Debug|Release|Diagnostic)(?:UnitTest|AndroidTest)?(?:Compile|Runtime)Classpath|(?:implementation|testImplementation|androidTestImplementation)DependenciesMetadata)/ &&
+                ['from_version', 'to_version'].every { key -> item[key] instanceof String &&
+                    item[key] ==~ /(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){0,3}/ }
+        }, 'Schema 6 requires exact bounded Watch business dependency grants')
+}
 def specs = [watch: [project: ':app', flavor: 'WatchAndroid'], phone: [project: ':companion', flavor: 'PhoneAndroid']]
 def testRoles = request.plan.instrumentation_roles
 requireMigration(testRoles instanceof List && testRoles == testRoles.toSet().toList() &&
@@ -129,7 +155,7 @@ archiveConsumers[':companion:robolectricSdk'] = 'configuration-artifacts'
 def inputConsumers = archiveConsumers.findAll { id, kind ->
     kind == 'task-input-archives' && !optionalInputs.contains(id)
 }.keySet().toList()
-requireMigration(gradle.startParameter.taskNames == writerTasks + [acquireId, collectorId],
+requireMigration(gradle.startParameter.taskNames == writerTasks + (acquirePhase ? [acquireId, collectorId] : [strictGraphId]),
     'Package acquisition task selection differs')
 
 def archiveRejection = { id, kind, file, path, regularFile, safeName ->
@@ -258,16 +284,144 @@ def classpathProducers = [:]
 def records = []
 def runtimeRecords = []
 def acquisitionDone = false
+def acquisitionBudget = null
 // The locked Gradle 8.13 API obtains each owning project lock, then restores prior locks.
 def producersFor = { selectedTest ->
     (selectedTest.project as ProjectInternal).owner.fromMutableState({ project ->
         selectedTest.classpath.buildDependencies.getDependencies(selectedTest).toList().sort { it.path }
     } as java.util.function.Function)
 }
+def captureConsumers = {
+    def root = gradle.rootProject
+    selectedTests.each { id, selectedTest ->
+        def actual = producersFor(selectedTest)
+        requireMigration(actual.collect { it.path } == classpathProducers[id].collect { it.path },
+            'Package classpath producers changed before capture')
+        runtimeRecords.add([consumer_id: id,
+            producer_tasks: actual.collect { [id: it.path, outcome: completedOutcome(it)] }])
+    }
+    (inputConsumers + optionalInputs.findAll { gradle.taskGraph.hasTask(it) }).each { id ->
+        def consumer = root.tasks.getByPath(id)
+        def outcome = completedOutcome(consumer)
+        def record = fileCollectionRecord(id, 'task-input-archives', consumer.inputs.files)
+        record.outcome = outcome
+        records.add(record)
+    }
+    selectedTests.each { id, selectedTest ->
+        records.add(fileCollectionRecord(id, 'test-classpath-archives', selectedTest.classpath))
+    }
+    def app = root.project(':app')
+    ['bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'].each { name ->
+        records.add(moduleArtifactsRecord(":app:${name}".toString(), 'configuration-artifacts',
+            app.configurations.findByName(name)))
+    }
+    def companion = root.project(':companion')
+    records.add(moduleArtifactsRecord(':companion:robolectricSdk', 'configuration-artifacts',
+        companion.configurations.findByName('robolectricSdk')))
+    [root, app, companion].each { project ->
+        def id = project.path == ':' ? ':buildscript:classpath' : project.path + ':buildscript:classpath'
+        records.add(moduleArtifactsRecord(id, 'buildscript-artifacts', project.buildscript.configurations.findByName('classpath')))
+    }
+    requireMigration(records.size() <= 128 && records.collect { it.id }.toSet().size() == records.size(),
+        'Package acquisition consumer inventory exceeds its bound or contains duplicates')
+    acquisitionBudget = [unique_archive_count: hashedFiles.size(), unique_archive_bytes: reservedBytes]
+}
+def checkHashedArchives = {
+    hashedFiles.each { path, cached ->
+        safeParents(path)
+        def attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
+        requireMigration(cached.identity == [attributes.fileKey(), attributes.size(), attributes.lastModifiedTime()],
+            'Actual package archive changed during graph collection')
+    }
+}
+def writeOriginal = { name, record ->
+    byte[] bytes = (encoded(record) + '\n').getBytes('UTF-8')
+    requireMigration(bytes.length <= 4 * 1024 * 1024, 'Package graph/acquisition report exceeds its bound')
+    def destination = reportRoot.resolve(name)
+    safeParents(destination)
+    requireMigration(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS), 'Package graph/acquisition original is occupied')
+    Files.write(destination, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
+    requireMigration(Arrays.equals(rawBytes(destination), bytes), 'Package graph/acquisition original changed during preservation')
+    digestBytes(bytes)
+}
+def captureResolvedGraph = { graphTask ->
+    def projects = [:]
+    gradle.rootProject.allprojects.sort { it.path }.each { project ->
+        def configurations = project.configurations.findAll { it.canBeResolved }.sort { it.name }
+        requireMigration(configurations.size() <= 4096, 'Package configuration inventory exceeds its bound')
+        def resolved = [:]
+        configurations.each { configuration ->
+            requireMigration(configuration.name ==~ /[A-Za-z0-9_.\-]{1,200}/, 'Configuration name is unsafe')
+            def result = configuration.incoming.resolutionResult
+            requireMigration(result.allComponents.size() <= 20000 && result.allDependencies.size() <= 60000 &&
+                !result.allDependencies.any { it instanceof UnresolvedDependencyResult }, 'Package lock graph is incomplete')
+            def modules = [:]
+            result.allComponents.each { component ->
+                def id = component.id
+                if (id instanceof ModuleComponentIdentifier) {
+                    def parts = [id.group, id.module, id.version]
+                    requireMigration(parts.every { it ==~ /[A-Za-z0-9_.+\-]{1,120}/ }, 'Resolved module coordinate is unsafe')
+                    def module = id.group + ':' + id.module
+                    requireMigration(!modules.containsKey(module) || modules[module] == id.version,
+                        'A real configuration selected conflicting versions of one module')
+                    modules[module] = id.version
+                } else {
+                    requireMigration(id == result.root.id, 'An undeclared project substitution entered the package graph')
+                }
+            }
+            resolved[configuration.name] = modules
+        }
+        projects[project.path] = resolved
+    }
+    def count = projects.values().sum { it.size() }
+    requireMigration(count > 0 && count <= 8192, 'Package lock graph count exceeds its bound')
+    def targets = [:]
+    request.allowed_dependency_upgrades.each { item ->
+        def modules = projects[':app'][item.configuration]
+        requireMigration(modules != null && modules.containsKey(item.module), 'An authorized baseline configuration/module disappeared')
+        def actual = modules[item.module]
+        requireMigration(actual == item.from_version || actual == item.to_version, 'An upgrade graph selected an undeclared target version')
+        if (actual == item.to_version && binaryModules.containsKey(item.module)) {
+            targets[item.module + ':' + actual] = binaryModules[item.module]
+        }
+    }
+    def app = gradle.rootProject.project(':app')
+    def originals = targets.collect { coordinate, extension ->
+        def parts = coordinate.split(':').toList()
+        // This supplemental query is outside the configuration container and never stands in for the real graph.
+        def dependency = app.dependencies.create(coordinate + '@' + extension)
+        dependency.transitive = false
+        def probe = app.configurations.detachedConfiguration(dependency)
+        probe.transitive = false
+        probe.resolutionStrategy.deactivateDependencyLocking()
+        def artifacts = probe.incoming.artifacts.artifacts
+        requireMigration(artifacts.size() == 1, 'An original upgrade archive query must resolve exactly one artifact')
+        def artifact = artifacts.first()
+        def component = artifact.id.componentIdentifier
+        requireMigration(component instanceof ModuleComponentIdentifier &&
+            [component.group, component.module, component.version] == parts &&
+            artifact.file.name == parts[1] + '-' + parts[2] + '.' + extension,
+            'An original upgrade archive query resolved different coordinates or artifact type')
+        archiveBytes(artifact.file, 'supplemental-upgrade-archive', 'detached-artifact-only') +
+            [component: parts, evidence_kind: 'detached-artifact-only']
+    }.sort { a, b -> encoded(a) <=> encoded(b) }
+    checkHashedArchives()
+    [schema_version: 1, kind: 'dependency-package-resolved-graph', phase: acquirePhase ? 'acquire' : 'strict-inputs',
+        request_sha256: requestDigest, variants: request.variants, writer_tasks: writerTasks, graph_task: graphTask,
+        graph_task_count: gradle.taskGraph.allTasks.size(), test_task_count: 0,
+        configuration_count: count, unresolved_dependency_count: 0, project_configurations: projects,
+        runtime_classpaths: runtimeRecords.sort { it.consumer_id }, consumers: records.sort { it.id },
+        upgrade_archives: originals,
+        archive_budget: [unique_archive_count: hashedFiles.size(), unique_archive_bytes: reservedBytes]] + binding
+}
 gradle.taskGraph.whenReady { graph ->
     requireMigration(!graph.allTasks.any { it instanceof Test }, 'Acquisition cannot run, disable or skip business Test tasks')
     requireMigration(graph.allTasks.size() <= 4096 && inputConsumers.every { graph.hasTask(it) } &&
-        graph.hasTask(acquireId) && graph.hasTask(collectorId), 'Package acquisition graph is incomplete')
+        (acquirePhase ? graph.hasTask(acquireId) && graph.hasTask(collectorId) : graph.hasTask(strictGraphId)),
+        'Package acquisition/strict graph is incomplete')
+    requireMigration(!graph.allTasks.any { task ->
+        task.path ==~ /:(app|companion):(assemble|package)(WatchAndroid|PhoneAndroid)(Debug|Release|Diagnostic)(AndroidTest)?/
+    }, 'Input graph validation cannot assemble or package APKs')
     requireMigration(graph.allTasks.every { task ->
         !['Debug', 'Release', 'Diagnostic'].findAll { !request.variants.contains(it.toLowerCase()) }.any { suffix ->
             task.path.contains('WatchAndroid' + suffix) || task.path.contains('PhoneAndroid' + suffix)
@@ -292,90 +446,73 @@ gradle.projectsEvaluated {
             producers.every { !(it instanceof Test) }, 'Package classpath has no real Test-free producer')
         classpathProducers[id] = producers
     }
-    def acquire = root.tasks.register('ciAcquirePackageDependencyFiles') { task ->
-        task.notCompatibleWithConfigurationCache('Package acquisition reads exact consumer files')
-        task.mustRunAfter(inputConsumers)
-        // Actual producer tasks come from each locked Test.classpath query.
-        task.dependsOn(classpathProducers.values().flatten().toSet())
-        task.doLast {
-            selectedTests.each { id, selectedTest ->
-                def actual = producersFor(selectedTest)
-                requireMigration(actual.collect { it.path } == classpathProducers[id].collect { it.path },
-                    'Package classpath producers changed before capture')
-                runtimeRecords.add([consumer_id: id,
-                    producer_tasks: actual.collect { [id: it.path, outcome: completedOutcome(it)] }])
+    if (acquirePhase) {
+        def acquire = root.tasks.register('ciAcquirePackageDependencyFiles') { task ->
+            task.notCompatibleWithConfigurationCache('Package acquisition reads exact consumer files')
+            task.mustRunAfter(inputConsumers)
+            // Actual producer tasks come from each locked Test.classpath query.
+            task.dependsOn(classpathProducers.values().flatten().toSet())
+            task.doLast {
+                captureConsumers()
+                acquisitionDone = true
             }
-            (inputConsumers + optionalInputs.findAll { gradle.taskGraph.hasTask(it) }).each { id ->
-                def consumer = root.tasks.getByPath(id)
-                def outcome = completedOutcome(consumer)
-                def record = fileCollectionRecord(id, 'task-input-archives', consumer.inputs.files)
-                record.outcome = outcome
-                records.add(record)
-            }
-            selectedTests.each { id, selectedTest ->
-                records.add(fileCollectionRecord(id, 'test-classpath-archives', selectedTest.classpath))
-            }
-            def app = root.project(':app')
-            ['bundledSqliteHost', 'robolectricSdk', 'robolectricSdk30'].each { name ->
-                records.add(moduleArtifactsRecord(":app:${name}".toString(), 'configuration-artifacts',
-                    app.configurations.findByName(name)))
-            }
-            def companion = root.project(':companion')
-            records.add(moduleArtifactsRecord(':companion:robolectricSdk', 'configuration-artifacts',
-                companion.configurations.findByName('robolectricSdk')))
-            [root, app, companion].each { project ->
-                def id = project.path == ':' ? ':buildscript:classpath' : project.path + ':buildscript:classpath'
-                records.add(moduleArtifactsRecord(id, 'buildscript-artifacts', project.buildscript.configurations.findByName('classpath')))
-            }
-            requireMigration(records.size() <= 128 && records.collect { it.id }.toSet().size() == records.size(),
-                'Package acquisition consumer inventory exceeds its bound or contains duplicates')
-            acquisitionDone = true
         }
-    }
-    root.tasks.named('ciResolveAndLockAll').configure { task ->
-        task.mustRunAfter(inputConsumers)
-        task.mustRunAfter(acquire)
-        task.doFirst {
-            requireMigration(acquisitionDone, 'Actual package file capture must precede lock graph collection')
-        }
-        task.doLast {
-            def projects = [:]
-            root.allprojects.sort { it.path }.each { project ->
-                def configurations = project.configurations.findAll { it.canBeResolved }.sort { it.name }
-                requireMigration(configurations.size() <= 4096, 'Package configuration inventory exceeds its bound')
-                configurations.each { configuration ->
-                    requireMigration(configuration.name ==~ /[A-Za-z0-9_.\-]{1,200}/, 'Configuration name is unsafe')
-                    def result = configuration.incoming.resolutionResult
-                    requireMigration(result.allComponents.size() <= 20000 && result.allDependencies.size() <= 60000 &&
-                        !result.allDependencies.any { it instanceof UnresolvedDependencyResult }, 'Package lock graph is incomplete')
+        root.tasks.named('ciResolveAndLockAll').configure { task ->
+            task.mustRunAfter(inputConsumers)
+            task.mustRunAfter(acquire)
+            task.doFirst {
+                requireMigration(acquisitionDone, 'Actual package file capture must precede lock graph collection')
+            }
+            task.doLast {
+                def projects = [:]
+                def graphDigest = null
+                if (upgradeMode) {
+                    def resolved = captureResolvedGraph(collectorId)
+                    projects = resolved.project_configurations.collectEntries { project, configurations ->
+                        [(project): configurations.keySet().toList().sort()]
+                    }
+                    graphDigest = writeOriginal('acquire-graph.json', resolved)
+                } else {
+                    root.allprojects.sort { it.path }.each { project ->
+                        def configurations = project.configurations.findAll { it.canBeResolved }.sort { it.name }
+                        requireMigration(configurations.size() <= 4096, 'Package configuration inventory exceeds its bound')
+                        configurations.each { configuration ->
+                            requireMigration(configuration.name ==~ /[A-Za-z0-9_.\-]{1,200}/, 'Configuration name is unsafe')
+                            def result = configuration.incoming.resolutionResult
+                            requireMigration(result.allComponents.size() <= 20000 && result.allDependencies.size() <= 60000 &&
+                                !result.allDependencies.any { it instanceof UnresolvedDependencyResult }, 'Package lock graph is incomplete')
+                        }
+                        projects[project.path] = configurations.collect { it.name }
+                    }
+                    checkHashedArchives()
                 }
-                projects[project.path] = configurations.collect { it.name }
+                def count = projects.values().sum { it.size() }
+                requireMigration(count > 0 && count <= 8192, 'Package lock graph count exceeds its bound')
+                def record = [schema_version: upgradeMode ? 4 : 3, kind: 'dependency-package-file-acquisition',
+                    variants: request.variants, request_sha256: requestDigest, writer_tasks: writerTasks,
+                    test_task_count: 0, graph_task_count: gradle.taskGraph.allTasks.size(),
+                    consumers: records.sort { it.id }, runtime_classpaths: runtimeRecords.sort { it.consumer_id },
+                    archive_budget: acquisitionBudget,
+                    lock_capture: [task: collectorId, preceding_file_capture_task: acquireId, status: 'completed',
+                        configuration_count: count, unresolved_dependency_count: 0, project_configurations: projects]] + binding
+                if (upgradeMode) record.acquired_graph_sha256 = graphDigest
+                def digest = writeOriginal('acquisition.json', record)
+                root.logger.lifecycle('CI_PACKAGE_ACQUISITION ' + encoded([consumer_count: records.size(),
+                    producer_count: runtimeRecords.sum { it.producer_tasks.size() }, archive_count: hashedFiles.size(),
+                    archive_bytes: reservedBytes, report_sha256: digest]))
             }
-            def count = projects.values().sum { it.size() }
-            requireMigration(count > 0 && count <= 8192, 'Package lock graph count exceeds its bound')
-            hashedFiles.each { path, cached ->
-                safeParents(path)
-                def attributes = Files.readAttributes(path, java.nio.file.attribute.BasicFileAttributes, LinkOption.NOFOLLOW_LINKS)
-                requireMigration(cached.identity == [attributes.fileKey(), attributes.size(), attributes.lastModifiedTime()],
-                    'Actual package archive changed during graph collection')
+        }
+    } else {
+        root.tasks.register('ciReadPackageDependencyGraph') { task ->
+            task.notCompatibleWithConfigurationCache('Independent strict validation reads real producer and configuration graphs')
+            task.mustRunAfter(inputConsumers)
+            task.dependsOn(classpathProducers.values().flatten().toSet())
+            task.doLast {
+                captureConsumers()
+                def digest = writeOriginal('strict-graph.json', captureResolvedGraph(strictGraphId))
+                root.logger.lifecycle('CI_PACKAGE_STRICT_GRAPH ' + encoded([consumer_count: records.size(),
+                    producer_count: runtimeRecords.sum { it.producer_tasks.size() }, report_sha256: digest]))
             }
-            def record = [schema_version: 3, kind: 'dependency-package-file-acquisition',
-                variants: request.variants, request_sha256: requestDigest, writer_tasks: writerTasks,
-                test_task_count: 0, graph_task_count: gradle.taskGraph.allTasks.size(),
-                consumers: records.sort { it.id }, runtime_classpaths: runtimeRecords.sort { it.consumer_id },
-                archive_budget: [unique_archive_count: hashedFiles.size(), unique_archive_bytes: reservedBytes],
-                lock_capture: [task: collectorId, preceding_file_capture_task: acquireId, status: 'completed',
-                    configuration_count: count, unresolved_dependency_count: 0, project_configurations: projects]] + binding
-            byte[] bytes = (encoded(record) + '\n').getBytes('UTF-8')
-            requireMigration(bytes.length <= 4 * 1024 * 1024, 'Package acquisition report exceeds its bound')
-            def destination = reportRoot.resolve('acquisition.json')
-            safeParents(destination)
-            requireMigration(!Files.exists(destination, LinkOption.NOFOLLOW_LINKS), 'Package acquisition original is occupied')
-            Files.write(destination, bytes, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
-            requireMigration(Arrays.equals(rawBytes(destination), bytes), 'Package acquisition original changed during preservation')
-            root.logger.lifecycle('CI_PACKAGE_ACQUISITION ' + encoded([consumer_count: records.size(),
-                producer_count: runtimeRecords.sum { it.producer_tasks.size() }, archive_count: hashedFiles.size(),
-                archive_bytes: reservedBytes, report_sha256: digestBytes(bytes)]))
         }
     }
 }

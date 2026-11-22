@@ -20,10 +20,12 @@ KIND = 'owner-pr-package-input-acquire-strict-compile'
 REPORT = 'android/app/build/reports/package-input-acquisition'
 ACQUIRE_TASK = ':ciAcquirePackageDependencyFiles'
 COLLECTOR = ':ciResolveAndLockAll'
+STRICT_GRAPH_TASK = ':ciReadPackageDependencyGraph'
 TOOLS = ('scripts/ci/build.py', 'scripts/ci/build_process.py', 'scripts/ci/enforce.gradle',
          'scripts/ci/ci_common.py', 'scripts/ci/apk_verify.py', 'scripts/ci/package_contract.py',
          'scripts/ci/package_build.py', 'scripts/ci/package_migration.py', 'scripts/ci/package_test_evidence.py',
          'scripts/ci/dependency-acquire-packages.gradle')
+VERSION_TOOLS = TOOLS + ('scripts/ci/package_lock_versions.py', 'scripts/ci/package_lock_graph.py')
 GRAPH_FILES = ('.ci/toolchain.properties', 'android/settings.gradle.kts', 'android/build.gradle.kts',
                'android/app/build.gradle.kts', 'android/companion/build.gradle.kts',
                'android/gradle/libs.versions.toml', 'android/gradle.properties')
@@ -41,6 +43,16 @@ def graph_changed(root, base):
         if previous.returncode != 0 or previous.stdout.strip() != git(root, 'rev-parse', 'HEAD:' + name):
             return True
     return False
+
+
+def version_source_bound(root, binding, request):
+    require(git(root, 'rev-parse', binding['source_sha'] + ':' + REQUEST_FILE) ==
+            git(root, 'rev-parse', 'HEAD:' + REQUEST_FILE), 'The frozen PR source must contain the exact upgrade request')
+    result = subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'diff', '--name-only', '--no-renames', '-z',
+                             binding['source_sha'], binding['build_sha'], '--'], cwd=root, capture_output=True)
+    require(result.returncode == 0 and len(result.stdout) <= 4 * 1024 * 1024, 'Upgrade source/build comparison is unavailable')
+    changed = set(filter(None, result.stdout.decode('utf-8').split('\0')))
+    require(not changed & set(request['frozen_input_hashes']), 'The upgrade source and build must have identical frozen build inputs')
 
 
 def runtime_components(root):
@@ -79,7 +91,7 @@ def schema_export_name(request, phase, relative):
     return 'schema-exports/' + phase + '/' + suffix
 
 
-def make_request(root, base, variants=('debug',), *, schema_version=None):
+def make_request(root, base, variants=('debug',), *, schema_version=None, allowed_dependency_upgrades=None):
     require(re.fullmatch(r'[0-9a-f]{40}', base), 'A frozen base source SHA is required')
     plan = project_plan(root)
     reviewed = input_hashes(root)
@@ -95,15 +107,25 @@ def make_request(root, base, variants=('debug',), *, schema_version=None):
     require(all(raw is None or reviewed.get(name) == hashlib.sha256(raw).hexdigest()
                 for name, raw in base_history.items()), 'Admitted Watch history cannot be removed or recollected')
     version = (4 if len(current) > 1 else 3) if schema_version is None else schema_version
-    require(type(version) is int and version in (3, 4), 'Package schema request must be v3 or v4')
+    require(type(version) is int and version in (3, 4, 6), 'Package schema request must be explicit v3/v4 or the independent v6')
+    require(version == 6 or allowed_dependency_upgrades is None, 'Earlier requests cannot authorize version upgrades')
     if version == 3:
         require(len(current) == 1 and current[0] == main, 'Request v3 binds only one actual current database')
-    if version == 4 or int(Path(main).stem) > max(HISTORICAL_SCHEMA_VERSIONS):
+    if version in (4, 6) or int(Path(main).stem) > max(HISTORICAL_SCHEMA_VERSIONS):
         required_history = history
         schema_six = SCHEMA_DIRECTORY + '/6.json'
         if main == schema_six and base_history[schema_six] is None and schema_six not in reviewed:
             required_history = history - {schema_six}
         require(required_history <= set(reviewed), 'Request must retain admitted Watch history1/2/3/6')
+    if version == 6:
+        from package_lock_versions import KIND as upgrade_kind, validate_upgrades
+        require(history | {'gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile'} <= set(reviewed),
+                'A version migration requires the complete admitted XML, dual locks and Watch history1/2/3/6')
+        for name in DEPENDENCY_FILES:
+            raw = data_bytes(root, 'android/' + name, base, optional=True)
+            require(raw is None or reviewed.get(name) == hashlib.sha256(raw).hexdigest(),
+                    'A version migration cannot remove an admitted baseline dependency file')
+        upgrades = validate_upgrades(allowed_dependency_upgrades, data_bytes(root, 'android/app/gradle.lockfile', base))
     collected = [name for name in current if name not in reviewed]
     for name in collected:
         require(not safe_path(root, 'android/' + name).exists(), 'Unreviewed schema output cannot be reused')
@@ -112,18 +134,19 @@ def make_request(root, base, variants=('debug',), *, schema_version=None):
             set(variants) <= {'debug', 'release', 'diagnostic'}, 'Acquisition variants must be explicit and bounded')
     frozen = source_hashes(root)
     declarations = room_declarations(root)
-    if version == 4:
+    if version in (4, 6):
         require(all(frozen.get(name) == entry['source_sha256'] for name, entry in declarations.items()),
-                'Request v4 Room declarations must be exact committed source inputs')
-    return {'schema_version': version, 'kind': KIND, 'owner_login': 'OnlineMo', 'owner_id': 143324986,
+                'Multi-current Room declarations must be exact committed source inputs')
+    return {'schema_version': version, 'kind': upgrade_kind if version == 6 else KIND, 'owner_login': 'OnlineMo', 'owner_id': 143324986,
             'base_source_sha': base, 'variants': variants, 'plan': plan,
             **({'current_schema': current[0]} if version == 3 else {'current_schemas': current}),
             'room_declarations': declarations,
             **({'schema_to_collect': collected[0] if collected else None} if version == 3 else {'schemas_to_collect': collected}),
             'reviewed_input_hashes': reviewed, 'frozen_input_hashes': frozen,
-            'migration_tool_hashes': {name: frozen[name] for name in TOOLS},
+            'migration_tool_hashes': {name: frozen[name] for name in (VERSION_TOOLS if version == 6 else TOOLS)},
             'allowed_dependency_outputs': list(DEPENDENCY_FILES), 'runtime_components': runtime_components(root),
-            'graph_input_hashes': {name: frozen[name] for name in GRAPH_FILES}}
+            'graph_input_hashes': {name: frozen[name] for name in GRAPH_FILES},
+            **({'allowed_dependency_upgrades': upgrades} if version == 6 else {})}
 
 
 def admit(root, binding, plan):
@@ -139,16 +162,23 @@ def admit(root, binding, plan):
     fields = {'schema_version', 'kind', 'owner_login', 'owner_id', 'base_source_sha', 'variants', 'plan',
               'reviewed_input_hashes', 'frozen_input_hashes', 'migration_tool_hashes', 'allowed_dependency_outputs',
               'runtime_components', 'graph_input_hashes', 'room_declarations'}
-    require(type(request) is dict and type(request.get('schema_version')) is int and request['schema_version'] in (3, 4),
-            'Explicit package request v3/v4 is required')
+    require(type(request) is dict and type(request.get('schema_version')) is int and request['schema_version'] in (3, 4, 6),
+            'Explicit package request v3/v4 or independent v6 is required')
     fields |= {'current_schema', 'schema_to_collect'} if request['schema_version'] == 3 else {'current_schemas', 'schemas_to_collect'}
-    require(set(request) == fields and request['kind'] == KIND and request['owner_login'] == 'OnlineMo' and
+    expected_kind = KIND
+    if request['schema_version'] == 6:
+        from package_lock_versions import KIND as expected_kind
+        fields.add('allowed_dependency_upgrades')
+    require(set(request) == fields and request['kind'] == expected_kind and request['owner_login'] == 'OnlineMo' and
             type(request['owner_id']) is int and request['owner_id'] == 143324986, 'Package request owner or fields differ')
     base = request['base_source_sha']
     require(type(base) is str and re.fullmatch(r'[0-9a-f]{40}', base), 'Package migration base SHA is invalid')
     git(root, 'merge-base', '--is-ancestor', base, binding['source_sha'])
     git(root, 'merge-base', '--is-ancestor', binding['source_sha'], binding['build_sha'])
-    require(exact_data(request, make_request(root, base, request['variants'], schema_version=request['schema_version'])) and exact_data(request['plan'], plan),
+    if request['schema_version'] == 6:
+        version_source_bound(root, binding, request)
+    require(exact_data(request, make_request(root, base, request['variants'], schema_version=request['schema_version'],
+                                           allowed_dependency_upgrades=request.get('allowed_dependency_upgrades'))) and exact_data(request['plan'], plan),
             'Package request does not bind the current committed source and admitted baseline')
     require(request_collected_schemas(request) or
             'companion/gradle.lockfile' not in request['reviewed_input_hashes'] or
@@ -162,6 +192,8 @@ def admit(root, binding, plan):
     else:
         admission.update(writer_schema_hashes={}, strict_schema_hashes={})
     admission['acquisition_sha256'] = None
+    if request['schema_version'] == 6:
+        admission.update(actual_dependency_upgrades=[], acquired_graph_sha256=None, strict_graph_sha256=None)
     return admission
 
 
@@ -220,8 +252,7 @@ def growth(before, after):
             require(after[name] == data, 'An old Room schema changed')
 
 
-def validate_acquisition(record, state):
-    request = state['collection']['request']
+def validate_archive_consumers(record, request, *, strict=False):
     expected = consumers(request)
     optional = {}
     for mode in request['variants']:
@@ -229,18 +260,6 @@ def validate_acquisition(record, state):
             spec = SPECS[role]
             optional[':' + spec['module'] + ':lintAnalyze' + spec['flavor'][0].upper() +
                      spec['flavor'][1:] + mode.title() + 'AndroidTest'] = 'task-input-archives'
-    fields = {'schema_version', 'kind', 'request_sha256', 'variants', 'writer_tasks', 'test_task_count',
-              'graph_task_count', 'consumers', 'runtime_classpaths', 'archive_budget', 'lock_capture'} | set(state['binding'])
-    require(type(record) is dict and set(record) == fields and type(record.get('schema_version')) is int and record['schema_version'] == 3 and
-            record.get('kind') == 'dependency-package-file-acquisition' and
-            record.get('request_sha256') == state['collection']['request_sha256'] and
-            record.get('variants') == request['variants'] and record.get('writer_tasks') == writer_tasks(request) and
-            all(type(record.get(key)) is type(value) and record[key] == value for key, value in state['binding'].items()),
-            'Package acquisition provenance or selected variants differ')
-    require(type(record.get('test_task_count')) is int and record['test_task_count'] == 0,
-            'Acquisition must not execute the business test suite')
-    require(type(record.get('graph_task_count')) is int and 0 < record['graph_task_count'] <= 4096,
-            'Package acquisition task graph count is invalid')
     observed = record.get('consumers')
     require(type(observed) is list and 0 < len(observed) <= 128 and
             all(type(item) is dict and type(item.get('id')) is str for item in observed), 'Package consumer inventory is invalid')
@@ -261,7 +280,7 @@ def validate_acquisition(record, state):
             outcome = consumer.get('outcome')
             require(outcome == 'executed' or outcome == 'no-source' and
                     (consumer['id'].endswith('JavaWithJavac') or consumer['id'] in optional) or
-                    outcome == 'up-to-date' and ':lint' in consumer['id'], 'A required compile/lint consumer did not complete')
+                    outcome == 'up-to-date' and (strict or ':lint' in consumer['id']), 'A required compile/lint consumer did not complete')
         for item in consumer['files']:
             file_fields = {'name', 'size', 'sha256'} | ({'component'} if kind in ('configuration-artifacts', 'buildscript-artifacts') else set())
             require(type(item) is dict and set(item) == file_fields and type(item.get('name')) is str and
@@ -307,13 +326,41 @@ def validate_acquisition(record, state):
                 'Package Test.classpath producer did not complete')
         require([value['id'] for value in producers] == sorted({value['id'] for value in producers}),
                 'Package Test.classpath producer inventory is duplicate')
-    budget = record.get('archive_budget', {})
+    return files
+
+
+def validate_archive_budget(budget, files):
     require(type(budget) is dict and set(budget) == {'unique_archive_count', 'unique_archive_bytes'} and
             type(budget.get('unique_archive_count')) is int and 0 < budget['unique_archive_count'] <= 4096 and
             type(budget.get('unique_archive_bytes')) is int and 0 < budget['unique_archive_bytes'] <= 2 * 1024 * 1024 * 1024 and
             len(set(files)) <= budget['unique_archive_count'] <= len(files) and
             sum(item[1] for item in set(files)) <= budget['unique_archive_bytes'] <= sum(item[1] for item in files),
             'Package archive reservation is inconsistent')
+
+
+def validate_acquisition(record, state):
+    request = state['collection']['request']
+    version_upgrade = request['schema_version'] == 6
+    fields = {'schema_version', 'kind', 'request_sha256', 'variants', 'writer_tasks', 'test_task_count',
+              'graph_task_count', 'consumers', 'runtime_classpaths', 'archive_budget', 'lock_capture'} | set(state['binding'])
+    if version_upgrade:
+        fields.add('acquired_graph_sha256')
+    require(type(record) is dict and set(record) == fields and type(record.get('schema_version')) is int and
+            record['schema_version'] == (4 if version_upgrade else 3) and
+            record.get('kind') == 'dependency-package-file-acquisition' and
+            record.get('request_sha256') == state['collection']['request_sha256'] and
+            record.get('variants') == request['variants'] and record.get('writer_tasks') == writer_tasks(request) and
+            all(type(record.get(key)) is type(value) and record[key] == value for key, value in state['binding'].items()),
+            'Package acquisition provenance or selected variants differ')
+    require(type(record.get('test_task_count')) is int and record['test_task_count'] == 0,
+            'Acquisition must not execute the business test suite')
+    require(type(record.get('graph_task_count')) is int and 0 < record['graph_task_count'] <= 4096,
+            'Package acquisition task graph count is invalid')
+    if version_upgrade:
+        require(type(record['acquired_graph_sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', record['acquired_graph_sha256']),
+                'Schema 6 acquisition must bind its actual resolved graph original')
+    files = validate_archive_consumers(record, request)
+    validate_archive_budget(record.get('archive_budget', {}), files)
     capture = record.get('lock_capture', {})
     require(type(capture) is dict and set(capture) == {'task', 'preceding_file_capture_task', 'status',
             'unresolved_dependency_count', 'configuration_count', 'project_configurations'} and
@@ -361,10 +408,23 @@ def acquire(root, state, legacy):
     require(set(observed) <= allowed and all(name in observed for name in required_inputs(root)),
             'Package writer omitted required outputs or added another input')
     after = {name: safe_path(Path(root) / 'android', name, file=True).read_bytes() for name in observed}
-    growth(before, {name: data for name, data in after.items() if name not in request_collected_schemas(request)})
+    comparable = {name: data for name, data in after.items() if name not in request_collected_schemas(request)}
+    if request['schema_version'] == 6:
+        from package_lock_versions import growth as upgrade_growth
+        changes = upgrade_growth(before, comparable, request['allowed_dependency_upgrades'])
+    else:
+        growth(before, comparable)
     witness = safe_path(root, REPORT + '/acquisition.json', file=True)
     record = migration_json(witness.read_bytes())
     validate_acquisition(record, {**state, '_root': str(root)})
+    if request['schema_version'] == 6:
+        from package_lock_graph import FILES, validate
+        graph = safe_path(root, REPORT + '/' + FILES['acquire'], file=True)
+        digest = sha256(graph)
+        require(record['acquired_graph_sha256'] == digest, 'Acquisition does not bind its actual graph original')
+        validate(root, migration_json(graph.read_bytes()), state, 'acquire', changes)
+        admission['actual_dependency_upgrades'] = changes
+        admission['acquired_graph_sha256'] = digest
     admission['acquisition_sha256'] = sha256(witness)
     admission['acquired_input_hashes'] = observed
     for name in request_collected_schemas(request):
@@ -377,12 +437,28 @@ def acquire(root, state, legacy):
         preserve(root, 'acquired-inputs/' + name, raw)
 
 
+def version_originals(root, admission):
+    """A later stage must retain both complete raw preimages, not only a hash summary."""
+    from package_lock_graph import FILES
+    require(sha256(safe_path(root, REPORT + '/dependency-migration-request.json', file=True)) == admission['request_sha256'],
+            'The preserved version upgrade request changed')
+    for directory, hashes in (('reviewed-inputs', admission['request']['reviewed_input_hashes']),
+                              ('acquired-inputs', admission['acquired_input_hashes'])):
+        for name, digest in hashes.items():
+            require(sha256(safe_path(root, REPORT + '/' + directory + '/' + name, file=True)) == digest,
+                    'A complete baseline/acquired input original changed')
+    require(sha256(safe_path(root, REPORT + '/' + FILES['acquire'], file=True)) == admission['acquired_graph_sha256'],
+            'The actual acquisition graph original changed')
+
+
 def before_strict(root, state, stage):
     admission = state['collection']
     request = admission['request']
     require(committed_hash(root, REQUEST_FILE) == admission['request_sha256'] and
             sha256(safe_path(root, REPORT + '/acquisition.json', file=True)) == admission['acquisition_sha256'],
             'Acquisition originals changed before strict validation')
+    if request['schema_version'] == 6:
+        version_originals(root, admission)
     if stage == 'strict-inputs':
         for name in request_collected_schemas(request):
             path = safe_path(Path(root) / 'android', name, file=True)
@@ -406,6 +482,17 @@ def after_strict(root, state, stage):
                 admission['strict_schema_sha256'] = digest
             else:
                 admission['strict_schema_hashes'][name] = digest
+        if request['schema_version'] == 6:
+            from package_lock_graph import FILES, compare, validate
+            version_originals(root, admission)
+            require(committed_hash(root, REQUEST_FILE) == admission['request_sha256'], 'Strict validation changed the frozen upgrade request')
+            acquired = safe_path(root, REPORT + '/' + FILES['acquire'], file=True)
+            strict = safe_path(root, REPORT + '/' + FILES['strict-inputs'], file=True)
+            acquired_record, strict_record = migration_json(acquired.read_bytes()), migration_json(strict.read_bytes())
+            validate(root, acquired_record, state, 'acquire', admission['actual_dependency_upgrades'])
+            validate(root, strict_record, state, 'strict-inputs', admission['actual_dependency_upgrades'])
+            compare(acquired_record, strict_record)
+            admission['strict_graph_sha256'] = sha256(strict)
         admission['strict_inputs_completed'] = True
 
 
@@ -414,13 +501,31 @@ def strict_inputs(root, state, legacy):
     environment = legacy.gradle_environment(unsigned=True)
     for name in ('CI_DEPENDENCY_PACKAGE_REQUEST_SHA256', 'CI_DEPENDENCY_PACKAGE_VARIANTS', 'CI_PACKAGE_FRESH_ROOM_SCHEMA', 'CI_PACKAGE_DEBUG_BINDING'):
         environment.pop(name, None)
-    if request_collected_schemas(state['collection']['request']):
+    request = state['collection']['request']
+    if request_collected_schemas(request):
         environment['CI_PACKAGE_FRESH_ROOM_SCHEMA'] = 'true'
-    legacy.run_gradle(legacy.gradle_command(writer_tasks(state['collection']['request'])), cwd=Path(root) / 'android',
+    command = legacy.gradle_command(writer_tasks(request))
+    if request['schema_version'] == 6:
+        environment['CI_DEPENDENCY_PACKAGE_REQUEST_SHA256'] = state['collection']['request_sha256']
+        command += [STRICT_GRAPH_TASK, '--init-script', '../scripts/ci/dependency-acquire-packages.gradle']
+    legacy.run_gradle(command, cwd=Path(root) / 'android',
                       env=environment, phase='package-strict-inputs', build_sha=state['binding']['build_sha'],
                       total_deadline=state['deadline_monotonic_seconds'], overall_limit_seconds=state['overall_limit_seconds'])
     require(source_hashes(root) == state['source_input_hashes'], 'Strict input validation changed frozen source')
     after_strict(root, state, 'strict-inputs')
+
+
+def report_version(request):
+    return 8 if request['schema_version'] == 6 else 6 if request['schema_version'] == 3 else 7
+
+
+def version_report_fields(admission):
+    if admission['request']['schema_version'] != 6:
+        return {}
+    return {'allowed_dependency_upgrades': admission['request']['allowed_dependency_upgrades'],
+            'actual_dependency_upgrades': admission['actual_dependency_upgrades'],
+            'acquired_graph_sha256': admission['acquired_graph_sha256'],
+            'strict_graph_sha256': admission['strict_graph_sha256']}
 
 
 def seal(root, state):
@@ -429,6 +534,12 @@ def seal(root, state):
     require(admission.get('strict_inputs_completed') is True and input_hashes(root) == admission['acquired_input_hashes'],
             'Strict compiler/lint input validation and exact output bytes are required')
     require(state['debug_test_evidence'] is None, 'Input acquisition cannot claim application test evidence')
+    if request['schema_version'] == 6:
+        from package_lock_graph import FILES
+        version_originals(root, admission)
+        require(admission['strict_graph_sha256'] is not None and
+                sha256(safe_path(root, REPORT + '/' + FILES['strict-inputs'], file=True)) == admission['strict_graph_sha256'],
+                'An independently validated strict graph original is required')
     files = {}
     for name, digest in admission['acquired_input_hashes'].items():
         raw = safe_path(Path(root) / 'android', name, file=True).read_bytes()
@@ -436,14 +547,15 @@ def seal(root, state):
         files[name] = preserve(root, name, raw)
     schema_hashes = {name: admission[name] for name in (('writer_schema_sha256', 'strict_schema_sha256')
                      if request['schema_version'] == 3 else ('writer_schema_hashes', 'strict_schema_hashes'))}
-    manifest = {'schema_version': 6 if request['schema_version'] == 3 else 7, 'collection_kind': KIND, **state['binding'], **state['plan'],
+    manifest = {'schema_version': report_version(request), 'collection_kind': request['kind'], **state['binding'], **state['plan'],
                 'room_declarations': request['room_declarations'],
                 'request_sha256': admission['request_sha256'], 'base_source_sha': request['base_source_sha'],
                 'variants': request['variants'], **request_schema_fields(request), 'reviewed_input_hashes': request['reviewed_input_hashes'],
                 'source_input_hashes': state['source_input_hashes'], 'acquired_input_hashes': admission['acquired_input_hashes'],
                 'strict_input_hashes': input_hashes(root), 'acquisition_sha256': admission['acquisition_sha256'],
-                **schema_hashes,
-                'input_validation_scope': 'strict-debug-compilation-and-lint', 'application_tests': 'NOT_RUN',
+                **schema_hashes, **version_report_fields(admission),
+                'input_validation_scope': ('strict-requested-variant-compilation-lint-and-full-lock-graph' if request['schema_version'] == 6
+                                           else 'strict-debug-compilation-and-lint'), 'application_tests': 'NOT_RUN',
                 'apk_assembly': 'NOT_RUN', 'release_diagnostic_full_suites': 'NOT REQUESTED',
                 'overall_limit_seconds': state['overall_limit_seconds'], 'elapsed_seconds': time.monotonic() - state['started_monotonic_seconds'],
                 'status': 'generated-unreviewed', 'files': files, 'accepted': False, 'apk_exported': False}
@@ -484,8 +596,9 @@ def record_failure(root, state, stage, failure):
             continue
         name = path.relative_to(report).as_posix()
         originals[name] = sha256(safe_path(report, name, file=True))
-    manifest = {'schema_version': 6 if request['schema_version'] == 3 else 7, 'collection_kind': KIND, **state['binding'], **state['plan'],
+    manifest = {'schema_version': report_version(request), 'collection_kind': request['kind'], **state['binding'], **state['plan'],
                 **({} if request['schema_version'] == 3 else request_schema_fields(request)),
+                **version_report_fields(admission),
                 'status': 'failed-partial', 'failed_stage': stage,
                 'failure_type': type(failure).__name__, 'completed_stages': state['completed'],
                 'request_sha256': admission['request_sha256'], 'base_source_sha': request['base_source_sha'],
@@ -503,12 +616,17 @@ def record_failure(root, state, stage, failure):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('operation', choices=('make-request',))
+    parser.add_argument('operation', choices=('make-request', 'make-version-request'))
     parser.add_argument('--base-sha', required=True)
     parser.add_argument('--variants', nargs='+', choices=('debug', 'release', 'diagnostic'), default=['debug'])
     parser.add_argument('--output', required=True)
+    parser.add_argument('--dependency-upgrades', help='Exact owner grant JSON array for the independent schema 6 request')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[2]
     destination = Path(args.output)
     require(not destination.exists(), 'Owner request output is write-once')
-    write_json(destination, make_request(root, args.base_sha, args.variants))
+    require((args.operation == 'make-version-request') == (args.dependency_upgrades is not None),
+            'Only make-version-request accepts and requires an exact dependency upgrade grant file')
+    grants = migration_json(Path(args.dependency_upgrades).read_bytes()) if args.dependency_upgrades is not None else None
+    write_json(destination, make_request(root, args.base_sha, args.variants,
+                                        schema_version=6 if grants is not None else None, allowed_dependency_upgrades=grants))
