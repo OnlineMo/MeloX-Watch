@@ -6,6 +6,7 @@ import android.net.NetworkCapabilities
 import io.github.onlinemo.meloxwatch.data.auth.SessionValidity
 import io.github.onlinemo.meloxwatch.data.auth.AuthException
 import io.github.onlinemo.meloxwatch.data.auth.AuthIssue
+import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
 import io.github.onlinemo.meloxwatch.data.meting.MetingRuntimeOwner
 import io.github.onlinemo.meloxwatch.data.netease.OnlineAccountChanges
 import io.github.onlinemo.meloxwatch.data.netease.OnlineMusicRuntime
@@ -125,6 +126,9 @@ internal class OnlineLyricsFeatureOwner(
         require(accountId.isNotBlank())
         return withContext(NonCancellable) { clearHash(onlineOpaqueHash("netease:$accountId")) }
     }
+
+    suspend fun measureDiskCache(): StorageCategory = cache.measureStorage()
+    suspend fun clearDiskCache(): StorageCategory = cache.clearStorage()
 
     private suspend fun clearHash(hash: String): OnlineLyricsIssue? {
         val issue = try {

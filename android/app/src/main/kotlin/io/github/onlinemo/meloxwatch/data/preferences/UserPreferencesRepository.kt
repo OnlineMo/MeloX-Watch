@@ -25,6 +25,7 @@ enum class PreferencesField {
     MAIN_PROGRESS,
     SEEK_GESTURE,
     SLEEP_SUMMARY,
+    HELP,
 }
 
 enum class PreferencesRecoveryReason {
@@ -42,6 +43,7 @@ data class PreferencesRecovery(
 
 enum class PreferencesFailure {
     IO,
+    BUSY,
     UNSUPPORTED_SCHEMA,
     INVALID_REVISION,
     REVISION_EXHAUSTED,

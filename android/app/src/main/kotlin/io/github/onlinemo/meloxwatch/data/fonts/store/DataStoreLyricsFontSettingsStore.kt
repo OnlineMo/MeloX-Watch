@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.Preferences
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSaveResult
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettings
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettingsStore
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -17,6 +19,7 @@ import kotlinx.coroutines.withContext
 /** One admitted operation, no observer/cache/retry loop; the actual file owns both roles' revision. */
 class DataStoreLyricsFontSettingsStore internal constructor(
     private val dataStore: DataStore<Preferences>,
+    private val backupBarrier: BackupMutationBarrier? = null,
 ) : LyricsFontSettingsStore {
     private val occupied = AtomicBoolean(false)
 
@@ -74,7 +77,11 @@ class DataStoreLyricsFontSettingsStore internal constructor(
         return completed.getOrThrow()
     }
 
-    private suspend fun <T> operation(action: suspend () -> T): T {
+    private suspend fun <T> operation(action: suspend () -> T): T = backupBarrier.withBackupMutation(
+        { LyricsFontSettingsStorageException(LyricsFontSettingsStorageIssue.BUSY) },
+    ) { operationActual(action) }
+
+    private suspend fun <T> operationActual(action: suspend () -> T): T {
         if (!occupied.compareAndSet(false, true)) fontSettingsFail(LyricsFontSettingsStorageIssue.BUSY)
         try {
             currentCoroutineContext().ensureActive()

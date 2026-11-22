@@ -1,6 +1,32 @@
 package io.github.onlinemo.meloxwatch
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.data.about.AppLicenseRepository
+import io.github.onlinemo.meloxwatch.data.about.DiagnosticArea
+import io.github.onlinemo.meloxwatch.data.about.DiagnosticCode
+import io.github.onlinemo.meloxwatch.data.about.ProjectUpdateSource
+import io.github.onlinemo.meloxwatch.data.about.SafeDiagnosticsStore
+import io.github.onlinemo.meloxwatch.data.backup.BackupCoordinator
+import io.github.onlinemo.meloxwatch.data.backup.BackupDocuments
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.BackupNativeConfigBridge
+import io.github.onlinemo.meloxwatch.data.backup.BackupNativeResourceBridge
+import io.github.onlinemo.meloxwatch.data.backup.BackupPermissionVerifier
+import io.github.onlinemo.meloxwatch.data.backup.BackupStartupState
+import io.github.onlinemo.meloxwatch.data.backup.RoomBackupRelinker
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationPlaybackHost
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationsRuntime
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontBackupAccess
+import io.github.onlinemo.meloxwatch.data.fonts.BackupFontOwner
+import io.github.onlinemo.meloxwatch.data.storage.FileStorageRepository
+import io.github.onlinemo.meloxwatch.playback.dsp.DspRuntime
+import io.github.onlinemo.meloxwatch.playback.dsp.DspSettingsStore
+import io.github.onlinemo.meloxwatch.playback.dsp.DspSettingsStoreFactory
+import io.github.onlinemo.meloxwatch.data.local.LocalArtifactDocuments
 import io.github.onlinemo.meloxwatch.data.online.OnlineCatalogFeatureOwner
 import io.github.onlinemo.meloxwatch.data.online.OnlineQueueDirectory
 import io.github.onlinemo.meloxwatch.data.network.BoundedHttpGetClient
@@ -82,6 +108,9 @@ import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontEditor
 import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontPresentationOwner
 import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontRuntime
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -97,6 +126,36 @@ import kotlinx.coroutines.withContext
 
 /** UI 和服务共享存储身份；播放内核只在唯一服务中建立。 */
 class MeloXApplication : Application() {
+    private val applicationScopeOwner = lazy { CoroutineScope(SupervisorJob() + Dispatchers.Default) }
+    internal val backupMutationBarrier by lazy { BackupMutationBarrier() }
+    val dspRuntime by lazy { DspRuntime() }
+    private val dspStoreScope by lazy { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
+    private val dspStoreFactory by lazy { DspSettingsStoreFactory() }
+    val dspSettings: DspSettingsStore
+        get() = dspStoreFactory.get(this, dspStoreScope, backupMutationBarrier)
+    private val diagnosticQueue = Channel<Pair<DiagnosticArea, DiagnosticCode>>(8)
+    private val diagnosticLock = Any()
+    private var diagnosticRecordingStarted = false
+    internal val diagnostics by lazy { SafeDiagnosticsStore(this) }
+    internal val appLicenses by lazy { AppLicenseRepository(assets) }
+    internal val localArtifactDocuments by lazy { LocalArtifactDocuments(this, localProviderIo) }
+    internal val projectUpdates by lazy { ProjectUpdateSource(boundedHttpGets) }
+
+    internal fun recordDiagnostic(area: DiagnosticArea, code: DiagnosticCode) {
+        diagnosticQueue.trySend(area to code)
+        synchronized(diagnosticLock) {
+            if (diagnosticRecordingStarted) return
+            diagnosticRecordingStarted = true
+            applicationScopeOwner.value.launch(Dispatchers.IO) {
+                for ((recordArea, recordCode) in diagnosticQueue) {
+                    try { diagnostics.record(recordArea, recordCode) }
+                    catch (failure: CancellationException) { throw failure }
+                    catch (_: Exception) { /* 诊断失效不能中断播放或擅自清空已有记录。 */ }
+                }
+            }
+        }
+    }
+
     val runtimePlaybackResources by lazy { RuntimePlaybackResources() }
     val onlineAccountChanges by lazy { OnlineAccountChanges() }
     private val boundedHttpGetOwner = lazy { BoundedHttpGetClient(this) }
@@ -137,14 +196,35 @@ class MeloXApplication : Application() {
     }
 
     override fun onTerminate() {
+        diagnosticQueue.close()
+        if (applicationScopeOwner.isInitialized()) applicationScopeOwner.value.cancel()
         try { closeOnlineResources() } finally { super.onTerminate() }
     }
 
-    private val database by lazy { MeloXDatabase.open(this) }
-    val queues: QueueStore by lazy { RoomQueueStore(database) }
+    private val database by lazy { MeloXDatabase.open(this, backupMutationBarrier) }
+    internal val roomQueues by lazy { RoomQueueStore(database) }
+    val queues: QueueStore get() = roomQueues
     val library by lazy { RoomLocalLibraryRepository(database) }
     val listening by lazy { RoomListeningRepository(library) }
     val localProviderIo by lazy { LocalProviderIo() }
+    internal val filePlaybackHost by lazy { FileOperationPlaybackHost() }
+    val fileOperations by lazy {
+        FileOperationsRuntime(this, library, roomQueues, localProviderIo, filePlaybackHost,
+            cancelScan = { scanId -> if (scansOwner.isInitialized()) scans.cancelAndAwait(scanId) },
+            validateRead = localSources::validateRead,
+            requireFileMutationReady = {
+                try { backupMutationBarrier.requireReadyForFileMutation() }
+                catch (failure: BackupException) {
+                    throw FileOperationException(if (failure.issue == BackupIssue.BUSY) FileOperationIssue.BUSY
+                        else FileOperationIssue.RECOVERY_REQUIRED, failure)
+                }
+            })
+    }
+    val fileStorage by lazy {
+        FileStorageRepository(this, localProviderIo, fileOperations,
+            artworkMeasure = { artworks.measureDiskCache() }, artworkClear = { artworks.clearDiskCache() },
+            lyricsMeasure = { onlineLyrics.measureDiskCache() }, lyricsClear = { onlineLyrics.clearDiskCache() })
+    }
     private val themeBitmapOwner = lazy { ThemeBitmapOwner() }
     val themeBitmaps get() = themeBitmapOwner.value
     private val audioCopyQuota: AudioCopyQuota by lazy {
@@ -164,13 +244,17 @@ class MeloXApplication : Application() {
     private val appearanceStoreFactory by lazy { AppearancePreferencesStoreFactory() }
     val appearancePreferences: AppearancePreferencesStore
         get() = appearanceStoreFactory.get(this, appearanceStoreScope)
-    val themes by lazy { LocalThemeRepository(this, localProviderIo, fontThemeStorageBudget, themeBitmaps) }
+    val themes by lazy { LocalThemeRepository(this, localProviderIo, fontThemeStorageBudget, themeBitmaps,
+        backupBarrier = backupMutationBarrier) }
     val appliedThemeResources by lazy { AppliedThemeResources(this, localProviderIo, themeBitmaps) }
-    val playbackBackgrounds by lazy { LocalBackgroundImages(this, localProviderIo, themeBitmaps) }
-    val lyricsFontFiles by lazy { AndroidLyricsFontFiles(this, localProviderIo, fontThemeStorageBudget, themeBitmaps) }
+    val playbackBackgrounds by lazy { LocalBackgroundImages(this, localProviderIo, themeBitmaps,
+        backupBarrier = backupMutationBarrier) }
+    val lyricsFontFiles by lazy { AndroidLyricsFontFiles(this, localProviderIo, fontThemeStorageBudget, themeBitmaps,
+        backupBarrier = backupMutationBarrier) }
     val lyricsFontSettings: LyricsFontSettingsStore get() = LyricsFontSettingsStoreFactory.get(this)
     val lyricsFontPresentationOwner by lazy { LyricsFontPresentationOwner() }
-    val lyricsFontEditor by lazy { LyricsFontEditor(lyricsFontSettings, lyricsFontFiles, lyricsFontPresentationOwner) }
+    val lyricsFontEditor by lazy { LyricsFontEditor(lyricsFontSettings, lyricsFontFiles, lyricsFontPresentationOwner,
+        backupBarrier = backupMutationBarrier) }
     val lyricsFontRuntime by lazy {
         LyricsFontRuntime(lyricsFontSettings, lyricsFontFiles, themes, appliedThemeResources,
             localProviderIo, lyricsFontPresentationOwner)
@@ -206,7 +290,7 @@ class MeloXApplication : Application() {
     }
     val localSources by lazy { AndroidLocalSources(this, localProviderIo) }
     val lyricsAuthority by lazy { LyricsLoadAuthority() }
-    val lyricsCopies by lazy { LyricsDocumentCopies(this, localProviderIo) }
+    val lyricsCopies by lazy { LyricsDocumentCopies(this, localProviderIo, backupBarrier = backupMutationBarrier) }
     val lyricsContexts by lazy { RoomLyricsContextResolver(database, library) }
     private val rawLyricsTracks by lazy { RoomLyricsTrackStore(database, database.lyricsDao()) }
     val lyricsTracks: LyricsTrackStore by lazy { ReferenceGatedLyricsTrackStore(rawLyricsTracks, lyricsCopies) }
@@ -228,7 +312,7 @@ class MeloXApplication : Application() {
     }
     val localMetadata by lazy { LocalMetadataReader(this, localProviderIo) }
     private val scansOwner = lazy {
-        LocalScanEngine(localSources, localMetadata::read, library, localProviderIo,
+        LocalScanEngine(localSources, localMetadata::read, fileOperations.mutations, localProviderIo,
             readContentToken = localMetadata::contentToken,
             verifyMetadataCandidate = localSources::verifyMetadataCandidate)
     }
@@ -255,6 +339,8 @@ class MeloXApplication : Application() {
     val transferReceiver get() = transferReceiverOwner.value
 
     internal suspend fun prepareTransferReception() {
+        requireBackupStorageReady()
+        fileOperations.initialize()
         library.initialize()
         playlists.initialize()
         // 完整的已安装副本保留到原操作获新授权；pending 不能封死认证恢复入口。
@@ -277,9 +363,62 @@ class MeloXApplication : Application() {
     val preferences: UserPreferencesRepository
         get() = UserPreferencesRepositoryFactory.get(this)
 
+    private val backupFontOwner = object : BackupFontOwner {
+        override suspend fun <T> withSettings(action: suspend (LyricsFontBackupAccess) -> T): T =
+            lyricsFontEditor.withBackupSettings(action)
+    }
+    private val backupConfigurations by lazy {
+        BackupNativeConfigBridge(backupMutationBarrier, preferences, lyricsDisplay,
+            appearancePreferences, playbackBackgrounds, themes, dspSettings)
+    }
+    private val backupResources by lazy {
+        BackupNativeResourceBridge(this, backupMutationBarrier, database, localProviderIo,
+            localSources, lyricsCopies, playbackBackgrounds, themes)
+    }
+    internal val backupDocuments by lazy { BackupDocuments(localArtifactDocuments) }
+    val backups by lazy {
+        BackupCoordinator(this, backupMutationBarrier, database, library, roomQueues,
+            roomPlaylists, listening, fileOperations, backupConfigurations, backupResources,
+            backupFontOwner, themes, localProviderIo, backupDocuments,
+            BackupPermissionVerifier(database, library, localSources, fileOperations::retainedRead),
+            RoomBackupRelinker(backupMutationBarrier, database, library, localSources, localProviderIo))
+    }
+    private val backupStartupOwner = lazy {
+        applicationScopeOwner.value.async(Dispatchers.IO) { backups.initializeStorage() }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        backupStartupOwner.value
+    }
+
+    internal suspend fun requireBackupStorageReady() {
+        // Join only the first startup operation. A later explicit retry changes the authoritative
+        // coordinator state, so the first Unavailable result must never remain a permanent latch.
+        backupStartupOwner.value.await()
+        backups.awaitReady()
+        when (val current = backups.startup.value) {
+            is BackupStartupState.Ready -> backups.requireReady()
+            is BackupStartupState.Unavailable -> throw BackupException(current.issue)
+            BackupStartupState.Loading -> throw BackupException(BackupIssue.BUSY)
+        }
+    }
+
     /** Recovery inspects private copies only; opening the app never enumerates external music. */
     suspend fun recoverLocalState(): ImportIssue? = recoveryLock.withLock {
-        library.initialize()
+        try {
+            requireBackupStorageReady()
+            fileOperations.initialize()
+            library.initialize()
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: Exception) {
+            return@withLock when (failure) {
+                is BackupException -> if (failure.issue == BackupIssue.BUSY) ImportIssue.BUSY else ImportIssue.RECOVERY_REQUIRED
+                is FileOperationException -> if (failure.issue == FileOperationIssue.BUSY) ImportIssue.BUSY else ImportIssue.RECOVERY_REQUIRED
+                is LibraryException -> if (failure.issue == LibraryIssue.BUSY) ImportIssue.BUSY else ImportIssue.RECOVERY_REQUIRED
+                else -> ImportIssue.RECOVERY_REQUIRED
+            }
+        }
         if (!localRecovered) {
             try {
                 val recovered = imports.recover()
@@ -338,6 +477,8 @@ class MeloXApplication : Application() {
             if (!visibility.foreground) return@collectLatest
             try {
                 attempt {
+                    requireBackupStorageReady()
+                    fileOperations.initialize()
                     library.initialize()
                     playlists.initialize()
                     mutableFolderMaintenanceIssue.value = folderPlaylistMaintainer.resume().issue

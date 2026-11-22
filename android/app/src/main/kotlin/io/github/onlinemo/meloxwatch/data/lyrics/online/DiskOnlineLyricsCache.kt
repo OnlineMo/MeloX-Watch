@@ -3,6 +3,9 @@ package io.github.onlinemo.meloxwatch.data.lyrics.online
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsLimits
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseException
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseIssue
+import android.os.StatFs
+import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
+import io.github.onlinemo.meloxwatch.data.storage.StorageLimits
 import io.github.onlinemo.meloxwatch.model.onlineOpaqueHash
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -11,6 +14,9 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.LinkOption
+import java.nio.file.NoSuchFileException
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -97,6 +103,8 @@ internal class DiskOnlineLyricsCache(private val directoryProvider: () -> File,
             if (size > maxBytes) return@withContext false
             checkCurrent(isCurrent)
             ensureDirectory()
+            val available = StatFs(directory.absolutePath).availableBytes
+            if (available < StorageLimits.FREE_RESERVE_BYTES || size > available - StorageLimits.FREE_RESERVE_BYTES) return@withContext false
             val target = path(key.fileName)
             val entries = inventory()
             // The old target stays intact until atomic replacement; pending owns another directory entry.
@@ -148,6 +156,36 @@ internal class DiskOnlineLyricsCache(private val directoryProvider: () -> File,
                 if (file.name.startsWith("$ownerHash-") && !file.delete()) throw IOException("Lyrics cache is unavailable")
             }
         }
+    }
+
+    suspend fun measureStorage(): StorageCategory = operations.withLock { withContext(Dispatchers.IO) { measuredStorage() } }
+
+    /** 明确清理缓存不构造账户会话，也不访问已保存的歌词文档。 */
+    suspend fun clearStorage(): StorageCategory = operations.withLock {
+        withContext(Dispatchers.IO) {
+            measuredStorage()
+            for (file in inventory()) {
+                currentCoroutineContext().ensureActive()
+                Files.delete(file.toPath())
+            }
+            measuredStorage()
+        }
+    }
+
+    private fun measuredStorage(): StorageCategory {
+        try {
+            val facts = Files.readAttributes(directory.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            if (!facts.isDirectory || facts.isSymbolicLink) throw IOException("Lyrics cache is unavailable")
+        } catch (_: NoSuchFileException) {
+            val parent = directory.parentFile ?: throw IOException("Lyrics cache is unavailable")
+            val facts = Files.readAttributes(parent.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            if (!facts.isDirectory || facts.isSymbolicLink) throw IOException("Lyrics cache is unavailable")
+            return StorageCategory(0L, 0L)
+        }
+        val files = inventory()
+        var bytes = 0L
+        for (file in files) bytes = Math.addExact(bytes, Files.size(file.toPath()))
+        return StorageCategory(bytes, files.size.toLong())
     }
 
     private suspend fun readText(input: DataInputStream, bytes: ByteArray, digest: MessageDigest) {

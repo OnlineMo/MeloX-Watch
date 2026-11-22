@@ -13,6 +13,11 @@ import io.github.onlinemo.meloxwatch.data.themes.SharedFontThemeStorageBudget
 import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapOwner
 import io.github.onlinemo.meloxwatch.data.themes.ThemeResource
 import io.github.onlinemo.meloxwatch.data.themes.ThemeResourceKind
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupResourceWriter
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -43,12 +48,14 @@ class AndroidLyricsFontFiles private constructor(
     private val availableBytes: (File) -> Long,
     private val cleanupDispatcher: CoroutineDispatcher,
     private val sharedBudget: SharedFontThemeStorageBudget,
+    private val backupBarrier: BackupMutationBarrier?,
 ) : LyricsFontFiles {
     constructor(
         context: Context,
         io: LocalProviderIo,
         sharedBudget: SharedFontThemeStorageBudget = SharedFontThemeStorageBudget(context, io),
         bitmaps: ThemeBitmapOwner = ThemeBitmapOwner(),
+        backupBarrier: BackupMutationBarrier? = null,
     ) : this(
         fontDirectoryProvider(context),
         io,
@@ -57,6 +64,7 @@ class AndroidLyricsFontFiles private constructor(
         File::getUsableSpace,
         Dispatchers.IO.limitedParallelism(1),
         sharedBudget,
+        backupBarrier,
     )
 
     internal constructor(
@@ -69,12 +77,64 @@ class AndroidLyricsFontFiles private constructor(
         sharedBudget: SharedFontThemeStorageBudget = SharedFontThemeStorageBudget(
             directory, File(directory.parentFile, "themes-v1"), io,
         ),
-    ) : this({ directory }, io, opener, decoder, availableBytes, cleanupDispatcher, sharedBudget)
+        backupBarrier: BackupMutationBarrier? = null,
+    ) : this({ directory }, io, opener, decoder, availableBytes, cleanupDispatcher, sharedBudget, backupBarrier)
 
     init { require(sharedBudget.uses(io)) { "Font storage must use the shared physical channel" } }
 
     private val occupied = AtomicBoolean(false)
     private val parser = SfntFontParser()
+    private val backupPinLock = Any()
+    private var backupRetained = emptyMap<String, LyricsFontAsset>()
+
+    /** Only the journal owner can retain the two old and two prospective saved roles. */
+    internal suspend fun retainForBackup(assets: List<LyricsFontAsset>) {
+        requireBackupOwner()
+        if (assets.size > 4 || assets.map { it.id }.distinct().size != assets.size) fontFail(LyricsFontIssue.INVALID_INPUT)
+        operation {
+            physical { signal ->
+                val directory = directory()
+                for (asset in assets) verifiedInfo(managedFile(directory, asset.id, FONT_EXTENSION), asset, signal)
+                synchronized(backupPinLock) { backupRetained = assets.associateBy { it.id } }
+            }
+        }
+    }
+
+    internal suspend fun exportForBackup(asset: LyricsFontAsset, output: BackupResourceWriter) {
+        requireBackupOwner()
+        operation {
+            physical { signal ->
+                val file = managedFile(directory(), asset.id, FONT_EXTENSION)
+                verifiedInfo(file, asset, signal)
+                output.copyVerified(file, asset.byteCount, asset.sha256, signal::throwIfCanceled)
+            }
+        }
+    }
+
+    /** Validate isolated archive bytes with this same parser, decoder and physical owner. */
+    internal suspend fun validateForBackup(file: File, asset: LyricsFontAsset): FontWeightCapability {
+        requireBackupOwner()
+        return operation { physical { signal ->
+            val info = verifiedInfo(file, asset, signal)
+            native { decoder.validate(file, info, signal::throwIfCanceled) }
+        } }
+    }
+
+    internal suspend fun releaseBackupRetention(retain: Set<String>) {
+        requireBackupOwner()
+        validateRetain(retain)
+        operation {
+            physical { signal ->
+                synchronized(backupPinLock) { backupRetained = emptyMap() }
+                pruneFiles(directory(), retain, signal)
+            }
+        }
+    }
+
+    private suspend fun requireBackupOwner() {
+        val barrier = backupBarrier ?: throw BackupException(BackupIssue.INVALID_INPUT)
+        barrier.requireExclusiveOwner()
+    }
 
     override suspend fun importFont(request: LyricsFontImportRequest, retain: Set<String>): PreparedLyricsFont = operation {
         validateRetain(retain)
@@ -160,7 +220,7 @@ class AndroidLyricsFontFiles private constructor(
 
     override suspend fun discard(asset: LyricsFontAsset, retain: Set<String>) = operation {
         validateRetain(retain)
-        if (asset.id !in retain) physical { signal ->
+        if (asset.id !in effectiveRetain(retain)) physical { signal ->
             signal.throwIfCanceled()
             val directory = directory()
             deleteManaged(managedFile(directory, asset.id, FONT_EXTENSION))
@@ -364,10 +424,11 @@ class AndroidLyricsFontFiles private constructor(
     }
 
     private fun pruneFiles(directory: File, retain: Set<String>, checkCancellation: () -> Unit) {
+        val retained = effectiveRetain(retain)
         managedFiles(directory).forEach { file ->
             checkCancellation()
             val id = checkNotNull(managedId(file.name))
-            if (id !in retain || file.name.endsWith(PART_EXTENSION)) deleteManaged(file)
+            if (id !in retained || file.name.endsWith(PART_EXTENSION)) deleteManaged(file)
         }
     }
 
@@ -381,7 +442,10 @@ class AndroidLyricsFontFiles private constructor(
         if (file.exists() && !file.delete()) fontFail(LyricsFontIssue.STORAGE_FULL)
     }
 
-    private suspend fun <T> operation(action: suspend () -> T): T {
+    private suspend fun <T> operation(action: suspend () -> T): T =
+        backupBarrier.withBackupMutation({ LyricsFontException(LyricsFontIssue.BUSY) }) { operationActual(action) }
+
+    private suspend fun <T> operationActual(action: suspend () -> T): T {
         if (!occupied.compareAndSet(false, true)) fontFail(LyricsFontIssue.BUSY)
         try { return action() }
         catch (error: SourceReadException) { throw LyricsFontException(mapSource(error), error) }
@@ -393,14 +457,11 @@ class AndroidLyricsFontFiles private constructor(
     }
 
     private suspend fun <T> physical(action: (CancellationSignal) -> T): T {
-        val rejected = AtomicBoolean(false)
+        val admitted = AtomicBoolean(false)
         try {
-            return io.read(failed = { error ->
-                if (error is SourceReadException && error.issue == SourceReadIssue.BUSY) rejected.set(true)
-            }) { signal -> sharedBudget.fontsOnWorker(signal) { action(signal) } }
-        } catch (cancelled: CancellationException) {
-            if (!rejected.get()) withContext(NonCancellable) { io.awaitIdle() }
-            throw cancelled
+            return io.read(admitted = { admitted.set(true) }) { signal -> sharedBudget.fontsOnWorker(signal) { action(signal) } }
+        } finally {
+            if (admitted.get()) withContext(NonCancellable) { io.awaitIdle() }
         }
     }
 
@@ -413,6 +474,10 @@ class AndroidLyricsFontFiles private constructor(
 
     private fun validateRetain(retain: Set<String>) {
         if (retain.size > 3 || retain.any { !isLyricsFontAssetId(it) }) fontFail(LyricsFontIssue.INVALID_INPUT)
+    }
+
+    private fun effectiveRetain(retain: Set<String>): Set<String> = synchronized(backupPinLock) {
+        (retain + backupRetained.keys).also { if (it.size > 4) fontFail(LyricsFontIssue.INVALID_INPUT) }
     }
 
     private fun validateRequest(request: LyricsFontImportRequest) {

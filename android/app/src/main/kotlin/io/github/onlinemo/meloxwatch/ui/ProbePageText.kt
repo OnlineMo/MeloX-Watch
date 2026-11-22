@@ -7,6 +7,8 @@ import io.github.onlinemo.meloxwatch.ui.meting.MetingSettingsState
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryUiState
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistUiState
 import io.github.onlinemo.meloxwatch.ui.queue.QueueViewerState
+import io.github.onlinemo.meloxwatch.ui.about.AboutUiState
+import io.github.onlinemo.meloxwatch.data.about.ProjectUpdateState
 
 /** Font coverage uses bounded current-page text and visible keys, never a full music directory. */
 internal fun probePageVisibleText(
@@ -19,6 +21,7 @@ internal fun probePageVisibleText(
     visibleKeys: List<Any>,
     online: OnlineUiState? = null,
     meting: MetingSettingsState? = null,
+    about: AboutUiState? = null,
 ): List<String> = buildList {
     val keys = visibleKeys.toSet()
     if (page == ProbePage.PLAYBACK) {
@@ -56,6 +59,30 @@ internal fun probePageVisibleText(
     }
     if (page == ProbePage.METING && meting != null && "meting:settings" in keys) {
         addAll(metingVisibleFontText(meting))
+    }
+    if (page == ProbePage.HELP && about != null) {
+        if ("help:version" in keys) add(about.version.name)
+        about.licenses.forEach { license ->
+            if ("help:license:${license.id}" in keys ||
+                (license.id == about.licenseId && "help:license-name" in keys)) {
+                add(license.name)
+                add(license.version)
+                add(license.license)
+            }
+        }
+        val update = about.updates as? ProjectUpdateState.Checked
+        if (update != null) {
+            if ("help:update-result" in keys) add(update.release.version.name)
+            if ("help:update-notes" in keys) add(update.release.notes)
+        }
+        about.diagnostics.asReversed().forEachIndexed { index, event ->
+            if ("help:diag:$index" in keys) {
+                add(event.area.name)
+                add(event.code.name)
+                add("UTC")
+            }
+        }
+        // 法律原文由页面的系统字体呈现，不把整份许可喂给主题字体覆盖检查。
     }
     if (page == ProbePage.LIBRARY) {
         val tracks = library.page?.tracks.orEmpty()

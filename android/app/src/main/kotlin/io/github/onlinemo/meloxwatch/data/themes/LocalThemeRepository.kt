@@ -18,6 +18,16 @@ import io.github.onlinemo.meloxwatch.data.transfer.TransferOperationKind
 import io.github.onlinemo.meloxwatch.data.transfer.TransferPermit
 import io.github.onlinemo.meloxwatch.data.transfer.TransferUploadKind
 import io.github.onlinemo.meloxwatch.data.transfer.TransferVerifiedUpload
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupResourceWriter
+import io.github.onlinemo.meloxwatch.data.backup.BackupFileIdentity
+import io.github.onlinemo.meloxwatch.data.backup.BackupPrivateDirectory
+import io.github.onlinemo.meloxwatch.data.backup.publishForBackup
+import io.github.onlinemo.meloxwatch.data.backup.publishFailureForBackup
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
+import io.github.onlinemo.meloxwatch.data.backup.withBackupWorkerMutation
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.File
@@ -29,7 +39,12 @@ import java.nio.file.LinkOption
 import java.nio.file.StandardOpenOption
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -49,10 +64,11 @@ class LocalThemeRepository private constructor(
     private val faults: ThemeStorageFaults,
     private val bitmaps: ThemeBitmapOwner,
     private val sharedBudget: SharedFontThemeStorageBudget?,
+    private val backupBarrier: BackupMutationBarrier?,
 ) : ThemeSelectionStore {
-    constructor(context: Context, io: LocalProviderIo, fontBudget: ThemeFontStorageBudget) : this(
+    constructor(context: Context, io: LocalProviderIo, fontBudget: ThemeFontStorageBudget, backupBarrier: BackupMutationBarrier? = null) : this(
         directoryProvider(context), io, AndroidThemePackageSource(context.applicationContext.contentResolver),
-        fontBudget, ThemeAssetValidator(), File::getUsableSpace, ThemeStorageFaults {}, ThemeBitmapOwner(), null,
+        fontBudget, ThemeAssetValidator(), File::getUsableSpace, ThemeStorageFaults {}, ThemeBitmapOwner(), null, backupBarrier,
     )
 
     constructor(
@@ -60,10 +76,11 @@ class LocalThemeRepository private constructor(
         io: LocalProviderIo,
         sharedBudget: SharedFontThemeStorageBudget,
         bitmaps: ThemeBitmapOwner,
+        backupBarrier: BackupMutationBarrier? = null,
     ) : this(
         directoryProvider(context), io, AndroidThemePackageSource(context.applicationContext.contentResolver),
         sharedBudget.themeBudget, ThemeAssetValidator(), sharedBudget::availableBytesForThemesOnWorker,
-        ThemeStorageFaults {}, bitmaps, sharedBudget,
+        ThemeStorageFaults {}, bitmaps, sharedBudget, backupBarrier,
     )
 
     internal constructor(
@@ -76,7 +93,8 @@ class LocalThemeRepository private constructor(
         faults: ThemeStorageFaults = ThemeStorageFaults {},
         bitmaps: ThemeBitmapOwner = ThemeBitmapOwner(),
         sharedBudget: SharedFontThemeStorageBudget? = null,
-    ) : this({ directory }, io, opener, fontBudget, validator, availableBytes, faults, bitmaps, sharedBudget)
+        backupBarrier: BackupMutationBarrier? = null,
+    ) : this({ directory }, io, opener, fontBudget, validator, availableBytes, faults, bitmaps, sharedBudget, backupBarrier)
 
     init { require(sharedBudget == null || sharedBudget.uses(io)) { "Theme storage must use the shared physical channel" } }
 
@@ -91,13 +109,137 @@ class LocalThemeRepository private constructor(
     private val mutablePreview = MutableStateFlow<ThemePreview?>(null)
     val preview: StateFlow<ThemePreview?> = mutablePreview.asStateFlow()
 
+    /** The actual directory transaction and every installed resource are checked, not cached UI. */
+    internal suspend fun readCatalogForBackup(): ThemeCatalog {
+        requireBackupOwner()
+        return operation { store, signal ->
+            val loaded = load(store)
+            requireHealthy(loaded)
+            store.requireMutationAllowed()
+            cleanAbandonedPreviews(store)
+            requireNoPreview()
+            if (store.receivedIds().isNotEmpty()) themeFail(ThemeIssue.BUSY)
+            for (installation in loaded.catalog.catalog.installed) {
+                validateAssets(store.installationDirectory(installation.ref.installationId), store.manifest(installation.ref, loaded.catalog.catalog), signal)
+            }
+            publish(snapshot(store, loaded.catalog))
+            loaded.catalog.catalog.copy(installed = loaded.catalog.catalog.installed.toList())
+        }
+    }
+
+    /** Changes choices through the existing native commit; originals remain installed for rollback. */
+    internal suspend fun setChoicesForBackup(expectedRevision: Long, selected: ThemeChoice, previous: ThemeChoice, operationId: String): ThemeCatalog {
+        requireBackupOwner()
+        if (!isThemeOperationId(operationId)) themeFail(ThemeIssue.INVALID_INPUT)
+        return operation { store, signal ->
+            val loaded = load(store)
+            requireHealthy(loaded)
+            store.requireMutationAllowed()
+            requireNoPreview()
+            val before = loaded.catalog
+            if (before.catalog.revision != expectedRevision) themeFail(ThemeIssue.REVISION_CONFLICT)
+            for (choice in listOf(selected, previous).distinct()) {
+                val manifest = definition(store, before.catalog, choice)
+                if (choice is ThemeChoice.Installed) validateAssets(store.installationDirectory(choice.ref.installationId), manifest, signal)
+            }
+            if (before.catalog.selected == selected && before.catalog.previous == previous) return@operation before.catalog
+            val digest = operationDigest(listOf("backup-choices", expectedRevision.toString(), selected.toString(), previous.toString()))
+            val replacement = before.catalog.copy(revision = nextRevision(before.catalog.revision), selected = selected, previous = previous,
+                lastOperationId = operationId, lastOperationDigest = digest)
+            val commit = try { store.commit(before, replacement, operationId, null, null, null, signal::throwIfCanceled) }
+            catch (failure: Throwable) { refreshAfterFailure(store, before, failure); throw failure }
+            publish(snapshot(store, commit.stored, if (commit.cleanupRequired) ThemeIssue.CLEANUP_REQUIRED else null))
+            if (commit.cleanupRequired) themeFail(ThemeIssue.CLEANUP_REQUIRED)
+            commit.stored.catalog
+        }
+    }
+
+    internal suspend fun exportForBackup(ref: ThemeRef, output: BackupResourceWriter) {
+        requireBackupOwner()
+        operation { store, signal ->
+            val loaded = load(store)
+            requireHealthy(loaded)
+            val manifest = store.manifest(ref, loaded.catalog.catalog)
+            val payload = store.installationDirectory(ref.installationId)
+            validateAssets(payload, manifest, signal)
+            val manifestFile = themeContainedFile(payload, ThemeZipIndex.MANIFEST_NAME)
+            val manifestBytes = readBoundedThemeFile(manifestFile, ThemeLimits.MANIFEST_BYTES, ThemeIssue.INTEGRITY_FAILED, signal::throwIfCanceled)
+            if (ThemeStorageRecords.digest(manifestBytes) != ref.manifestSha256) themeFail(ThemeIssue.INTEGRITY_FAILED)
+            ZipOutputStream(output.output, Charsets.UTF_8).use { zip ->
+                fun entry(name: String, file: File, expectedBytes: Long, expectedSha256: String) {
+                    signal.throwIfCanceled()
+                    val identity = BackupFileIdentity.capture(file)
+                    val digest = java.security.MessageDigest.getInstance("SHA-256")
+                    val prefix = (expectedBytes + ThemeLimits.EXPANSION_RATIO - 1) / ThemeLimits.EXPANSION_RATIO
+                    var copied = 0L
+                    zip.setLevel(Deflater.NO_COMPRESSION)
+                    zip.putNextEntry(ZipEntry(name).apply { time = 315619200000L })
+                    FileChannel.open(file.toPath(), StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS).use { channel ->
+                        if (channel.size() != expectedBytes) themeFail(ThemeIssue.INTEGRITY_FAILED)
+                        val bytes = ByteBuffer.allocate(ThemeLimits.IO_BYTES)
+                        while (true) {
+                            signal.throwIfCanceled()
+                            bytes.clear()
+                            val count = channel.read(bytes)
+                            if (count < 0) break
+                            if (count == 0 || count.toLong() > expectedBytes - copied) themeFail(ThemeIssue.INTEGRITY_FAILED)
+                            digest.update(bytes.array(), 0, count)
+                            val plain = minOf(count.toLong(), maxOf(0L, prefix - copied)).toInt()
+                            if (plain > 0) zip.write(bytes.array(), 0, plain)
+                            if (count > plain) { zip.setLevel(Deflater.BEST_SPEED); zip.write(bytes.array(), plain, count - plain) }
+                            copied += count
+                        }
+                        if (channel.size() != expectedBytes) themeFail(ThemeIssue.INTEGRITY_FAILED)
+                    }
+                    identity.requireSame(file)
+                    if (copied != expectedBytes || themeHex(digest.digest()) != expectedSha256) themeFail(ThemeIssue.INTEGRITY_FAILED)
+                    zip.closeEntry()
+                }
+                entry(ThemeZipIndex.MANIFEST_NAME, manifestFile, manifestBytes.size.toLong(), ref.manifestSha256)
+                for (resource in manifest.resources.sortedBy { it.path }) entry(resource.path, themeContainedFile(payload, resource.path), resource.byteCount, resource.sha256)
+            }
+            output.verifyWrittenFile { file ->
+                val archive = ThemeZipArchive(file)
+                val index = archive.inspect(signal::throwIfCanceled)
+                if (!archive.readManifest(index, signal::throwIfCanceled).contentEquals(manifestBytes)) themeFail(ThemeIssue.INTEGRITY_FAILED)
+                archive.validateDeclarations(index, manifest)
+            }
+        }
+    }
+
+    /** Validation extracts only into the backup owner's new isolated generation. */
+    internal suspend fun validateForBackup(file: File, payload: BackupPrivateDirectory): ValidatedBackupTheme {
+        requireBackupOwner()
+        return operation { _, signal ->
+            val archive = ThemeZipArchive(file)
+            val index = archive.inspect(signal::throwIfCanceled)
+            val bytes = archive.readManifest(index, signal::throwIfCanceled)
+            val manifest = ThemeManifestReader.read(bytes, signal::throwIfCanceled)
+            archive.validateDeclarations(index, manifest)
+            var written = 0L
+            archive.extract(index, manifest, payload.root, { next ->
+                signal.throwIfCanceled()
+                if (next < 0L || next > ThemeLimits.UNPACKED_BYTES - written) themeFail(ThemeIssue.EXPANDED_TOO_LARGE)
+                val available = payload.root.usableSpace
+                if (available < ThemeLimits.FREE_RESERVE_BYTES || next > available - ThemeLimits.FREE_RESERVE_BYTES) themeFail(ThemeIssue.STORAGE_FULL)
+                written += next
+            }, signal::throwIfCanceled)
+            ValidatedBackupTheme(manifest, ThemeStorageRecords.digest(bytes), validateAssets(payload.root, manifest, signal))
+        }
+    }
+
+    private suspend fun requireBackupOwner() {
+        val barrier = backupBarrier ?: throw BackupException(BackupIssue.INVALID_INPUT)
+        barrier.requireExclusiveOwner()
+    }
+
     /** Memory-only cancellation; the next physical operation cleans this unaccepted stage. */
     override fun retirePreview(token: String) {
         synchronized(previewLock) {
             val record = heldPreview
             if (record != null && record.preview.token == token) {
                 record.retired.set(true)
-                mutablePreview.value = null
+                publishPreview(null)
             }
         }
     }
@@ -123,7 +265,7 @@ class LocalThemeRepository private constructor(
         throw cancelled
     } catch (error: ThemeException) {
         if (error.issue == ThemeIssue.BUSY) throw error
-        publish(unknownSnapshot(error.issue, mutableState.value.selected, mutableState.value.previous))
+        publishFailure(unknownSnapshot(error.issue, mutableState.value.selected, mutableState.value.previous))
     }
 
     /** 原件只读；完整校验并关闭输入后才发布一份可确认预览，当前选择保持不变。 */
@@ -207,7 +349,7 @@ class LocalThemeRepository private constructor(
         store.requireMutationAllowed()
         val record = held(token, allowRetired = true)
         record.retired.set(true)
-        mutablePreview.value = null
+        publishPreview(null)
         if (record.stageId != null && record.receivedId == null) store.discardStage(record.stageId)
         clear(record)
     }
@@ -483,7 +625,12 @@ class LocalThemeRepository private constructor(
         signal: CancellationSignal,
         permit: TransferPermit,
         transferQuota: ThemeTransferQuota,
-    ): TransferredThemeRecord {
+    ): TransferredThemeRecord = backupBarrier.withBackupWorkerMutation({ ThemeException(ThemeIssue.BUSY) }) {
+        receiveTransferredActual(binding, upload, input, signal, permit, transferQuota)
+    }
+
+    private fun receiveTransferredActual(binding: TransferOperationBinding, upload: TransferVerifiedUpload, input: File,
+        signal: CancellationSignal, permit: TransferPermit, transferQuota: ThemeTransferQuota): TransferredThemeRecord {
         if (!occupied.compareAndSet(false, true)) themeFail(ThemeIssue.BUSY)
         try {
             return ownedWorker(signal) { store ->
@@ -814,7 +961,7 @@ class LocalThemeRepository private constructor(
         } catch (reporting: Throwable) {
             if (reporting !== error) error.addSuppressed(reporting)
             try {
-                publish(unknownSnapshot(ThemeIssue.RECOVERY_REQUIRED, fallback.catalog.selected, fallback.catalog.previous))
+                publishFailure(unknownSnapshot(ThemeIssue.RECOVERY_REQUIRED, fallback.catalog.selected, fallback.catalog.previous))
             } catch (lastFailure: Throwable) {
                 if (lastFailure !== error) error.addSuppressed(lastFailure)
             }
@@ -882,9 +1029,15 @@ class LocalThemeRepository private constructor(
     }
 
     private fun publish(snapshot: ThemeSnapshot): ThemeSnapshot {
-        mutableState.value = snapshot
+        backupBarrier.publishForBackup(this) { mutableState.value = snapshot }
         return snapshot
     }
+    private fun publishFailure(snapshot: ThemeSnapshot): ThemeSnapshot {
+        backupBarrier.publishFailureForBackup(this) { mutableState.value = snapshot }
+        return snapshot
+    }
+    private val previewPublicationOwner = Any()
+    private fun publishPreview(value: ThemePreview?) { backupBarrier.publishForBackup(previewPublicationOwner) { mutablePreview.value = value } }
 
     private fun currentPreview(): PreviewRecord? = synchronized(previewLock) { heldPreview }
     private fun held(token: String, allowRetired: Boolean = false): PreviewRecord {
@@ -901,7 +1054,7 @@ class LocalThemeRepository private constructor(
         synchronized(previewLock) {
             if (heldPreview != null) themeFail(ThemeIssue.BUSY)
             heldPreview = record
-            mutablePreview.value = record.preview
+            publishPreview(record.preview)
         }
     }
 
@@ -909,7 +1062,7 @@ class LocalThemeRepository private constructor(
         synchronized(previewLock) {
             if (heldPreview === record) {
                 heldPreview = null
-                mutablePreview.value = null
+                publishPreview(null)
             }
         }
     }
@@ -924,7 +1077,7 @@ class LocalThemeRepository private constructor(
             val record = heldPreview
             if (record != null && record.preview.token == value.token) {
                 record.retired.set(true)
-                mutablePreview.value = null
+                publishPreview(null)
             }
         }
         if (value is ThemeImageLease) value.close()
@@ -942,15 +1095,17 @@ class LocalThemeRepository private constructor(
         synchronized(imageLock) { imageLeases-- }
     }
 
-    private suspend fun <T> operation(action: (ThemeDirectoryStore, CancellationSignal) -> T): T {
+    private suspend fun <T> operation(action: (ThemeDirectoryStore, CancellationSignal) -> T): T =
+        backupBarrier.withBackupMutation({ ThemeException(ThemeIssue.BUSY) }) { operationActual(action) }
+
+    private suspend fun <T> operationActual(action: (ThemeDirectoryStore, CancellationSignal) -> T): T {
         if (!occupied.compareAndSet(false, true)) themeFail(ThemeIssue.BUSY)
-        val entered = AtomicBoolean(false)
+        val admitted = AtomicBoolean(false)
         try {
             return io.read(
-                failed = { if (!entered.get()) occupied.set(false) },
+                admitted = { admitted.set(true) },
                 abandoned = ::abandon,
             ) { signal ->
-                entered.set(true)
                 try {
                     ownedWorker(signal) { action(it, signal) }
                 } catch (error: IOException) {
@@ -959,8 +1114,6 @@ class LocalThemeRepository private constructor(
                     throw ThemeException(ThemeIssue.STORAGE_UNAVAILABLE, error)
                 } catch (error: OutOfMemoryError) {
                     throw ThemeException(ThemeIssue.LOW_MEMORY, error)
-                } finally {
-                    occupied.set(false)
                 }
             }
         } catch (cancelled: CancellationException) {
@@ -982,6 +1135,9 @@ class LocalThemeRepository private constructor(
             throw ThemeException(ThemeIssue.PERMISSION_DENIED, error)
         } catch (error: OutOfMemoryError) {
             throw ThemeException(ThemeIssue.LOW_MEMORY, error)
+        } finally {
+            try { if (admitted.get()) withContext(NonCancellable) { io.awaitIdle() } }
+            finally { occupied.set(false) }
         }
     }
 
@@ -1056,4 +1212,9 @@ class LocalThemeRepository private constructor(
             previous: ThemeChoice? = null,
         ): ThemeSnapshot = ThemeSnapshot(null, selected, previous, ThemeBuiltins.defaultChoice, emptyList(), issue)
     }
+}
+
+internal class ValidatedBackupTheme(val manifest: ThemeManifest, val manifestSha256: String,
+    val fontCapabilities: Map<LyricsFontRole, FontWeightCapability>) {
+    override fun toString(): String = "ValidatedBackupTheme"
 }

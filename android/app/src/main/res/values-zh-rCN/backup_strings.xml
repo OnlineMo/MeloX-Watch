@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="backup_storage_busy">正在备份或恢复，请完成后再试。</string>
+</resources>

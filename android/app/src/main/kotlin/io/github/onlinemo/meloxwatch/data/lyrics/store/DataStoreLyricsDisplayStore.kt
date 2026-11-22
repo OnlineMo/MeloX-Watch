@@ -3,6 +3,13 @@ package io.github.onlinemo.meloxwatch.data.lyrics.store
 import androidx.datastore.core.CorruptionException
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.publishForBackup
+import io.github.onlinemo.meloxwatch.data.backup.publishFailureForBackup
+import io.github.onlinemo.meloxwatch.data.backup.publishIfCurrentForBackup
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
@@ -22,6 +29,7 @@ import kotlinx.coroutines.withContext
 class DataStoreLyricsDisplayStore internal constructor(
     private val dataStore: DataStore<Preferences>,
     scope: CoroutineScope,
+    private val backupBarrier: BackupMutationBarrier? = null,
 ) : LyricsDisplayStore {
     private val mutableState = MutableStateFlow<LyricsDisplayState>(LyricsDisplayState.Loading)
     override val state = mutableState.asStateFlow()
@@ -54,7 +62,24 @@ class DataStoreLyricsDisplayStore internal constructor(
         }
     }
 
-    override suspend fun save(expectedRevision: Long, next: LyricsDisplayPreferences): LyricsDisplayWriteResult {
+    override suspend fun save(expectedRevision: Long, next: LyricsDisplayPreferences): LyricsDisplayWriteResult = try {
+        backupBarrier.withBackupMutation({ BackupException(BackupIssue.BUSY) }) { saveActual(expectedRevision, next) }
+    } catch (error: BackupException) {
+        if (error.issue != BackupIssue.BUSY) throw error
+        LyricsDisplayWriteResult.Failed(lastKnown(), LyricsDisplayIssue.BUSY)
+    }
+
+    internal suspend fun readForBackup(): LyricsDisplayPreferences = backupBarrier.withBackupMutation({ BackupException(BackupIssue.BUSY) }) {
+        if (!occupied.compareAndSet(false, true)) throw BackupException(BackupIssue.BUSY)
+        try {
+            val decoded = LyricsDisplayCodec.decode(readActualPreferences())
+            val actual = decoded.preferences ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            publishAuthoritative(decoded)
+            actual
+        } finally { occupied.set(false) }
+    }
+
+    private suspend fun saveActual(expectedRevision: Long, next: LyricsDisplayPreferences): LyricsDisplayWriteResult {
         if (expectedRevision < 0L || next.revision != expectedRevision) {
             return LyricsDisplayWriteResult.Failed(lastKnown(), LyricsDisplayIssue.INVALID_REVISION)
         }
@@ -199,9 +224,15 @@ class DataStoreLyricsDisplayStore internal constructor(
             // An older collector error cannot replace a newer verified read or atomic save result.
             if (generation !== readGeneration) null else CompletableDeferred<Unit>().also {
                 pendingReadRetry = it
-                mutableState.value = LyricsDisplayState.Unavailable(lastKnown(), issue)
             }
         } ?: return
+        backupBarrier.publishFailureForBackup(this) {
+            synchronized(publicationLock) {
+                if (generation === readGeneration && pendingReadRetry === retry) {
+                    mutableState.value = LyricsDisplayState.Unavailable(lastKnown(), issue)
+                }
+            }
+        }
         try {
             retry.await()
         } finally {
@@ -212,20 +243,21 @@ class DataStoreLyricsDisplayStore internal constructor(
     }
 
     private fun publishVerifiedRead(decoded: DecodedLyricsDisplay, generation: Any) {
-        synchronized(publicationLock) {
+        val publication = { synchronized(publicationLock) {
             if (generation === readGeneration) publishDecodedLocked(decoded)
-        }
+            Unit
+        } }
+        backupBarrier.publishIfCurrentForBackup(this, { synchronized(publicationLock) { generation === readGeneration } },
+            confirmed = decoded.preferences != null && decoded.issue == null, action = publication)
     }
 
     private fun publishAuthoritative(decoded: DecodedLyricsDisplay) {
-        synchronized(publicationLock) { publishAuthoritativeLocked(decoded) }
-    }
-
-    private fun publishAuthoritativeLocked(decoded: DecodedLyricsDisplay) {
-        if (!publishDecodedLocked(decoded)) return
-        readGeneration = Any()
-        // A verified explicit operation also resolves the old failed read, without banking a retry credit.
-        pendingReadRetry?.complete(Unit)
+        val generation = synchronized(publicationLock) {
+            Any().also { readGeneration = it; pendingReadRetry?.complete(Unit) }
+        }
+        val publication = { synchronized(publicationLock) { if (generation === readGeneration) publishDecodedLocked(decoded); Unit } }
+        backupBarrier.publishIfCurrentForBackup(this, { synchronized(publicationLock) { generation === readGeneration } },
+            confirmed = decoded.preferences != null && decoded.issue == null, action = publication)
     }
 
     private fun publishDecodedLocked(decoded: DecodedLyricsDisplay): Boolean {
@@ -241,7 +273,9 @@ class DataStoreLyricsDisplayStore internal constructor(
     }
 
     private fun publishUnavailable(issue: LyricsDisplayIssue) {
-        synchronized(publicationLock) { mutableState.value = LyricsDisplayState.Unavailable(lastKnown(), issue) }
+        backupBarrier.publishFailureForBackup(this) {
+            synchronized(publicationLock) { mutableState.value = LyricsDisplayState.Unavailable(lastKnown(), issue) }
+        }
     }
 
     private fun lastKnown(): LyricsDisplayPreferences? = when (val current = mutableState.value) {

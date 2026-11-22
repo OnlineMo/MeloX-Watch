@@ -4,6 +4,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.time.DateTimeException
 import java.time.Instant
@@ -14,6 +15,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 
 /** Cumulative service acknowledgements, history and statistics share one local transaction owner. */
@@ -41,7 +44,12 @@ class RoomListeningRepository(private val library: RoomLocalLibraryRepository) :
         }
     }
 
-    override fun observeSummary(): Flow<ListeningSummary> = dao.observeMeta().map { summary() }.distinctUntilChanged()
+    override fun observeSummary(): Flow<ListeningSummary> = flow {
+        library.database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeMeta().map {
+            library.database.backupMutationBarrier.readBackupProjection { summary() }
+        })
+    }.distinctUntilChanged()
 
     override suspend fun submit(update: ListeningRoundUpdate): ListeningCommit = access {
         validateEpochs(update.epochs)

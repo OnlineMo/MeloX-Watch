@@ -161,6 +161,7 @@ fun SleepTimerSummaryPreferences(model: PreferencesViewModel, onCancel: () -> Un
         state.failure?.let { failure ->
             WatchText(stringResource(when (failure) {
                 PreferencesFailure.IO -> R.string.sleep_summary_save_failed
+                PreferencesFailure.BUSY -> R.string.backup_storage_busy
                 PreferencesFailure.UNSUPPORTED_SCHEMA -> R.string.prefs_write_unsupported
                 PreferencesFailure.INVALID_REVISION -> R.string.prefs_invalid_edit
                 PreferencesFailure.REVISION_EXHAUSTED -> R.string.prefs_revision_exhausted

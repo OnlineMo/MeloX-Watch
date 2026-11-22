@@ -346,6 +346,7 @@ private fun languageLabel(language: AppLanguage): Int = when (language) {
 }
 
 private fun appearanceIssueMessage(issue: AppearanceIssue): Int = when (issue) {
+    AppearanceIssue.BUSY -> R.string.backup_storage_busy
     AppearanceIssue.INVALID_SETTINGS -> R.string.appearance_invalid_settings
     AppearanceIssue.NEWER_SCHEMA -> R.string.appearance_newer_schema
     AppearanceIssue.SETTINGS_TOO_LARGE -> R.string.appearance_settings_too_large

@@ -9,6 +9,7 @@ import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -42,6 +43,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
@@ -92,7 +95,12 @@ class RoomLocalLibraryRepository(
     }
 
     override suspend fun overview(): LibraryOverview = access { database.withPreservedTransaction { overviewUnlocked() } }
-    override fun observeOverview(): Flow<LibraryOverview> = dao.observeMeta().map { overview() }.distinctUntilChanged()
+    override fun observeOverview(): Flow<LibraryOverview> = flow {
+        database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeMeta().map {
+            database.backupMutationBarrier.readBackupProjection { overview() }
+        })
+    }.distinctUntilChanged()
     override suspend fun source(sourceId: String): LibrarySource? = access { dao.source(sourceId)?.let { sourceModel(it) } }
     override suspend fun sourcesPage(afterSourceId: String?, limit: Int): LibrarySourcePage = access {
         pageLimit(limit)
@@ -632,7 +640,12 @@ class RoomLocalLibraryRepository(
         }
     }
     override suspend fun latestScan(sourceId: String): ScanState? = access { dao.source(sourceId)?.latestScanId?.let { dao.scan(it)?.model() } }
-    override fun observeScan(scanId: String): Flow<ScanState?> = dao.observeScan(scanId).map { it?.model() }.distinctUntilChanged()
+    override fun observeScan(scanId: String): Flow<ScanState?> = flow {
+        database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeScan(scanId).map {
+            database.backupMutationBarrier.readBackupProjection { dao.scan(scanId)?.model() }
+        })
+    }.distinctUntilChanged()
 
     override suspend fun rules(): LibraryRules = access { rulesUnlocked() }
     override suspend fun exclusionPage(afterRuleId: String?, limit: Int): LibraryExclusionPage = access {
@@ -715,6 +728,13 @@ class RoomLocalLibraryRepository(
         else database.withPreservedTransaction { action() }
         if (cleanAfter) cleanVersions()
         result
+    }
+
+    /** 主库提交已核验；清除旧查询和初始化缓存，后续读取使用恢复后的代次。 */
+    internal suspend fun invalidateAfterBackupRestore() = access {
+        database.backupMutationBarrier?.requireExclusiveOwner()
+        liveViews.clear()
+        initialized = false
     }
 
     /** The transfer owner queries only its exact lease inside this repository's real transaction. */

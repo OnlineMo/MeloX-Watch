@@ -27,6 +27,10 @@ import androidx.media3.session.SessionResult
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
 import io.github.onlinemo.meloxwatch.data.ProbeAccess
 import io.github.onlinemo.meloxwatch.data.ProbeAudio
 import io.github.onlinemo.meloxwatch.data.ProbeDocument
@@ -110,6 +114,7 @@ enum class ProbePage {
     TRANSFER,
     DEVICE,
     SETTINGS,
+    DSP,
     QUEUE,
     LIBRARY,
     PLAYLISTS,
@@ -117,6 +122,8 @@ enum class ProbePage {
     VOLUME,
     SLEEP_TIMER,
     SLEEP_TIMER_NOTIFICATIONS,
+    HELP,
+    BACKUP,
 }
 
 enum class ProbeNotice {
@@ -189,6 +196,12 @@ class ProbeViewModel(
 ) : AndroidViewModel(application) {
     private val files = ProbeFiles(application)
     private val queues = (application as MeloXApplication).queues
+
+    private suspend fun requireLocalStorageReady() {
+        val application = getApplication<MeloXApplication>()
+        application.requireBackupStorageReady()
+        application.fileOperations.initialize()
+    }
     private val restoredPage = ProbePage.entries.firstOrNull {
         it.name == (savedStateHandle.get<Any>(KEY_PAGE) as? String)
     } ?: ProbePage.HOME
@@ -902,6 +915,7 @@ class ProbeViewModel(
         mediaVolume.contextChanged()
         val job = viewModelScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             try {
+                requireLocalStorageReady()
                 val (command, args) = request()
                 if (generation != playbackCommandGeneration || controller !== active || !isForeground) return@launch
                 val result = awaitResult(active.sendCustomCommand(command, args))
@@ -918,6 +932,17 @@ class ProbeViewModel(
             } catch (error: kotlinx.coroutines.CancellationException) {
                 if (generation == playbackCommandGeneration) onFailure("CANCELLED")
                 throw error
+            } catch (error: BackupException) {
+                if (generation == playbackCommandGeneration) {
+                    val code = if (error.issue == BackupIssue.BUSY) "BUSY" else "RECOVERY_REQUIRED"
+                    publishUiState { state -> state.copy(queueIssue = queueIssue(code)) }
+                    onFailure(code)
+                }
+            } catch (error: FileOperationException) {
+                if (generation == playbackCommandGeneration) {
+                    publishUiState { state -> state.copy(queueIssue = queueIssue(error.issue.name)) }
+                    onFailure(error.issue.name)
+                }
             } catch (error: QueueStoreException) {
                 if (generation == playbackCommandGeneration) {
                     publishUiState { state -> state.copy(queueIssue = queueIssue(error.issue.name)) }
@@ -1091,7 +1116,10 @@ class ProbeViewModel(
         publishUiState { state -> state.copy(isReading = true, notice = ProbeNotice.READING, fileIssue = null) }
         fileJob = viewModelScope.launch {
             try {
-                val result = withTimeoutOrNull(FILE_CHECK_TIMEOUT_MS) { operation() }
+                val result = withTimeoutOrNull(FILE_CHECK_TIMEOUT_MS) {
+                    requireLocalStorageReady()
+                    operation()
+                }
                 if (generation != fileGeneration) return@launch
                 if (result == null) {
                     publishUiState { state -> state.copy(isReading = false, notice = ProbeNotice.TIMEOUT) }
@@ -1118,6 +1146,13 @@ class ProbeViewModel(
                 updateProgressSampling()
             } catch (error: kotlinx.coroutines.CancellationException) {
                 throw error
+            } catch (failure: Exception) {
+                if (generation == fileGeneration) {
+                    val busy = (failure as? BackupException)?.issue == BackupIssue.BUSY ||
+                        (failure as? FileOperationException)?.issue == FileOperationIssue.BUSY
+                    publishUiState { state -> state.copy(isReading = false, notice = null,
+                        fileIssue = if (busy) ProbeFileIssue.SOURCE_BUSY else ProbeFileIssue.SOURCE_UNAVAILABLE) }
+                }
             }
         }
     }

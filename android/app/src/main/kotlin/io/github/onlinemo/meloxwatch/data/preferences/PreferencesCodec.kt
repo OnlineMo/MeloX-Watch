@@ -7,6 +7,9 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.mutablePreferencesOf
 import androidx.datastore.preferences.core.stringPreferencesKey
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.HelpPreferenceLimits
+import io.github.onlinemo.meloxwatch.model.HelpPreferences
+import io.github.onlinemo.meloxwatch.model.PrivacyNoticeChoice
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
@@ -49,6 +52,12 @@ internal object PreferencesCodec {
     private val mainProgressKey = booleanPreferencesKey("show_main_progress")
     private val progressGestureKey = stringPreferencesKey("progress_gesture")
     private val sleepSummaryKey = booleanPreferencesKey("sleep_timer_summary")
+    private val guideCompletedKey = intPreferencesKey("guide_completed_version")
+    private val guideDismissedKey = intPreferencesKey("guide_dismissed_version")
+    private val guideStepKey = intPreferencesKey("guide_step")
+    private val showTipsKey = booleanPreferencesKey("help_show_tips")
+    private val noticeVersionKey = intPreferencesKey("privacy_notice_version")
+    private val noticeChoiceKey = stringPreferencesKey("privacy_notice_choice")
     private val sortKeys = LibraryListContext.entries.associateWith { context ->
         stringPreferencesKey("library_sort_" + context.name.lowercase(java.util.Locale.ROOT))
     }
@@ -63,6 +72,8 @@ internal object PreferencesCodec {
         backendKey.name, speedKey.name, gaplessKey.name,
         rotaryEnabledKey.name, rotaryActionKey.name, rotaryOrientationKey.name, rotaryHapticsKey.name,
         mainProgressKey.name, progressGestureKey.name, sleepSummaryKey.name,
+        guideCompletedKey.name, guideDismissedKey.name, guideStepKey.name, showTipsKey.name,
+        noticeVersionKey.name, noticeChoiceKey.name,
     ) + sortKeys.values.map { it.name } + sortDirectionKeys.values.map { it.name }
     private val allFields = PreferencesField.entries.toSet()
 
@@ -76,7 +87,8 @@ internal object PreferencesCodec {
         val revision = storedRevision?.takeIf { value -> value >= 0L } ?: 0L
         val legacy = schemaVersion == 1 || schemaVersion == 2
         val legacyControls = legacy || schemaVersion == 3
-        if (!legacyControls && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
+        val legacyHelp = legacyControls || schemaVersion == 4
+        if (!legacyHelp && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
             val isNewer = schemaVersion != null && schemaVersion > UserPreferences.CURRENT_SCHEMA_VERSION
             val reason = if (isNewer) {
                 PreferencesRecoveryReason.NEWER_SCHEMA
@@ -174,6 +186,31 @@ internal object PreferencesCodec {
             sleepTimerSummary = controlsBoolean(sleepSummaryKey, PreferencesField.SLEEP_SUMMARY, false),
         )
 
+        val help = if (legacyHelp) HelpPreferenceLimits.Legacy else {
+            fun documentVersion(key: Preferences.Key<Int>): Int? =
+                (raw[key.name] as? Int)?.takeIf { it in 0..HelpPreferenceLimits.MAX_DOCUMENT_VERSION }
+
+            val completed = documentVersion(guideCompletedKey)
+            val dismissed = documentVersion(guideDismissedKey)
+            val step = (raw[guideStepKey.name] as? Int)?.takeIf { it in 0 until HelpPreferenceLimits.GUIDE_STEP_COUNT }
+            val showTips = raw[showTipsKey.name] as? Boolean
+            val noticeVersion = documentVersion(noticeVersionKey)
+            val choice = PrivacyNoticeChoice.entries.firstOrNull { it.name == raw[noticeChoiceKey.name] }
+            val noticeValid = noticeVersion != null && choice != null &&
+                ((noticeVersion == 0) == (choice == PrivacyNoticeChoice.UNANSWERED))
+            if (completed == null || dismissed == null || step == null || showTips == null || !noticeValid) {
+                invalidFields.add(PreferencesField.HELP)
+            }
+            HelpPreferences(
+                onboardingCompletedVersion = completed ?: 0,
+                onboardingDismissedVersion = dismissed ?: 0,
+                onboardingStep = step ?: 0,
+                showTips = showTips ?: true,
+                privacyNoticeVersion = if (noticeValid) checkNotNull(noticeVersion) else 0,
+                privacyNoticeChoice = if (noticeValid) checkNotNull(choice) else PrivacyNoticeChoice.UNANSWERED,
+            )
+        }
+
         val recovery = when {
             raw[corruptionKey.name] == true -> PreferencesRecovery(PreferencesRecoveryReason.CORRUPT_FILE, allFields)
             invalidFields.isNotEmpty() -> PreferencesRecovery(
@@ -198,9 +235,10 @@ internal object PreferencesCodec {
                 playbackSpeedTenths = speed,
                 gaplessPlayback = gapless,
                 controls = controls,
+                help = help,
             ),
             recovery = recovery,
-            isCanonical = !legacyControls && recovery == null && raw.keys == canonicalNames,
+            isCanonical = !legacyHelp && recovery == null && raw.keys == canonicalNames,
         )
     }
 
@@ -224,6 +262,12 @@ internal object PreferencesCodec {
         mainProgressKey to preferences.controls.showMainProgress,
         progressGestureKey to preferences.controls.progressGesture.name,
         sleepSummaryKey to preferences.controls.sleepTimerSummary,
+        guideCompletedKey to preferences.help.onboardingCompletedVersion,
+        guideDismissedKey to preferences.help.onboardingDismissedVersion,
+        guideStepKey to preferences.help.onboardingStep,
+        showTipsKey to preferences.help.showTips,
+        noticeVersionKey to preferences.help.privacyNoticeVersion,
+        noticeChoiceKey to preferences.help.privacyNoticeChoice.name,
     ).apply {
         LibraryListContext.entries.forEach { context ->
             val sort = preferences.librarySorts.getValue(context)

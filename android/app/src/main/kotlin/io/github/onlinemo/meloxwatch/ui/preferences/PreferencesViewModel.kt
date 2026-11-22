@@ -11,6 +11,9 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
 import io.github.onlinemo.meloxwatch.data.preferences.ResetConfirmation
 import io.github.onlinemo.meloxwatch.data.preferences.UserPreferencesRepositoryFactory
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.HelpPreferenceLimits
+import io.github.onlinemo.meloxwatch.model.HelpPreferences
+import io.github.onlinemo.meloxwatch.model.PrivacyNoticeChoice
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
@@ -424,6 +427,8 @@ class PreferencesViewModel(
         val oldDraft = !savedStateHandle.contains(KEY_EDITOR_SCHEMA)
         val editorSchema = savedStateHandle.get<Any>(KEY_EDITOR_SCHEMA) as? Int
         val legacyControls = oldDraft || editorSchema == 3
+        val legacyHelp = legacyControls || editorSchema == 4
+        val help = restoredHelp(legacyHelp)
         val tapPolicy = if (oldDraft) SongTapPolicy.ASK else SongTapPolicy.entries.firstOrNull {
             it.name == (savedStateHandle.get<Any>(KEY_TAP_POLICY) as? String)
         }
@@ -464,7 +469,7 @@ class PreferencesViewModel(
             mediaButtons != null && audioFocus != null && gapless != null &&
             rotaryEnabled != null && rotaryAction != null && rotaryOrientation != null && rotaryHaptics != null &&
             mainProgress != null && progressGesture != null && sleepSummary != null &&
-            (legacyControls || editorSchema == UserPreferences.CURRENT_SCHEMA_VERSION)
+            help != null && (legacyHelp || editorSchema == UserPreferences.CURRENT_SCHEMA_VERSION)
         ) {
             UserPreferencesDraft(
                 restorePosition = restore,
@@ -480,6 +485,7 @@ class PreferencesViewModel(
                 gaplessPlayback = gapless,
                 controls = PlaybackControlsPreferences(rotaryEnabled, rotaryAction, rotaryOrientation, rotaryHaptics,
                     mainProgress, progressGesture, sleepSummary),
+                help = help,
             )
         } else {
             null
@@ -491,6 +497,30 @@ class PreferencesViewModel(
             baseRevision = revision.takeIf { draft != null },
             draft = draft,
             previewEnabled = savedStateHandle.get<Any>(KEY_PREVIEW) as? Boolean ?: true,
+        )
+    }
+
+    private fun restoredHelp(legacy: Boolean): HelpPreferences? {
+        if (legacy) return HelpPreferenceLimits.Legacy
+        fun version(key: String): Int? = (savedStateHandle.get<Any>(key) as? Int)
+            ?.takeIf { it in 0..HelpPreferenceLimits.MAX_DOCUMENT_VERSION }
+        val completed = version(KEY_GUIDE_COMPLETED) ?: return null
+        val dismissed = version(KEY_GUIDE_DISMISSED) ?: return null
+        val step = (savedStateHandle.get<Any>(KEY_GUIDE_STEP) as? Int)
+            ?.takeIf { it in 0 until HelpPreferenceLimits.GUIDE_STEP_COUNT } ?: return null
+        val showTips = savedStateHandle.get<Any>(KEY_HELP_TIPS) as? Boolean ?: return null
+        val noticeVersion = version(KEY_NOTICE_VERSION) ?: return null
+        val choice = PrivacyNoticeChoice.entries.firstOrNull {
+            it.name == (savedStateHandle.get<Any>(KEY_NOTICE_CHOICE) as? String)
+        } ?: return null
+        if ((noticeVersion == 0) != (choice == PrivacyNoticeChoice.UNANSWERED)) return null
+        return HelpPreferences(
+            onboardingCompletedVersion = completed,
+            onboardingDismissedVersion = dismissed,
+            onboardingStep = step,
+            showTips = showTips,
+            privacyNoticeVersion = noticeVersion,
+            privacyNoticeChoice = choice,
         )
     }
 
@@ -519,6 +549,12 @@ class PreferencesViewModel(
             savedStateHandle[KEY_MAIN_PROGRESS] = draft.controls.showMainProgress
             savedStateHandle[KEY_PROGRESS_GESTURE] = draft.controls.progressGesture.name
             savedStateHandle[KEY_SLEEP_SUMMARY] = draft.controls.sleepTimerSummary
+            savedStateHandle[KEY_GUIDE_COMPLETED] = draft.help.onboardingCompletedVersion
+            savedStateHandle[KEY_GUIDE_DISMISSED] = draft.help.onboardingDismissedVersion
+            savedStateHandle[KEY_GUIDE_STEP] = draft.help.onboardingStep
+            savedStateHandle[KEY_HELP_TIPS] = draft.help.showTips
+            savedStateHandle[KEY_NOTICE_VERSION] = draft.help.privacyNoticeVersion
+            savedStateHandle[KEY_NOTICE_CHOICE] = draft.help.privacyNoticeChoice.name
             LibraryListContext.entries.forEach { context ->
                 savedStateHandle[sortKey(context)] = draft.librarySorts.getValue(context).field.name
                 savedStateHandle[sortDirectionKey(context)] = draft.librarySorts.getValue(context).descending
@@ -544,6 +580,12 @@ class PreferencesViewModel(
             savedStateHandle.remove<Boolean>(KEY_MAIN_PROGRESS)
             savedStateHandle.remove<String>(KEY_PROGRESS_GESTURE)
             savedStateHandle.remove<Boolean>(KEY_SLEEP_SUMMARY)
+            savedStateHandle.remove<Int>(KEY_GUIDE_COMPLETED)
+            savedStateHandle.remove<Int>(KEY_GUIDE_DISMISSED)
+            savedStateHandle.remove<Int>(KEY_GUIDE_STEP)
+            savedStateHandle.remove<Boolean>(KEY_HELP_TIPS)
+            savedStateHandle.remove<Int>(KEY_NOTICE_VERSION)
+            savedStateHandle.remove<String>(KEY_NOTICE_CHOICE)
             LibraryListContext.entries.forEach { context ->
                 savedStateHandle.remove<String>(sortKey(context))
                 savedStateHandle.remove<Boolean>(sortDirectionKey(context))
@@ -573,6 +615,12 @@ class PreferencesViewModel(
         const val KEY_MAIN_PROGRESS = "preferences.editor.main_progress"
         const val KEY_PROGRESS_GESTURE = "preferences.editor.progress_gesture"
         const val KEY_SLEEP_SUMMARY = "preferences.editor.sleep_summary"
+        const val KEY_GUIDE_COMPLETED = "preferences.editor.guide_completed"
+        const val KEY_GUIDE_DISMISSED = "preferences.editor.guide_dismissed"
+        const val KEY_GUIDE_STEP = "preferences.editor.guide_step"
+        const val KEY_HELP_TIPS = "preferences.editor.help_tips"
+        const val KEY_NOTICE_VERSION = "preferences.editor.notice_version"
+        const val KEY_NOTICE_CHOICE = "preferences.editor.notice_choice"
         const val KEY_PREVIEW = "preferences.editor.preview"
         fun sortKey(context: LibraryListContext) = "preferences.editor.sort.${context.name}"
         fun sortDirectionKey(context: LibraryListContext) = "preferences.editor.descending.${context.name}"

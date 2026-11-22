@@ -52,7 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 
-internal enum class CompanionScreen { CONNECTION, LIBRARY, PLAYLIST, DISPLAY, THEME }
+internal enum class CompanionScreen { CONNECTION, LIBRARY, PLAYLIST, DISPLAY, THEME, LICENSES }
 internal enum class CompanionTrackSelection { NONE, PLAYLIST_ADD, DISPLAY_ADD, DISPLAY_REMOVE }
 
 /** 连接输入只留内存，不进入实例恢复或本地记录。 */

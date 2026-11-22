@@ -29,12 +29,16 @@ import io.github.onlinemo.meloxwatch.playback.route.RoutingRenderersFactory
 import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolume
 import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
 import io.github.onlinemo.meloxwatch.playback.resources.PlaybackDataSources
+import io.github.onlinemo.meloxwatch.playback.resources.metadata.BoundedExtractorsFactory
 import io.github.onlinemo.meloxwatch.playback.resources.NoAutomaticPlaybackLoadRetry
 import io.github.onlinemo.meloxwatch.playback.resources.RuntimePlaybackResources
+import io.github.onlinemo.meloxwatch.playback.dsp.DspRuntime
+import io.github.onlinemo.meloxwatch.playback.dsp.DspRuntimeIssue
 import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
@@ -64,6 +68,8 @@ internal class ServicePlaybackOwner(
     private val releaseGuard: PlaybackEngineReleaseGuard = PlaybackEngineReleaseGuard.process,
     musicVolumePort: MusicVolumePort = AndroidMusicVolume(context.applicationContext),
     runtimeResources: RuntimePlaybackResources = RuntimePlaybackResources(),
+    private val mayCreateBackend: () -> Boolean = { true },
+    private val dspRuntime: DspRuntime = DspRuntime(),
 ) {
     private class Backend(
         val kind: PlaybackBackendKind,
@@ -79,12 +85,22 @@ internal class ServicePlaybackOwner(
             closeOperations = { media3?.close() },
             releasePlayer = { if (system != null) system.releaseOwnedPlayer() else player.release() })
 
-        fun releaseLater() = run {
-            route.close()
-            release.start()
+        fun releaseLater(): Deferred<Unit> {
+                // 路由收尾失败也不能跳过唯一的原生释放轮次。
+            try { route.close() } finally { release.start() }
+            return release.start()
         }
 
-        suspend fun releaseAndAwait() = withContext(NonCancellable) { releaseLater().await() }
+        suspend fun releaseAndAwait() = withContext(NonCancellable) {
+            var failure: Throwable? = null
+            try { route.close() } catch (error: Throwable) { failure = error }
+            try { release.start().await() }
+            catch (error: Throwable) {
+                val first = failure
+                if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
+            }
+            failure?.let { throw it }
+        }
     }
 
     private val applicationContext = context.applicationContext.also { checkMain() }
@@ -107,6 +123,8 @@ internal class ServicePlaybackOwner(
     // An explicit retry and the preference observer must not freeze the same queue concurrently.
     private val preferenceTransactions = Mutex()
     private var closed = false
+    private var closingBackends: List<Backend> = emptyList()
+    private var closingPreferenceObserver: Job? = null
     private var preferencesInitialized = false
     var currentPreferences: UserPreferences = UserPreferences()
         private set
@@ -240,10 +258,12 @@ internal class ServicePlaybackOwner(
         checkMain()
         if (closed) return
         closed = true
+        closingPreferenceObserver = preferenceObserver
         preferenceObserver?.cancel()
         preferenceObserver = null
         val previous = active
         val retained = quarantined
+        closingBackends = listOfNotNull(previous, retained).distinct()
         var failure: Exception? = null
         fun attempt(operation: () -> Unit) {
             try { operation() }
@@ -264,8 +284,30 @@ internal class ServicePlaybackOwner(
         if (retained !== previous) attempt { retained?.releaseLater() }
         attempt(pausedBackend::release)
         attempt(dataSources::close)
+        dspRuntime.unavailable(DspRuntimeIssue.CLOSED)
         _state.value = _state.value.copy(actualBackend = null, switching = false, issue = PlaybackBackendIssue.CLOSED,
             gaplessAvailable = false, generation = _state.value.generation + 1L)
+        failure?.let { throw it }
+    }
+
+    /** 等待实际调度的原生完成；门面标志或另一个 owner 不能清除此租约。 */
+    suspend fun awaitClosed() = withContext(NonCancellable + Dispatchers.Main.immediate) {
+        check(closed)
+        var failure: Throwable? = null
+        try { closingPreferenceObserver?.join() }
+        catch (error: Throwable) { failure = error }
+        for (backend in closingBackends) {
+            try { backend.releaseAndAwait() }
+            catch (error: Throwable) {
+                val first = failure
+                if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
+            }
+        }
+        if (releaseGuard.hasUnconfirmedRelease()) {
+            val error = PlaybackReleaseUnconfirmedException()
+            val first = failure
+            if (first == null) failure = error else first.addSuppressed(error)
+        }
         failure?.let { throw it }
     }
 
@@ -450,6 +492,7 @@ internal class ServicePlaybackOwner(
     }
 
     private fun bindObserver(backend: Backend) {
+        if (backend.kind == PlaybackBackendKind.SYSTEM_MEDIA_PLAYER) dspRuntime.unavailable(DspRuntimeIssue.BACKEND_UNSUPPORTED)
         val generation = _state.value.generation
         val listener = object : Player.Listener {
             override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
@@ -538,12 +581,14 @@ internal class ServicePlaybackOwner(
     private fun createInitialBackend(): Backend? = try {
         createBackend(PlaybackBackendKind.MEDIA3, 10)
     } catch (_: Exception) {
+        dspRuntime.unavailable(DspRuntimeIssue.CLOSED)
         // The process guard must yield an inspectable paused service, not an onCreate crash.
         _state.value = _state.value.copy(actualBackend = null, issue = PlaybackBackendIssue.SWITCH_FAILED)
         null
     }
 
     private fun createBackend(kind: PlaybackBackendKind, speedTenths: Int): Backend {
+        if (!mayCreateBackend()) throw PlaybackReleaseUnconfirmedException()
         val lease = releaseGuard.acquire()
         val route = PlaybackAudioRoute(lease, releaseGuard, routeExecutor, ::refreshRouteState)
         return try {
@@ -579,10 +624,10 @@ internal class ServicePlaybackOwner(
             }
         }
         PlaybackBackendKind.MEDIA3 -> {
-            val renderers = RoutingRenderersFactory(applicationContext, route)
+            val renderers = RoutingRenderersFactory(applicationContext, route, dspRuntime)
                 .setEnableAudioFloatOutput(false).setEnableAudioTrackPlaybackParams(false)
             val player = ExoPlayer.Builder(applicationContext).setRenderersFactory(renderers)
-                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSources)
+                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSources, BoundedExtractorsFactory())
                     .setLoadErrorHandlingPolicy(NoAutomaticPlaybackLoadRetry()))
                 .setReleaseTimeoutMs(1500L).build()
             val routedPlayer = RoutingPlaybackPlayer(player, route)

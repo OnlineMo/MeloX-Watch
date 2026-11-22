@@ -71,6 +71,16 @@
             android:authorities="${applicationId}.owned-audio"
             android:exported="false"
             android:grantUriPermissions="false" />
+        <provider
+            android:name=".data.lyrics.active.OwnedLyricsProvider"
+            android:authorities="${applicationId}.owned-lyrics"
+            android:exported="false"
+            android:grantUriPermissions="false" />
+        <provider
+            android:name=".data.backup.BackupResourceProvider"
+            android:authorities="${applicationId}.backup-resources"
+            android:exported="false"
+            android:grantUriPermissions="false" />
         <!-- Local entry points stay independent of OkHttp platform initialization. -->
         <provider
             android:name="androidx.startup.InitializationProvider"

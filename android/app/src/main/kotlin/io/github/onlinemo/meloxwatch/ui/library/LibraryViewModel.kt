@@ -132,6 +132,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
         refresh.onForeground()
         observers = viewModelScope.launch {
             try {
+                app.requireBackupStorageReady()
                 library.initialize()
                 val initial = app.preferences.state.first { it !is PreferencesState.Loading }
                 val initialPreferences = when (initial) {

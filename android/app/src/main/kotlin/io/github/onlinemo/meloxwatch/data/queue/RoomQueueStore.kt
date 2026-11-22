@@ -6,6 +6,8 @@ import androidx.sqlite.SQLiteException
 import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
+import io.github.onlinemo.meloxwatch.data.fileoperations.FilePlaybackReservation
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueLimits
@@ -23,6 +25,8 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
@@ -39,6 +43,20 @@ class RoomQueueStore(
     @Volatile
     private var initialized = false
 
+    /** 用实际 preparation 租约排除替换/随机重排，直到原件队列引用协调结束。 */
+    internal suspend fun <T> withFileReferenceRepair(reservation: FilePlaybackReservation, action: suspend () -> T): T = preparing {
+        reservation.requireClosedResources()
+        if (!initialized) initializeLocked()
+        action().also { reservation.requireClosedResources() }
+    }
+
+    /** 主库恢复和旧验证缓存失效使用同一实例、同一个实际 preparation 租约。 */
+    internal suspend fun <T> withFileLibraryRestore(reservation: FilePlaybackReservation, action: suspend () -> T): T = preparing {
+        reservation.requireClosedResources()
+        try { action().also { reservation.requireClosedResources() } }
+        finally { initialized = false }
+    }
+
     override suspend fun initialize(): QueueSnapshot? = preparing {
         initializeLocked()
         snapshot()
@@ -52,9 +70,10 @@ class RoomQueueStore(
         }
     }
 
-    override fun snapshots(): Flow<QueueSnapshot?> = dao.observeHead()
-        .map { snapshot() }
-        .distinctUntilChanged()
+    override fun snapshots(): Flow<QueueSnapshot?> = flow {
+        database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeHead().map { database.backupMutationBarrier.readBackupProjection { snapshot() } })
+    }.distinctUntilChanged()
 
     override suspend fun replace(
         request: QueueReplacementRequest,

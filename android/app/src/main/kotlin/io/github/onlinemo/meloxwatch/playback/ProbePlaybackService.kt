@@ -26,6 +26,10 @@ import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.R
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
@@ -47,6 +51,7 @@ import io.github.onlinemo.meloxwatch.playback.route.MediaVolumeResult
 import io.github.onlinemo.meloxwatch.playback.route.ServiceMediaVolumeIssue
 import io.github.onlinemo.meloxwatch.playback.resources.SourcePlaybackResolver
 import io.github.onlinemo.meloxwatch.playback.resources.toSessionExtras
+import io.github.onlinemo.meloxwatch.playback.dsp.ServiceDspSettingsOwner
 import java.util.concurrent.Executor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -54,16 +59,15 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -74,12 +78,21 @@ import kotlinx.coroutines.withTimeoutOrNull
  */
 @UnstableApi
 class ProbePlaybackService : MediaSessionService() {
+    private class PlaybackStartup {
+        var bootId: String? = null
+        var bootIdentityRead = false
+        var dspInitialized = false
+        var preferencesInitialized = false
+    }
+
     private var mediaSession: MediaSession? = null
     private var playbackOwner: ServicePlaybackOwner? = null
     private var bitmapLoader: LocalSessionBitmapLoader? = null
     private var coordinator: QueuePlaybackCoordinator? = null
     private var listening: ServiceListeningObserver? = null
     private var sleepTimer: ServiceSleepTimer? = null
+    private var dspSettingsOwner: ServiceDspSettingsOwner? = null
+    private var playbackStartup: PlaybackStartup? = null
     private var timerSaveCommand: Job? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeCommand: Job? = null
@@ -91,8 +104,12 @@ class ProbePlaybackService : MediaSessionService() {
     private var onlineAccountObserver: Job? = null
     private var resourceStatusObserver: Job? = null
     private var initializing = true
+    private var initializationComplete = false
     private var mediaButtonsEnabled = true
     private var destroyed = false
+    private var quiescing = false
+    private var resourcesClosed = false
+    private var closing: Deferred<Unit>? = null
     private var retiredPlaylistProducer: PlaylistQueueProducer? = null
     private val mediaVolumeCommands = ServiceMediaVolumeCommandHandler(
         ownerUid = Process.myUid(),
@@ -117,13 +134,33 @@ class ProbePlaybackService : MediaSessionService() {
                 session.sendError(SessionError(SessionError.ERROR_INVALID_STATE, "BACKGROUND_START_DENIED"))
             }
         })
+        createPlaybackResources()
+    }
+
+    /** 新 controller 连接可重建空 owner；初始化只恢复暂停状态。 */
+    private fun createPlaybackResources() {
         val application = application as MeloXApplication
+        if (!application.filePlaybackHost.attach(this, ::closeForFileMutation)) {
+            // 此入口尚未分配资源；围栏解除后，同一服务可再次申请空 owner。
+            resourcesClosed = true
+            initializing = false
+            return
+        }
+        initializing = true
+        initializationComplete = false
+        quiescing = false
+        resourcesClosed = false
+        closing = null
+        val dsp = ServiceDspSettingsOwner(application.dspSettings, application.dspRuntime, serviceScope)
+        dspSettingsOwner = dsp
         val owner = ServicePlaybackOwner(this, serviceScope, application.preferences, application.localProviderIo,
             ensureForeground = ::ensurePlaybackForeground,
             onFailure = { issue ->
                 mediaSession?.sendError(SessionError(SessionError.ERROR_INVALID_STATE, "BACKEND_${issue.name}"))
             },
             runtimeResources = application.runtimePlaybackResources,
+            mayCreateBackend = { application.filePlaybackHost.allowsOwner(this) },
+            dspRuntime = application.dspRuntime,
         )
         playbackOwner = owner
         val player = owner.initialPlayer
@@ -169,9 +206,10 @@ class ProbePlaybackService : MediaSessionService() {
         onlineAccountObserver = serviceScope.launch {
             application.onlineAccountChanges.revision.collect { if (!destroyed) queues.onAccountStateChanged() }
         }
-        var bootId: String? = null
+        val startup = PlaybackStartup()
+        playbackStartup = startup
         val timer = ServiceSleepTimer(SleepTimerStoreFactory.get(application), serviceScope,
-            now = { SleepTimerClockSample(bootId, SystemClock.elapsedRealtime()) },
+            now = { SleepTimerClockSample(startup.bootId, SystemClock.elapsedRealtime()) },
             currentTrack = queues::sleepTimerTrackBinding,
             scheduler = AndroidSleepTimerScheduler(),
             notification = AndroidSleepTimerNotification(this),
@@ -241,10 +279,7 @@ class ProbePlaybackService : MediaSessionService() {
         }
         initialization = serviceScope.launch {
             try {
-                bootId = readSleepTimerBootId(this@ProbePlaybackService)
-                timer.initialize()
-                owner.initializePreferences()
-                queues.initialize()
+                initializePlaybackResources(retryBackend = false)
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
@@ -253,31 +288,89 @@ class ProbePlaybackService : MediaSessionService() {
                         SessionError(SessionError.ERROR_INVALID_STATE, "QUEUE_RECOVERY_REQUIRED"),
                     )
                 }
-            } finally {
-                if (!destroyed) {
-                    initializing = false
-                    owner.observePreferences()
-                    refreshSessionState()
-                    refreshControllerCommands()
-                }
             }
         }
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = mediaSession
+    /** 首次启动和显式恢复共用分阶段入口；失败重试保留本轮 owner、boot 证据和已完成阶段。 */
+    private suspend fun initializePlaybackResources(retryBackend: Boolean) {
+        val application = application as MeloXApplication
+        val owner = checkNotNull(playbackOwner)
+        val queues = checkNotNull(coordinator)
+        val timer = checkNotNull(sleepTimer)
+        val dsp = checkNotNull(dspSettingsOwner)
+        val startup = checkNotNull(playbackStartup)
+        initializing = true
+        initializationComplete = false
+        try {
+            application.requireBackupStorageReady()
+            application.fileOperations.assertPlaybackReadable()
+            currentCoroutineContext().ensureActive()
+            if (!startup.bootIdentityRead) {
+                startup.bootId = readSleepTimerBootId(this)
+                startup.bootIdentityRead = true
+            }
+            // Timer.initialize 自身保留已恢复的 lease；再次重试不能重新启用磁盘旧定时。
+            timer.initialize()
+            if (!startup.dspInitialized) {
+                dsp.initialize()
+                startup.dspInitialized = true
+            }
+            if (!startup.preferencesInitialized) {
+                owner.initializePreferences()
+                startup.preferencesInitialized = true
+            }
+            val restoredBackend = retryBackend && owner.retryBackendIfNeeded()
+            if (!restoredBackend) queues.initialize()
+            currentCoroutineContext().ensureActive()
+            if (destroyed || quiescing || playbackOwner !== owner) {
+                throw CancellationException("Playback service owner retired")
+            }
+            initializationComplete = true
+            dsp.observe()
+            owner.observePreferences()
+        } finally {
+            if (!destroyed && !quiescing && playbackOwner === owner) {
+                initializing = false
+                refreshSessionState()
+                refreshControllerCommands()
+            }
+        }
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
+        val application = application as MeloXApplication
+        if (mediaSession == null && !destroyed && resourcesClosed && !application.filePlaybackHost.isReadBlocked()) {
+            createPlaybackResources()
+        }
+        return mediaSession
+    }
 
     override fun onDestroy() {
         destroyed = true
-        val pendingCommand = activeCommand
-        pendingCommand?.cancel()
-        initialization?.cancel()
-        extrasObserver?.cancel()
-        routeStateObserver?.cancel()
-        seekStateObserver?.cancel()
-        commandPreferencesObserver?.cancel()
-        onlineAccountObserver?.cancel()
-        resourceStatusObserver?.cancel()
-        timerSaveCommand?.cancel()
+        dspSettingsOwner?.close()
+        dspSettingsOwner = null
+        startClosure()
+        super.onDestroy()
+    }
+
+    /** 由确认关闭仍绑定的同一个服务；单独 stopService 不能证明资源已释放。 */
+    private suspend fun closeForFileMutation() {
+        // 收尾 job 不受调用方取消影响，host 独立限制等候时间。
+        startClosure().await()
+    }
+
+    private fun startClosure(): Deferred<Unit> {
+        closing?.let { return it }
+        quiescing = true
+        initializationComplete = false
+        // Native closure retires the observer before a later empty-owner rebuild.
+        dspSettingsOwner?.close()
+        dspSettingsOwner = null
+        val application = application as MeloXApplication
+        val pendingJobs = listOfNotNull(activeCommand, initialization, extrasObserver, routeStateObserver,
+            seekStateObserver, commandPreferencesObserver, onlineAccountObserver, resourceStatusObserver, timerSaveCommand).distinct()
+        pendingJobs.forEach { it.cancel() }
         val session = mediaSession
         val owner = playbackOwner
         val artwork = bitmapLoader
@@ -290,65 +383,53 @@ class ProbePlaybackService : MediaSessionService() {
         bitmapLoader = null
         listening = null
         sleepTimer = null
-        try {
-            try { timer?.detach() }
-            finally {
-                try { session?.player?.pause() }
-                finally {
-                    try { statistics?.detach() }
-                    finally {
-                        try { queues?.detach() }
-                        finally {
-                            try { session?.release() }
-                            finally { try { owner?.close() } finally { artwork?.close() } }
-                        }
-                    }
-                }
-            }
-        } catch (_: Exception) {
-            // Each teardown was attempted. Writers below consume captured values even when a
-            // platform release reports an error; no player is recreated during destruction.
+        playbackStartup = null
+        var failure: Throwable? = null
+        fun captureFailure(error: Throwable) {
+            val first = failure
+            if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
         }
-        // 主要保存路径是5秒及暂停/seek/切歌；销毁只补一次已捕获状态，不阻塞主线程。
-        serviceScope.launch {
+        fun cleanup(action: () -> Unit) { try { action() } catch (error: Throwable) { captureFailure(error) } }
+        cleanup { owner?.userPause() }
+        cleanup { timer?.detach() }
+        cleanup { session?.player?.pause() }
+        cleanup { statistics?.detach() }
+        cleanup { queues?.detach() }
+        cleanup { session?.release() }
+        cleanup { owner?.close() }
+        cleanup { artwork?.close() }
+        cleanup { stopForeground(STOP_FOREGROUND_REMOVE) }
+        val completion = serviceScope.async(NonCancellable, start = CoroutineStart.LAZY) {
+            suspend fun finish(action: suspend () -> Unit) {
+                try { action() } catch (error: Throwable) { captureFailure(error) }
+            }
             try {
-                // 被取消的命令先完成有界lease收尾，再补偿最后一个失败的关闭尝试。
-                withTimeoutOrNull(PLAYLIST_SHUTDOWN_TIMEOUT_MS) { pendingCommand?.join() }
+                for (pending in pendingJobs) finish { pending.join() }
                 val producer = retiredPlaylistProducer
-                if (producer != null && closePlaylistProducer(producer)) retiredPlaylistProducer = null
-                supervisorScope {
-                    listOf(
-                        async {
-                            try { withTimeoutOrNull(1500L) { queues?.close() } }
-                            catch (error: CancellationException) { throw error }
-                            catch (_: Exception) { null }
-                        },
-                        async {
-                            try { withTimeoutOrNull(1500L) { timer?.close() } }
-                            catch (error: CancellationException) { throw error }
-                            catch (_: Exception) { null }
-                        },
-                        async {
-                            try { withTimeoutOrNull(1500L) { statistics?.close() } }
-                            catch (error: CancellationException) { throw error }
-                            catch (_: Exception) { null }
-                        },
-                    ).awaitAll()
+                if (producer != null) finish {
+                    if (!closePlaylistProducer(producer)) throw FileOperationException(FileOperationIssue.PLAYBACK_RELEASE_UNCONFIRMED)
+                    if (retiredPlaylistProducer === producer) retiredPlaylistProducer = null
                 }
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                // 销毁阶段已停声并释放内核；保存失败保留上一次完整 checkpoint，不重建服务。
+                finish { owner?.awaitClosed() }
+                finish { queues?.close() }
+                finish { timer?.close() }
+                finish { statistics?.close() }
+                finish { application.localProviderIo.awaitIdle() }
+                failure?.let { throw FileOperationException(FileOperationIssue.PLAYBACK_RELEASE_UNCONFIRMED, it) }
+                resourcesClosed = true
+                application.filePlaybackHost.detach(this@ProbePlaybackService)
             } finally {
-                serviceScope.cancel()
+                if (destroyed) serviceScope.cancel()
             }
         }
-        super.onDestroy()
+        closing = completion
+        completion.start()
+        return completion
     }
 
     private fun ensurePlaybackForeground(): Boolean {
         val session = mediaSession ?: return false
-        if (destroyed) return false
+        if (destroyed || quiescing || (application as MeloXApplication).filePlaybackHost.isReadBlocked()) return false
         if (isPlaybackOngoing) return true
         return try {
             val manager = checkNotNull(getSystemService(NotificationManager::class.java))
@@ -383,6 +464,8 @@ class ProbePlaybackService : MediaSessionService() {
     }
 
     private fun requestPlayback(): Boolean {
+        if (destroyed || quiescing || initializing || !initializationComplete ||
+            (application as MeloXApplication).filePlaybackHost.isReadBlocked()) return false
         val accepted = sleepTimer?.beforePlay() == true && playbackOwner?.requestPlay() == true
         if (!accepted) mediaSession?.let { session ->
             // A denied or delayed request stays paused. Media3 stops any warm-up foreground
@@ -400,7 +483,7 @@ class ProbePlaybackService : MediaSessionService() {
     }
 
     private fun withMediaVolumeOwner(operation: (ServicePlaybackOwner) -> MediaVolumeResult): MediaVolumeResult {
-        val owner = playbackOwner.takeUnless { destroyed }
+        val owner = playbackOwner.takeUnless { destroyed || quiescing }
         return if (owner == null) MediaVolumeResult(null, ServiceMediaVolumeIssue.UNAVAILABLE) else operation(owner)
     }
 
@@ -410,7 +493,7 @@ class ProbePlaybackService : MediaSessionService() {
 
     /** 定时取消不等待队列/provider命令；运行时接受与独立写盘状态分别呈现。 */
     private fun timerResult(operation: (ServiceSleepTimer) -> Boolean): ListenableFuture<SessionResult> {
-        if (destroyed) return Futures.immediateFuture(failureResult("CLOSED"))
+        if (destroyed || quiescing) return Futures.immediateFuture(failureResult("CLOSED"))
         val timer = sleepTimer
         if (initializing || timer == null || !timer.state.value.initialized) return Futures.immediateFuture(failureResult("BUSY"))
         return try {
@@ -424,7 +507,7 @@ class ProbePlaybackService : MediaSessionService() {
         val timer = sleepTimer ?: return Futures.immediateFuture(failureResult("NOT_READY"))
         val expected = try { SleepTimerCommands.readExpected(arguments) }
         catch (_: IllegalArgumentException) { return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE)) }
-        if (destroyed || initializing || timerSaveCommand != null || expected != timer.generationId) {
+        if (destroyed || quiescing || initializing || timerSaveCommand != null || expected != timer.generationId) {
             return Futures.immediateFuture(failureResult(if (destroyed) "CLOSED" else "CONFLICT"))
         }
         val future = SettableFuture.create<SessionResult>()
@@ -446,12 +529,22 @@ class ProbePlaybackService : MediaSessionService() {
         return future
     }
 
-    private fun commandFuture(operationId: String? = null, operation: suspend () -> SessionResult): ListenableFuture<SessionResult> {
-        if (destroyed) return Futures.immediateFuture(receiptResult(failureResult("CLOSED"), operationId))
+    private fun commandFuture(
+        operationId: String? = null,
+        retryInitialization: Boolean = false,
+        operation: suspend () -> SessionResult,
+    ): ListenableFuture<SessionResult> {
+        if (destroyed || quiescing) return Futures.immediateFuture(receiptResult(failureResult("CLOSED"), operationId))
+        if (!retryInitialization && (application as MeloXApplication).filePlaybackHost.isReadBlocked()) {
+            return Futures.immediateFuture(receiptResult(failureResult("RECOVERY_REQUIRED"), operationId))
+        }
         // Cancellation can still own noncancellable provider/receipt cleanup. Only completion
         // releases this slot; isActive would admit a new command while that cleanup is running.
         if (initializing || playbackOwner?.state?.value?.switching == true || activeCommand != null) {
             return Futures.immediateFuture(receiptResult(failureResult("BUSY"), operationId))
+        }
+        if (!retryInitialization && !initializationComplete) {
+            return Futures.immediateFuture(receiptResult(failureResult("NOT_READY"), operationId))
         }
         val future = SettableFuture.create<SessionResult>()
         fun complete(result: SessionResult) {
@@ -473,6 +566,8 @@ class ProbePlaybackService : MediaSessionService() {
                 complete(failureResult(issue, error.issue.name))
             } catch (error: OnlineCatalogException) {
                 complete(failureResult(error.issue.name))
+            } catch (error: BackupException) {
+                complete(failureResult(if (error.issue == BackupIssue.BUSY) "BUSY" else "RECOVERY_REQUIRED"))
             } catch (error: LibraryException) {
                 val issue = when (error.issue) {
                     LibraryIssue.BUSY -> "BUSY"
@@ -549,7 +644,8 @@ class ProbePlaybackService : MediaSessionService() {
             .remove(Player.COMMAND_SET_SPEED_AND_PITCH)
         val externalButtonsDisabled = !mediaButtonsEnabled && controller.uid != Process.myUid() &&
             !session.isMediaNotificationController(controller)
-        if (initializing || playbackOwner?.hasUsableBackend != true || externalButtonsDisabled) {
+        if (initializing || !initializationComplete || quiescing || (application as MeloXApplication).filePlaybackHost.isReadBlocked() ||
+            playbackOwner?.hasUsableBackend != true || externalButtonsDisabled) {
             commands.remove(Player.COMMAND_PLAY_PAUSE).remove(Player.COMMAND_PREPARE).remove(Player.COMMAND_STOP)
                 .remove(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM).remove(Player.COMMAND_SEEK_TO_DEFAULT_POSITION)
                 .remove(Player.COMMAND_SEEK_TO_MEDIA_ITEM).remove(Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
@@ -600,7 +696,9 @@ class ProbePlaybackService : MediaSessionService() {
             session: MediaSession,
             controllerInfo: MediaSession.ControllerInfo,
             intent: Intent,
-        ): Boolean = initializing || !mediaButtonsEnabled && !session.isMediaNotificationController(controllerInfo)
+        ): Boolean = initializing || !initializationComplete || quiescing ||
+            (application as MeloXApplication).filePlaybackHost.isReadBlocked() ||
+            !mediaButtonsEnabled && !session.isMediaNotificationController(controllerInfo)
 
         override fun onCustomCommand(
             session: MediaSession,
@@ -714,7 +812,9 @@ class ProbePlaybackService : MediaSessionService() {
                     SessionResult(SessionResult.RESULT_SUCCESS)
                 }
                 PlaybackCommands.beginSeek.customAction -> {
-                    if (destroyed || initializing || playbackOwner?.state?.value?.switching == true || activeCommand != null) {
+                    if (destroyed || quiescing || initializing || !initializationComplete ||
+                        (application as MeloXApplication).filePlaybackHost.isReadBlocked() ||
+                        playbackOwner?.state?.value?.switching == true || activeCommand != null) {
                         Futures.immediateFuture(failureResult(if (destroyed) "CLOSED" else "BUSY"))
                     } else try {
                         PlaybackCommands.readBeginSeek(args)
@@ -745,9 +845,9 @@ class ProbePlaybackService : MediaSessionService() {
                     checkNotNull(coordinator).seek(PlaybackCommands.readSeek(args))
                     playbackResult()
                 }
-                PlaybackCommands.retryRestore.customAction -> commandFuture {
-                    val rebuilt = checkNotNull(playbackOwner).retryBackendIfNeeded()
-                    if (!rebuilt) checkNotNull(coordinator).initialize()
+                // 恢复命令可检查尚未加载的 file journal；内部仍先核验 Backup 和真实释放围栏。
+                PlaybackCommands.retryRestore.customAction -> commandFuture(retryInitialization = true) {
+                    initializePlaybackResources(retryBackend = true)
                     playbackResult()
                 }
                 else -> super.onCustomCommand(session, controller, customCommand, args)
@@ -759,6 +859,5 @@ class ProbePlaybackService : MediaSessionService() {
         private const val NOTIFICATION_ID = 1001
         private const val NOTIFICATION_CHANNEL = "melox_playback"
         private const val PLAYLIST_CLOSE_TIMEOUT_MS = 2_500L
-        private const val PLAYLIST_SHUTDOWN_TIMEOUT_MS = 3_000L
     }
 }

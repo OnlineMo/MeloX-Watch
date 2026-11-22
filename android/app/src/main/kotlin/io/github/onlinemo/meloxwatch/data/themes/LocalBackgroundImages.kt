@@ -15,6 +15,13 @@ import io.github.onlinemo.meloxwatch.data.local.LocalInputLimits
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupResourceWriter
+import io.github.onlinemo.meloxwatch.data.backup.publishForBackup
+import io.github.onlinemo.meloxwatch.data.backup.publishFailureForBackup
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -30,6 +37,8 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,9 +50,10 @@ class LocalBackgroundImages private constructor(
     private val bitmaps: ThemeBitmapOwner,
     private val opener: ThemePackageOpener,
     private val availableBytes: (File) -> Long,
+    private val backupBarrier: BackupMutationBarrier?,
 ) : PlaybackBackgroundStore {
-    constructor(context: Context, io: LocalProviderIo, bitmaps: ThemeBitmapOwner) : this(
-        directoryProvider(context), io, bitmaps, AndroidThemePackageSource(context.applicationContext.contentResolver), File::getUsableSpace,
+    constructor(context: Context, io: LocalProviderIo, bitmaps: ThemeBitmapOwner, backupBarrier: BackupMutationBarrier? = null) : this(
+        directoryProvider(context), io, bitmaps, AndroidThemePackageSource(context.applicationContext.contentResolver), File::getUsableSpace, backupBarrier,
     )
 
     internal constructor(
@@ -52,15 +62,107 @@ class LocalBackgroundImages private constructor(
         bitmaps: ThemeBitmapOwner,
         opener: ThemePackageOpener,
         availableBytes: (File) -> Long = File::getUsableSpace,
-    ) : this({ directory }, io, bitmaps, opener, availableBytes)
+        backupBarrier: BackupMutationBarrier? = null,
+    ) : this({ directory }, io, bitmaps, opener, availableBytes, backupBarrier)
 
     private val occupied = AtomicBoolean(false)
     private val previewLock = Any()
     private var held: PreviewRecord? = null
+    private var backupRetained = emptyMap<String, BackgroundImageRef>()
     private val mutableState = MutableStateFlow(PlaybackBackgroundSnapshot(null))
     val state: StateFlow<PlaybackBackgroundSnapshot> = mutableState.asStateFlow()
     private val mutablePreview = MutableStateFlow<CustomBackgroundPreview?>(null)
     val preview: StateFlow<CustomBackgroundPreview?> = mutablePreview.asStateFlow()
+
+    internal suspend fun readForBackup(): PlaybackBackgroundSettings {
+        requireBackupOwner()
+        return operation { directory, signal ->
+            synchronized(previewLock) {
+                val preview = held
+                if (preview != null && !preview.retired && backupRetained[preview.preview.image.id] != preview.preview.image) {
+                    backgroundFail(PlaybackBackgroundIssue.BUSY)
+                }
+            }
+            val settings = readSettings(directory, signal)
+            prune(directory, settings, signal)
+            publish(PlaybackBackgroundSnapshot(settings))
+            settings
+        }
+    }
+
+    internal suspend fun retainForBackup(images: List<BackgroundImageRef>) {
+        requireBackupOwner()
+        if (images.size > 2 || images.map { it.id }.distinct().size != images.size) backgroundFail(PlaybackBackgroundIssue.INVALID_INPUT)
+        operation { directory, signal ->
+            for (image in images) verifiedImage(directory, image, signal)
+            synchronized(previewLock) { backupRetained = images.associateBy { it.id } }
+        }
+    }
+
+    internal suspend fun exportForBackup(image: BackgroundImageRef, output: BackupResourceWriter) {
+        requireBackupOwner()
+        operation { directory, signal ->
+            verifiedImage(directory, image, signal)
+            output.copyVerified(sourceFile(directory, image.id, ".image"), image.byteCount, image.sha256, signal::throwIfCanceled)
+        }
+    }
+
+    internal suspend fun validateForBackup(file: File, image: BackgroundImageRef) {
+        requireBackupOwner()
+        operation { _, signal ->
+            val bytes = readImageBytes(file, image.byteCount, signal)
+            if (ThemeStorageRecords.digest(bytes) != image.sha256) backgroundFail(PlaybackBackgroundIssue.INTEGRITY_FAILED)
+            val info = inspect(bytes, signal)
+            if (info.mediaType != image.mediaType || info.width != image.width || info.height != image.height || info.orientation != image.orientation) {
+                backgroundFail(PlaybackBackgroundIssue.INTEGRITY_FAILED)
+            }
+            val reservation = bitmaps.reserve(PlaybackBackgroundLimits.DECODE_BYTES)
+            var validation: Bitmap? = null
+            try { validation = BoundedArtworkDecoder.decode(bytes, ThemeLimits.VALIDATION_IMAGE_EDGE, signal); signal.throwIfCanceled() }
+            finally { validation?.recycle(); reservation.close() }
+        }
+    }
+
+    /** Rollback may select an exact journal-retained original, without inventing a UI preview. */
+    internal suspend fun compareAndSetForBackup(expectedRevision: Long, replacement: PlaybackBackgroundOptions): PlaybackBackgroundSaveResult {
+        requireBackupOwner()
+        return operation { directory, signal ->
+            val actual = readSettings(directory, signal)
+            if (actual.revision != expectedRevision) return@operation PlaybackBackgroundSaveResult.Conflict(
+                publish(PlaybackBackgroundSnapshot(actual, PlaybackBackgroundIssue.SETTINGS_CONFLICT)),
+            )
+            if (expectedRevision < 0L || expectedRevision == Long.MAX_VALUE) backgroundFail(PlaybackBackgroundIssue.SETTINGS_CONFLICT)
+            replacement.customImage?.let { image ->
+                val retained = synchronized(previewLock) { backupRetained[image.id] }
+                if (retained != image && image != actual.options.customImage) backgroundFail(PlaybackBackgroundIssue.PREVIEW_NOT_FOUND)
+                verifiedImage(directory, image, signal)
+            }
+            if (actual.options == replacement) return@operation PlaybackBackgroundSaveResult.Saved(publish(PlaybackBackgroundSnapshot(actual)))
+            val next = PlaybackBackgroundSettings(actual.revision + 1L, replacement)
+            signal.throwIfCanceled()
+            writeSettings(directory, next, signal)
+            publish(PlaybackBackgroundSnapshot(next))
+            synchronized(previewLock) {
+                held?.takeIf { it.preview.image == replacement.customImage }?.let { held = null; publishPreview(null) }
+            }
+            prune(directory, next, signal)
+            PlaybackBackgroundSaveResult.Saved(publish(PlaybackBackgroundSnapshot(next)))
+        }
+    }
+
+    internal suspend fun releaseBackupRetention() {
+        requireBackupOwner()
+        operation { directory, signal ->
+            val settings = readSettings(directory, signal)
+            synchronized(previewLock) { backupRetained = emptyMap() }
+            prune(directory, settings, signal)
+        }
+    }
+
+    private suspend fun requireBackupOwner() {
+        val barrier = backupBarrier ?: throw BackupException(BackupIssue.INVALID_INPUT)
+        barrier.requireExclusiveOwner()
+    }
 
     override suspend fun read(): PlaybackBackgroundSnapshot = try {
         operation { directory, signal ->
@@ -72,7 +174,7 @@ class LocalBackgroundImages private constructor(
     } catch (cancelled: CancellationException) { throw cancelled }
     catch (error: PlaybackBackgroundException) {
         if (error.issue == PlaybackBackgroundIssue.BUSY) throw error
-        publish(PlaybackBackgroundSnapshot(null, error.issue))
+        publishFailure(PlaybackBackgroundSnapshot(null, error.issue))
     }
 
     override suspend fun prepareImage(request: CustomBackgroundImportRequest): CustomBackgroundPreview = operation(
@@ -114,7 +216,7 @@ class LocalBackgroundImages private constructor(
             Files.move(part.toPath(), installed.toPath(), StandardCopyOption.ATOMIC_MOVE)
             signal.throwIfCanceled()
             val result = CustomBackgroundPreview(UUID.randomUUID().toString(), image, request.displayName, settings.revision)
-            synchronized(previewLock) { held = PreviewRecord(result, digest); mutablePreview.value = result }
+            synchronized(previewLock) { held = PreviewRecord(result, digest); publishPreview(result) }
             ready = true
             result
         } catch (error: Throwable) {
@@ -138,7 +240,7 @@ class LocalBackgroundImages private constructor(
         val settings = readSettings(directory, signal)
         val record = record(token, allowRetired = true)
         retire(token)
-        if (settings.options.customImage != record.preview.image) {
+        if (settings.options.customImage != record.preview.image && synchronized(previewLock) { record.preview.image.id !in backupRetained }) {
             deleteSource(sourceFile(directory, record.preview.image.id, ".image"))
         }
         synchronized(previewLock) { if (held === record) held = null }
@@ -168,7 +270,7 @@ class LocalBackgroundImages private constructor(
         // The accepted record is observable even if cancellation wins before result delivery.
         publish(PlaybackBackgroundSnapshot(next))
         candidate?.let { record -> synchronized(previewLock) {
-            if (held === record) { held = null; mutablePreview.value = null }
+            if (held === record) { held = null; publishPreview(null) }
         } }
         val issue = try { prune(directory, next, signal); null }
         catch (cancelled: CancellationException) { throw cancelled }
@@ -390,7 +492,7 @@ class LocalBackgroundImages private constructor(
 
     private fun prune(directory: File, settings: PlaybackBackgroundSettings, signal: CancellationSignal) {
         val previewId = synchronized(previewLock) { held?.takeIf { !it.retired }?.preview?.image?.id }
-        val retain = setOfNotNull(settings.options.customImage?.id, previewId)
+        val retain = setOfNotNull(settings.options.customImage?.id, previewId) + synchronized(previewLock) { backupRetained.keys.toSet() }
         for (file in sourceFiles(directory)) {
             signal.throwIfCanceled()
             if (file.name.endsWith(".part") || file.name.removeSuffix(".image") !in retain) deleteSource(file)
@@ -428,7 +530,7 @@ class LocalBackgroundImages private constructor(
     }
 
     private fun retire(token: String) = synchronized(previewLock) {
-        held?.takeIf { it.preview.token == token }?.let { it.retired = true; mutablePreview.value = null }
+        held?.takeIf { it.preview.token == token }?.let { it.retired = true; publishPreview(null) }
     }
 
     private fun validate(request: CustomBackgroundImportRequest) {
@@ -438,13 +540,14 @@ class LocalBackgroundImages private constructor(
         }
     }
 
-    private suspend fun <T> operation(abandoned: (T) -> Unit = {}, action: (File, CancellationSignal) -> T): T {
+    private suspend fun <T> operation(abandoned: (T) -> Unit = {}, action: (File, CancellationSignal) -> T): T =
+        backupBarrier.withBackupMutation({ PlaybackBackgroundException(PlaybackBackgroundIssue.BUSY) }) { operationActual(abandoned, action) }
+
+    private suspend fun <T> operationActual(abandoned: (T) -> Unit, action: (File, CancellationSignal) -> T): T {
         if (!occupied.compareAndSet(false, true)) backgroundFail(PlaybackBackgroundIssue.BUSY)
-        val entered = AtomicBoolean(false)
+        val admitted = AtomicBoolean(false)
         try {
-            return io.read(abandoned = abandoned, failed = { if (!entered.get()) occupied.set(false) }) { signal ->
-                entered.set(true)
-                try {
+            return io.read(abandoned = abandoned, admitted = { admitted.set(true) }) { signal ->
                     val directory = directory()
                     val lockFile = File(directory, "owner.lock")
                     FileChannel.open(lockFile.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS).use { channel ->
@@ -462,9 +565,10 @@ class LocalBackgroundImages private constructor(
                             }
                         }
                     }
-                } finally { occupied.set(false) }
             }
-        } catch (cancelled: CancellationException) { throw cancelled }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        }
         catch (error: PlaybackBackgroundException) { throw error }
         catch (error: ThemeException) { throw PlaybackBackgroundException(themeIssue(error.issue), error) }
         catch (error: ArtworkException) { throw PlaybackBackgroundException(artworkIssue(error.issue), error) }
@@ -472,6 +576,10 @@ class LocalBackgroundImages private constructor(
         catch (error: OutOfMemoryError) { throw PlaybackBackgroundException(PlaybackBackgroundIssue.LOW_MEMORY, error) }
         catch (error: IOException) { throw PlaybackBackgroundException(PlaybackBackgroundIssue.STORAGE_UNAVAILABLE, error) }
         catch (error: SecurityException) { throw PlaybackBackgroundException(PlaybackBackgroundIssue.PERMISSION_DENIED, error) }
+        finally {
+            try { if (admitted.get()) withContext(NonCancellable) { io.awaitIdle() } }
+            finally { occupied.set(false) }
+        }
     }
 
     private fun directory(): File {
@@ -486,9 +594,15 @@ class LocalBackgroundImages private constructor(
     }
 
     private fun publish(snapshot: PlaybackBackgroundSnapshot): PlaybackBackgroundSnapshot {
-        mutableState.value = snapshot
+        backupBarrier.publishForBackup(this) { mutableState.value = snapshot }
         return snapshot
     }
+    private fun publishFailure(snapshot: PlaybackBackgroundSnapshot): PlaybackBackgroundSnapshot {
+        backupBarrier.publishFailureForBackup(this) { mutableState.value = snapshot }
+        return snapshot
+    }
+    private val previewPublicationOwner = Any()
+    private fun publishPreview(value: CustomBackgroundPreview?) { backupBarrier.publishForBackup(previewPublicationOwner) { mutablePreview.value = value } }
 
     private fun themeIssue(issue: ThemeIssue): PlaybackBackgroundIssue = when (issue) {
         ThemeIssue.BUSY -> PlaybackBackgroundIssue.BUSY

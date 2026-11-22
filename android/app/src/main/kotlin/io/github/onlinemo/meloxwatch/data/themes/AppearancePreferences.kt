@@ -25,7 +25,7 @@ data class AppearanceSettings(val revision: Long = 0L, val options: AppearanceOp
 
 enum class AppearanceIssue {
     INVALID_SETTINGS, NEWER_SCHEMA, SETTINGS_TOO_LARGE, UNRECOVERABLE_SETTINGS,
-    STORAGE_UNAVAILABLE, REVISION_EXHAUSTED, CONFLICT,
+    STORAGE_UNAVAILABLE, REVISION_EXHAUSTED, CONFLICT, BUSY,
 }
 
 /** null 表示读取失败，界面使用的安全默认不能被当作一次成功保存。 */

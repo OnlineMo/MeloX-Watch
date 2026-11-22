@@ -9,6 +9,8 @@ import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.database.withRoomCallerCancellation
+import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -17,6 +19,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -60,8 +64,13 @@ class RoomPlaylistRepository(
 
     override suspend fun overview(): PlaylistOverview = storage { database.withPreservedTransaction { readOverview() } }
 
-    override fun observeOverview(): Flow<PlaylistOverview?> = dao.observeMeta().map { meta ->
-        if (meta == null) null else overview()
+    override fun observeOverview(): Flow<PlaylistOverview?> = flow {
+        (database as? MeloXDatabase)?.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeMeta().map {
+            (database as? MeloXDatabase)?.backupMutationBarrier.readBackupProjection {
+                if (dao.meta() == null) null else overview()
+            }
+        })
     }
 
     override suspend fun snapshot(playlistId: String): PlaylistSnapshot? = storage {
@@ -71,7 +80,12 @@ class RoomPlaylistRepository(
 
     override fun observePlaylist(playlistId: String): Flow<PlaylistSnapshot?> {
         requirePlaylistIdentifier(playlistId)
-        return dao.observeCurrentGeneration(playlistId).map { it?.model() }
+        return flow {
+            (database as? MeloXDatabase)?.backupMutationBarrier.readBackupProjection { Unit }
+            emitAll(dao.observeCurrentGeneration(playlistId).map {
+                (database as? MeloXDatabase)?.backupMutationBarrier.readBackupProjection { snapshot(playlistId) }
+            })
+        }
     }
 
     override suspend fun isFavorite(trackKey: TrackKey): Boolean = storage {
@@ -82,8 +96,13 @@ class RoomPlaylistRepository(
         }
     }
 
-    override fun observeFavorite(trackKey: TrackKey): Flow<Boolean> =
-        dao.observeFavoriteContains(PlaylistReference(trackKey = trackKey).identityKey())
+    override fun observeFavorite(trackKey: TrackKey): Flow<Boolean> = flow {
+        val barrier = (database as? MeloXDatabase)?.backupMutationBarrier
+        barrier.readBackupProjection { Unit }
+        emitAll(dao.observeFavoriteContains(PlaylistReference(trackKey = trackKey).identityKey()).map { observed ->
+            if (barrier == null) observed else barrier.readBackupProjection { isFavorite(trackKey) }
+        })
+    }
 
     override suspend fun apply(request: PlaylistMutationRequest, source: PlaylistPageSource?): PlaylistCommit =
         applyInternal(request, source, participant = null)

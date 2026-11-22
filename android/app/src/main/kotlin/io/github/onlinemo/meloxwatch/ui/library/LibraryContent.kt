@@ -70,6 +70,9 @@ import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistEntryViewModel
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistTrackControls
 import io.github.onlinemo.meloxwatch.ui.watch.WatchActionRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchContentRow
+import io.github.onlinemo.meloxwatch.ui.fileoperations.FileOperationsControls
+import io.github.onlinemo.meloxwatch.ui.fileoperations.FileSelectionTrackChoice
+import io.github.onlinemo.meloxwatch.ui.fileoperations.FileTrackActions
 import io.github.onlinemo.meloxwatch.ui.themes.LocalWatchThemeColors
 import java.time.Instant
 import java.time.ZoneId
@@ -102,6 +105,7 @@ fun LazyListScope.libraryContent(
         LibraryNavigation(state, model)
         LibraryButton(stringResource(R.string.playlist_entry_browse), true, onPlaylists)
         PlaylistEntryStatus(playlistEntry, playlistEntryModel)
+        FileOperationsControls(if (state.screen !in setOf(LibraryScreen.SOURCES, LibraryScreen.HISTORY, LibraryScreen.STATISTICS)) state.page?.view?.viewId else null)
     }
     if (state.screen == LibraryScreen.SOURCES) {
         sourcesContent(sources, sourceModel, commandPending, onPlayPreview, onChooseFile, onChooseTree, onMediaStore, onPermissionSettings)
@@ -348,6 +352,7 @@ private fun TrackCard(track: LibraryTrack, path: ArtworkReadPath, enabled: Boole
             }
         }
         LibraryButton(stringResource(R.string.library_open_detail), enabled, onDetail)
+        FileSelectionTrackChoice(track)
     }
 }
 
@@ -397,6 +402,7 @@ private fun LazyListScope.detailContent(state: LibraryUiState, model: LibraryVie
     if (track == null) { item { LibraryText(stringResource(R.string.library_detail_missing)) }; return }
     item(key = "library:detail-art") { TrackArtwork(track, state.preferences.artworkReadPath, revision = state.artworkRevision) }
     item { LibraryText(track.title, primary = true) }
+    item(key = "library:detail-file-actions") { FileTrackActions(track, state.page?.view?.revision ?: 0L) }
     item { LibraryText(stringResource(R.string.library_display_artist_value, track.displayArtist ?: stringResource(R.string.library_unknown_artist))) }
     item { LibraryText(stringResource(R.string.library_display_album_value, track.displayAlbum ?: stringResource(R.string.library_unknown_album))) }
     item { LibraryText(stringResource(R.string.library_file_value, track.filename)) }

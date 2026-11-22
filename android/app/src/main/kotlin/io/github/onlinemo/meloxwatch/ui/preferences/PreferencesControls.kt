@@ -32,8 +32,9 @@ import io.github.onlinemo.meloxwatch.ui.watch.WatchActionRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchChoiceRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchSwitchRow
 import io.github.onlinemo.meloxwatch.ui.watch.WatchText
+import io.github.onlinemo.meloxwatch.ui.storage.StorageControls
 
-private enum class PreferencesSection { OVERVIEW, GENERAL, PLAYBACK, CONTROLS }
+private enum class PreferencesSection { OVERVIEW, GENERAL, PLAYBACK, CONTROLS, STORAGE }
 
 /** 放入宿主的可滚动 item；宿主负责标题、真实窗口避让与导航 enterEditor/clearDraft。 */
 @Composable
@@ -50,6 +51,10 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
         if (section != PreferencesSection.OVERVIEW) {
             PreferenceButton(stringResource(R.string.prefs_back_to_sections)) { sectionName = PreferencesSection.OVERVIEW.name }
         }
+        if (section == PreferencesSection.OVERVIEW) {
+            PreferenceButton(stringResource(R.string.storage_title)) { sectionName = PreferencesSection.STORAGE.name }
+        }
+        if (section == PreferencesSection.STORAGE) StorageControls()
         if (!requiresSavedValues) {
             PreferenceButton(stringResource(if (showSavedValues) R.string.prefs_hide_saved_values else R.string.prefs_show_saved_values)) {
                 showSavedValues = !showSavedValues
@@ -57,7 +62,7 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
         }
         if (requiresSavedValues || showSavedValues) CurrentPreferences(state)
         val draft = state.draft
-        if (state.isEditing && draft != null) {
+        if (state.isEditing && draft != null && section != PreferencesSection.STORAGE) {
             Heading(stringResource(R.string.prefs_edit_values))
             when (section) {
                 PreferencesSection.OVERVIEW -> {
@@ -68,6 +73,7 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
                 PreferencesSection.GENERAL -> GeneralSettingsEditor(draft, state.canEdit, viewModel)
                 PreferencesSection.PLAYBACK -> PlaybackSettingsEditor(draft, state.canEdit, viewModel)
                 PreferencesSection.CONTROLS -> ControlsSettingsEditor(draft, state.canEdit, viewModel)
+                PreferencesSection.STORAGE -> Unit
             }
             Explanation(stringResource(R.string.prefs_save_scope))
             if (state.confirmReset) {
@@ -95,7 +101,7 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
                     onClick = viewModel::requestReset,
                 )
             }
-        } else {
+        } else if (section != PreferencesSection.STORAGE) {
             Explanation(stringResource(R.string.prefs_wait_for_settings))
         }
         PreferenceButton(stringResource(R.string.prefs_cancel_edit), enabled = !state.isSaving) {
@@ -337,6 +343,7 @@ private fun EditorStatus(state: PreferencesEditorState, onReload: () -> Unit) {
             } else {
                 R.string.prefs_save_failure
             }
+            PreferencesFailure.BUSY -> R.string.backup_storage_busy
             PreferencesFailure.UNSUPPORTED_SCHEMA -> R.string.prefs_write_unsupported
             PreferencesFailure.INVALID_REVISION -> R.string.prefs_invalid_edit
             PreferencesFailure.REVISION_EXHAUSTED -> R.string.prefs_revision_exhausted
@@ -385,6 +392,7 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
     val mainProgress = stringResource(R.string.prefs_main_progress)
     val seekGesture = stringResource(R.string.prefs_progress_gesture)
     val sleepSummary = stringResource(R.string.prefs_sleep_summary)
+    val help = stringResource(R.string.help_title)
     val separator = stringResource(R.string.prefs_field_separator)
     return PreferencesField.entries.filter { field -> field in fields }.joinToString(separator) { field ->
         when (field) {
@@ -408,6 +416,7 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
             PreferencesField.MAIN_PROGRESS -> mainProgress
             PreferencesField.SEEK_GESTURE -> seekGesture
             PreferencesField.SLEEP_SUMMARY -> sleepSummary
+            PreferencesField.HELP -> help
         }
     }
 }

@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.lyrics.store
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.MeloXApplication
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
@@ -19,7 +20,7 @@ object LyricsDisplayStoreFactory {
             val context = application.applicationContext
             val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
             val dataStore = createLyricsDisplayDataStore(scope) { context.preferencesDataStoreFile("lyrics_display") }
-            DataStoreLyricsDisplayStore(dataStore, scope).also { instance = it }
+            DataStoreLyricsDisplayStore(dataStore, scope, (application as? MeloXApplication)?.backupMutationBarrier).also { instance = it }
         }
     }
 }

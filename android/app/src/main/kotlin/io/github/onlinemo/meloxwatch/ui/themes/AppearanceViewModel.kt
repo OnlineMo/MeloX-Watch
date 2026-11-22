@@ -116,6 +116,7 @@ class AppearanceViewModel(
     private val savedState: SavedStateHandle,
     scope: CoroutineScope? = null,
     private val receivedThemes: TransferredThemeCoordinator? = null,
+    private val awaitStorageStartup: (suspend () -> Unit)? = null,
 ) : ViewModel() {
     private val workScope = scope ?: viewModelScope
     private val lock = Any()
@@ -641,6 +642,7 @@ class AppearanceViewModel(
             if (closed || !workScope.isActive || !mutableState.value.foreground || active != null || !readRequested) return
             readRequested = false
             begin(AppearanceOperation.READ) { task ->
+                awaitStorageStartup?.invoke()
                 val a = readAppearanceActual()
                 val t = readThemeActual()
                 val b = readBackgroundActual()

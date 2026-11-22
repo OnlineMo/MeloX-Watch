@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.themes
 
 import android.content.Context
+import io.github.onlinemo.meloxwatch.MeloXApplication
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import java.io.File
 import java.io.IOException
@@ -30,7 +31,7 @@ class AppearancePreferencesStoreFactory {
                 }
                 file
             },
-        ))
+        ), (application as? MeloXApplication)?.backupMutationBarrier)
         store = created
         return created
     }

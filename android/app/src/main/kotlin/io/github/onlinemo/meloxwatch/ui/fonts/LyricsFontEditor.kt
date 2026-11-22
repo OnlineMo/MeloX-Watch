@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.ui.fonts
 
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontBackupAccess
 import io.github.onlinemo.meloxwatch.data.fonts.LoadedLyricsFont
 import io.github.onlinemo.meloxwatch.data.fonts.FontWeightSupport
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontAsset
@@ -12,7 +13,12 @@ import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSaveResult
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSelection
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettings
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontSettingsStore
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.IOException
+import kotlinx.coroutines.coroutineScope
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -32,6 +38,7 @@ class LyricsFontEditor private constructor(
     private val files: LyricsFontFiles,
     private val presentationOwner: LyricsFontPresentationOwner,
     bindInitially: Boolean,
+    private val backupBarrier: BackupMutationBarrier? = null,
 ) {
     /** Standalone file/transaction tests retain their existing two-argument entry point. */
     constructor(settings: LyricsFontSettingsStore, files: LyricsFontFiles) :
@@ -40,6 +47,10 @@ class LyricsFontEditor private constructor(
     /** The real Application shares one owner; constructing a hidden editor does not bind it. */
     constructor(settings: LyricsFontSettingsStore, files: LyricsFontFiles, presentationOwner: LyricsFontPresentationOwner) :
         this(settings, files, presentationOwner, false)
+
+    constructor(settings: LyricsFontSettingsStore, files: LyricsFontFiles,
+        presentationOwner: LyricsFontPresentationOwner, backupBarrier: BackupMutationBarrier) :
+        this(settings, files, presentationOwner, false, backupBarrier)
 
     private val occupied = AtomicBoolean(false)
     private val mutable = MutableStateFlow(LyricsFontEditorState())
@@ -284,7 +295,44 @@ class LyricsFontEditor private constructor(
         if (current.saved != null) files.discard(asset, current.retainedIds())
     }
 
+    /** Backup/restore uses this same editor owner, with no competing draft or native font pair. */
+    internal suspend fun <T> withBackupSettings(action: suspend (LyricsFontBackupAccess) -> T): T =
+        backupBarrier.withBackupMutation({ BackupException(BackupIssue.BUSY) }) {
+            if (!occupied.compareAndSet(false, true)) throw BackupException(BackupIssue.BUSY)
+            var failure: Throwable? = null
+            val active = AtomicBoolean(true)
+            var session: LyricsFontBackupAccess? = null
+            try {
+                val before = mutable.value.withoutTypefaces()
+                if (before.draft != null || before.retry != null) throw BackupException(BackupIssue.BUSY)
+                presentationBinding.close()
+                val pair = presentationOwner.state.value
+                if (pair.original.font.typeface != null || pair.translation.font.typeface != null) throw BackupException(BackupIssue.BUSY)
+                val actual = settings.read()
+                val admitted = LyricsFontBackupAccess(settings, files, actual) { active.get() }
+                session = admitted
+                coroutineScope { action(admitted) }
+            } catch (error: Throwable) {
+                failure = error
+                throw error
+            } finally {
+                active.set(false)
+                try {
+                    // The coordinator's real read/CAS result is metadata; retiring does no new I/O.
+                    session?.let { publish(LyricsFontEditorState(saved = it.confirmedSettings)) }
+                } catch (cleanup: Throwable) {
+                    val original = failure
+                    if (original == null) throw cleanup else if (original !== cleanup) original.addSuppressed(cleanup)
+                } finally { occupied.set(false) }
+            }
+        }
+
     private suspend fun action(block: suspend () -> Unit) {
+        try { backupBarrier.withBackupMutation({ LyricsFontException(LyricsFontIssue.BUSY) }) { actionActual(block) } }
+        catch (error: LyricsFontException) { update { it.copy(issue = error.issue) } }
+    }
+
+    private suspend fun actionActual(block: suspend () -> Unit) {
         if (!occupied.compareAndSet(false, true)) {
             update { it.copy(issue = LyricsFontIssue.BUSY) }
             return

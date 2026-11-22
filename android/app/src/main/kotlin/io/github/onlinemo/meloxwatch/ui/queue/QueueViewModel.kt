@@ -299,6 +299,7 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
         }
         observationJob = viewModelScope.launch {
             try {
+                app.requireBackupStorageReady()
                 queues.snapshots().collect { snapshot ->
                     if (ownsObservation(identity) && !reloadRequired) {
                         val state = mutableUiState.value

@@ -22,6 +22,7 @@ import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapOwner
 import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapReservation
 import io.github.onlinemo.meloxwatch.data.themes.ThemeException
 import io.github.onlinemo.meloxwatch.data.themes.ThemeIssue
+import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
 import java.io.EOFException
 import java.io.File
 import java.io.FileNotFoundException
@@ -141,6 +142,17 @@ class LocalArtworkRepository(
     }
 
     fun trimUnused() { bitmaps.trimUnused() }
+
+    suspend fun measureDiskCache(): StorageCategory = diskCommand { disk.measure(it) }
+    suspend fun clearDiskCache(): StorageCategory = diskCommand { signal ->
+        disk.clear(signal).also { synchronized(missingLock) { noArtwork.clear() } }
+    }
+
+    private suspend fun diskCommand(action: (CancellationSignal) -> StorageCategory): StorageCategory {
+        val ticket = gate.enter(ArtworkPriority.VISIBLE)
+        try { return provider { io.read(action = action) } }
+        finally { try { withContext(NonCancellable) { io.awaitIdle() } } finally { gate.exit(ticket) } }
+    }
 
     /** Online thumbnails share the existing gate, bitmap owner and 32 MiB disk LRU; this method never accesses HTTP. */
     internal suspend fun derived(key: String, targetPx: Int, encoded: ByteArray? = null): ThemeBitmapLease? {

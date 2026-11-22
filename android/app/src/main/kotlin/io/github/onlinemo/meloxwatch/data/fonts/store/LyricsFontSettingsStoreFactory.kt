@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.fonts.store
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.MeloXApplication
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
@@ -22,7 +23,7 @@ object LyricsFontSettingsStoreFactory {
             val dataStore = createLyricsFontSettingsDataStore(scope) {
                 context.preferencesDataStoreFile("lyrics_font_settings")
             }
-            DataStoreLyricsFontSettingsStore(dataStore).also { instance = it }
+            DataStoreLyricsFontSettingsStore(dataStore, (application as? MeloXApplication)?.backupMutationBarrier).also { instance = it }
         }
     }
 }

@@ -13,9 +13,11 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import io.github.onlinemo.meloxwatch.companion.MeloXCompanionApplication
 import io.github.onlinemo.meloxwatch.companion.data.CompanionIconRole
+import io.github.onlinemo.meloxwatch.companion.ui.about.CompanionLicensesViewModel
 
 class CompanionActivity : ComponentActivity() {
     private lateinit var model: CompanionViewModel
+    private lateinit var licenses: CompanionLicensesViewModel
     private var pendingIcon: IconSelection? = null
 
     private class IconSelection(val role: CompanionIconRole, val licenseName: String, val licenseText: String) {
@@ -35,13 +37,17 @@ class CompanionActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val app = application as MeloXCompanionApplication
-        model = ViewModelProvider(this, viewModelFactory {
+        val provider = ViewModelProvider(this, viewModelFactory {
             initializer { CompanionViewModel(app.documents, app.transfer) }
-        })[CompanionViewModel::class.java]
+            initializer { CompanionLicensesViewModel(app.licenses) }
+        })
+        model = provider[CompanionViewModel::class.java]
+        licenses = provider[CompanionLicensesViewModel::class.java]
         enableEdgeToEdge()
         setContent {
             val state by model.state.collectAsStateWithLifecycle()
-            CompanionUi(state, model, onExit = ::finish, selectAudio = {
+            val licenseState by licenses.state.collectAsStateWithLifecycle()
+            CompanionUi(state, model, licenseState, licenses, onExit = ::finish, selectAudio = {
                 try { selectAudio.launch(arrayOf("audio/*")) }
                 catch (_: ActivityNotFoundException) { model.pickerUnavailable() }
                 catch (_: SecurityException) { model.pickerUnavailable() }
@@ -61,12 +67,14 @@ class CompanionActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        if (::licenses.isInitialized) licenses.background()
         if (::model.isInitialized) model.background()
         super.onStop()
     }
 
     override fun onStart() {
         super.onStart()
+        if (::licenses.isInitialized) licenses.foreground()
         if (::model.isInitialized) model.reloadLocal()
     }
 }

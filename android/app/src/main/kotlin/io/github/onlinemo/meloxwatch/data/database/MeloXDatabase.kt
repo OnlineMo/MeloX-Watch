@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.database
 
 import android.content.Context
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
@@ -99,6 +100,8 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
+    internal var backupMutationBarrier: BackupMutationBarrier? = null
+        private set
     @Volatile private var closed = false
     internal val isClosed: Boolean get() = closed
 
@@ -174,11 +177,11 @@ abstract class MeloXDatabase : RoomDatabase() {
             }
         }
 
-        fun open(context: Context): MeloXDatabase = Room.databaseBuilder(
+        fun open(context: Context, backupBarrier: BackupMutationBarrier? = null): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
         ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build()
+            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build().also { it.backupMutationBarrier = backupBarrier }
     }
 }

@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.preferences
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.MeloXApplication
 import androidx.datastore.core.DataStore
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
@@ -23,7 +24,7 @@ object UserPreferencesRepositoryFactory {
             val store = createUserPreferencesDataStore(scope) {
                 applicationContext.preferencesDataStoreFile("user_preferences")
             }
-            DataStoreUserPreferencesRepository(store, scope).also { repository -> instance = repository }
+            DataStoreUserPreferencesRepository(store, scope, (application as? MeloXApplication)?.backupMutationBarrier).also { repository -> instance = repository }
         }
     }
 }

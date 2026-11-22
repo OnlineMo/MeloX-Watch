@@ -31,14 +31,25 @@ class LocalProviderIo(
         signal: CancellationSignal = CancellationSignal(),
         abandoned: (T) -> Unit = {},
         failed: (Exception) -> Unit = {},
+        admitted: () -> Unit = {},
         action: (CancellationSignal) -> T,
     ): T = suspendCancellableCoroutine { continuation ->
-        val accepted = synchronized(lock) {
-            if (occupied) false else { occupied = true; busy.value = true; true }
+        val accepted = try { synchronized(lock) {
+            if (occupied) false else {
+                occupied = true
+                busy.value = true
+                // Acceptance and the owner's fence are one synchronous admission decision.
+                try { admitted() }
+                catch (failure: Throwable) { occupied = false; busy.value = false; throw failure }
+                true
+            }
+        } } catch (failure: Throwable) {
+            if (continuation.isActive) continuation.resumeWithException(if (failure is Exception) map(failure) else failure)
+            return@suspendCancellableCoroutine
         }
         if (!accepted) {
             val failure = SourceReadException(SourceReadIssue.BUSY)
-            failed(failure)
+            notifyFailure(failure, failed)
             continuation.resumeWithException(failure)
             return@suspendCancellableCoroutine
         }
@@ -50,11 +61,11 @@ class LocalProviderIo(
                 val value = action(signal)
                 if (continuation.isActive) outcome = Result.success(value) else abandoned(value)
             } catch (error: Exception) {
-                failed(error)
+                notifyFailure(error, failed)
                 outcome = Result.failure(map(error))
             } catch (error: OutOfMemoryError) {
                 val failure = SourceReadException(SourceReadIssue.METADATA_UNREADABLE, error)
-                failed(failure)
+                notifyFailure(failure, failed)
                 outcome = Result.failure(failure)
             } finally {
                 drainAndRelease()
@@ -68,10 +79,16 @@ class LocalProviderIo(
         try {
             dispatcher.dispatch(continuation.context, worker)
         } catch (error: RuntimeException) {
-            failed(error)
+            notifyFailure(error, failed)
             drainAndRelease()
             if (continuation.isActive) continuation.resumeWithException(map(error))
         }
+    }
+
+    /** Reporting a failure cannot strand the caller or the accepted physical slot. */
+    private fun notifyFailure(error: Exception, report: (Exception) -> Unit) {
+        try { report(error) }
+        catch (reporting: Throwable) { if (reporting !== error) error.addSuppressed(reporting) }
     }
 
     /** Only the single live enumeration cursor may use this bounded retirement slot. */

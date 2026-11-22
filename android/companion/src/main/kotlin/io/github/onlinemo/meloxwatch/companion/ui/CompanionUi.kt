@@ -17,7 +17,10 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -28,54 +31,78 @@ import io.github.onlinemo.meloxwatch.companion.R
 import io.github.onlinemo.meloxwatch.companion.data.CompanionConnectionPhase
 import io.github.onlinemo.meloxwatch.companion.data.CompanionEditPhase
 import io.github.onlinemo.meloxwatch.companion.data.CompanionIconRole
+import io.github.onlinemo.meloxwatch.companion.ui.about.CompanionLicensesState
+import io.github.onlinemo.meloxwatch.companion.ui.about.CompanionLicensesViewModel
+import io.github.onlinemo.meloxwatch.companion.ui.about.companionLicenseItems
 import io.github.onlinemo.meloxwatch.data.transfer.TransferIssue
 import io.github.onlinemo.meloxwatch.data.transfer.TransferReceipt
 import io.github.onlinemo.meloxwatch.data.transfer.TransferReceiptKind
 
 @Composable
 internal fun CompanionUi(
-    state: CompanionUiState, model: CompanionViewModel, onExit: () -> Unit, selectAudio: () -> Unit,
+    state: CompanionUiState, model: CompanionViewModel,
+    licenseState: CompanionLicensesState, licenses: CompanionLicensesViewModel,
+    onExit: () -> Unit, selectAudio: () -> Unit,
     selectIcon: (CompanionIconRole, String, String) -> Unit,
 ) {
-    BackHandler(enabled = state.screen != CompanionScreen.CONNECTION) { model.back() }
+    DisposableEffect(state.screen, licenses) {
+        if (state.screen == CompanionScreen.LICENSES) licenses.show() else licenses.hide()
+        onDispose { licenses.hide() }
+    }
+    val back: () -> Unit = {
+        if (state.screen != CompanionScreen.LICENSES || !licenses.backToList()) {
+            if (state.screen == CompanionScreen.LICENSES) licenses.hide()
+            if (state.screen == CompanionScreen.CONNECTION) onExit() else model.back()
+        }
+    }
+    BackHandler(enabled = state.screen != CompanionScreen.CONNECTION, onBack = back)
+    val scroll = rememberLazyListState()
+    LaunchedEffect(state.screen, licenseState.selected?.id) {
+        if (state.screen == CompanionScreen.LICENSES) scroll.scrollToItem(0)
+    }
     Column(Modifier.fillMaxSize().background(CompanionInk.background).windowInsetsPadding(WindowInsets.safeDrawing).imePadding(),
         horizontalAlignment = Alignment.CenterHorizontally) {
-        MeloXAction(stringResource(R.string.back), { if (state.screen == CompanionScreen.CONNECTION) onExit() else model.back() },
+        MeloXAction(stringResource(R.string.back), back,
             modifier = Modifier.widthIn(max = 720.dp).padding(horizontal = 16.dp, vertical = 8.dp))
         LazyColumn(Modifier.widthIn(max = 720.dp).fillMaxWidth().weight(1f), contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            verticalArrangement = Arrangement.spacedBy(16.dp), state = scroll) {
             item(key = "screen-heading") { MeloXText(screenName(state.screen), heading = true) }
             item(key = "screen-navigation") {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
                     items(CompanionScreen.entries, key = { it.name }) { screen ->
-                        MeloXAction(screenName(screen), { model.navigate(screen) }, prominent = screen == state.screen,
+                        MeloXAction(screenName(screen), {
+                            if (state.screen == CompanionScreen.LICENSES && screen != CompanionScreen.LICENSES) licenses.hide()
+                            model.navigate(screen)
+                        }, prominent = screen == state.screen,
                             modifier = Modifier.width(144.dp).semantics { selected = screen == state.screen })
                     }
                 }
             }
-            item(key = "session-status") {
-                MeloXCard {
-                    val target = state.connection.target ?: state.local?.target
-                    MeloXText(connectionPhaseName(state.connection.phase))
-                    if (target != null) MeloXText(stringResource(R.string.target_label, target.label), secondary = true)
-                    if (state.busy || state.stopping || state.recovering) {
-                        MeloXText(stringResource(if (state.stopping || state.recovering) R.string.retiring else R.string.working), secondary = true)
-                        if (state.busy && !state.stopping) MeloXAction(stringResource(R.string.cancel_work), { model.stop() })
-                    }
-                    if (state.local == null) {
-                        MeloXText(stringResource(R.string.loading_local), secondary = true)
-                        MeloXAction(stringResource(R.string.reload_local), model::reloadLocal, enabled = !state.busy && !state.stopping && !state.recovering && state.documentIssue != TransferIssue.RECOVERY_REQUIRED)
+            if (state.screen != CompanionScreen.LICENSES) {
+                item(key = "session-status") {
+                    MeloXCard {
+                        val target = state.connection.target ?: state.local?.target
+                        MeloXText(connectionPhaseName(state.connection.phase))
+                        if (target != null) MeloXText(stringResource(R.string.target_label, target.label), secondary = true)
+                        if (state.busy || state.stopping || state.recovering) {
+                            MeloXText(stringResource(if (state.stopping || state.recovering) R.string.retiring else R.string.working), secondary = true)
+                            if (state.busy && !state.stopping) MeloXAction(stringResource(R.string.cancel_work), { model.stop() })
+                        }
+                        if (state.local == null) {
+                            MeloXText(stringResource(R.string.loading_local), secondary = true)
+                            MeloXAction(stringResource(R.string.reload_local), model::reloadLocal, enabled = !state.busy && !state.stopping && !state.recovering && state.documentIssue != TransferIssue.RECOVERY_REQUIRED)
+                        }
                     }
                 }
-            }
-            val issue = state.issue ?: state.documentIssue ?: state.connection.issue
-            if (issue != null || state.pickerUnavailable) item(key = "fixed-error") {
-                MeloXCard {
-                    MeloXText(if (state.pickerUnavailable) stringResource(R.string.error_picker) else transferIssueText(checkNotNull(issue)))
-                    if (issue == TransferIssue.RECOVERY_REQUIRED || state.documentIssue == TransferIssue.RECOVERY_REQUIRED || state.connection.phase == CompanionConnectionPhase.RECOVERY_REQUIRED) {
-                        MeloXAction(stringResource(R.string.retry_retirement), model::retryRecovery, enabled = !state.stopping && !state.recovering)
+                val issue = state.issue ?: state.documentIssue ?: state.connection.issue
+                if (issue != null || state.pickerUnavailable) item(key = "fixed-error") {
+                    MeloXCard {
+                        MeloXText(if (state.pickerUnavailable) stringResource(R.string.error_picker) else transferIssueText(checkNotNull(issue)))
+                        if (issue == TransferIssue.RECOVERY_REQUIRED || state.documentIssue == TransferIssue.RECOVERY_REQUIRED || state.connection.phase == CompanionConnectionPhase.RECOVERY_REQUIRED) {
+                            MeloXAction(stringResource(R.string.retry_retirement), model::retryRecovery, enabled = !state.stopping && !state.recovering)
+                        }
+                        if (issue != TransferIssue.RECOVERY_REQUIRED) MeloXAction(stringResource(R.string.dismiss), model::dismissIssue)
                     }
-                    if (issue != TransferIssue.RECOVERY_REQUIRED) MeloXAction(stringResource(R.string.dismiss), model::dismissIssue)
                 }
             }
             when (state.screen) {
@@ -84,6 +111,7 @@ internal fun CompanionUi(
                 CompanionScreen.PLAYLIST -> playlistItems(state, model)
                 CompanionScreen.DISPLAY -> displayItems(state, model)
                 CompanionScreen.THEME -> themeItems(state, model, selectIcon)
+                CompanionScreen.LICENSES -> companionLicenseItems(licenseState, licenses)
             }
         }
     }
@@ -96,6 +124,7 @@ internal fun screenName(screen: CompanionScreen): String = stringResource(when (
     CompanionScreen.PLAYLIST -> R.string.playlists
     CompanionScreen.DISPLAY -> R.string.display_info
     CompanionScreen.THEME -> R.string.theme
+    CompanionScreen.LICENSES -> R.string.licenses
 })
 
 @Composable

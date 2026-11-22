@@ -16,6 +16,9 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
 import io.github.onlinemo.meloxwatch.data.preferences.ResetConfirmation
 import io.github.onlinemo.meloxwatch.data.preferences.createUserPreferencesDataStore
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.HelpPreferenceLimits
+import io.github.onlinemo.meloxwatch.model.HelpPreferences
+import io.github.onlinemo.meloxwatch.model.PrivacyNoticeChoice
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
@@ -75,6 +78,63 @@ class UserPreferencesRepositoryTest {
         assertEquals(UserPreferences(), loaded.preferences)
         assertNull(loaded.recovery)
         assertTrue(loaded.canWrite)
+    }
+
+    @Test(timeout = 30000L)
+    fun noticeChoiceTipsAndGuideProgressSurviveRealFileReopenAndStaleWrites() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val help = HelpPreferences(onboardingStep = 2, showTips = false,
+            privacyNoticeVersion = HelpPreferenceLimits.PRIVACY_NOTICE_VERSION, privacyNoticeChoice = PrivacyNoticeChoice.LATER)
+        val saved = (first.repository.save(0L, UserPreferencesDraft(help = help)) as PreferencesWriteResult.Saved).preferences
+        val bytes = file.readBytes()
+        assertEquals(saved, (first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict).current)
+        assertArrayEquals(bytes, file.readBytes())
+        first.close()
+        val second = open(file)
+        assertEquals(help, second.ready().preferences.help)
+        val completed = help.copy(onboardingCompletedVersion = HelpPreferenceLimits.GUIDE_VERSION,
+            onboardingStep = HelpPreferenceLimits.GUIDE_STEP_COUNT - 1)
+        assertTrue(second.repository.save(saved.revision, saved.asDraft().copy(help = completed)) is PreferencesWriteResult.Saved)
+        second.close()
+        val reopened = open(file).ready()
+        assertEquals(completed, reopened.preferences.help)
+        assertFalse(reopened.preferences.help.offerInitialGuide)
+    }
+
+    @Test(timeout = 30000L)
+    fun priorSchemasKeepTheirBytesAndDoNotOfferNewInstallGuidanceUntilExplicitSave() = runBlocking {
+        for (schema in 1..4) {
+            val file = preferencesFile()
+            writeFixture(file, if (schema == 1) fixture(schema, 9L) else completeFixture(schema, 9L))
+            val bytes = file.readBytes()
+            val first = open(file)
+            val loaded = first.ready()
+            assertNull(loaded.recovery)
+            assertEquals(HelpPreferenceLimits.Legacy, loaded.preferences.help)
+            assertFalse(loaded.preferences.help.offerInitialGuide)
+            assertArrayEquals(bytes, file.readBytes())
+            val migrated = first.repository.save(9L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+            first.close()
+            assertEquals(migrated.preferences, open(file).ready().preferences)
+        }
+    }
+
+    @Test(timeout = 30000L)
+    fun invalidHelpFieldsExplainRecoveryWithoutRewritingTheStoredChoice() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(UserPreferences.CURRENT_SCHEMA_VERSION, 2L).toMutablePreferences().apply {
+            this[intPreferencesKey("guide_step")] = HelpPreferenceLimits.GUIDE_STEP_COUNT
+            this[intPreferencesKey("privacy_notice_version")] = 1
+            this[stringPreferencesKey("privacy_notice_choice")] = "UNANSWERED"
+        }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val loaded = open(file).ready()
+        assertEquals(setOf(PreferencesField.HELP), loaded.recovery?.fields)
+        assertEquals(HelpPreferences(), loaded.preferences.help)
+        assertArrayEquals(bytes, file.readBytes())
     }
 
     @Test(timeout = 30000L)
@@ -264,7 +324,8 @@ class UserPreferencesRepositoryTest {
         val revisionBytes = wrongRevisionFile.readBytes()
         val session = open(wrongRevisionFile)
         val recovered = session.ready()
-        assertEquals(UserPreferences(restorePosition = false, screenShape = ScreenShape.ROUND), recovered.preferences)
+        assertEquals(UserPreferences(restorePosition = false, screenShape = ScreenShape.ROUND,
+            help = HelpPreferenceLimits.Legacy), recovered.preferences)
         assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, recovered.recovery?.reason)
         assertEquals(setOf(PreferencesField.REVISION), recovered.recovery?.fields)
         assertArrayEquals(revisionBytes, wrongRevisionFile.readBytes())
@@ -407,6 +468,7 @@ class UserPreferencesRepositoryTest {
         assertEquals(UserPreferences(
             revision = 9L, restorePosition = false, screenShape = ScreenShape.ROUND,
             libraryLayout = LibraryLayout.GRID, artworkReadPath = ArtworkReadPath.LOCAL_EXTRACT, librarySorts = sorts,
+            help = HelpPreferenceLimits.Legacy,
         ), loaded.preferences)
         assertNull(loaded.recovery)
         assertArrayEquals(bytes, file.readBytes())
@@ -471,6 +533,7 @@ class UserPreferencesRepositoryTest {
             songTapPolicy = SongTapPolicy.INSERT_AND_PLAY, playbackBackend = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER,
             playbackSpeedTenths = 17, mediaButtonsEnabled = false, audioFocusManagement = false, gaplessPlayback = false,
             controls = PlaybackControlsPreferences(),
+            help = HelpPreferenceLimits.Legacy,
         ), loaded.preferences)
         assertNull(loaded.recovery)
         assertArrayEquals(bytes, file.readBytes())
@@ -563,7 +626,8 @@ class UserPreferencesRepositoryTest {
         // 同一个真实 DataStore 内的 fixture 前进到 revision 2；观察回调保持滞后以验证权威读取。
         realStore.updateData { fixture(schema = 1, revision = 2L) }
         assertEquals(1L, session.ready().preferences.revision)
-        val committed = UserPreferences(revision = 2L, restorePosition = false, screenShape = ScreenShape.ROUND)
+        val committed = UserPreferences(revision = 2L, restorePosition = false, screenShape = ScreenShape.ROUND,
+            help = HelpPreferenceLimits.Legacy)
         val committedBytes = file.readBytes()
 
         // DataStore 1.1.7 使用该暂存名；非空目录制造真实写盘故障，不替换存储为假实现。
@@ -718,6 +782,14 @@ class UserPreferencesRepositoryTest {
             this[booleanPreferencesKey("show_main_progress")] = true
             this[stringPreferencesKey("progress_gesture")] = ProgressGestureMode.DRAG_TO_COMMIT.name
             this[booleanPreferencesKey("sleep_timer_summary")] = false
+        }
+        if (schema >= 5) {
+            this[intPreferencesKey("guide_completed_version")] = 0
+            this[intPreferencesKey("guide_dismissed_version")] = 0
+            this[intPreferencesKey("guide_step")] = 0
+            this[booleanPreferencesKey("help_show_tips")] = true
+            this[intPreferencesKey("privacy_notice_version")] = 0
+            this[stringPreferencesKey("privacy_notice_choice")] = "UNANSWERED"
         }
         sorts.forEach { (context, sort) ->
             val suffix = context.name.lowercase(java.util.Locale.ROOT)
