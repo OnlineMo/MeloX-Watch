@@ -2,7 +2,7 @@ package io.github.onlinemo.meloxwatch.playback.dsp
 
 import androidx.media3.common.Metadata
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.extractor.metadata.flac.VorbisComment
+import androidx.media3.extractor.metadata.vorbis.VorbisComment
 import androidx.media3.extractor.metadata.id3.Id3Decoder
 import androidx.media3.extractor.metadata.id3.TextInformationFrame
 import java.io.ByteArrayOutputStream

@@ -30,7 +30,7 @@ internal class BackupResourceWriter private constructor(
             checkCancelled()
             if (closed || sealed) throw BackupException(BackupIssue.IO)
             if (length.toLong() > maximumBytes - written) throw BackupException(BackupIssue.TOO_LARGE)
-            requireBackupSpace(created.file.parentFile, length.toLong())
+            requireBackupSpace(created.directory, length.toLong())
             val buffer = ByteBuffer.wrap(bytes, offset, length)
             while (buffer.hasRemaining()) {
                 checkCancelled()
@@ -75,7 +75,7 @@ internal class BackupResourceWriter private constructor(
         created.requireSame()
         created.close()
         closed = true
-        syncBackupDirectory(created.file.parentFile)
+        syncBackupDirectory(created.directory)
         val sha256 = backupHex(digest.digest())
         val descriptor = BackupResource(BackupLogicalSchema.resourceId(kind, sha256), kind, written, sha256, fontLicenseRequired)
         sealed = true

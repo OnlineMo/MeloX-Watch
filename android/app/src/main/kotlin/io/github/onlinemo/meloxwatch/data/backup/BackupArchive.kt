@@ -56,7 +56,7 @@ internal class BackupArchiveWriter {
         val created = BackupCreatedFile.create(destination)
         try {
             created.use {
-                val output = BackupCountingOutput(Channels.newOutputStream(created.channel), destination.parentFile)
+                val output = BackupCountingOutput(Channels.newOutputStream(created.channel), created.directory)
                 ZipOutputStream(output).use { zip ->
                     fun entry(name: String, write: () -> Unit) {
                         checkCancelled()
@@ -172,7 +172,7 @@ internal class BackupArchiveWriter {
                 }
             }
             created.requireSame()
-            syncBackupDirectory(destination.parentFile)
+            syncBackupDirectory(created.directory)
             // Re-read the actual central directory, every row and its matching resource descriptor.
             BackupArchiveReader().verify(destination, checkCancelled)
             return BackupExportReceipt(header.exportId, backupFileSha256(destination, checkCancelled), destination.length())

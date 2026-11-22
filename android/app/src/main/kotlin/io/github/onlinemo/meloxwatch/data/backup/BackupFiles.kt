@@ -40,30 +40,32 @@ internal class BackupCreatedFile private constructor(
     val channel: FileChannel,
     private val identity: BackupFileIdentity,
     private val parentIdentity: BackupFileIdentity,
+    val directory: File,
 ) : AutoCloseable {
     fun requireSame() {
-        parentIdentity.requireSame(file.parentFile)
+        parentIdentity.requireSame(directory)
         identity.requireSame(file)
     }
 
     fun deleteCreated() {
         requireSame()
         Files.delete(file.toPath())
-        syncBackupDirectory(file.parentFile)
+        syncBackupDirectory(directory)
     }
 
     override fun close() = channel.close()
 
     companion object {
         fun create(file: File): BackupCreatedFile {
-            val parent = BackupFileIdentity.capture(file.parentFile, directory = true)
-            if (file.parentFile.absoluteFile != file.parentFile.canonicalFile) throw BackupException(BackupIssue.PATH_ESCAPE)
+            val directory = file.parentFile ?: throw BackupException(BackupIssue.PATH_ESCAPE)
+            val parent = BackupFileIdentity.capture(directory, directory = true)
+            if (directory.absoluteFile != directory.canonicalFile) throw BackupException(BackupIssue.PATH_ESCAPE)
             val channel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
                 LinkOption.NOFOLLOW_LINKS)
             try {
                 val identity = BackupFileIdentity.capture(file)
-                parent.requireSame(file.parentFile)
-                return BackupCreatedFile(file, channel, identity, parent)
+                parent.requireSame(directory)
+                return BackupCreatedFile(file, channel, identity, parent, directory)
             } catch (failure: Throwable) {
                 channel.close()
                 // No cleanup without the captured identity; an unexpected path is never guessed to be ours.

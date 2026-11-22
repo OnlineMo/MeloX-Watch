@@ -151,7 +151,7 @@ class FixtureDocumentTree(val root: File) : AutoCloseable {
         }.apply {
             for (id in ids) {
                 val document = documents[id]?.takeIf { it.file.exists() } ?: continue
-                addRow(columns.map { column ->
+                val row: List<Any?> = columns.map { column ->
                     when (column) {
                         DocumentsContract.Document.COLUMN_DOCUMENT_ID -> id
                         DocumentsContract.Document.COLUMN_DISPLAY_NAME -> document.file.name
@@ -163,7 +163,8 @@ class FixtureDocumentTree(val root: File) : AutoCloseable {
                             DocumentsContract.Document.FLAG_SUPPORTS_RENAME or DocumentsContract.Document.FLAG_SUPPORTS_MOVE
                         else -> null
                     }
-                }.toTypedArray())
+                }
+                addRow(row)
             }
         }
     }

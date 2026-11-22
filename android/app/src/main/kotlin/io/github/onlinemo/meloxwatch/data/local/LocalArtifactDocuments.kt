@@ -256,7 +256,7 @@ internal class LocalArtifactDocuments internal constructor(
                 }
             }
             created.close()
-            syncArtifactDirectory(created.file.parentFile)
+            syncArtifactDirectory(artifactParent(created.file))
             return CopiedDocument(created)
         } catch (error: Throwable) {
             closeWithFailure(error) { created.close() }
@@ -281,7 +281,7 @@ internal class LocalArtifactDocuments internal constructor(
         if (java.nio.file.Files.isSymbolicLink(source.file.toPath())) throw LocalArtifactException(LocalArtifactIssue.PATH_ESCAPE)
         when (source.kind) {
             LocalArtifactKind.BACKUP -> {
-                val generation = requireBackupGeneration(source.file.parentFile)
+                val generation = requireBackupGeneration(artifactParent(source.file))
                 if (source.file.name != "export.zip" || sourceFile.parentFile != generation) throw LocalArtifactException(LocalArtifactIssue.PATH_ESCAPE)
             }
             LocalArtifactKind.DIAGNOSTIC -> {
@@ -725,6 +725,9 @@ private class ArtifactFileIdentity private constructor(private val key: Any, pri
     }
 }
 
+private fun artifactParent(file: File): File =
+    file.parentFile ?: throw LocalArtifactException(LocalArtifactIssue.PATH_ESCAPE)
+
 private class ArtifactCreatedFile private constructor(
     val file: File,
     val channel: FileChannel,
@@ -732,23 +735,23 @@ private class ArtifactCreatedFile private constructor(
     private val parentIdentity: ArtifactFileIdentity,
 ) : AutoCloseable {
     fun requireSame() {
-        parentIdentity.requireSame(file.parentFile)
+        parentIdentity.requireSame(artifactParent(file))
         identity.requireSame(file)
     }
     fun deleteCreated() {
         requireSame()
         Files.delete(file.toPath())
-        syncArtifactDirectory(file.parentFile)
+        syncArtifactDirectory(artifactParent(file))
     }
     override fun close() = channel.close()
     companion object {
         fun create(file: File): ArtifactCreatedFile {
-            val parent = ArtifactFileIdentity.capture(file.parentFile, directory = true)
+            val parent = ArtifactFileIdentity.capture(artifactParent(file), directory = true)
             val channel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE_NEW,
                 StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)
             try {
                 val identity = ArtifactFileIdentity.capture(file)
-                parent.requireSame(file.parentFile)
+                parent.requireSame(artifactParent(file))
                 return ArtifactCreatedFile(file, channel, identity, parent)
             } catch (error: Throwable) {
                 closeWithFailure(error) { channel.close() }
