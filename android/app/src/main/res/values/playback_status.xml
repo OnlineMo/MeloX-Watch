@@ -8,8 +8,14 @@
     <string name="playback_engine_prepare_failed">The engine could not prepare this audio. The saved queue is kept; retry playback.</string>
     <string name="playback_engine_switch_failed">The requested engine could not be restored. Check the active engine and retry from settings; playback remains paused.</string>
     <string name="playback_focus_denied">Audio focus was not granted. Playback remains paused; try again when other audio is finished.</string>
-    <string name="playback_gapless_active">Continuous playback is available for the current combination.</string>
+    <string name="playback_gapless_active">Consecutive local tracks are prepared for continuous playback.</string>
     <string name="playback_gapless_fallback">Continuous playback was requested. This combination uses regular track transitions.</string>
+    <string name="playback_gapless_backend">This engine uses regular track transitions.</string>
+    <string name="playback_gapless_timer">Regular track transitions keep the sleep timer’s stopping rule active.</string>
+    <string name="playback_gapless_repeat">This repeat boundary uses regular track transitions.</string>
+    <string name="playback_gapless_sources">Online and mixed sources use regular track transitions.</string>
+    <string name="playback_gapless_successor">No following track is ready for continuous playback.</string>
+    <string name="playback_gapless_preparing">Continuous playback is waiting for the following track.</string>
     <string name="playback_seek_failed">The audio could not move to the selected position. Check the current position before retrying.</string>
     <string name="playback_seek_open">Choose playback position</string>
     <string name="playback_seek_start">Preview the start of this song</string>

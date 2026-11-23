@@ -38,7 +38,7 @@ private enum class PreferencesSection { OVERVIEW, GENERAL, PLAYBACK, CONTROLS, S
 
 /** 放入宿主的可滚动 item；宿主负责标题、真实窗口避让与导航 enterEditor/clearDraft。 */
 @Composable
-fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
+fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit, onBluetoothLyrics: () -> Unit = {}) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var sectionName by rememberSaveable { mutableStateOf(PreferencesSection.OVERVIEW.name) }
     var showSavedValues by rememberSaveable { mutableStateOf(false) }
@@ -71,7 +71,10 @@ fun PreferencesControls(viewModel: PreferencesViewModel, onCancel: () -> Unit) {
                     PreferenceButton(stringResource(R.string.prefs_section_controls)) { sectionName = PreferencesSection.CONTROLS.name }
                 }
                 PreferencesSection.GENERAL -> GeneralSettingsEditor(draft, state.canEdit, viewModel)
-                PreferencesSection.PLAYBACK -> PlaybackSettingsEditor(draft, state.canEdit, viewModel)
+                PreferencesSection.PLAYBACK -> {
+                    PlaybackSettingsEditor(draft, state.canEdit, viewModel)
+                    PreferenceButton(stringResource(R.string.bluetooth_lyrics_title), onClick = onBluetoothLyrics)
+                }
                 PreferencesSection.CONTROLS -> ControlsSettingsEditor(draft, state.canEdit, viewModel)
                 PreferencesSection.STORAGE -> Unit
             }
@@ -393,6 +396,7 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
     val seekGesture = stringResource(R.string.prefs_progress_gesture)
     val sleepSummary = stringResource(R.string.prefs_sleep_summary)
     val help = stringResource(R.string.help_title)
+    val bluetoothLyrics = stringResource(R.string.bluetooth_lyrics_title)
     val separator = stringResource(R.string.prefs_field_separator)
     return PreferencesField.entries.filter { field -> field in fields }.joinToString(separator) { field ->
         when (field) {
@@ -417,6 +421,7 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
             PreferencesField.SEEK_GESTURE -> seekGesture
             PreferencesField.SLEEP_SUMMARY -> sleepSummary
             PreferencesField.HELP -> help
+            PreferencesField.BLUETOOTH_LYRICS -> bluetoothLyrics
         }
     }
 }

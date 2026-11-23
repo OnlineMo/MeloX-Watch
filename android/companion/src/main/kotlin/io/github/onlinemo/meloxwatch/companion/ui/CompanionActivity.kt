@@ -2,6 +2,8 @@ package io.github.onlinemo.meloxwatch.companion.ui
 
 import android.content.ActivityNotFoundException
 import android.os.Bundle
+import android.content.Intent
+import io.github.onlinemo.meloxwatch.companion.bluetoothlyrics.BluetoothLyricsReceiverActivity
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,6 +53,8 @@ class CompanionActivity : ComponentActivity() {
                 try { selectAudio.launch(arrayOf("audio/*")) }
                 catch (_: ActivityNotFoundException) { model.pickerUnavailable() }
                 catch (_: SecurityException) { model.pickerUnavailable() }
+            }, onBluetoothLyrics = {
+                startActivity(Intent(this, BluetoothLyricsReceiverActivity::class.java))
             }, selectIcon = { role, licenseName, licenseText ->
                 pendingIcon = IconSelection(role, licenseName, licenseText)
                 try { selectIcon.launch(arrayOf("image/*")) }

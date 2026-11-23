@@ -72,11 +72,15 @@ internal class BackupNativeConfigBridge(
         barrier.requireExclusiveOwner()
         val canonical = canonicalConfigPreference(target)
         if (before.record.key != canonical.key) throw BackupException(BackupIssue.INVALID_INPUT)
-        val actualBefore = read(canonical.key, fonts)
+        val playerBefore = if (canonical.key == "player") preferences.readForBackup() else null
+        val actualBefore = playerBefore?.let {
+            BackupConfigVersion(it.revision, BackupPreferencesCodec.player(it))
+        } ?: read(canonical.key, fonts)
         if (actualBefore.revision != before.revision || !actualBefore.record.sameContent(before.record)) {
             throw BackupException(BackupIssue.STALE_PREVIEW)
         }
-        if (actualBefore.record.sameContent(canonical)) return actualBefore
+        // Portable player rows omit activation; equal rows still need a real native disable.
+        if (actualBefore.record.sameContent(canonical) && playerBefore?.bluetoothLyricsEnabled != true) return actualBefore
         if (before.revision == Long.MAX_VALUE) throw BackupException(BackupIssue.CONFLICT)
         val attempt = try {
             when (canonical.key) {
@@ -94,13 +98,20 @@ internal class BackupNativeConfigBridge(
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { failure }
         currentCoroutineContext().ensureActive()
-        val observed = try { read(canonical.key, fonts) }
+        var playerDisabled = canonical.key != "player"
+        val observed = try {
+            if (canonical.key == "player") {
+                val player = preferences.readForBackup()
+                playerDisabled = !player.bluetoothLyricsEnabled
+                BackupConfigVersion(player.revision, BackupPreferencesCodec.player(player))
+            } else read(canonical.key, fonts)
+        }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) {
             if (attempt != null && attempt !== failure) failure.addSuppressed(attempt)
             throw BackupException(BackupIssue.RECOVERY_REQUIRED, failure)
         }
-        if (observed.revision == before.revision + 1L && observed.record.sameContent(canonical)) return observed
+        if (observed.revision == before.revision + 1L && observed.record.sameContent(canonical) && playerDisabled) return observed
         if (observed.revision == before.revision && observed.record.sameContent(before.record)) {
             throw BackupException(BackupIssue.IO, attempt)
         }

@@ -56,6 +56,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
@@ -80,6 +81,130 @@ import org.junit.Test
 /** 有界假边界控制时序；不将这里的会话、权限或 pin 断言当成设备验收。 */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LyricsEntryViewModelTest {
+    @Test fun externalClosureWaitsForItsExactNonCooperativeLoadToActuallyExit(): Unit = runTest {
+        val fixture = fixture()
+        val entered = CompletableDeferred<Unit>()
+        val cleanup = CompletableDeferred<Unit>()
+        fixture.beforeLoad = {
+            entered.complete(Unit)
+            withContext(NonCancellable) { cleanup.await() }
+        }
+        val external = fixture.vm.bindExternalReading()
+        try {
+            runCurrent()
+            assertTrue(entered.isCompleted)
+            external.close()
+            val retired = backgroundScope.async { external.awaitClosed() }
+            runCurrent()
+            assertFalse(retired.isCompleted)
+            assertNull(fixture.vm.readExternal())
+            cleanup.complete(Unit)
+            runCurrent()
+            assertTrue(retired.isCompleted)
+            assertEquals(1, fixture.loads)
+        } finally { cleanup.complete(Unit); external.close(); fixture.vm.close(); runCurrent() }
+    }
+
+    @Test fun authenticatedExternalReadingSurvivesPageHideAndLeaveWithoutASampler(): Unit = runTest {
+        val fixture = fixture()
+        var external: LyricsEntryViewModel.ExternalReading? = null
+        try {
+            fixture.playback.playing = true
+            fixture.vm.onVisible(LyricsEntrySurface.PAGE)
+            runCurrent()
+            external = fixture.vm.bindExternalReading()
+            val before = checkNotNull(fixture.vm.readExternal())
+            fixture.vm.onHidden()
+            fixture.vm.leave()
+            runCurrent()
+            val hiddenReads = fixture.playback.clockReads
+            advanceTimeBy(5000L)
+            runCurrent()
+            assertEquals(hiddenReads, fixture.playback.clockReads)
+            assertNull(fixture.vm.mediaClock.value)
+            assertEquals(before.identity, fixture.vm.readExternal()?.identity)
+            assertEquals(1, fixture.loads)
+            fixture.queues.selectDuplicate()
+            runCurrent()
+            assertEquals("entry-duplicate", fixture.vm.readExternal()?.queueEntryId)
+            assertEquals(2, fixture.loads)
+            external.close()
+            external = null
+            fixture.queues.reviseWithoutSelecting()
+            runCurrent()
+            assertNull(fixture.vm.readExternal())
+            assertEquals(2, fixture.loads)
+        } finally { external?.close(); fixture.vm.close(); runCurrent() }
+    }
+
+    @Test fun externalReadingUsesSavedOffsetAndNeverAnUnconfirmedAssociation(): Unit = runTest {
+        val fixture = fixture()
+        var external: LyricsEntryViewModel.ExternalReading? = null
+        try {
+            fixture.tracks.preferences = fixture.tracks.preferences.copy(userDelayMs = 500)
+            fixture.vm.onVisible(LyricsEntrySurface.OPTIONS)
+            runCurrent()
+            external = fixture.vm.bindExternalReading()
+            assertTrue(fixture.vm.beginOffset())
+            fixture.vm.adjustOffset(3)
+            assertEquals(800, fixture.vm.uiState.value.offsetDraftMs)
+            assertEquals(500, fixture.vm.readExternal()?.mapping?.userOffset?.delayMs)
+            fixture.vm.cancelOffset()
+            val request = checkNotNull(fixture.vm.requestDocument(LyricsDocumentPurpose.PRIMARY))
+            fixture.vm.pickerReturned(request, EntryDocuments.URI, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            runCurrent()
+            assertNotNull(fixture.vm.uiState.value.associationPreview)
+            assertNull(fixture.vm.readExternal())
+            fixture.vm.onHidden()
+            runCurrent()
+            assertEquals(500, fixture.vm.readExternal()?.mapping?.userOffset?.delayMs)
+            assertEquals(0, fixture.tracks.commits)
+        } finally { external?.close(); fixture.vm.close(); runCurrent() }
+    }
+
+    @Test fun hiddenPresentationCannotCommitOrChangeTheExternallyReadSavedSource(): Unit = runTest {
+        val fixture = fixture()
+        var external: LyricsEntryViewModel.ExternalReading? = null
+        try {
+            fixture.vm.onVisible(LyricsEntrySurface.OPTIONS)
+            runCurrent()
+            external = fixture.vm.bindExternalReading()
+            fixture.vm.onHidden()
+            val before = checkNotNull(fixture.vm.readExternal())
+            assertFalse(fixture.vm.beginOffset())
+            assertNull(fixture.vm.requestDocument(LyricsDocumentPurpose.PRIMARY))
+            assertFalse(fixture.vm.clearAssociation(LyricsDocumentPurpose.PRIMARY))
+            fixture.vm.adjustOffset(1)
+            fixture.vm.cancelOffset()
+            fixture.vm.retry(sourceChanged = true)
+            runCurrent()
+            assertEquals(before.identity, fixture.vm.readExternal()?.identity)
+            assertEquals(1, fixture.loads)
+            assertEquals(0, fixture.tracks.commits)
+            assertTrue(fixture.playback.dispatched.isEmpty())
+        } finally { external?.close(); fixture.vm.close(); runCurrent() }
+    }
+
+    @Test fun anExternalReaderAndVisiblePageShareOneDocumentAcquisition(): Unit = runTest {
+        val fixture = fixture()
+        var external: LyricsEntryViewModel.ExternalReading? = null
+        try {
+            external = fixture.vm.bindExternalReading()
+            runCurrent()
+            val externalDocument = checkNotNull(fixture.vm.readExternal()).document
+            fixture.vm.onVisible(LyricsEntrySurface.PAGE)
+            runCurrent()
+            assertSame(externalDocument, fixture.vm.readExternal()?.document)
+            assertEquals(1, fixture.loads)
+            external.close()
+            external = null
+            assertTrue(fixture.vm.uiState.value.content is LyricsPageContent.Ready)
+            fixture.vm.onHidden()
+            runCurrent()
+            assertNull(fixture.vm.readExternal())
+        } finally { external?.close(); fixture.vm.close(); runCurrent() }
+    }
+
     @Test fun hiddenPageStopsSamplingAndSameQueueReloadsWithoutLosingItsDisplayIdentity(): Unit = runTest {
         val fixture = fixture()
         try {

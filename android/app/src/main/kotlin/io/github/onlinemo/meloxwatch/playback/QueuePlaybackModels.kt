@@ -51,6 +51,7 @@ data class QueuePlaybackState(
     val preparing: Boolean = false,
     val failure: QueuePlaybackFailure? = null,
     val resourceStatus: PlaybackResourceStatus? = null,
+    val gapless: GaplessPlaybackState = GaplessPlaybackState(),
 )
 
 class QueuePlaybackException(val failure: QueuePlaybackFailure) : Exception(failure.issue.name)

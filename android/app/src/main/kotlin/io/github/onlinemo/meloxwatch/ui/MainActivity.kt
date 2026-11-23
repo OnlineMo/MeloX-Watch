@@ -6,6 +6,10 @@ import android.content.Intent
 import android.graphics.Point
 import android.os.Build
 import android.os.Bundle
+import io.github.onlinemo.meloxwatch.ui.bluetoothlyrics.BluetoothLyricsSettingsActivity
+import io.github.onlinemo.meloxwatch.ui.lyrics.entry.LyricsEntrySavedStateHolder
+import io.github.onlinemo.meloxwatch.ui.lyrics.entry.lyricsEntrySavedStateFactory
+import androidx.lifecycle.lifecycleScope
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -106,6 +110,7 @@ import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendIssue
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendState
+import io.github.onlinemo.meloxwatch.playback.GaplessPlaybackIssue
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import io.github.onlinemo.meloxwatch.playback.input.SeekGestureMode
 import io.github.onlinemo.meloxwatch.playback.input.SeekGestureSurface
@@ -158,7 +163,6 @@ import io.github.onlinemo.meloxwatch.ui.fonts.ProbeFontPickerViewModel
 import io.github.onlinemo.meloxwatch.ui.fonts.WatchSystemFontControls
 import io.github.onlinemo.meloxwatch.ui.fonts.rememberProbeFontPickerLauncher
 import io.github.onlinemo.meloxwatch.ui.lyrics.entry.LyricsEntryViewModel
-import io.github.onlinemo.meloxwatch.ui.lyrics.entry.lyricsEntryViewModelFactory
 import io.github.onlinemo.meloxwatch.ui.lyrics.options.LyricsDisplayEditor
 import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsAssociationConfirmation
 import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsDisplaySettings
@@ -203,11 +207,11 @@ import io.github.onlinemo.meloxwatch.ui.debugmask.debugRoundMaskRequested
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private var lyricsUiPlaybackBinding: AutoCloseable? = null
     private val debugRoundMask = mutableStateOf(false)
     private lateinit var probeViewModel: ProbeViewModel
     private lateinit var preferencesViewModel: PreferencesViewModel
@@ -287,14 +291,9 @@ class MainActivity : ComponentActivity() {
                     app.appliedThemeResources, app.playbackBackgrounds, app.localProviderIo, app.themeBitmaps)
             }
         })[PlaybackBackgroundViewModel::class.java]
-        lyricsEntryViewModel = ViewModelProvider(this, lyricsEntryViewModelFactory { savedState ->
-            LyricsEntryViewModel(app.queues, app.lyricsContexts::resolve, app::validateLyricsContext,
-                app.lyricsTracks, app.lyricsDocuments, app.lyricsAuthority, app.lyricsLoader::load,
-                app.lyricsLoader::validate, probeViewModel.lyricsPlayback,
-                libraryChanges = app.library.observeOverview().map { it.revision }
-                    .distinctUntilChanged().drop(1).map { Unit }, savedStateHandle = savedState,
-                memoryOwner = app.lyricsMemory, onlineLyrics = app.onlineLyrics)
-        })[LyricsEntryViewModel::class.java]
+        val lyricsSavedState = ViewModelProvider(this, lyricsEntrySavedStateFactory())[LyricsEntrySavedStateHolder::class.java]
+        lyricsEntryViewModel = app.lyricsEntryOwner.model
+        lyricsEntryViewModel.bindSavedDraftState(lyricsSavedState.handle)
         playlistsViewModel = ViewModelProvider(this, viewModelFactory {
             initializer {
                 PlaylistsViewModel(app.playlists, app.library, app.playlistQueueMapper, app.playlistFolders,
@@ -398,6 +397,8 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         if (uiPresentationBinding?.isCurrent == true) {
+            lyricsUiPlaybackBinding = (application as MeloXApplication).lyricsEntryOwner.playback
+                .bindUi(probeViewModel.lyricsPlayback, lifecycleScope)
             transferForeground = true
             featureForeground = true
             transferViewModel.visibilityChanged()
@@ -408,6 +409,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        lyricsUiPlaybackBinding?.close()
+        lyricsUiPlaybackBinding = null
         if (uiPresentationBinding?.isCurrent == true) {
             transferForeground = false
             featureForeground = false
@@ -430,6 +433,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        lyricsUiPlaybackBinding?.close()
+        lyricsUiPlaybackBinding = null
         if (uiPresentationBinding?.isCurrent == true && ::aboutViewModel.isInitialized) aboutViewModel.setVisible(false)
         if (uiPresentationBinding?.isCurrent == true && ::onlineViewModel.isInitialized) onlineViewModel.setVisible(false)
         if (uiPresentationBinding?.isCurrent == true && ::metingSettingsViewModel.isInitialized) metingSettingsViewModel.setVisible(false)
@@ -1170,7 +1175,10 @@ private fun ProbeApp(
                                     ProbeButton(stringResource(R.string.dsp_title), onClick = { viewModel.showPage(ProbePage.DSP) })
                                 }
                                 item {
-                                    PreferencesControls(preferencesViewModel, onCancel = { viewModel.showPage(ProbePage.HOME) })
+                                    PreferencesControls(preferencesViewModel, onCancel = { viewModel.showPage(ProbePage.HOME) },
+                                        onBluetoothLyrics = {
+                                            activity.startActivity(Intent(activity, BluetoothLyricsSettingsActivity::class.java))
+                                        })
                                     ProbeButton(stringResource(R.string.help_title)) { viewModel.showPage(ProbePage.HELP) }
                                     ProbeButton(stringResource(R.string.backup_ui_title)) { viewModel.showPage(ProbePage.BACKUP) }
                                 }
@@ -1716,7 +1724,7 @@ private fun BackendStatus(backend: PlaybackBackendState?) {
                 backend.speed.requestedTenths / 10f, backend.speed.actualSpeed, backend.speed.actualPitch))
             if (backend.speed.pending) BodyText(stringResource(R.string.playback_speed_pending))
             if (backend.gaplessRequested) BodyText(stringResource(
-                if (backend.gaplessAvailable) R.string.playback_gapless_active else R.string.playback_gapless_fallback,
+                if (backend.gaplessAvailable) R.string.playback_gapless_active else gaplessIssueText(backend.gaplessIssue),
             ))
         }
         backend.speed.issue?.let { BodyText(stringResource(backendIssueText(it)), isError = true) }
@@ -1724,6 +1732,16 @@ private fun BackendStatus(backend: PlaybackBackendState?) {
             BodyText(stringResource(backendIssueText(it)), isError = true)
         }
     }
+}
+
+private fun gaplessIssueText(issue: GaplessPlaybackIssue?): Int = when (issue) {
+    GaplessPlaybackIssue.BACKEND_UNSUPPORTED -> R.string.playback_gapless_backend
+    GaplessPlaybackIssue.TIMER_ACTIVE -> R.string.playback_gapless_timer
+    GaplessPlaybackIssue.MODE_REQUIRES_SETTLEMENT -> R.string.playback_gapless_repeat
+    GaplessPlaybackIssue.SOURCE_UNSUPPORTED -> R.string.playback_gapless_sources
+    GaplessPlaybackIssue.QUEUE_BOUNDARY, GaplessPlaybackIssue.SUCCESSOR_UNAVAILABLE -> R.string.playback_gapless_successor
+    GaplessPlaybackIssue.PREPARING, GaplessPlaybackIssue.HANDOVER_PENDING -> R.string.playback_gapless_preparing
+    GaplessPlaybackIssue.PREFERENCE_DISABLED, null -> R.string.playback_gapless_fallback
 }
 
 private fun backendLabel(kind: PlaybackBackendKind): Int = when (kind) {

@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.ui.lyrics.entry
 
 import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.viewmodel.initializer
@@ -9,9 +10,12 @@ import io.github.onlinemo.meloxwatch.data.local.LocalInputLimits
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsUserOffset
 import java.security.MessageDigest
 
-/** Main and recreation tests use the same factory and the Activity's saved-state creation extras. */
-internal fun lyricsEntryViewModelFactory(create: (SavedStateHandle) -> LyricsEntryViewModel): ViewModelProvider.Factory =
-    viewModelFactory { initializer { create(createSavedStateHandle()) } }
+/** Main and recreation tests bind only the draft holder to the Activity registry. */
+internal fun lyricsEntrySavedStateFactory(): ViewModelProvider.Factory =
+    viewModelFactory { initializer { LyricsEntrySavedStateHolder(createSavedStateHandle()) } }
+
+/** Activity registry ownership remains separate from the application-owned lyrics business model. */
+internal class LyricsEntrySavedStateHolder(val handle: SavedStateHandle) : ViewModel()
 
 /** A proposal, never read permission or commit authority. All identities are fixed-size local digests. */
 internal data class LyricsSavedOffsetDraft(

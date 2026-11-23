@@ -77,7 +77,7 @@ sealed interface OnlineLyricsResult {
     class Unavailable(val issue: OnlineLyricsIssue) : OnlineLyricsResult
 }
 
-/** The caller supplies only a visible current intent; constructing or observing this port fetches nothing. */
+/** Only a visible display or authenticated external reading authorizes the current-track intent. */
 interface OnlineLyricsPort {
     val changes: Flow<Unit>
     suspend fun load(request: OnlineLyricsRequest, isCurrent: () -> Boolean): OnlineLyricsResult

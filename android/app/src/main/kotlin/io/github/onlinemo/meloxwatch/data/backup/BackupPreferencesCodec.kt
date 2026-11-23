@@ -42,7 +42,7 @@ import io.github.onlinemo.meloxwatch.playback.dsp.DspSettings
 import io.github.onlinemo.meloxwatch.playback.dsp.DspStored
 import io.github.onlinemo.meloxwatch.playback.dsp.ReplayGainMode
 
-/** Only local choices have an envelope. Accounts, endpoints, grants and running timers have none. */
+/** Only portable local choices have an envelope. External-output activation and grants have none. */
 internal object BackupPreferencesCodec {
     val KEYS = setOf("player", "appearance", "lyrics-display", "lyrics-fonts", "background", "theme", "dsp")
     private val playerFields = setOf("restorePosition", "screenShape", "libraryLayout", "artworkReadPath", "songTapPolicy",
@@ -112,6 +112,8 @@ internal object BackupPreferencesCodec {
     } })
 
     fun player(record: BackupRecord): UserPreferences = UserPreferences(
+        // A portable restore cannot re-enable disclosure to an old or different device.
+        bluetoothLyricsEnabled = false,
         restorePosition = record.flag("restorePosition"), screenShape = enum(record.text("screenShape")),
         libraryLayout = enum<LibraryLayout>(record.text("libraryLayout")), artworkReadPath = enum<ArtworkReadPath>(record.text("artworkReadPath")),
         librarySorts = LibraryListContext.entries.associateWith { LibrarySort(enum<LibrarySortField>(record.text("sort" + it.name + "Field")), record.flag("sort" + it.name + "Descending")) },

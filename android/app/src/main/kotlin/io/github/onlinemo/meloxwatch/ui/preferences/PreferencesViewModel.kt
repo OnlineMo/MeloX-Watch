@@ -428,7 +428,11 @@ class PreferencesViewModel(
         val editorSchema = savedStateHandle.get<Any>(KEY_EDITOR_SCHEMA) as? Int
         val legacyControls = oldDraft || editorSchema == 3
         val legacyHelp = legacyControls || editorSchema == 4
+        val legacyBluetooth = legacyHelp || editorSchema == 5
         val help = restoredHelp(legacyHelp)
+        val bluetoothLyrics = if (legacyBluetooth) false else {
+            savedStateHandle.get<Any>(KEY_BLUETOOTH_LYRICS) as? Boolean
+        }
         val tapPolicy = if (oldDraft) SongTapPolicy.ASK else SongTapPolicy.entries.firstOrNull {
             it.name == (savedStateHandle.get<Any>(KEY_TAP_POLICY) as? String)
         }
@@ -469,7 +473,7 @@ class PreferencesViewModel(
             mediaButtons != null && audioFocus != null && gapless != null &&
             rotaryEnabled != null && rotaryAction != null && rotaryOrientation != null && rotaryHaptics != null &&
             mainProgress != null && progressGesture != null && sleepSummary != null &&
-            help != null && (legacyHelp || editorSchema == UserPreferences.CURRENT_SCHEMA_VERSION)
+            help != null && bluetoothLyrics != null && (legacyBluetooth || editorSchema == UserPreferences.CURRENT_SCHEMA_VERSION)
         ) {
             UserPreferencesDraft(
                 restorePosition = restore,
@@ -486,6 +490,7 @@ class PreferencesViewModel(
                 controls = PlaybackControlsPreferences(rotaryEnabled, rotaryAction, rotaryOrientation, rotaryHaptics,
                     mainProgress, progressGesture, sleepSummary),
                 help = help,
+                bluetoothLyricsEnabled = bluetoothLyrics,
             )
         } else {
             null
@@ -542,6 +547,7 @@ class PreferencesViewModel(
             savedStateHandle[KEY_BACKEND] = draft.playbackBackend.name
             savedStateHandle[KEY_SPEED] = draft.playbackSpeedTenths
             savedStateHandle[KEY_GAPLESS] = draft.gaplessPlayback
+            savedStateHandle[KEY_BLUETOOTH_LYRICS] = draft.bluetoothLyricsEnabled
             savedStateHandle[KEY_ROTARY_ENABLED] = draft.controls.rotaryEnabled
             savedStateHandle[KEY_ROTARY_ACTION] = draft.controls.rotaryAction.name
             savedStateHandle[KEY_ROTARY_ORIENTATION] = draft.controls.rotaryOrientation.name
@@ -573,6 +579,7 @@ class PreferencesViewModel(
             savedStateHandle.remove<String>(KEY_BACKEND)
             savedStateHandle.remove<Int>(KEY_SPEED)
             savedStateHandle.remove<Boolean>(KEY_GAPLESS)
+            savedStateHandle.remove<Boolean>(KEY_BLUETOOTH_LYRICS)
             savedStateHandle.remove<Boolean>(KEY_ROTARY_ENABLED)
             savedStateHandle.remove<String>(KEY_ROTARY_ACTION)
             savedStateHandle.remove<String>(KEY_ROTARY_ORIENTATION)
@@ -608,6 +615,7 @@ class PreferencesViewModel(
         const val KEY_BACKEND = "preferences.editor.backend"
         const val KEY_SPEED = "preferences.editor.speed_tenths"
         const val KEY_GAPLESS = "preferences.editor.gapless"
+        const val KEY_BLUETOOTH_LYRICS = "preferences.editor.bluetooth_lyrics"
         const val KEY_ROTARY_ENABLED = "preferences.editor.rotary_enabled"
         const val KEY_ROTARY_ACTION = "preferences.editor.rotary_action"
         const val KEY_ROTARY_ORIENTATION = "preferences.editor.rotary_orientation"

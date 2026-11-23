@@ -9,9 +9,11 @@ import io.github.onlinemo.meloxwatch.companion.transfer.CompanionTlsIdentity
 import io.github.onlinemo.meloxwatch.companion.transfer.CompanionTransferClient
 import io.github.onlinemo.meloxwatch.companion.transfer.TlsCompanionWireFactory
 import java.io.File
+import io.github.onlinemo.meloxwatch.companion.bluetoothlyrics.CompanionBluetoothLyricsReceiver
 
 /** Wiring alone creates no socket, identity, provider read or implicit connection. */
 class MeloXCompanionApplication : Application() {
+    internal val bluetoothLyrics by lazy { CompanionBluetoothLyricsReceiver(this) }
     internal val licenses: CompanionLicenseRepository by lazy { CompanionLicenseRepository(assets) }
     internal val documents: CompanionDocuments by lazy {
         CompanionDocuments(contentResolver, CompanionLocalStore(File(noBackupFilesDir, "companion-v1")))

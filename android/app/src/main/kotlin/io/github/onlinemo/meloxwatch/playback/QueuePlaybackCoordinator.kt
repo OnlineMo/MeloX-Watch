@@ -78,6 +78,9 @@ class QueuePlaybackCoordinator(
     private val beforeNaturalAdvance: (SleepTimerTrackBinding) -> Boolean = { false },
     private val sourceResolver: SourcePlaybackResolver? = null,
     private val resolveMetadata: suspend (QueueEntry) -> MediaMetadata? = { null },
+    private val mayContinuousPlayback: () -> Boolean = { true },
+    private val mayBeginContinuousRound: () -> Boolean = { true },
+    private val onContinuousRoundChanged: (QueueEntry, Long) -> Unit = { _, _ -> },
 ) {
     private var backend: Player = backend
     private var operations: PlaybackBackendOperations = operations
@@ -134,6 +137,10 @@ class QueuePlaybackCoordinator(
     private var pendingRecovery: RecoveryRequest? = null
     private var resourceRefreshUsed = false
     private var consecutiveSkipped = 0
+    private var continuousBoundary: ContinuousBoundary? = null
+    private var pendingContinuous: ContinuousHandover? = null
+    private var continuousWriteFailed = false
+    private var boundaryPaused = true
 
     private fun backendListener(bound: Player, generation: Long) = object : Player.Listener {
         private fun current(): Boolean = !isDetached && backendBound && backend === bound && backendGeneration == generation
@@ -142,6 +149,7 @@ class QueuePlaybackCoordinator(
             if (!current()) return
             if (isPlaying && !applyingWindow) resetRecoveryBudget()
             updateTicker()
+            refreshContinuousBoundary()
             if (!isPlaying && !applyingWindow) requestCheckpoint()
         }
 
@@ -164,14 +172,21 @@ class QueuePlaybackCoordinator(
         }
 
         override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
-            if (current() && !applyingWindow) {
+            if (current()) {
+                if (reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
+                    witnessContinuousHandover(oldPosition, newPosition)
+                }
+                if (applyingWindow) return
                 sessionBridge.backendPositionDiscontinuity(oldPosition.contentPositionMs, newPosition.contentPositionMs, reason)
                 if (reason in listOf(Player.DISCONTINUITY_REASON_SEEK, Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT)) requestCheckpoint()
             }
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            if (current() && !applyingWindow) requestCheckpoint()
+            if (current() && !applyingWindow) {
+                requestCheckpoint()
+                refreshContinuousBoundary()
+            }
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -193,6 +208,7 @@ class QueuePlaybackCoordinator(
         override fun onEvents(player: Player, events: Player.Events) {
             if (current()) {
                 refreshSeekState()
+                refreshContinuousBoundary()
                 sessionBridge.logicalStateChanged()
             }
         }
@@ -264,6 +280,7 @@ class QueuePlaybackCoordinator(
         }
         // 历史 operation 的确认不能重装窗口，也不代表修复了此前的加载失败。
         if (commit.wasReplay) return@action commit
+        retireContinuousTraversal()
         this@QueuePlaybackCoordinator.sourceIntent = sourceIntent
         streamingQuality = quality
         onManualTrackChange()
@@ -402,6 +419,7 @@ class QueuePlaybackCoordinator(
             }
         }
         if (commit.wasReplay) return@action commit
+        if (!keepsCurrent) retireContinuousTraversal()
         sourceIntent?.let { this@QueuePlaybackCoordinator.sourceIntent = it }
         streamingQuality?.let { this@QueuePlaybackCoordinator.streamingQuality = it }
         if (!keepsCurrent) onManualTrackChange()
@@ -423,6 +441,9 @@ class QueuePlaybackCoordinator(
                     restoreOnlineReference(commit.snapshot, referenceWindow, commit.snapshot.positionMs)
                     if (pausedBinding != null) onRetainedTrackBinding(pausedBinding,
                         SleepTimerTrackBinding(sessionId, referenceWindow.generationId, referenceWindow.current.queueEntryId, playbackCycle))
+                } else if (keepsCurrent && pendingContinuous != null) {
+                    // 已提交保留当前的编辑遇到真实 AUTO：交接 actor 先按同源新代次结清。
+                    // 旧当前项的准备窗口不能再装回去，以免重播刚完成的尾部。
                 } else if (window == null) {
                     clearBackend()
                     retainedFailure?.let(::report)
@@ -543,6 +564,11 @@ class QueuePlaybackCoordinator(
     fun requestCheckpoint() {
         assertMain()
         if (isDetached) return
+        pendingContinuous?.let { continuous ->
+            if (backendBound && backend.currentMediaItem?.mediaId == continuous.incoming.queueEntryId) {
+                continuous.incomingPositionMs = backend.currentPosition.coerceAtLeast(0L)
+            }
+        }
         capture()?.let { captured ->
             pendingCheckpoint = captured
             checkpointRequests.trySend(Unit)
@@ -573,11 +599,15 @@ class QueuePlaybackCoordinator(
             pendingRecovery = null
             onUserIntentChanged()
             invalidateIntent()
+            // 连续后继在 CAS 中仍可推进；先暂停并捕获，不能等旧事务退出后才响应切后端。
+            if (backendBound) pauseForWindowChange()
+            requestCheckpoint()
             sessionBridge.logicalStateChanged()
             if (runningCommand !== currentCoroutineContext()[Job]) runningCommand?.cancelAndJoin()
             if (running != null && running !== runningCommand && running !== currentCoroutineContext()[Job]) running.cancelAndJoin()
             actions.withLock {
                 if (backendBound) pauseForWindowChange()
+                pendingContinuous?.let { settleContinuousHandover(it) }
                 settleNaturalBeforeSwitch(natural)
                 pendingSwitchSettlement = null
                 flush()
@@ -645,6 +675,8 @@ class QueuePlaybackCoordinator(
         backend.repeatMode = Player.REPEAT_MODE_OFF
         backend.shuffleModeEnabled = false
         operations.setPauseAtBoundary(true)
+        boundaryPaused = true
+        continuousBoundary = null
         backend.addListener(listener)
         playbackCycle = checkpoint.playbackCycle
         handledNaturalCycle = checkpoint.handledNaturalCycle
@@ -833,6 +865,11 @@ class QueuePlaybackCoordinator(
             }
         }
         try {
+            pendingContinuous?.let { continuous ->
+                if (backendBound && backend.currentMediaItem?.mediaId == continuous.incoming.queueEntryId) {
+                    continuous.incomingPositionMs = backend.currentPosition.coerceAtLeast(0L)
+                }
+            }
             capture()?.let { pendingCheckpoint = it }
         } catch (error: Throwable) {
             failure = error
@@ -889,6 +926,7 @@ class QueuePlaybackCoordinator(
             }
             cleanup { checkpointWorker.cancelAndJoin() }
             checkpointRequests.close()
+            cleanup { pendingContinuous?.let { settleContinuousHandover(it) } }
             cleanup { drainCheckpoints() }
             failure?.let { throw it }
         }
@@ -923,6 +961,14 @@ class QueuePlaybackCoordinator(
     internal fun playFromSession() {
         assertMain()
         if (!acceptsSessionCommands()) return
+        if (pendingContinuous != null) {
+            // 实际已过轨的写入失败只能重试结清；不能 prepare/seek 回刚播完的旧尾部。
+            continuousWriteFailed = false
+            intentRevision += 1L
+            resumeIntent = true
+            startPendingCommands()
+            return
+        }
         val active = _state.value.snapshot ?: return
         val entryId = active.currentEntryId ?: return
         // 显式播放按实际音源放行网络意图；可用适配器及账户权限仍由 SourcePlaybackResolver 核验。
@@ -971,6 +1017,7 @@ class QueuePlaybackCoordinator(
                 backend.playerError?.let { report(QueuePlaybackFailure(errorIssue(it), entryId)) }
             }
             updateTicker()
+            refreshContinuousBoundary()
             refreshSeekState()
         }
     }
@@ -1095,6 +1142,7 @@ class QueuePlaybackCoordinator(
             naturalSettlement?.submittedCheckpoint = checkpoint
             withContext(NonCancellable) {
                 queueStore.saveCheckpoint(generationId, live.checkpointRevision, checkpoint).also {
+                    retireContinuousTraversal()
                     checkpointEpoch += 1L
                     publishSnapshot(it)
                     selectedIntent?.let { selected -> sourceIntent = selected }
@@ -1353,6 +1401,8 @@ class QueuePlaybackCoordinator(
         try {
             sessionBridge.positionSourceChanging()
             backend.pause()
+            // pause 可 flush 已发生的 AUTO 或随后手动暂停；不能再用旧当前项覆写实际后继。
+            currentCoroutineContext().ensureActive()
             val oldCurrent = backend.currentMediaItem?.mediaId
             val existingIndex = (0 until backend.mediaItemCount).firstOrNull { index ->
                 matches(backend.getMediaItemAt(index), current)
@@ -1423,11 +1473,18 @@ class QueuePlaybackCoordinator(
 
     private fun pauseForWindowChange() {
         if (isDetached || !backendBound) return
+        pauseContinuousBoundary()
         val wasApplying = applyingWindow
         applyingWindow = true
         try {
             // Media3 1.8 的个别回调在 setPlayWhenReady 内 flush；不能取消自己的切换。
             backend.pause()
+            pendingContinuous?.let { continuous ->
+                if (!isDetached && backendBound && backendGeneration == continuous.boundary.backendGeneration &&
+                    backend.currentMediaItem?.mediaId == continuous.incoming.queueEntryId) {
+                    continuous.incomingPositionMs = backend.currentPosition.coerceAtLeast(0L)
+                }
+            }
         } finally {
             applyingWindow = wasApplying
         }
@@ -1437,6 +1494,8 @@ class QueuePlaybackCoordinator(
         if (isDetached || !backendBound) return
         applyingWindow = true
         try {
+            pauseContinuousBoundary()
+            continuousBoundary = null
             resumeIntent = false
             loadedWindow = null
             releaseRuntimeWindows()
@@ -1451,12 +1510,233 @@ class QueuePlaybackCoordinator(
         updateTicker()
     }
 
+    /** 仅主线程读取已核验窗口；睡眠/设置变化直接收回下一个边界，不访问 provider。 */
+    internal fun refreshContinuousBoundary() {
+        if (isDetached || !backendBound) return
+        val saved = _state.value.snapshot
+        val window = loadedWindow
+        val preferencesState = preferences.state.value
+        val requested = when (preferencesState) {
+            is PreferencesState.Ready -> preferencesState.preferences.gaplessPlayback
+            is PreferencesState.Unavailable -> preferencesState.lastKnown?.gaplessPlayback ?: false
+            PreferencesState.Loading -> false
+        }
+        val next = window?.let { it.entries.getOrNull(it.currentIndex + 1) }
+        val issue = when {
+            !requested -> GaplessPlaybackIssue.PREFERENCE_DISABLED
+            !operations.supportsContinuousPlayback -> GaplessPlaybackIssue.BACKEND_UNSUPPORTED
+            !mayContinuousPlayback() -> GaplessPlaybackIssue.TIMER_ACTIVE
+            pendingContinuous != null -> GaplessPlaybackIssue.HANDOVER_PENDING
+            switchingBackend || applyingWindow || actions.isLocked || _state.value.preparing ||
+                _state.value.failure != null ||
+                !resumeIntent || !backend.playWhenReady || backend.playerError != null ||
+                backend.playbackState != Player.STATE_READY || !mayBeginContinuousRound() -> GaplessPlaybackIssue.PREPARING
+            saved == null || window == null || saved.currentEntryId != window.current.queueEntryId ||
+                backend.currentMediaItem?.mediaId != window.current.queueEntryId ||
+                saved.generationId != window.generationId || saved.queueRevision != window.queueRevision -> GaplessPlaybackIssue.PREPARING
+            next == null || next.playbackOrder != window.current.playbackOrder + 1L -> GaplessPlaybackIssue.QUEUE_BOUNDARY
+            naturalQueueAdvance(requireNotNull(saved.currentPlaybackOrder), saved.entryCount, saved.mode,
+                saved.checkpoint.completedCycles).targetOrder != next.playbackOrder -> GaplessPlaybackIssue.MODE_REQUIRES_SETTLEMENT
+            window.current.trackKey.providerId != TrackKey.LOCAL_PROVIDER ||
+                next.trackKey.providerId != TrackKey.LOCAL_PROVIDER -> GaplessPlaybackIssue.SOURCE_UNSUPPORTED
+            loadedResources[window.current.queueEntryId] == null || loadedResources[next.queueEntryId] == null ||
+                backend.currentMediaItemIndex + 1 !in 0 until backend.mediaItemCount ||
+                backend.getMediaItemAt(backend.currentMediaItemIndex + 1).mediaId != next.queueEntryId -> GaplessPlaybackIssue.SUCCESSOR_UNAVAILABLE
+            else -> null
+        }
+        if (issue != null) {
+            pauseContinuousBoundary(issue)
+            return
+        }
+        val currentWindow = requireNotNull(window)
+        val successor = requireNotNull(next)
+        try {
+            loadedResources[currentWindow.current.queueEntryId]?.checkCurrent()
+            loadedResources[successor.queueEntryId]?.checkCurrent()
+        } catch (_: QueuePlaybackException) {
+            pauseContinuousBoundary(GaplessPlaybackIssue.SUCCESSOR_UNAVAILABLE)
+            return
+        }
+        // 许可只包含一个真实相邻实例；逻辑单曲重复/尾回绕仍由完整队列普通结清。
+        continuousBoundary = ContinuousBoundary(currentWindow, successor, playbackCycle, backendGeneration,
+            requireNotNull(saved).checkpoint.completedCycles,
+            requireNotNull(loadedResources[currentWindow.current.queueEntryId]).mediaUri.toString(),
+            requireNotNull(loadedResources[successor.queueEntryId]).mediaUri.toString())
+        if (boundaryPaused) {
+            boundaryPaused = false
+            operations.setPauseAtBoundary(false)
+        }
+        _state.value = _state.value.copy(gapless = GaplessPlaybackState(available = true, issue = null))
+    }
+
+    private fun pauseContinuousBoundary(issue: GaplessPlaybackIssue = GaplessPlaybackIssue.PREPARING) {
+        if (!isDetached && backendBound && !boundaryPaused) {
+            boundaryPaused = true
+            operations.setPauseAtBoundary(true)
+        }
+        // 保留最后许可至来源被替换，识别已在播放线程发生、随后才送达的 AUTO 回调。
+        _state.value = _state.value.copy(gapless = GaplessPlaybackState(issue = issue))
+    }
+
+    /** 新的权威选曲已提交；旧许可/交接不能覆盖它，也不能永远堵住后续命令。 */
+    private fun retireContinuousTraversal() {
+        continuousBoundary = null
+        pendingContinuous = null
+        continuousWriteFailed = false
+    }
+
+    /** AUTO 的前后实例和位置是实际过轨证据；seek/repeat/元数据事件不能造完成。 */
+    private fun witnessContinuousHandover(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo) {
+        val boundary = continuousBoundary ?: return
+        val window = loadedWindow ?: return
+        val incoming = boundary.successor
+        if (pendingContinuous != null || boundary.backendGeneration != backendGeneration || boundary.endingCycle != playbackCycle ||
+            window.generationId != boundary.window.generationId || window.queueRevision != boundary.window.queueRevision ||
+            !sameSource(window.current, boundary.window.current) ||
+            oldPosition.mediaItem?.mediaId != window.current.queueEntryId ||
+            newPosition.mediaItem?.mediaId != incoming.queueEntryId ||
+            oldPosition.mediaItem?.localConfiguration?.uri?.toString() != boundary.endingMediaUri ||
+            newPosition.mediaItem?.localConfiguration?.uri?.toString() != boundary.successorMediaUri ||
+            backend.currentMediaItem?.mediaId != incoming.queueEntryId ||
+            oldPosition.adGroupIndex != C.INDEX_UNSET || newPosition.adGroupIndex != C.INDEX_UNSET) return
+        val advance = naturalQueueAdvance(window.current.playbackOrder, window.totalCount,
+            requireNotNull(_state.value.snapshot).mode, boundary.completedCycles)
+        if (advance.targetOrder != incoming.playbackOrder) {
+            pauseForInterruption()
+            report(QueuePlaybackFailure(QueuePlaybackIssue.CONFLICT, incoming.queueEntryId))
+            return
+        }
+        val handover = ContinuousHandover(boundary, incoming, Math.addExact(playbackCycle, 1L),
+            newPosition.contentPositionMs.coerceAtLeast(0L), advance.completedCycles)
+        pendingContinuous = handover
+        continuousWriteFailed = false
+        continuousBoundary = null
+        loadedWindow = window.copy(currentIndex = window.entries.indexOfFirst { it.queueEntryId == incoming.queueEntryId })
+        playbackCycle = handover.incomingCycle
+        manualEndCycle = -1L
+        checkpointEpoch += 1L
+        invalidateSeekOwner()
+        // 已过轨的 CAS 优先于尚未发布的编辑；其 NonCancellable 提交仍按真实 generation 冲突处理。
+        currentOperation?.cancel()
+        try {
+            onContinuousRoundChanged(incoming, handover.incomingPositionMs)
+        } catch (_: Exception) {
+            resumeIntent = false
+            pauseForWindowChange()
+            report(QueuePlaybackFailure(QueuePlaybackIssue.OUTPUT_ERROR, incoming.queueEntryId))
+        }
+        // 设置 pause-at-end 也可 flush 已排队回调；先发布运行时身份，极短后继的结束才不会丢失。
+        pauseContinuousBoundary(GaplessPlaybackIssue.HANDOVER_PENDING)
+        if (backend.playbackState == Player.STATE_ENDED && resumeIntent) naturalEnd()
+        startPendingCommands()
+    }
+
+    /**
+     * 已实际过轨的短数据库事务必须结清，包括取消、切后端和 teardown。
+     * 此段只消费捕获值，不调用 provider/后端或重新播放。失败保留 pending，显式重试。
+     */
+    private suspend fun settleContinuousHandover(request: ContinuousHandover): QueueSnapshot =
+        withContext(NonCancellable) {
+            checkpointWrites.withLock {
+                val live = activeSnapshot()
+                val ending = request.boundary.window
+                var reboundIncoming: QueueEntry? = null
+                if (request.accepted) {
+                    if (live.generationId != request.acceptedGenerationId || live.queueRevision != request.acceptedQueueRevision ||
+                        live.currentEntryId != request.incoming.queueEntryId || live.checkpoint.completedCycles != request.completedCycles) {
+                        throw QueueStoreException(QueueStoreIssue.CONFLICT)
+                    }
+                } else {
+                    if (live.currentEntryId != ending.current.queueEntryId) throw QueueStoreException(QueueStoreIssue.CONFLICT)
+                    if (live.generationId != ending.generationId || live.queueRevision != ending.queueRevision) {
+                        // 已提交的保留当前编辑可先于过轨 receipt 抵达。只重绑定两份相同源，不能覆盖手动选曲。
+                        val retainedEnding = queueStore.window(live.generationId, requireNotNull(live.currentEntryId)).current
+                        val retainedIncoming = try { queueStore.window(live.generationId, request.incoming.queueEntryId).current }
+                        catch (failure: QueueStoreException) {
+                            if (failure.issue == QueueStoreIssue.CONFLICT) {
+                                val latest = activeSnapshot()
+                                if (latest.generationId == live.generationId && latest.queueRevision == live.queueRevision &&
+                                    latest.currentEntryId == live.currentEntryId) retireContinuousTraversal()
+                            }
+                            throw failure
+                        }
+                        if (!sameSource(retainedEnding, ending.current) || !sameSource(retainedIncoming, request.incoming)) {
+                            retireContinuousTraversal()
+                            throw QueueStoreException(QueueStoreIssue.CONFLICT)
+                        }
+                        reboundIncoming = retainedIncoming
+                    } else if (live.checkpoint.completedCycles != request.boundary.completedCycles) {
+                        throw QueueStoreException(QueueStoreIssue.CONFLICT)
+                    }
+                }
+                var saved = live
+                if (!request.accepted) {
+                    saved = queueStore.saveCheckpoint(live.generationId, live.checkpointRevision,
+                        QueueCheckpoint(request.incoming.queueEntryId, request.incomingPositionMs, request.completedCycles))
+                    request.accepted = true
+                    request.acceptedGenerationId = saved.generationId
+                    request.acceptedQueueRevision = saved.queueRevision
+                    checkpointEpoch += 1L
+                    val currentWindow = loadedWindow
+                    if (reboundIncoming != null && !isDetached && backendBound &&
+                        backendGeneration == request.boundary.backendGeneration &&
+                        currentWindow != null && sameSource(currentWindow.current, request.incoming)) {
+                        val previousBinding = SleepTimerTrackBinding(sessionId, currentWindow.generationId,
+                            request.incoming.queueEntryId, playbackCycle)
+                        // 这里只更新同一实际当前项的逻辑绑定；相邻项待后续可取消 preflight 补齐。
+                        loadedWindow = QueueWindow(saved.generationId, saved.queueRevision, saved.entryCount,
+                            listOf(requireNotNull(reboundIncoming)), 0)
+                        onRetainedTrackBinding(previousBinding, SleepTimerTrackBinding(sessionId, saved.generationId,
+                            request.incoming.queueEntryId, playbackCycle))
+                    }
+                    publishSnapshot(saved)
+                }
+                // 先前 IO 期间可能已结束或暂停后继。至多补一次位置；随后普通合并 writer 继续。
+                if (saved.positionMs != request.incomingPositionMs) {
+                    saved = queueStore.saveCheckpoint(saved.generationId, saved.checkpointRevision,
+                        QueueCheckpoint(request.incoming.queueEntryId, request.incomingPositionMs, request.completedCycles))
+                }
+                handledNaturalCycle = request.boundary.endingCycle
+                publishSnapshot(saved)
+                if (pendingContinuous === request) pendingContinuous = null
+                continuousWriteFailed = false
+                saved
+            }
+        }
+
+    private suspend fun processContinuousHandover(request: ContinuousHandover) =
+        action(clearFailure = false, continuousHandover = true) { token ->
+            val saved = settleContinuousHandover(request)
+            currentCoroutineContext().ensureActive()
+            if (isDetached || !backendBound || switchingBackend || token != intentRevision ||
+                backend.currentMediaItem?.mediaId != request.incoming.queueEntryId || request.incomingEnded ||
+                backend.playbackState == Player.STATE_ENDED || pendingNatural != null || !resumeIntent) return@action
+            // 只在已接纳的当前项仍推进时补充新相邻窗口；不对短后继做 pause/prepare/seek。
+            val window = queueStore.window(saved.generationId, request.incoming.queueEntryId)
+            val prepared = prepareWindow(window, retainCurrent = true)
+            currentCoroutineContext().ensureActive()
+            if (token != intentRevision || request.incomingEnded || pendingNatural != null ||
+                backend.currentMediaItem?.mediaId != request.incoming.queueEntryId || backend.playbackState == Player.STATE_ENDED) return@action
+            applyKeptWindow(saved, prepared)
+            if (resumeIntent && !backend.playWhenReady && token == intentRevision) authorizePlay()
+        }
+
     private fun naturalEnd() {
         if (isDetached || !backendBound || switchingBackend || !resumeIntent || applyingWindow ||
             handledNaturalCycle == playbackCycle || manualEndCycle == playbackCycle) return
         val saved = _state.value.snapshot ?: return
-        if (backend.currentMediaItem?.mediaId != saved.currentEntryId) return
-        if (pendingNatural?.cycle != playbackCycle) pendingNatural = NaturalCompletion(requireNotNull(saved.currentEntryId), playbackCycle, backendGeneration)
+        val continuous = pendingContinuous
+        val entryId = if (continuous != null && continuous.incomingCycle == playbackCycle &&
+            backend.currentMediaItem?.mediaId == continuous.incoming.queueEntryId) {
+            // 下一段可能短于前一段的 CAS；独立保存其完成，不能按旧持久 ID 丢掉结束。
+            continuous.incomingEnded = true
+            continuous.incomingPositionMs = backend.currentPosition.coerceAtLeast(0L)
+            continuous.incoming.queueEntryId
+        } else {
+            if (backend.currentMediaItem?.mediaId != saved.currentEntryId) return
+            saved.currentEntryId ?: return
+        }
+        if (pendingNatural?.cycle != playbackCycle) pendingNatural = NaturalCompletion(entryId, playbackCycle, backendGeneration)
         startPendingCommands()
     }
 
@@ -1576,6 +1856,7 @@ class QueuePlaybackCoordinator(
                     currentCoroutineContext().ensureActive()
                     withContext(NonCancellable) {
                         queueStore.saveCheckpoint(live.generationId, live.checkpointRevision, QueueCheckpoint(entry.queueEntryId, 0L)).also {
+                            retireContinuousTraversal()
                             checkpointEpoch += 1L
                             publishSnapshot(it)
                         }
@@ -1619,7 +1900,10 @@ class QueuePlaybackCoordinator(
             ticker = serviceScope.launch(Dispatchers.Main.immediate) {
                 while (isActive && !isDetached) {
                     delay(CHECKPOINT_INTERVAL_MS)
-                    if (!isDetached && backendBound && backend.isPlaying) requestCheckpoint()
+                    if (!isDetached && backendBound && backend.isPlaying) {
+                        requestCheckpoint()
+                        refreshContinuousBoundary()
+                    }
                 }
             }
         }
@@ -1802,6 +2086,7 @@ class QueuePlaybackCoordinator(
     private fun launchCommand(preserveSeekOwner: Boolean = false, command: suspend () -> Unit) {
         if (isDetached || switchingBackend || !backendBound) return
         if (!preserveSeekOwner) invalidateSeekOwner()
+        pauseContinuousBoundary()
         // 快速连续标准命令仅保留最近一个；自然完成和恢复各有一个独立槽位。
         pendingCommand = command
         startPendingCommands()
@@ -1809,10 +2094,13 @@ class QueuePlaybackCoordinator(
 
     private fun startPendingCommands() {
         if (isDetached || switchingBackend || !backendBound || currentOperation != null || actions.isLocked || commandJob != null) return
-        val ordinary = pendingCommand
+        val continuous = pendingContinuous
+        if (continuous != null && continuousWriteFailed) return
+        val ordinary = if (continuous == null) pendingCommand else null
         val recovery = if (ordinary == null) pendingRecovery else null
         val natural = if (ordinary == null && recovery == null) pendingNatural else null
         val command: suspend () -> Unit = when {
+            continuous != null -> { { processContinuousHandover(continuous) } }
             ordinary != null -> { pendingCommand = null; ordinary }
             recovery != null -> { { processRecovery(recovery) } }
             natural != null -> { { processNatural(natural) } }
@@ -1827,9 +2115,21 @@ class QueuePlaybackCoordinator(
                 // 存储失败不能触发同一待处理事件的无限隐式重试。
                 if (pendingRecovery === recovery) pendingRecovery = null
                 if (pendingNatural === natural) pendingNatural = null
+                if (pendingContinuous === continuous) continuousWriteFailed = true
+                if (continuous != null) {
+                    resumeIntent = false
+                    pauseForWindowChange()
+                    requestCheckpoint()
+                }
             } catch (_: QueuePlaybackException) {
                 if (pendingRecovery === recovery) pendingRecovery = null
                 if (pendingNatural === natural) pendingNatural = null
+                if (pendingContinuous === continuous) continuousWriteFailed = true
+                if (continuous != null) {
+                    resumeIntent = false
+                    pauseForWindowChange()
+                    requestCheckpoint()
+                }
             } finally {
                 commandJob = null
                 startPendingCommands()
@@ -1842,6 +2142,7 @@ class QueuePlaybackCoordinator(
     private suspend fun <T> action(
         clearFailure: Boolean = true,
         preserveSeekOwner: Boolean = false,
+        continuousHandover: Boolean = false,
         block: suspend (Long) -> T,
     ): T = withContext(Dispatchers.Main.immediate) {
         if (isDetached || switchingBackend || !backendBound) {
@@ -1858,8 +2159,19 @@ class QueuePlaybackCoordinator(
             report(failure)
             throw QueuePlaybackException(failure)
         }
+        if (!continuousHandover && pendingContinuous != null) {
+            actions.unlock()
+            throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY))
+        }
+        pauseContinuousBoundary()
+        if (!continuousHandover && pendingContinuous != null) {
+            // setter 可同步 flush 真实 AUTO；准入须在它返回后重核，再开始任何 IO/意图修改。
+            actions.unlock()
+            startPendingCommands()
+            throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY))
+        }
         if (preserveSeekOwner) seeking = true else invalidateSeekOwner()
-        intentRevision += 1L
+        if (!continuousHandover) intentRevision += 1L
         val token = intentRevision
         currentOperation = currentCoroutineContext()[Job]
         _state.value = _state.value.copy(preparing = true, failure = if (clearFailure) null else _state.value.failure)
@@ -1887,6 +2199,7 @@ class QueuePlaybackCoordinator(
             actions.unlock()
             if (preserveSeekOwner) seeking = false
             _state.value = _state.value.copy(preparing = false)
+            refreshContinuousBoundary()
             refreshSeekState()
             try { if (!isDetached) sessionBridge.logicalStateChanged() }
             finally { startPendingCommands() }
@@ -1895,6 +2208,7 @@ class QueuePlaybackCoordinator(
 
     private fun invalidateIntent() {
         invalidateSeekOwner()
+        pauseContinuousBoundary()
         intentRevision += 1L
         currentOperation?.cancel()
     }
@@ -1915,6 +2229,7 @@ class QueuePlaybackCoordinator(
             pauseForWindowChange()
             requestCheckpoint()
         }
+        refreshContinuousBoundary()
         return resumeIntent
     }
 
@@ -2043,6 +2358,26 @@ class QueuePlaybackCoordinator(
         val actionId: String,
     )
     private data class NaturalCompletion(val entryId: String, val cycle: Long, val backendGeneration: Long)
+    private data class ContinuousBoundary(
+        val window: QueueWindow,
+        val successor: QueueEntry,
+        val endingCycle: Long,
+        val backendGeneration: Long,
+        val completedCycles: Int,
+        val endingMediaUri: String,
+        val successorMediaUri: String,
+    )
+    private class ContinuousHandover(
+        val boundary: ContinuousBoundary,
+        val incoming: QueueEntry,
+        val incomingCycle: Long,
+        var incomingPositionMs: Long,
+        val completedCycles: Int,
+        var incomingEnded: Boolean = false,
+        var accepted: Boolean = false,
+        var acceptedGenerationId: String? = null,
+        var acceptedQueueRevision: Long? = null,
+    )
     private data class NaturalSettlement(
         val request: NaturalCompletion,
         val ending: SleepTimerTrackBinding,

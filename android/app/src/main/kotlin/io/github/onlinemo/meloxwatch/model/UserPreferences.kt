@@ -23,6 +23,7 @@ data class UserPreferences(
     val gaplessPlayback: Boolean = true,
     val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
     val help: HelpPreferences = HelpPreferences(),
+    val bluetoothLyricsEnabled: Boolean = false,
 ) {
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION)
@@ -45,10 +46,11 @@ data class UserPreferences(
         gaplessPlayback = gaplessPlayback,
         controls = controls,
         help = help,
+        bluetoothLyricsEnabled = bluetoothLyricsEnabled,
     )
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 5
+        const val CURRENT_SCHEMA_VERSION = 6
     }
 }
 
@@ -67,6 +69,7 @@ data class UserPreferencesDraft(
     val gaplessPlayback: Boolean = true,
     val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
     val help: HelpPreferences = HelpPreferences(),
+    val bluetoothLyricsEnabled: Boolean = false,
 ) {
     init {
         require(librarySorts.keys == LibraryListContext.entries.toSet())

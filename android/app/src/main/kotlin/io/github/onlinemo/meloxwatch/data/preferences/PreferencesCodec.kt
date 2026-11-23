@@ -45,6 +45,7 @@ internal object PreferencesCodec {
     private val backendKey = stringPreferencesKey("playback_backend")
     private val speedKey = intPreferencesKey("playback_speed_tenths")
     private val gaplessKey = booleanPreferencesKey("gapless_playback")
+    private val bluetoothLyricsKey = booleanPreferencesKey("bluetooth_lyrics_enabled")
     private val rotaryEnabledKey = booleanPreferencesKey("rotary_enabled")
     private val rotaryActionKey = stringPreferencesKey("rotary_action")
     private val rotaryOrientationKey = stringPreferencesKey("rotary_orientation")
@@ -69,7 +70,7 @@ internal object PreferencesCodec {
         schemaKey.name, revisionKey.name, restorePositionKey.name, screenShapeKey.name,
         libraryLayoutKey.name, artworkPathKey.name,
         songTapKey.name, mediaButtonsKey.name, audioFocusKey.name,
-        backendKey.name, speedKey.name, gaplessKey.name,
+        backendKey.name, speedKey.name, gaplessKey.name, bluetoothLyricsKey.name,
         rotaryEnabledKey.name, rotaryActionKey.name, rotaryOrientationKey.name, rotaryHapticsKey.name,
         mainProgressKey.name, progressGestureKey.name, sleepSummaryKey.name,
         guideCompletedKey.name, guideDismissedKey.name, guideStepKey.name, showTipsKey.name,
@@ -88,7 +89,8 @@ internal object PreferencesCodec {
         val legacy = schemaVersion == 1 || schemaVersion == 2
         val legacyControls = legacy || schemaVersion == 3
         val legacyHelp = legacyControls || schemaVersion == 4
-        if (!legacyHelp && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
+        val legacyBluetooth = legacyHelp || schemaVersion == 5
+        if (!legacyBluetooth && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
             val isNewer = schemaVersion != null && schemaVersion > UserPreferences.CURRENT_SCHEMA_VERSION
             val reason = if (isNewer) {
                 PreferencesRecoveryReason.NEWER_SCHEMA
@@ -156,6 +158,12 @@ internal object PreferencesCodec {
         val mediaButtons = playbackBoolean(mediaButtonsKey, PreferencesField.MEDIA_BUTTONS)
         val audioFocus = playbackBoolean(audioFocusKey, PreferencesField.AUDIO_FOCUS)
         val gapless = playbackBoolean(gaplessKey, PreferencesField.GAPLESS)
+        // Old schemas have no external-output intent. Migration never grants or opens a receiver.
+        val bluetoothLyrics = if (legacyBluetooth) false else {
+            (raw[bluetoothLyricsKey.name] as? Boolean).also {
+                if (it == null) invalidFields.add(PreferencesField.BLUETOOTH_LYRICS)
+            } ?: false
+        }
 
         fun controlsBoolean(key: Preferences.Key<Boolean>, field: PreferencesField, default: Boolean): Boolean =
             if (legacyControls) default else {
@@ -236,9 +244,10 @@ internal object PreferencesCodec {
                 gaplessPlayback = gapless,
                 controls = controls,
                 help = help,
+                bluetoothLyricsEnabled = bluetoothLyrics,
             ),
             recovery = recovery,
-            isCanonical = !legacyHelp && recovery == null && raw.keys == canonicalNames,
+            isCanonical = !legacyBluetooth && recovery == null && raw.keys == canonicalNames,
         )
     }
 
@@ -255,6 +264,7 @@ internal object PreferencesCodec {
         backendKey to preferences.playbackBackend.name,
         speedKey to preferences.playbackSpeedTenths,
         gaplessKey to preferences.gaplessPlayback,
+        bluetoothLyricsKey to preferences.bluetoothLyricsEnabled,
         rotaryEnabledKey to preferences.controls.rotaryEnabled,
         rotaryActionKey to preferences.controls.rotaryAction.name,
         rotaryOrientationKey to preferences.controls.rotaryOrientation.name,

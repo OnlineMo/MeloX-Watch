@@ -41,6 +41,7 @@ data class PlaybackBackendState(
     val gaplessRequested: Boolean = true,
     val gaplessAvailable: Boolean = false,
     val issue: PlaybackBackendIssue? = null,
+    val gaplessIssue: GaplessPlaybackIssue? = GaplessPlaybackIssue.PREPARING,
 ) {
     fun toSessionExtras(): Bundle = Bundle().apply {
         putString(REQUESTED_BACKEND, requestedBackend.name)
@@ -54,6 +55,7 @@ data class PlaybackBackendState(
         speed.issue?.let { putString(SPEED_ISSUE, it.name) }
         putBoolean(GAPLESS_REQUESTED, gaplessRequested)
         putBoolean(GAPLESS_AVAILABLE, gaplessAvailable)
+        gaplessIssue?.let { putString(GAPLESS_ISSUE, it.name) }
         issue?.let { putString(ISSUE, it.name) }
     }
 
@@ -70,6 +72,7 @@ data class PlaybackBackendState(
         const val SPEED_ISSUE = PREFIX + "speedIssue"
         const val GAPLESS_REQUESTED = PREFIX + "gaplessRequested"
         const val GAPLESS_AVAILABLE = PREFIX + "gaplessAvailable"
+        const val GAPLESS_ISSUE = PREFIX + "gaplessIssue"
         const val ISSUE = PREFIX + "issue"
 
         fun fromSessionExtras(extras: Bundle): PlaybackBackendState? {
@@ -88,6 +91,7 @@ data class PlaybackBackendState(
                     ),
                     gaplessRequested = extras.value(GAPLESS_REQUESTED),
                     gaplessAvailable = extras.value(GAPLESS_AVAILABLE),
+                    gaplessIssue = extras.optionalText(GAPLESS_ISSUE)?.let(GaplessPlaybackIssue::valueOf),
                     issue = extras.optionalText(ISSUE)?.let(PlaybackBackendIssue::valueOf),
                 )
             } catch (_: RuntimeException) {

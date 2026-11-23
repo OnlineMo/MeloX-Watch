@@ -13,6 +13,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.data.preferences.UserPreferencesRepository
@@ -47,6 +48,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -120,6 +123,7 @@ internal class ServicePlaybackOwner(
     private var observer: Player.Listener? = null
     private var speedObserver: Job? = null
     private var preferenceObserver: Job? = null
+    private var gaplessObserver: Job? = null
     // An explicit retry and the preference observer must not freeze the same queue concurrently.
     private val preferenceTransactions = Mutex()
     private var closed = false
@@ -167,6 +171,11 @@ internal class ServicePlaybackOwner(
         check(coordinator == null && listening == null)
         coordinator = queues
         listening = statistics
+        gaplessObserver = scope.launch(Dispatchers.Main.immediate) {
+            queues.state.map { it.gapless }.distinctUntilChanged().collect { actual ->
+                if (!closed) _state.value = _state.value.copy(gaplessAvailable = actual.available, gaplessIssue = actual.issue)
+            }
+        }
     }
 
     /** 会话seek使用协调器的绑定代次；内部焦点/监听代次不与它混用。 */
@@ -261,6 +270,8 @@ internal class ServicePlaybackOwner(
         closingPreferenceObserver = preferenceObserver
         preferenceObserver?.cancel()
         preferenceObserver = null
+        gaplessObserver?.cancel()
+        gaplessObserver = null
         val previous = active
         val retained = quarantined
         closingBackends = listOfNotNull(previous, retained).distinct()
@@ -323,6 +334,7 @@ internal class ServicePlaybackOwner(
             gaplessRequested = saved.gaplessPlayback,
             speed = _state.value.speed.copy(requestedTenths = saved.playbackSpeedTenths))
         focus.setManagementEnabled(saved.audioFocusManagement)
+        coordinator?.refreshContinuousBoundary()
         if (quarantined != null || blockedByPriorRelease()) {
             report(PlaybackBackendIssue.SWITCH_FAILED)
             return
@@ -627,6 +639,11 @@ internal class ServicePlaybackOwner(
             val renderers = RoutingRenderersFactory(applicationContext, route, dspRuntime)
                 .setEnableAudioFloatOutput(false).setEnableAudioTrackPlaybackParams(false)
             val player = ExoPlayer.Builder(applicationContext).setRenderersFactory(renderers)
+                .setLoadControl(DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(5_000, 15_000, 1_000, 2_000)
+                    .setTargetBufferBytes(4 * 1024 * 1024)
+                    .setPrioritizeTimeOverSizeThresholds(false)
+                    .setBackBuffer(0, false).build())
                 .setMediaSourceFactory(DefaultMediaSourceFactory(dataSources, BoundedExtractorsFactory())
                     .setLoadErrorHandlingPolicy(NoAutomaticPlaybackLoadRetry()))
                 .setReleaseTimeoutMs(1500L).build()

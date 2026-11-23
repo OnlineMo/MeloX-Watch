@@ -115,7 +115,8 @@ data class LyricsEntryUiState(
 /**
  * 当前队列实例、授权加载、关联 CAS 和显式行播放共用一个主线程所有者。
  * collectLatest 先等待旧读取的实际清理，再启动新意图；取消不释放仍在运行的 provider。
- * 页面隐藏停止订阅和媒体采样。选择器的单个运行时票据可跨 STOP，不恢复播放或确认动作。
+ * 页面隐藏停止媒体采样；最后一个展示/认证外部读 lease 关闭才停止业务订阅。
+ * 选择器的单个运行时票据可跨 STOP，不恢复播放或确认动作。
  * 同一实际 Entry 路由内关闭展示只留小草稿；下一展示重读校验，不保留旧读权限或解析对象。
  */
 @MainThread
@@ -136,9 +137,10 @@ class LyricsEntryViewModel(
     savedStateHandle: SavedStateHandle = SavedStateHandle(),
     private val memoryOwner: LyricsMemoryOwner = LyricsMemoryOwner(),
     private val onlineLyrics: OnlineLyricsPort? = null,
+    private val awaitReadReady: suspend () -> Unit = {},
 ) : ViewModel() {
     private val scope: CoroutineScope get() = scopeOverride ?: viewModelScope
-    private val savedDrafts = LyricsEntrySavedDrafts(savedStateHandle)
+    private var savedDrafts = LyricsEntrySavedDrafts(savedStateHandle)
     // This survives the first queue observation's new process generation, unlike runtime SuspendedDraft.
     private var restoredOffset = savedDrafts.readOffset()
     private val mutableState = MutableStateFlow(LyricsEntryUiState(offsetDraftMs = restoredOffset?.value,
@@ -151,6 +153,8 @@ class LyricsEntryViewModel(
     private val work = MutableStateFlow<Work?>(null)
     private val writeAuthority = AtomicReference<WriteTicket?>()
     private var visible = false
+    private var uiVisible = false
+    private var externalReading: ExternalReading? = null
     private var surface = LyricsEntrySurface.PAGE
     private var closed = false
     private var latestQueue: QueueSnapshot? = null
@@ -162,6 +166,7 @@ class LyricsEntryViewModel(
     private var owner: Owner? = null
     private var loaded: Loaded? = null
     private var onlineLoaded: OnlineLyricsResult.Loaded? = null
+    private var onlineExternalIdentity: Any? = null
     private val onlineAcquisition = AtomicReference<OnlineLyricsRequest?>()
     private var observedProvider: String? = null
     private var displayMemory: LyricsMemoryOwner.Lease? = null
@@ -170,6 +175,7 @@ class LyricsEntryViewModel(
     private var entryRoute: EntryRoute? = null
     private var suspendedDraft: SuspendedDraft? = null
     private var sampler: Job? = null
+    private var activeReadJob: Job? = null
     private var wordEmphasis = false
     private var visibleLines: List<Int> = emptyList()
     private var timelinePresented = false
@@ -184,6 +190,12 @@ class LyricsEntryViewModel(
     private val observer = scope.launch {
         visibility.collectLatest { visibilityTicket ->
             if (!visibilityTicket.enabled) return@collectLatest
+            try { awaitReadReady() }
+            catch (error: CancellationException) { throw error }
+            catch (_: Exception) {
+                if (visible && visibility.value === visibilityTicket) failCurrent(LyricsLoadIssue.SOURCE_UNAVAILABLE)
+                return@collectLatest
+            }
             coroutineScope {
                 launch {
                     try {
@@ -200,7 +212,7 @@ class LyricsEntryViewModel(
                     val changes = onlineLyrics?.changes ?: return@launch
                     changes.collect {
                         if (visible && visibility.value === visibilityTicket && observedProvider == "netease") {
-                            retry(sourceChanged = true)
+                            refreshSource(sourceChanged = true)
                         }
                     }
                 }
@@ -208,7 +220,7 @@ class LyricsEntryViewModel(
                     try {
                         libraryChanges.collect {
                             if (visible && visibility.value === visibilityTicket && observedProvider == TrackKey.LOCAL_PROVIDER) {
-                                retry(sourceChanged = true)
+                                refreshSource(sourceChanged = true)
                             }
                         }
                     } catch (error: CancellationException) { throw error }
@@ -227,6 +239,87 @@ class LyricsEntryViewModel(
         check(!closed) { "The lyrics owner has been cleared" }
         presentation?.close()
         return Presentation().also { presentation = it }
+    }
+
+    /** A new Activity registry receives only the bounded draft, never the active reading/session. */
+    fun bindSavedDraftState(handle: SavedStateHandle) {
+        val oldDraft = savedDrafts.readOffset()
+        val next = LyricsEntrySavedDrafts(handle)
+        if (oldDraft != null) next.writeOffset(oldDraft)
+        savedDrafts = next
+        if (oldDraft == null && restoredOffset == null && mutableState.value.offsetDraftMs == null) {
+            restoredOffset = next.readOffset()
+            mutableState.value = mutableState.value.copy(offsetDraftMs = restoredOffset?.value,
+                offsetDraftNeedsReview = restoredOffset != null, canReviewOffsetDraft = false)
+        }
+    }
+
+    /** Called only after the dedicated receiver session has authenticated on both screens. */
+    fun bindExternalReading(onlineReadReady: (String) -> Boolean = { false }): ExternalReading {
+        check(!closed)
+        check(externalReading == null) { "Only one external receiver may retain a reading" }
+        return ExternalReading(onlineReadReady).also {
+            externalReading = it
+            if (!visible) {
+                visible = true
+                visibility.value = Visibility(true)
+            }
+            resumeDeferredLoad()
+        }
+    }
+
+    inner class ExternalReading internal constructor(private val onlineReadReady: (String) -> Boolean) : AutoCloseable {
+        private var open = true
+        private var needsHiddenCleanup = false
+        private var retiringRead: Job? = null
+        private var onlineAttempt: ExternalOnlineAttempt? = null
+        val isCurrent: Boolean get() = open && !closed && externalReading === this
+
+        override fun close() {
+            if (open) {
+                open = false
+                if (externalReading !== this) return
+                externalReading = null
+                if (!uiVisible) retiringRead = activeReadJob
+                needsHiddenCleanup = true
+            }
+            if (needsHiddenCleanup) {
+                if (!uiVisible) onHidden()
+                needsHiddenCleanup = false
+            }
+        }
+
+        suspend fun awaitClosed() {
+            check(!open && !needsHiddenCleanup)
+            retiringRead?.join()
+            retiringRead = null
+        }
+
+        internal fun canAcquireOnline(entryId: String): Boolean = isCurrent && onlineReadReady(entryId)
+        internal fun hasAttemptedOnline(generation: String, revision: Long, entry: String, source: Long): Boolean =
+            onlineAttempt == ExternalOnlineAttempt(generation, revision, entry, source)
+        internal fun markOnlineAttempt(generation: String, revision: Long, entry: String, source: Long) {
+            onlineAttempt = ExternalOnlineAttempt(generation, revision, entry, source)
+        }
+    }
+
+    /** Saved source/offset only: an unconfirmed association, write or display draft is never sent. */
+    fun readExternal(): LyricsExternalRead? {
+        if (externalReading?.isCurrent != true || closed) return null
+        val state = mutableState.value
+        if (state.loading || state.saving || pendingPreview != null || state.associationPreview != null) return null
+        val local = loaded
+        if (local != null && local.owner === owner && local.owner.key == latestKey &&
+            local.owner.identity.sourceGeneration == sourceGeneration) {
+            return LyricsExternalRead(local.externalIdentity, local.owner.key.entryId, sourceGeneration, local.primary.document,
+                local.translated, LyricsClockMapping(userOffset = LyricsUserOffset(local.owner.preferences.userDelayMs)))
+        }
+        val online = onlineLoaded ?: return null
+        val fence = online.fence
+        if (latestKey != QueueKey(fence.queueGenerationId, fence.queueRevision, fence.queueEntryId) ||
+            state.identity?.sourceGeneration != fence.sourceGeneration) return null
+        return LyricsExternalRead(onlineExternalIdentity ?: return null, fence.queueEntryId, fence.sourceGeneration, online.document,
+            online.translation, LyricsClockMapping())
     }
 
     /** An old page or Activity cannot hide the successor using the same retained ViewModel. */
@@ -248,8 +341,10 @@ class LyricsEntryViewModel(
             suspendedDraft = draft
             // A retained Activity owner keeps only bounded proposal metadata across STOP/config.
             // Parsed documents, translations and their timelines belong to the visible presentation.
-            mutableState.value = LyricsEntryUiState(documentRequest = pendingPicker?.request,
-                pickerLaunched = pendingPicker?.launched == true)
+            if (externalReading == null) {
+                mutableState.value = LyricsEntryUiState(documentRequest = pendingPicker?.request,
+                    pickerLaunched = pendingPicker?.launched == true)
+            }
         }
     }
 
@@ -271,6 +366,7 @@ class LyricsEntryViewModel(
 
     fun onVisible(nextSurface: LyricsEntrySurface) {
         if (closed) return
+        uiVisible = true
         surface = nextSurface
         timelinePresented = nextSurface == LyricsEntrySurface.PAGE
         if (!visible) {
@@ -283,17 +379,29 @@ class LyricsEntryViewModel(
     }
 
     fun onHidden(preservePicker: Boolean = true) {
-        visible = false
+        uiVisible = false
         timelinePresented = false
-        deferredLoad = false
-        visibility.value = Visibility(false)
-        replaceWork(null)
         sampler?.cancel()
         sampler = null
         mutableClock.value = null
         suspendedDraft = null
+        val hadPreview = pendingPreview != null || work.value?.action?.let { it !== Action.Load } == true
         pendingPreview = null
         if (!preservePicker || pendingPicker?.launched != true) pendingPicker = null
+        if (externalReading?.isCurrent == true) {
+            mutableState.value = mutableState.value.copy(offsetDraftMs = null,
+                offsetDraftNeedsReview = false, canReviewOffsetDraft = false, associationPreview = null,
+                documentRequest = pendingPicker?.request, pickerLaunched = pendingPicker?.launched == true,
+                canChoose = false)
+            if (hadPreview || deferredLoad ||
+                owner == null && onlineLoaded == null && work.value == null) latestKey?.let(::requestLoad)
+            playConfirmation.contextChanged()
+            return
+        }
+        visible = false
+        deferredLoad = false
+        visibility.value = Visibility(false)
+        replaceWork(null)
         mutableState.value = mutableState.value.copy(loading = false, saving = false, associationPreview = null,
             content = LyricsPageContent.Missing, documentId = null, onlineOrigin = null, onlineIssue = null, onlineFromCache = false,
             offsetDraftMs = null, canChoose = false, documentRequest = pendingPicker?.request,
@@ -305,6 +413,10 @@ class LyricsEntryViewModel(
 
     fun leave() {
         onHidden(preservePicker = false)
+        if (externalReading?.isCurrent == true) {
+            clearSavedOffset()
+            return
+        }
         latestKey = null
         latestQueue = null
         owner = null
@@ -315,6 +427,11 @@ class LyricsEntryViewModel(
     }
 
     fun retry(sourceChanged: Boolean = false) {
+        if (!uiVisible) return
+        refreshSource(sourceChanged)
+    }
+
+    private fun refreshSource(sourceChanged: Boolean) {
         val queue = latestQueue ?: return
         if (!visible || closed) return
         if (sourceChanged && !advanceSourceGeneration()) return
@@ -337,7 +454,7 @@ class LyricsEntryViewModel(
 
     fun pickerLaunched(requestId: String): Boolean {
         val picker = pendingPicker?.takeIf { it.request.requestId == requestId } ?: return false
-        if (!visible || picker.launched || picker.key != latestKey) return false
+        if (!uiVisible || picker.launched || picker.key != latestKey) return false
         picker.launched = true
         mutableState.value = mutableState.value.copy(pickerLaunched = true)
         return true
@@ -358,7 +475,7 @@ class LyricsEntryViewModel(
         }
         picker.result = Picked(uri, returnedFlags)
         mutableState.value = mutableState.value.copy(documentRequest = null, pickerLaunched = false)
-        if (visible) consumePicker()
+        if (uiVisible) consumePicker()
     }
 
     fun noPicker(requestId: String) {
@@ -378,7 +495,7 @@ class LyricsEntryViewModel(
     }
 
     fun cancelAssociation(previewId: String) {
-        if (pendingPreview?.id != previewId) return
+        if (!uiVisible || pendingPreview?.id != previewId) return
         pendingPreview = null
         mutableState.value = mutableState.value.copy(associationPreview = null, notice = LyricsEntryNotice.CANCELLED)
         retry()
@@ -405,6 +522,7 @@ class LyricsEntryViewModel(
     }
 
     fun adjustOffset(steps: Int) {
+        if (!uiVisible) return
         if (mutableState.value.offsetDraftNeedsReview) return
         val current = mutableState.value.offsetDraftMs ?: return
         val value = LyricsUserOffset(current).plusSteps(steps).delayMs
@@ -414,6 +532,7 @@ class LyricsEntryViewModel(
     }
 
     fun resetOffset() {
+        if (!uiVisible) return
         if (mutableState.value.offsetDraftNeedsReview) return
         if (mutableState.value.offsetDraftMs != null) {
             mutableState.value = mutableState.value.copy(offsetDraftMs = 0)
@@ -423,6 +542,7 @@ class LyricsEntryViewModel(
     }
 
     fun cancelOffset() {
+        if (!uiVisible) return
         clearSavedOffset()
         suspendedDraft = null
         mutableState.value = mutableState.value.copy(offsetDraftMs = null,
@@ -451,6 +571,7 @@ class LyricsEntryViewModel(
     }
 
     fun previewPlay(preview: LyricsPlayPreview): String? {
+        if (!uiVisible) return null
         val confirmation = playConfirmation.begin(preview)
         if (confirmation != null) setTimelinePresented(false)
         return confirmation
@@ -459,13 +580,13 @@ class LyricsEntryViewModel(
     /** The original document stays owned for confirmation; its replaced visual body does no work. */
     fun setTimelinePresented(presented: Boolean) {
         if (closed) return
-        timelinePresented = presented
+        timelinePresented = uiVisible && presented
         updateSampler()
         resumeDeferredLoad()
     }
 
     private fun requestLoad(key: QueueKey) {
-        if (surface == LyricsEntrySurface.PAGE && !timelinePresented) {
+        if (externalReading == null && uiVisible && surface == LyricsEntrySurface.PAGE && !timelinePresented) {
             deferredLoad = true
             replaceWork(null)
             mutableState.value = mutableState.value.copy(content = LyricsPageContent.Loading, documentId = null,
@@ -477,7 +598,8 @@ class LyricsEntryViewModel(
     }
 
     private fun resumeDeferredLoad() {
-        if (!deferredLoad || !visible || surface != LyricsEntrySurface.PAGE || !timelinePresented) return
+        if (!deferredLoad || !visible ||
+            externalReading == null && (surface != LyricsEntrySurface.PAGE || !timelinePresented)) return
         latestKey?.let(::requestLoad)
     }
 
@@ -514,17 +636,24 @@ class LyricsEntryViewModel(
             } else if (!consumePicker() && !consumeDraft()) {
                 requestLoad(key)
             }
-        } else if (!consumePicker() && !consumeDraft() && owner == null && work.value == null && key != null) {
-            requestLoad(key)
+        } else if (!consumePicker() && !consumeDraft() && key != null) {
+            if (canStartExternalOnline(key) || owner == null && work.value == null) requestLoad(key)
         }
         playConfirmation.contextChanged()
         updateSampler()
     }
 
+    private fun canStartExternalOnline(key: QueueKey): Boolean {
+        val external = externalReading ?: return false
+        return visible && observedProvider == "netease" && onlineLoaded == null && activeReadJob == null &&
+            external.canAcquireOnline(key.entryId) &&
+            !external.hasAttemptedOnline(key.generationId, key.revision, key.entryId, sourceGeneration)
+    }
+
     private fun consumePicker(): Boolean {
         val picker = pendingPicker ?: return false
         val result = picker.result ?: return false
-        if (!visible || latestQueue == null) return false
+        if (!uiVisible || latestQueue == null) return false
         pendingPicker = null
         if (picker.key != latestKey || picker.sourceGeneration != sourceGeneration) {
             mutableState.value = mutableState.value.copy(documentRequest = null, pickerLaunched = false,
@@ -567,7 +696,7 @@ class LyricsEntryViewModel(
     private fun consumeDraft(): Boolean {
         val draft = suspendedDraft ?: return false
         suspendedDraft = null
-        if (!visible || draft.route !== entryRoute || draft.key != latestKey || draft.sourceGeneration != sourceGeneration) return false
+        if (!uiVisible || draft.route !== entryRoute || draft.key != latestKey || draft.sourceGeneration != sourceGeneration) return false
         replaceWork(Work(UUID.randomUUID().toString(), draft.key, sourceGeneration, Action.Resume(draft)))
         return true
     }
@@ -592,8 +721,12 @@ class LyricsEntryViewModel(
     private suspend fun perform(operation: Work) {
         var primaryRequest: LyricsLoadRequest? = null
         var operationMemory: LyricsMemoryOwner.Lease? = null
+        val attempt = checkNotNull(currentCoroutineContext()[Job])
+        activeReadJob = attempt
         try {
             if (!isCurrent(operation)) return
+            awaitReadReady()
+            ensureCurrent(operation)
             // PAGE and OPTIONS share this gate; cancellation must finish before a new document owns the budget.
             playConfirmation.awaitCleanup()
             ensureCurrent(operation)
@@ -820,7 +953,8 @@ class LyricsEntryViewModel(
                 }
                 is Action.Offset, is Action.Clear -> error("Handled before document acquisition")
                 Action.Load, is Action.ReviewOffset -> {
-                    val draft = (action as? Action.ReviewOffset)?.draft ?: restoredOffset
+                    val draft = (action as? Action.ReviewOffset)?.draft ?:
+                        restoredOffset.takeIf { uiVisible && entryRoute != null }
                     if (draft == null) publishLoaded(currentOwner, primaryRequest, primary, translationRequest, translation,
                         translated, translationFailure, operation.noticeAfterLoad)
                     else restoreOffsetAfterRead(operation, draft, currentOwner, primaryRequest, primary,
@@ -841,15 +975,23 @@ class LyricsEntryViewModel(
                 if (!isCurrent(operation) || loaded?.primaryRequest !== primaryRequest) primaryRequest?.let(authority::retire)
                 if (isCurrent(operation)) {
                     mutableState.value = mutableState.value.copy(loading = false, saving = false,
-                        canChoose = owner != null && pendingPreview == null && mutableState.value.offsetDraftMs == null)
+                        canChoose = uiVisible && owner != null && pendingPreview == null && mutableState.value.offsetDraftMs == null)
                     updateSampler()
                 }
-            } finally { operationMemory?.close() }
+            } finally {
+                try { operationMemory?.close() }
+                finally {
+                    if (activeReadJob === attempt) activeReadJob = null
+                    if (isCurrent(operation) && canStartExternalOnline(operation.key)) requestLoad(operation.key)
+                }
+            }
         }
     }
 
     private suspend fun performOnline(operation: Work, queue: QueueSnapshot, entry: QueueEntry, maxBytes: Long) {
         if (operation.action !== Action.Load) return failCurrent(LyricsLoadIssue.INVALID_INPUT)
+        val external = externalReading?.takeIf { it.canAcquireOnline(entry.queueEntryId) }
+        external?.markOnlineAttempt(queue.generationId, queue.queueRevision, entry.queueEntryId, operation.sourceGeneration)
         val identity = LyricsPageIdentity(entry.trackKey, queue.generationId, entry.queueEntryId, operation.sourceGeneration)
         val port = onlineLyrics ?: return publishOnlineUnavailable(OnlineLyricsIssue.UNSUPPORTED, identity)
         mutableState.value = LyricsEntryUiState(identity = identity, content = LyricsPageContent.Loading, loading = true)
@@ -860,8 +1002,9 @@ class LyricsEntryViewModel(
         val available = maxBytes - VALIDATION_SCRATCH_BYTES
         if (available <= 0L) return publishOnlineUnavailable(OnlineLyricsIssue.MEMORY_LIMIT, identity)
         val request = OnlineLyricsRequest(entry.trackKey, queue.generationId, queue.queueRevision, entry.queueEntryId,
-            operation.sourceGeneration, accountId, available, allowNetwork = visible && surface == LyricsEntrySurface.PAGE &&
-                timelinePresented && playConfirmation.state.value.phase == LyricsPlayPhase.IDLE)
+            operation.sourceGeneration, accountId, available, allowNetwork = external != null ||
+                uiVisible && surface == LyricsEntrySurface.PAGE && timelinePresented &&
+                playConfirmation.state.value.phase == LyricsPlayPhase.IDLE)
         onlineAcquisition.set(request)
         val result = port.load(request) { onlineAcquisition.get() === request }
         ensureCurrent(operation)
@@ -875,6 +1018,7 @@ class LyricsEntryViewModel(
                     return publishOnlineUnavailable(OnlineLyricsIssue.SOURCE_CHANGED, identity)
                 }
                 onlineLoaded = result
+                onlineExternalIdentity = Any()
                 mutableState.value = LyricsEntryUiState(identity = identity, documentId = result.document.documentId,
                     content = LyricsPageContent.Ready(result.document, result.translation), onlineOrigin = fence.origin,
                     onlineFromCache = result.fromCache, onlineIssue = result.translationIssue)
@@ -932,7 +1076,7 @@ class LyricsEntryViewModel(
         ensureCurrent(operation)
         val result = tracks.commit(current.preferences.revision, next,
             LyricsTrackWriteFence(current.binding, current.key.generationId, current.key.revision, current.key.entryId)) {
-            writeAuthority.get() === ticket
+            uiVisible && isCurrent(operation) && writeAuthority.get() === ticket
         }
         ensureCurrent(operation)
         when (result) {
@@ -1007,7 +1151,10 @@ class LyricsEntryViewModel(
         val recovering = restoredOffset != null
         restoredOffset = null
         savedDrafts.clearOffset()
-        if (recovering && (work.value?.action is Action.Load || work.value?.action is Action.ReviewOffset)) replaceWork(null)
+        if (recovering && (work.value?.action is Action.Load || work.value?.action is Action.ReviewOffset)) {
+            replaceWork(null)
+            if (externalReading?.isCurrent == true && visible) latestKey?.let(::requestLoad)
+        }
     }
 
     private fun rememberOffset(current: Owner, previous: Loaded, value: Int) {
@@ -1080,7 +1227,7 @@ class LyricsEntryViewModel(
         val state = mutableState.value
         val clock = playback.clock() ?: return null
         val duration = clock.durationMs?.takeIf { it > 0L } ?: return null
-        if (!visible || surface != LyricsEntrySurface.PAGE || state.loading || state.saving ||
+        if (!uiVisible || surface != LyricsEntrySurface.PAGE || state.loading || state.saving ||
             state.associationPreview != null || state.offsetDraftMs != null || pendingPicker != null) return null
         val local = loaded
         if (local != null) {
@@ -1120,7 +1267,7 @@ class LyricsEntryViewModel(
         sampler = null
         val state = mutableState.value
         val document = (state.content as? LyricsPageContent.Ready)?.document
-        if (!visible || surface != LyricsEntrySurface.PAGE || !timelinePresented || playConfirmation.state.value.phase != LyricsPlayPhase.IDLE || state.loading || state.saving ||
+        if (!uiVisible || surface != LyricsEntrySurface.PAGE || !timelinePresented || playConfirmation.state.value.phase != LyricsPlayPhase.IDLE || state.loading || state.saving ||
             document?.kind != LyricsKind.SYNCHRONIZED || (loaded?.primary?.document ?: onlineLoaded?.document) !== document) {
             mutableClock.value = null
             return
@@ -1128,7 +1275,7 @@ class LyricsEntryViewModel(
         mutableClock.value = playback.clock()?.takeIf { it.queueEntryId == latestKey?.entryId }
         if (mutableClock.value?.isPlaying != true) return
         sampler = scope.launch {
-            while (visible && surface == LyricsEntrySurface.PAGE && timelinePresented && playConfirmation.state.value.phase == LyricsPlayPhase.IDLE &&
+            while (uiVisible && surface == LyricsEntrySurface.PAGE && timelinePresented && playConfirmation.state.value.phase == LyricsPlayPhase.IDLE &&
                 (mutableState.value.content as? LyricsPageContent.Ready)?.document === document) {
                 val sample = playback.clock()?.takeIf { it.queueEntryId == latestKey?.entryId } ?: break
                 mutableClock.value = sample
@@ -1140,7 +1287,7 @@ class LyricsEntryViewModel(
         }
     }
 
-    private fun canEdit(current: Owner): Boolean = visible && !closed && current.key == latestKey &&
+    private fun canEdit(current: Owner): Boolean = uiVisible && !closed && current.key == latestKey &&
         current.identity.sourceGeneration == sourceGeneration && !mutableState.value.loading && !mutableState.value.saving &&
         !playConfirmation.busy && !playback.busy
 
@@ -1148,6 +1295,7 @@ class LyricsEntryViewModel(
     // Cancellation/route exit replace Work, so the proposal's lifetime cannot retire its successful reader.
     private fun isCurrent(operation: Work): Boolean = !closed && visible && work.value === operation &&
         latestKey == operation.key && sourceGeneration == operation.sourceGeneration &&
+        (uiVisible || operation.action === Action.Load) &&
         (operation.action !is Action.Resume || operation.action.draft.route === entryRoute) &&
         (operation.action !is Action.ReviewOffset || entryRoute != null)
 
@@ -1193,6 +1341,7 @@ class LyricsEntryViewModel(
 
     fun close() {
         if (closed) return
+        externalReading?.close()
         presentation?.close()
         leave()
         closed = true
@@ -1203,6 +1352,9 @@ class LyricsEntryViewModel(
 
     private data class QueueKey(val generationId: String, val revision: Long, val entryId: String)
     private data class SourceKey(val generationId: String, val entryId: String)
+    private data class ExternalOnlineAttempt(val generation: String, val revision: Long, val entry: String, val source: Long) {
+        override fun toString(): String = "<external-current-track-read-epoch>"
+    }
     private class EntryRoute
     private fun QueueKey.sourceKey() = SourceKey(generationId, entryId)
     private fun QueueSnapshot.key(): QueueKey? = currentEntryId?.let { QueueKey(generationId, queueRevision, it) }
@@ -1231,7 +1383,10 @@ class LyricsEntryViewModel(
         val preferences: LyricsTrackPreferences, val binding: LyricsLoadBinding)
     private class Loaded(val owner: Owner, val primaryRequest: LyricsLoadRequest, val primary: LocalLyricsLoadResult.Loaded,
         val translationRequest: LyricsLoadRequest?, val translation: LocalLyricsLoadResult.Loaded?,
-        val translated: LyricsTranslation?, val translationFailure: LyricsLoadFailure?)
+        val translated: LyricsTranslation?, val translationFailure: LyricsLoadFailure?) {
+        // The external scheduler may retain this token; it never retains a retired full document.
+        val externalIdentity = Any()
+    }
 
     /** Memory only: no request authority, parsed document, timeline, SavedState or replayable commit. */
     private sealed class SuspendedDraft(val route: EntryRoute, val key: QueueKey, val sourceGeneration: Long,

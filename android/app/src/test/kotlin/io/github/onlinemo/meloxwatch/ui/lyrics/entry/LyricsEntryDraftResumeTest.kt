@@ -881,6 +881,47 @@ class LyricsEntryDraftResumeTest {
 @Config(sdk = [30], manifest = Config.NONE, application = Application::class)
 @OptIn(ExperimentalCoroutinesApi::class)
 class LyricsEntryProcessStateTest {
+    @Test fun aNewActivityRegistryDoesNotReplaceTheAuthenticatedApplicationReading(): Unit = runTest {
+        val fixture = fixture()
+        val business = fixture.vm
+        val first = Robolectric.buildActivity(EntryDraftRestoreActivity::class.java).create().start().resume()
+        var firstDestroyed = false
+        var second: org.robolectric.android.controller.ActivityController<EntryDraftRestoreActivity>? = null
+        var external: LyricsEntryViewModel.ExternalReading? = null
+        try {
+            val draft = ViewModelProvider(first.get(), lyricsEntrySavedStateFactory())[LyricsEntrySavedStateHolder::class.java]
+            business.bindSavedDraftState(draft.handle)
+            val presentation = fixture.show(LyricsEntrySurface.PAGE)
+            runCurrent()
+            external = business.bindExternalReading()
+            val document = checkNotNull(business.readExternal()).document
+            val saved = Bundle()
+            presentation.close()
+            first.pause().saveInstanceState(saved).stop().destroy()
+            firstDestroyed = true
+            runCurrent()
+            val successor = Robolectric.buildActivity(EntryDraftRestoreActivity::class.java).create(saved).start().resume()
+            second = successor
+            val successorDraft = ViewModelProvider(successor.get(), lyricsEntrySavedStateFactory())[LyricsEntrySavedStateHolder::class.java]
+            business.bindSavedDraftState(successorDraft.handle)
+            val successorPresentation = fixture.show(LyricsEntrySurface.PAGE)
+            runCurrent()
+            assertSame(business, fixture.vm)
+            assertSame(document, business.readExternal()?.document)
+            assertTrue(external.isCurrent)
+            assertEquals(1, fixture.loads)
+            assertEquals(0, fixture.tracks.commits)
+            assertTrue(fixture.playback.dispatched.isEmpty())
+            successorPresentation.close()
+        } finally {
+            external?.close()
+            fixture.vm.close()
+            second?.pause()?.stop()?.destroy()
+            if (!firstDestroyed) first.pause().stop().destroy()
+            runCurrent()
+        }
+    }
+
     @Test(timeout = 20_000L)
     fun activityRegistryRestoresAnUnsavedOffsetIntoAFreshOwnerWithoutCommands(): Unit = runTest {
         val fixture = fixture()
@@ -889,7 +930,8 @@ class LyricsEntryProcessStateTest {
         var firstDestroyed = false
         var second: org.robolectric.android.controller.ActivityController<EntryDraftRestoreActivity>? = null
         try {
-            fixture.vm = ViewModelProvider(first.get(), lyricsEntryViewModelFactory(fixture::createViewModel))[LyricsEntryViewModel::class.java]
+            val firstDraft = ViewModelProvider(first.get(), lyricsEntrySavedStateFactory())[LyricsEntrySavedStateHolder::class.java]
+            fixture.vm = fixture.createViewModel(firstDraft.handle)
             fixture.show()
             runCurrent()
             assertTrue(fixture.vm.beginOffset())
@@ -903,11 +945,13 @@ class LyricsEntryProcessStateTest {
             val saved = Bundle()
             first.pause().saveInstanceState(saved).stop().destroy()
             firstDestroyed = true
+            old.close()
             runCurrent()
             fixture.authority = LyricsLoadAuthority()
             val successor = Robolectric.buildActivity(EntryDraftRestoreActivity::class.java).create(saved).start().resume()
             second = successor
-            fixture.vm = ViewModelProvider(successor.get(), lyricsEntryViewModelFactory(fixture::createViewModel))[LyricsEntryViewModel::class.java]
+            val successorDraft = ViewModelProvider(successor.get(), lyricsEntrySavedStateFactory())[LyricsEntrySavedStateHolder::class.java]
+            fixture.vm = fixture.createViewModel(successorDraft.handle)
             assertNotSame(old, fixture.vm)
             val loads = fixture.loads
             runCurrent()
@@ -1271,8 +1315,8 @@ private class DraftResumeFixture(private val scope: CoroutineScope, private val 
             translationMatcher = LyricsTranslationMatcher(LyricsLimits(), dispatcher),
             scopeOverride = scope,
             awaitDisplayFrame = {},
-            savedStateHandle = state,
-        )
+            savedStateHandle = SavedStateHandle(),
+        ).also { it.bindSavedDraftState(state) }
     }
 
     fun recreate() {

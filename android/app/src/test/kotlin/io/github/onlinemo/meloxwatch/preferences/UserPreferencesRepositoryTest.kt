@@ -65,6 +65,35 @@ class UserPreferencesRepositoryTest {
     val temporaryFolder = TemporaryFolder()
     private val sessions = mutableListOf<StoreSession>()
 
+    @Test(timeout = 30000L)
+    fun schemaFivePreservesHelpAndDefaultsBluetoothOffUntilAnExplicitSave() = runBlocking {
+        val file = preferencesFile()
+        writeFixture(file, completeFixture(5, 11L).toMutablePreferences().apply {
+            this[booleanPreferencesKey("help_show_tips")] = false
+            this[intPreferencesKey("guide_step")] = 2
+            this[intPreferencesKey("privacy_notice_version")] = HelpPreferenceLimits.PRIVACY_NOTICE_VERSION
+            this[stringPreferencesKey("privacy_notice_choice")] = PrivacyNoticeChoice.LATER.name
+        })
+        val bytes = file.readBytes()
+        val first = open(file)
+        val before = first.ready().preferences
+        assertFalse(before.bluetoothLyricsEnabled)
+        assertEquals(2, before.help.onboardingStep)
+        assertFalse(before.help.showTips)
+        assertEquals(PrivacyNoticeChoice.LATER, before.help.privacyNoticeChoice)
+        assertArrayEquals(bytes, file.readBytes())
+        val saved = (first.repository.save(before.revision,
+            before.asDraft().copy(bluetoothLyricsEnabled = true)) as PreferencesWriteResult.Saved).preferences
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved, reopened.ready().preferences)
+        assertEquals(before.help, reopened.ready().preferences.help)
+        assertTrue(reopened.ready().preferences.bluetoothLyricsEnabled)
+        val untouched = file.readBytes()
+        assertTrue(reopened.repository.save(before.revision, before.asDraft()) is PreferencesWriteResult.Conflict)
+        assertArrayEquals(untouched, file.readBytes())
+    }
+
     @After
     fun closeStores() = runBlocking {
         sessions.asReversed().forEach { session -> session.close() }
@@ -791,6 +820,7 @@ class UserPreferencesRepositoryTest {
             this[intPreferencesKey("privacy_notice_version")] = 0
             this[stringPreferencesKey("privacy_notice_choice")] = "UNANSWERED"
         }
+        if (schema >= 6) this[booleanPreferencesKey("bluetooth_lyrics_enabled")] = false
         sorts.forEach { (context, sort) ->
             val suffix = context.name.lowercase(java.util.Locale.ROOT)
             this[stringPreferencesKey("library_sort_" + suffix)] = sort.field.name

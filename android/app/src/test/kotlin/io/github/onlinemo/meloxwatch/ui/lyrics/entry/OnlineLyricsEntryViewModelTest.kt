@@ -11,6 +11,7 @@ import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsDocumentInput
 import io.github.onlinemo.meloxwatch.data.lyrics.load.LyricsLoadIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsFence
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsOrigin
+import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsPort
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsRepository
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsRepositoryFixture
@@ -83,6 +84,75 @@ import org.robolectric.annotation.Config
 class OnlineLyricsEntryViewModelTest {
     @get:Rule val temporary = TemporaryFolder()
     @Before fun initializeSyntheticHttp() { OkHttp.initialize(RuntimeEnvironment.getApplication()) }
+
+    @Test fun externalReadingAuthorizesOnlyOneFirstReadyCurrentTrackAttemptAfterCacheFailure(): Unit = runTest {
+        val requests = ArrayList<OnlineLyricsRequest>()
+        val signals = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+        val port = object : OnlineLyricsPort {
+            override val changes: Flow<Unit> = signals
+            override suspend fun load(request: OnlineLyricsRequest, isCurrent: () -> Boolean): OnlineLyricsResult {
+                requests += request
+                return OnlineLyricsResult.Unavailable(OnlineLyricsIssue.OFFLINE)
+            }
+            override suspend fun validate(loaded: OnlineLyricsResult.Loaded) = false
+        }
+        val fixture = fixture(port = port)
+        var currentTrackReady = false
+        val external = fixture.vm.bindExternalReading {
+            currentTrackReady && it == fixture.queues.current.currentEntryId
+        }
+        try {
+            runCurrent()
+            assertEquals(1, requests.size)
+            assertFalse(requests.single().allowNetwork)
+            currentTrackReady = true
+            fixture.playback.signals.emit(Unit)
+            runCurrent()
+            assertEquals(2, requests.size)
+            assertTrue(requests.last().allowNetwork)
+            repeat(3) { fixture.playback.signals.emit(Unit); runCurrent() }
+            assertEquals(2, requests.size)
+            assertNull(fixture.vm.mediaClock.value)
+            assertEquals(0, fixture.localCalls)
+        } finally { external.close(); fixture.vm.close(); runCurrent() }
+    }
+
+    @Test fun missingOnlineAccountCannotCreateAnAutomaticExternalReadLoop(): Unit = runTest {
+        val fixture = fixture(first = QueueEntry("lyrics-entry-one", TrackKey("netease", "201"), 0L, 0L))
+        val external = fixture.vm.bindExternalReading { true }
+        try {
+            runCurrent()
+            assertEquals(OnlineLyricsIssue.LOGIN_REQUIRED, fixture.vm.uiState.value.onlineIssue)
+            repeat(3) { fixture.playback.signals.emit(Unit); runCurrent() }
+            assertEquals(0, fixture.online.requests.size)
+            assertNull(fixture.vm.readExternal())
+            assertEquals(0, fixture.localCalls)
+        } finally { external.close(); fixture.vm.close(); runCurrent() }
+    }
+
+    @Test fun authenticatedOnlineReadingReusesTheDocumentWhenItsUiSamplerStops(): Unit = runTest {
+        val fixture = fixture()
+        val external = fixture.vm.bindExternalReading { it == fixture.queues.current.currentEntryId }
+        try {
+            runCurrent()
+            assertTrue(fixture.online.requests.single().allowNetwork)
+            val document = checkNotNull(fixture.vm.readExternal()).document
+            fixture.playback.playing = true
+            fixture.vm.onVisible(LyricsEntrySurface.PAGE)
+            runCurrent()
+            fixture.vm.onHidden()
+            runCurrent()
+            val reads = fixture.playback.clockReads
+            advanceTimeBy(5000L)
+            runCurrent()
+            assertEquals(reads, fixture.playback.clockReads)
+            assertNull(fixture.vm.mediaClock.value)
+            assertSame(document, fixture.vm.readExternal()?.document)
+            assertEquals(1, fixture.online.requests.size)
+            assertEquals(0, fixture.localCalls)
+            assertTrue(fixture.playback.dispatched.isEmpty())
+        } finally { external.close(); fixture.vm.close(); runCurrent() }
+    }
 
     @Test fun theProductionNativeRepositoryFeedsTheOriginalEntryAndTimelineWithNoLocalAuthority() = runTest {
         OnlineLyricsRepositoryFixture(temporary.newFolder(), this).use { repository ->

@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.data.bluetoothlyrics.WatchBluetoothLyricsController
+import io.github.onlinemo.meloxwatch.ui.lyrics.entry.ApplicationLyricsEntryOwner
 import io.github.onlinemo.meloxwatch.data.about.AppLicenseRepository
 import io.github.onlinemo.meloxwatch.data.about.DiagnosticArea
 import io.github.onlinemo.meloxwatch.data.about.DiagnosticCode
@@ -170,6 +172,18 @@ class MeloXApplication : Application() {
         OnlineCatalogFeatureOwner(this, ::onlineMusic, { artworks }, { boundedHttpGets }, ::clearOnlineLyricsAccount)
     }
     val lyricsMemory by lazy { LyricsMemoryOwner() }
+    private val lyricsEntryRuntime = lazy { ApplicationLyricsEntryOwner(this, ::stopBluetoothLyricsIfStarted) }
+    internal val lyricsEntryOwner get() = lyricsEntryRuntime.value
+    private val bluetoothLyricsOwner = lazy { WatchBluetoothLyricsController(this) }
+    internal val bluetoothLyrics get() = bluetoothLyricsOwner.value
+
+    internal fun stopBluetoothLyricsIfStarted() {
+        if (bluetoothLyricsOwner.isInitialized()) bluetoothLyricsOwner.value.stop()
+    }
+
+    internal suspend fun quiesceBluetoothLyricsIfStarted() {
+        if (bluetoothLyricsOwner.isInitialized()) bluetoothLyricsOwner.value.quiesce()
+    }
     private val onlineLyricsOwner = lazy {
         OnlineLyricsFeatureOwner(this, ::onlineMusic, runtimePlaybackResources, onlineAccountChanges, metingRuntime)
     }
@@ -196,6 +210,8 @@ class MeloXApplication : Application() {
     }
 
     override fun onTerminate() {
+        if (bluetoothLyricsOwner.isInitialized()) bluetoothLyricsOwner.value.close()
+        if (lyricsEntryRuntime.isInitialized()) lyricsEntryRuntime.value.close()
         diagnosticQueue.close()
         if (applicationScopeOwner.isInitialized()) applicationScopeOwner.value.cancel()
         try { closeOnlineResources() } finally { super.onTerminate() }

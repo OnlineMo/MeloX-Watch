@@ -10,6 +10,8 @@ v1 为普通 ZIP：首项 `manifest.json`；按 `BackupRecordKind` 固定类型�
 
 排除凭据、账号/配对密钥、token、Keystore、系统 grant、在线/传输端点、运行中定时器、诊断身份、缓存及音频。不把绝对路径或 URI 字符串恢复为权限。可移植的内容/相对引用只作提示，不据此新开来源。歌词的摘要和编码是一对独立内容引用，文档/来源/URI 提示各自可缺失；清掉不可移植提示不能丢掉内容关联。
 
+[F-084 外部歌词合同](LP-08-F084-bluetooth-lyrics.md)新增的 player schema 6 activation Boolean 也排除；portable backup schema 1 与字段白名单保持不变，恢复明确关闭。配对地址、数字、密钥与接收能力只在内存，不随设置/备份恢复。既有唯一服务关闭会等待外部 read 的实际退出和 transport 退休，不能在 socket 已关而歌词 provider 仍退出时放行播放 owner；此源提案和原恢复/设备验收仍分别记未完成。
+
 输入预算为逻辑压缩 100 MiB/展开 200 MiB、资源另计 200 MiB、目录 32,768 项、JSON 深度 16/字段 128、每行 1 MiB、每批 100 行/2 MiB。资源分别受既有原生 owner 的字体、图片、主题及歌词限额约束。新 input/stage/resource/ZIP 写入检查同一 512 MiB 剩余空间保留量；文档输入在实际 FD 长度预检并每 64 KiB 复核。预算是归档输入及工作窗口限制，完整库/队列没有 10,000 项或当前页容量限制。
 
 ## 2. 捕获与严格预览

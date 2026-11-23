@@ -93,6 +93,7 @@ class ProbePlaybackService : MediaSessionService() {
     private var sleepTimer: ServiceSleepTimer? = null
     private var dspSettingsOwner: ServiceDspSettingsOwner? = null
     private var playbackStartup: PlaybackStartup? = null
+    private var lyricsPlaybackBinding: AutoCloseable? = null
     private var timerSaveCommand: Job? = null
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var activeCommand: Job? = null
@@ -188,6 +189,11 @@ class ProbePlaybackService : MediaSessionService() {
             onManualTrackChange = { sleepTimer?.onManualTrackChange() },
             onRetainedTrackBinding = { previous, current -> sleepTimer?.onRetainedTrackBinding(previous, current) },
             beforeNaturalAdvance = { ending -> sleepTimer?.beforeNaturalAdvance(ending) ?: true },
+            mayContinuousPlayback = {
+                sleepTimer?.state?.value?.let { it.initialized && it.timer.active == null } == true
+            },
+            mayBeginContinuousRound = statistics::canBeginContinuousRound,
+            onContinuousRoundChanged = statistics::beginContinuousRound,
             sourceResolver = SourcePlaybackResolver(LocalPlaybackResolver(application)::resolve) {
                 application.onlineMusic().playbackResolver
             },
@@ -202,6 +208,7 @@ class ProbePlaybackService : MediaSessionService() {
             },
         )
         coordinator = queues
+        statistics.onContinuousRoundReady = queues::refreshContinuousBoundary
         owner.attach(queues, statistics)
         onlineAccountObserver = serviceScope.launch {
             application.onlineAccountChanges.revision.collect { if (!destroyed) queues.onAccountStateChanged() }
@@ -218,7 +225,10 @@ class ProbePlaybackService : MediaSessionService() {
                 queues.pauseForSleepTimer()
             },
             cancelResumeIntent = owner::userPause,
-            onChanged = ::refreshSessionState,
+            onChanged = {
+                queues.refreshContinuousBoundary()
+                refreshSessionState()
+            },
         )
         sleepTimer = timer
         val artwork = LocalSessionBitmapLoader(this, application.localProviderIo, serviceScope)
@@ -327,6 +337,9 @@ class ProbePlaybackService : MediaSessionService() {
                 throw CancellationException("Playback service owner retired")
             }
             initializationComplete = true
+            if (lyricsPlaybackBinding == null) {
+                lyricsPlaybackBinding = application.lyricsEntryOwner.playback.bindService(queues.sessionPlayer)
+            }
             dsp.observe()
             owner.observePreferences()
         } finally {
@@ -368,6 +381,8 @@ class ProbePlaybackService : MediaSessionService() {
         dspSettingsOwner?.close()
         dspSettingsOwner = null
         val application = application as MeloXApplication
+        val lyricsBinding = lyricsPlaybackBinding
+        lyricsPlaybackBinding = null
         val pendingJobs = listOfNotNull(activeCommand, initialization, extrasObserver, routeStateObserver,
             seekStateObserver, commandPreferencesObserver, onlineAccountObserver, resourceStatusObserver, timerSaveCommand).distinct()
         pendingJobs.forEach { it.cancel() }
@@ -390,6 +405,8 @@ class ProbePlaybackService : MediaSessionService() {
             if (first == null) failure = error else if (first !== error) first.addSuppressed(error)
         }
         fun cleanup(action: () -> Unit) { try { action() } catch (error: Throwable) { captureFailure(error) } }
+        cleanup { application.stopBluetoothLyricsIfStarted() }
+        cleanup { lyricsBinding?.close() }
         cleanup { owner?.userPause() }
         cleanup { timer?.detach() }
         cleanup { session?.player?.pause() }
@@ -405,6 +422,7 @@ class ProbePlaybackService : MediaSessionService() {
             }
             try {
                 for (pending in pendingJobs) finish { pending.join() }
+                finish { application.quiesceBluetoothLyricsIfStarted() }
                 val producer = retiredPlaylistProducer
                 if (producer != null) finish {
                     if (!closePlaylistProducer(producer)) throw FileOperationException(FileOperationIssue.PLAYBACK_RELEASE_UNCONFIRMED)

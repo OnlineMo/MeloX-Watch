@@ -148,6 +148,7 @@ class DataStoreUserPreferencesRepository internal constructor(
                                 gaplessPlayback = draft.gaplessPlayback,
                                 controls = draft.controls,
                                 help = draft.help,
+                                bluetoothLyricsEnabled = draft.bluetoothLyricsEnabled,
                             ),
                         )
                     }

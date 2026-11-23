@@ -11,15 +11,18 @@ import androidx.media3.common.util.UnstableApi
 import io.github.onlinemo.meloxwatch.data.listening.ListeningException
 import io.github.onlinemo.meloxwatch.data.listening.ListeningIssue
 import io.github.onlinemo.meloxwatch.data.listening.ListeningRepository
+import io.github.onlinemo.meloxwatch.data.listening.ListeningEpochs
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import java.time.ZoneId
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -34,10 +37,19 @@ internal class ServiceListeningObserver(
     private val scope: CoroutineScope,
     private val onFailure: (ListeningIssue) -> Unit,
 ) {
+    var onContinuousRoundReady: () -> Unit = {}
     private data class ActiveRound(val entryId: String, val progress: ListeningProgressRound)
+    private data class CapturedSample(val sample: ListeningSample?, val reset: Boolean = false)
+    private class StartingRound(val entry: QueueEntry, val epochs: ListeningEpochs) {
+        val samples = mutableListOf<CapturedSample>()
+        var saturated = false
+    }
     private val pending = ArrayDeque<ListeningProgressRound>()
     private var current: ActiveRound? = null
     private var deferred: ActiveRound? = null
+    private var starting: StartingRound? = null
+    private var automaticStart: Job? = null
+    private var lastKnownEpochs: ListeningEpochs? = null
     private var sampling: Job? = null
     private var detached = false
     private var attachedPlayer: Player? = player
@@ -54,19 +66,19 @@ internal class ServiceListeningObserver(
         }
         override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
             if (!isCurrentBinding(bound, generation)) return
-            val round = current
-            if (round != null && oldPosition.mediaItem?.mediaId == round.entryId) {
+            val entryId = current?.entryId ?: starting?.entry?.queueEntryId
+            if (entryId != null && oldPosition.mediaItem?.mediaId == entryId) {
                 capture(ListeningSample(System.currentTimeMillis(), SystemClock.elapsedRealtime(), ZoneId.systemDefault().id,
                     oldPosition.positionMs.coerceAtLeast(0L), false, bound.playbackParameters.speed))
+                resetCurrent(sampleForCurrent())
             }
-            current?.progress?.reset(sampleForCurrent())
         }
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
             if (!isCurrentBinding(bound, generation)) return
             val sample = sampleForCurrent()
-            val oldSpeed = current?.progress?.baselineSpeed
+            val oldSpeed = current?.progress?.baselineSpeed ?: starting?.samples?.lastOrNull()?.sample?.speed
             if (sample != null && oldSpeed != null) capture(sample.copy(speed = oldSpeed))
-            current?.progress?.reset(sample)
+            resetCurrent(sample)
             requests.trySend(Unit)
         }
         override fun onPlayerError(error: PlaybackException) {
@@ -77,10 +89,19 @@ internal class ServiceListeningObserver(
         }
     }
     private val writer: Job
+    private val epochObserver: Job?
 
     init {
         check(Looper.myLooper() == Looper.getMainLooper() && player.applicationLooper == Looper.getMainLooper())
         listener = backendListener(player, backendGeneration).also(player::addListener)
+        epochObserver = repository.observedEpochs?.let { epochs ->
+            scope.launch(Dispatchers.Main.immediate) {
+                epochs.collect { observed ->
+                    if (observed != null) lastKnownEpochs = observed
+                    if (!detached) onContinuousRoundReady()
+                }
+            }
+        }
         writer = scope.launch(Dispatchers.Main.immediate) {
             while (isActive) {
                 requests.receive()
@@ -91,6 +112,8 @@ internal class ServiceListeningObserver(
 
     suspend fun beginRound(entry: QueueEntry) {
         if (detached) return
+        automaticStart?.join()
+        if (detached) return
         current?.let { active ->
             if (active.progress.hasUnacknowledgedProgress) pending.addLast(active.progress)
         }
@@ -99,6 +122,7 @@ internal class ServiceListeningObserver(
         requests.trySend(Unit)
         try {
             val epochs = repository.state()
+            lastKnownEpochs = epochs
             if (detached) return
             val round = ActiveRound(entry.queueEntryId, ListeningProgressRound(UUID.randomUUID().toString(),
                 entry.trackKey, entry.displayName, epochs, entry.durationMs))
@@ -112,6 +136,70 @@ internal class ServiceListeningObserver(
             }
         } catch (error: CancellationException) { throw error }
         catch (error: Exception) { onFailure((error as? ListeningException)?.issue ?: ListeningIssue.STORAGE_UNAVAILABLE) }
+    }
+
+    /** 一个未完成 epoch 读取与最多100个真实样本；它未释放前不能再授权自动边界。 */
+    fun canBeginContinuousRound(): Boolean = !detached && starting == null && automaticStart == null &&
+        deferred == null && pending.size < MAX_PENDING_ROUNDS &&
+        (repository.observedEpochs?.value != null || repository.observedEpochs == null && lastKnownEpochs != null)
+
+    /**
+     * 真实 AUTO 回调冻结已确认 epoch 并捕获新轮次；异步新读只供后续轮次使用。
+     * 短曲在 IO 期间结束也保留其真实采样；
+     * 不重启轮次、不复用旧 epoch，不用媒体位移猜未观测聆听。只由队列过轨 witness 调用一次。
+     */
+    fun beginContinuousRound(entry: QueueEntry, positionMs: Long) {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (detached || starting != null || automaticStart != null || deferred != null || pending.size >= MAX_PENDING_ROUNDS) {
+            onFailure(ListeningIssue.STORAGE_UNAVAILABLE)
+            return
+        }
+        current?.let { if (it.progress.hasUnacknowledgedProgress) pending.addLast(it.progress) }
+        current = null
+        deferred = null
+        // 清除可在已授权的播放线程过轨后先失效缓存；此时仍冻结旧已确认 epoch，不把旧采样带回新代次。
+        val epochs = repository.observedEpochs?.value ?: lastKnownEpochs
+        if (epochs == null) {
+            onFailure(ListeningIssue.STORAGE_UNAVAILABLE)
+            return
+        }
+        val captured = StartingRound(entry, epochs)
+        starting = captured
+        sampleForCurrent()?.let { captured.samples += CapturedSample(it.copy(positionMs = positionMs.coerceAtLeast(0L)), reset = true) }
+        requests.trySend(Unit)
+        val job = scope.launch(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
+            try {
+                lastKnownEpochs = repository.state()
+                if (!detached && starting === captured) sampleForCurrent()?.let { recordStartingSample(CapturedSample(it)) }
+                val round = ActiveRound(entry.queueEntryId, ListeningProgressRound(UUID.randomUUID().toString(),
+                    entry.trackKey, entry.displayName, captured.epochs, entry.durationMs))
+                for (observed in captured.samples) {
+                    if (observed.reset) round.progress.reset(observed.sample)
+                    else observed.sample?.let { round.progress.sample(it) }
+                }
+                if (detached) {
+                    if (round.progress.hasUnacknowledgedProgress && pending.size < MAX_PENDING_ROUNDS) pending.addLast(round.progress)
+                } else if (pending.size >= MAX_PENDING_ROUNDS) {
+                    deferred = round
+                    onFailure(ListeningIssue.STORAGE_UNAVAILABLE)
+                } else {
+                    current = round
+                }
+                requests.trySend(Unit)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { onFailure((error as? ListeningException)?.issue ?: ListeningIssue.STORAGE_UNAVAILABLE) }
+            finally {
+                if (starting === captured) starting = null
+                automaticStart = null
+                if (!detached) {
+                    if (attachedPlayer?.isPlaying == true) startSampling()
+                    onContinuousRoundReady()
+                }
+            }
+        }
+        automaticStart = job
+        job.start()
+        if (!detached && attachedPlayer?.isPlaying == true) startSampling()
     }
 
     /** Capture and stop the sampler before release; the durable round remains the same. */
@@ -128,7 +216,7 @@ internal class ServiceListeningObserver(
             attachedPlayer = null
             listener = null
             sampling?.cancel(); sampling = null
-            current?.progress?.reset(null)
+            resetCurrent(null)
             requests.trySend(Unit)
             if (bound != null && oldListener != null) bound.removeListener(oldListener)
         }
@@ -140,18 +228,24 @@ internal class ServiceListeningObserver(
         backendGeneration += 1L
         attachedPlayer = backend
         listener = backendListener(backend, backendGeneration).also(backend::addListener)
-        current?.progress?.reset(sampleForCurrent())
+        resetCurrent(sampleForCurrent())
         if (backend.isPlaying) startSampling()
     }
 
     fun detach() {
         if (detached) return
         try { unbindBackend() }
-        finally { detached = true; deferred = null }
+        finally {
+            detached = true
+            deferred = null
+            epochObserver?.cancel()
+        }
     }
 
     suspend fun close() {
         check(detached)
+        automaticStart?.join()
+        epochObserver?.join()
         writer.cancelAndJoin()
         requests.close()
         flush()
@@ -169,14 +263,14 @@ internal class ServiceListeningObserver(
 
     private fun capture() {
         if (detached) return
-        val round = current ?: return
-        val sample = sampleForCurrent() ?: run { round.progress.reset(null); return }
+        if (current == null && starting == null) return
+        val sample = sampleForCurrent() ?: run { resetCurrent(null); return }
         capture(sample)
     }
 
     private fun capture(sample: ListeningSample) {
         if (detached) return
-        val round = current ?: return
+        val round = current ?: run { recordStartingSample(CapturedSample(sample)); return }
         try {
             val hadProgress = round.progress.hasProgress
             round.progress.sample(sample)
@@ -189,10 +283,29 @@ internal class ServiceListeningObserver(
 
     private fun sampleForCurrent(): ListeningSample? {
         val bound = attachedPlayer ?: return null
-        if (detached || bound.currentMediaItem?.mediaId != current?.entryId) return null
+        val entryId = current?.entryId ?: starting?.entry?.queueEntryId ?: return null
+        if (detached || bound.currentMediaItem?.mediaId != entryId) return null
         return ListeningSample(System.currentTimeMillis(), SystemClock.elapsedRealtime(), ZoneId.systemDefault().id,
             bound.currentPosition.coerceAtLeast(0L), bound.isPlaying, bound.playbackParameters.speed,
             bound.duration.takeIf { it != C.TIME_UNSET && it > 0L })
+    }
+
+    private fun resetCurrent(sample: ListeningSample?) {
+        current?.progress?.reset(sample)
+        if (current == null) recordStartingSample(CapturedSample(sample, reset = true))
+    }
+
+    private fun recordStartingSample(sample: CapturedSample) {
+        val captured = starting ?: return
+        if (captured.samples.size < MAX_STARTING_SAMPLES) captured.samples += sample
+        else {
+            // 达上限仍保留最后真实观察，但不把丢失的中间观察猜成连续聆听。
+            captured.samples[captured.samples.lastIndex] = sample.copy(reset = true)
+            if (!captured.saturated) {
+                captured.saturated = true
+                onFailure(ListeningIssue.STORAGE_UNAVAILABLE)
+            }
+        }
     }
 
     private suspend fun flush() = writes.withLock {
@@ -226,5 +339,6 @@ internal class ServiceListeningObserver(
         private const val SAMPLE_INTERVAL_MS = 1000L
         private const val WRITE_INTERVAL_MS = 5000L
         private const val MAX_PENDING_ROUNDS = 8
+        private const val MAX_STARTING_SAMPLES = 100
     }
 }

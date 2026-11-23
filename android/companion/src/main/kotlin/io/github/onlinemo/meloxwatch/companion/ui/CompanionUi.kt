@@ -44,6 +44,7 @@ internal fun CompanionUi(
     licenseState: CompanionLicensesState, licenses: CompanionLicensesViewModel,
     onExit: () -> Unit, selectAudio: () -> Unit,
     selectIcon: (CompanionIconRole, String, String) -> Unit,
+    onBluetoothLyrics: () -> Unit = {},
 ) {
     DisposableEffect(state.screen, licenses) {
         if (state.screen == CompanionScreen.LICENSES) licenses.show() else licenses.hide()
@@ -106,7 +107,12 @@ internal fun CompanionUi(
                 }
             }
             when (state.screen) {
-                CompanionScreen.CONNECTION -> connectionItems(state, model, selectAudio)
+                CompanionScreen.CONNECTION -> {
+                    item(key = "bluetooth-lyrics-receiver") {
+                        MeloXAction(stringResource(R.string.bluetooth_lyrics_receiver_title), onBluetoothLyrics)
+                    }
+                    connectionItems(state, model, selectAudio)
+                }
                 CompanionScreen.LIBRARY -> libraryItems(state, model)
                 CompanionScreen.PLAYLIST -> playlistItems(state, model)
                 CompanionScreen.DISPLAY -> displayItems(state, model)

@@ -396,8 +396,9 @@ def acquire(root, state, legacy):
     environment['CI_DEPENDENCY_PACKAGE_REQUEST_SHA256'] = admission['request_sha256']
     command = legacy.gradle_command(writer_tasks(request) + [ACQUIRE_TASK, COLLECTOR]) + [
         '--init-script', '../scripts/ci/dependency-acquire-packages.gradle', '--write-verification-metadata',
-        'sha256', '--write-locks', '--rerun-tasks', '--no-build-cache', '--continue']
+        'sha256', '--write-locks', '--rerun-tasks', '--no-build-cache', '--continue', '--info']
     # Collect independent compiler/lint failures in one bounded run; any failed consumer still rejects all inputs.
+    # Expose configuration and dependency progress before tasks start; the no-output guard excludes CI heartbeats.
     legacy.run_gradle(command, cwd=Path(root) / 'android', env=environment, phase='package-acquire',
                       build_sha=state['binding']['build_sha'], total_deadline=state['deadline_monotonic_seconds'],
                       overall_limit_seconds=state['overall_limit_seconds'])
