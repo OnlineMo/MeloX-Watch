@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.ui.debugmask
 
+import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,12 +25,35 @@ import io.github.onlinemo.meloxwatch.BuildConfig
 internal const val DEBUG_ROUND_MASK_ACTION = "io.github.onlinemo.meloxwatch.debug.ROUND_MASK"
 internal const val DEBUG_ROUND_MASK_ENABLED = "io.github.onlinemo.meloxwatch.debug.round_mask_enabled"
 
-internal fun debugRoundMaskRequested(intent: Intent?): Boolean {
+private const val DEBUG_ROUND_MASK_PREFERENCES = "melox_debug_round_mask"
+private const val DEBUG_ROUND_MASK_SAVED_ENABLED = "enabled"
+
+/** Missing or malformed settings leave the existing crop unchanged. */
+@Suppress("DEPRECATION")
+internal fun debugRoundMaskRequested(intent: Intent?): Boolean? {
+    if (!BuildConfig.DEBUG) return null
+    val source = intent ?: return null
+    if (source.action != DEBUG_ROUND_MASK_ACTION) return null
+    return try { source.extras?.get(DEBUG_ROUND_MASK_ENABLED) as? Boolean }
+    catch (_: RuntimeException) { null }
+}
+
+internal fun readDebugRoundMask(context: Context): Boolean {
     if (!BuildConfig.DEBUG) return false
-    val source = intent ?: return false
-    if (source.action != DEBUG_ROUND_MASK_ACTION) return false
-    return try { source.getBooleanExtra(DEBUG_ROUND_MASK_ENABLED, false) }
-    catch (_: RuntimeException) { false }
+    return try {
+        context.getSharedPreferences(DEBUG_ROUND_MASK_PREFERENCES, Context.MODE_PRIVATE)
+            .getBoolean(DEBUG_ROUND_MASK_SAVED_ENABLED, false)
+    } catch (_: RuntimeException) { false }
+}
+
+/** Schedule this private Debug value without blocking an Activity callback on a disk commit. */
+internal fun saveDebugRoundMask(context: Context, enabled: Boolean): Boolean {
+    if (!BuildConfig.DEBUG) return false
+    return try {
+        context.getSharedPreferences(DEBUG_ROUND_MASK_PREFERENCES, Context.MODE_PRIVATE)
+            .edit().putBoolean(DEBUG_ROUND_MASK_SAVED_ENABLED, enabled).apply()
+        true
+    } catch (_: RuntimeException) { false }
 }
 
 /** Keep the Debug composition stable while toggling the crop; Release uses the original content. */

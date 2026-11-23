@@ -204,6 +204,8 @@ import io.github.onlinemo.meloxwatch.data.about.ProjectChannels
 import io.github.onlinemo.meloxwatch.data.about.ProjectVersion
 import io.github.onlinemo.meloxwatch.ui.debugmask.DebugRoundMaskFrame
 import io.github.onlinemo.meloxwatch.ui.debugmask.debugRoundMaskRequested
+import io.github.onlinemo.meloxwatch.ui.debugmask.readDebugRoundMask
+import io.github.onlinemo.meloxwatch.ui.debugmask.saveDebugRoundMask
 import java.util.Locale
 import kotlin.math.roundToInt
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -244,7 +246,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        debugRoundMask.value = debugRoundMaskRequested(intent)
+        debugRoundMask.value = readDebugRoundMask(this)
+        // A recreation reads the latest saved setting instead of replaying an old mask action.
+        if (savedInstanceState == null) acceptDebugRoundMaskIntent(intent)
         probeViewModel = ViewModelProvider(this)[ProbeViewModel::class.java]
         preferencesViewModel = ViewModelProvider(this)[PreferencesViewModel::class.java]
         aboutViewModel = ViewModelProvider(this)[AboutViewModel::class.java]
@@ -390,8 +394,13 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        debugRoundMask.value = debugRoundMaskRequested(intent)
+        acceptDebugRoundMaskIntent(intent)
         acceptLaunchIntent(intent)
+    }
+
+    private fun acceptDebugRoundMaskIntent(source: Intent?) {
+        val requested = debugRoundMaskRequested(source) ?: return
+        if (saveDebugRoundMask(this, requested)) debugRoundMask.value = requested
     }
 
     override fun onStart() {

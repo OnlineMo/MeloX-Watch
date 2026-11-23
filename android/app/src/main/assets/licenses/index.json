@@ -34,12 +34,12 @@
       "notice_sha256": "c43bc4e3875267f01f3fcf2ff1e45fb26d7a5f45b491cdf54aecee53c4d660b0"
     },
     {
-      "id": "androidx.annotation.annotation-jvm.1.9.1",
-      "name": "Annotation",
-      "version": "1.9.1",
+      "id": "androidx.annotation.annotation-jvm.1.10.0",
       "license": "Apache-2.0",
-      "notice_asset": "licenses/androidx.annotation.annotation-jvm.1.9.1.txt",
-      "notice_sha256": "063d05b526037270e704bd900618f8f9e2eaeddf4fdb4cc7dab86fca44c95030"
+      "name": "Annotation",
+      "notice_asset": "licenses/androidx.annotation.annotation-jvm.1.10.0.txt",
+      "notice_sha256": "c55013679fb1b994c19a728ed7c9e0ebe79656dd7cb7034862966c1d8a667bb2",
+      "version": "1.10.0"
     },
     {
       "id": "androidx.arch.core.core-common.2.2.0",
@@ -530,12 +530,12 @@
       "notice_sha256": "1662e1933d521b059af594a2f06b65474fcc0a80d8eba9e30b50e4c27c5e5f32"
     },
     {
-      "id": "androidx.startup.startup-runtime.1.1.1",
-      "name": "Android App Startup Runtime",
-      "version": "1.1.1",
+      "id": "androidx.startup.startup-runtime.1.2.0",
       "license": "Apache-2.0",
-      "notice_asset": "licenses/androidx.startup.startup-runtime.1.1.1.txt",
-      "notice_sha256": "03ba93eadd362d7d63cd9f4940b60daf83ea9e6b922982d699ea37df76638cbd"
+      "name": "Startup Runtime",
+      "notice_asset": "licenses/androidx.startup.startup-runtime.1.2.0.txt",
+      "notice_sha256": "11232e70112bdf7bce30ad9c3a8fea759e93c4f0028ae9371e14d92f213ad6d0",
+      "version": "1.2.0"
     },
     {
       "id": "androidx.tracing.tracing.1.2.0",
@@ -570,12 +570,28 @@
       "notice_sha256": "1baec1ca7a3afcda5afebb62e0c0fccbdd0a7c1934bfc2eb908de3b61e2d38bd"
     },
     {
-      "id": "com.squareup.okio.okio-jvm.3.4.0",
-      "name": "okio",
-      "version": "3.4.0",
+      "id": "com.google.zxing.core.3.5.3",
+      "name": "ZXing core",
+      "version": "3.5.3",
       "license": "Apache-2.0",
-      "notice_asset": "licenses/com.squareup.okio.okio-jvm.3.4.0.txt",
-      "notice_sha256": "29afe1950646a75c7402088c4712065e41d0c03ea681c04002017b76640596f1"
+      "notice_asset": "licenses/com.google.zxing.core.3.5.3.txt",
+      "notice_sha256": "325914f9a505acbe9b4962bcbd20689b6b44ca68beab8375564ee0e5d26c26c7"
+    },
+    {
+      "id": "com.squareup.okhttp3.okhttp-android.5.4.0",
+      "name": "OkHttp Android",
+      "version": "5.4.0",
+      "license": "Apache-2.0 AND MPL-2.0 AND Unicode-3.0",
+      "notice_asset": "licenses/com.squareup.okhttp3.okhttp-android.5.4.0.txt",
+      "notice_sha256": "414615d70755ac2ee8ce49f1dd82258d94d952d639aef906d1f5cc3414610436"
+    },
+    {
+      "id": "com.squareup.okio.okio-jvm.3.17.0",
+      "license": "Apache-2.0",
+      "name": "okio",
+      "notice_asset": "licenses/com.squareup.okio.okio-jvm.3.17.0.txt",
+      "notice_sha256": "90a44b9698cd55f75d03b3c66aa2141f5edf6ba3e9c7351ba8625a25d30242ed",
+      "version": "3.17.0"
     },
     {
       "id": "jmac",
@@ -584,6 +600,14 @@
       "license": "GPL-2.0-or-later",
       "notice_asset": "licenses/jmac-NOTICE.txt",
       "notice_sha256": "9a5202d933efd4b0dd9441e4abe66bf2334e7968e409ea5926ecc2f32486ed6e"
+    },
+    {
+      "id": "jmac-original-gpl2-license",
+      "name": "JMAC original license text",
+      "version": "GPL v2 or later",
+      "license": "GPL-2.0-or-later",
+      "notice_asset": "licenses/jmac-GPL-2.0-or-later.txt",
+      "notice_sha256": "204d8eff92f95aac4df6c8122bc1505f468f3a901e5a4cc08940e0ede1938994"
     },
     {
       "id": "melox-watch-project-license",
