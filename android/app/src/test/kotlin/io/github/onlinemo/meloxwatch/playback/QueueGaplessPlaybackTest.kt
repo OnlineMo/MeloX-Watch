@@ -124,7 +124,7 @@ class QueueGaplessPlaybackTest {
         seed(4)
         val before = checked.calls.toMap()
         assertTrue(coordinator.state.value.gapless.available)
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
         assertEquals(listOf("entry-0", "entry-1"), rounds)
@@ -134,7 +134,7 @@ class QueueGaplessPlaybackTest {
         assertTrue(checked.player.isPlaying)
         assertTrue(raw.peakWindow <= 3)
         assertTrue(coordinator.state.value.gapless.available)
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-2", store.snapshot()?.currentEntryId)
         assertEquals(listOf("entry-0", "entry-1", "entry-2"), rounds)
@@ -145,12 +145,12 @@ class QueueGaplessPlaybackTest {
         seed(2)
         val before = checked.calls.toMap()
         val gate = gated.blockNext()
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         gate.entered.await()
         assertEquals("entry-0", store.snapshot()?.currentEntryId)
         assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
-        assertTrue(operations.pauseAtBoundary)
-        raw.completeNaturally(operations.pauseAtBoundary)
+        assertTrue(operations.boundaryPauseEnabled)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         gate.release.complete(Unit)
         idle()
         val saved = requireNotNull(store.snapshot())
@@ -170,7 +170,7 @@ class QueueGaplessPlaybackTest {
     @Test fun terminalEventsFlushedByTheBoundaryGateKeepTheIncomingIdentity() = onMain {
         seed(2)
         operations.onNextPause = { raw.completeNaturally(pause = true) }
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
         assertEquals(1, store.snapshot()?.checkpoint?.completedCycles)
@@ -182,7 +182,7 @@ class QueueGaplessPlaybackTest {
         seed(3)
         val before = checked.calls.toMap()
         val gate = gated.blockNext()
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         gate.entered.await()
         raw.position(200L)
         coordinator.sessionPlayer.pause()
@@ -198,7 +198,7 @@ class QueueGaplessPlaybackTest {
     @Test fun teardownDuringTheReceiptRetainsTheActualIncomingClockWithoutReleasedPlayerAccess() = onMain {
         seed(3)
         val gate = gated.blockNext()
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         gate.entered.await()
         raw.position(300L)
         assertEquals(300L, checked.player.currentPosition)
@@ -214,7 +214,7 @@ class QueueGaplessPlaybackTest {
     @Test fun backendSwitchPausesAndCapturesTheIncomingClockBeforeWaitingForItsReceipt() = onMain {
         seed(3)
         val gate = gated.blockNext()
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         gate.entered.await()
         raw.position(250L)
         val freezing = scope.async { coordinator.freezeForBackendSwitch() }
@@ -237,7 +237,7 @@ class QueueGaplessPlaybackTest {
         assertFalse(coordinator.state.value.gapless.available)
         assertEquals(GaplessPlaybackIssue.TIMER_ACTIVE, coordinator.state.value.gapless.issue)
         timerBlocksEnd = true
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-0", store.snapshot()?.currentEntryId)
         assertEquals(1, store.snapshot()?.checkpoint?.completedCycles)
@@ -248,12 +248,12 @@ class QueueGaplessPlaybackTest {
     @Test fun finiteSingleRepeatSettlesItsCountBeforeArmingTheDistinctNextInstance() = onMain {
         seed(2, QueueMode(repeat = QueueRepeatMode.SINGLE, cycleLimit = 2))
         assertEquals(GaplessPlaybackIssue.MODE_REQUIRES_SETTLEMENT, coordinator.state.value.gapless.issue)
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-0", store.snapshot()?.currentEntryId)
         assertEquals(1, store.snapshot()?.checkpoint?.completedCycles)
         assertTrue(coordinator.state.value.gapless.available)
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
         assertEquals(0, store.snapshot()?.checkpoint?.completedCycles)
@@ -264,7 +264,7 @@ class QueueGaplessPlaybackTest {
         seed(2)
         val before = checked.calls.toMap()
         gated.failNext = true
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-0", store.snapshot()?.currentEntryId)
         assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
@@ -284,7 +284,7 @@ class QueueGaplessPlaybackTest {
         seed(2)
         assertEquals(GaplessPlaybackIssue.BACKEND_UNSUPPORTED, coordinator.state.value.gapless.issue)
         val preparations = checked.calls["prepare"]
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
         assertEquals(requireNotNull(preparations) + 1, checked.calls["prepare"])
@@ -297,9 +297,9 @@ class QueueGaplessPlaybackTest {
         preferences.state.value = PreferencesState.Ready(UserPreferences(gaplessPlayback = false))
         coordinator.refreshContinuousBoundary()
         assertEquals(GaplessPlaybackIssue.PREFERENCE_DISABLED, coordinator.state.value.gapless.issue)
-        assertTrue(operations.pauseAtBoundary)
+        assertTrue(operations.boundaryPauseEnabled)
         assertEquals(before, checked.calls["pause"])
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
         assertTrue(checked.player.playWhenReady)
@@ -344,7 +344,7 @@ class QueueGaplessPlaybackTest {
 
     @Test fun aRetainedModeCommitWithALateAutomaticEventPreservesTheActualSourceAndItsNewGeneration() = onMain {
         seed(3, QueueMode(repeat = QueueRepeatMode.SINGLE, cycleLimit = 2))
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         val base = requireNotNull(store.snapshot())
         assertEquals(1, base.checkpoint.completedCycles)
@@ -372,12 +372,12 @@ class QueueGaplessPlaybackTest {
 
     @Test fun listWrapUsesTheDurableOrderWithoutMakingThePhysicalWindowRepeat() = onMain {
         seed(2, QueueMode(repeat = QueueRepeatMode.LIST))
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
-        assertTrue(operations.pauseAtBoundary)
+        assertTrue(operations.boundaryPauseEnabled)
         assertEquals(Player.REPEAT_MODE_OFF, checked.player.repeatMode)
-        raw.completeNaturally(operations.pauseAtBoundary)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-0", store.snapshot()?.currentEntryId)
         assertEquals(listOf("entry-0", "entry-1", "entry-0"), rounds)
@@ -466,10 +466,10 @@ class QueueGaplessPlaybackTest {
     private class WindowOperations(override val player: Player) : PlaybackBackendOperations {
         var supports = true
         override val supportsContinuousPlayback: Boolean get() = supports
-        var pauseAtBoundary = true
+        var boundaryPauseEnabled = true
         var onNextPause: (() -> Unit)? = null
         override fun setPauseAtBoundary(pause: Boolean) {
-            pauseAtBoundary = pause
+            boundaryPauseEnabled = pause
             if (pause) onNextPause?.also { onNextPause = null }?.invoke()
         }
         override suspend fun prepareAndAwait(expectedMediaId: String) {
