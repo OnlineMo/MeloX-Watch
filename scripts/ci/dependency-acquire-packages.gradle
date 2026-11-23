@@ -85,8 +85,11 @@ requireMigration(requestDigest != null && requestDigest ==~ /[0-9a-f]{64}/ &&
     Arrays.equals(rawBytes(reportRoot.resolve('dependency-migration-request.json')), requestBytes),
     'Package acquisition request differs from the wrapper original')
 def request = new groovy.json.JsonSlurper().parse(requestBytes)
-def upgradeMode = request instanceof Map && request.schema_version instanceof Integer && request.schema_version == 6 &&
+def versionUpgradeMode = request instanceof Map && request.schema_version instanceof Integer && request.schema_version == 6 &&
     request.kind == 'owner-pr-package-dependency-upgrade-acquire-strict-compile'
+def retirementMode = request instanceof Map && request.schema_version instanceof Integer && request.schema_version == 7 &&
+    request.kind == 'owner-pr-package-dependency-upgrade-retirement-acquire-strict-compile'
+def upgradeMode = versionUpgradeMode || retirementMode
 def earlierMode = request instanceof Map && request.schema_version instanceof Integer && [3, 4].contains(request.schema_version) &&
     request.kind == 'owner-pr-package-input-acquire-strict-compile'
 requireMigration((upgradeMode || earlierMode) && (acquirePhase || upgradeMode) && request.owner_login == 'OnlineMo' &&
@@ -107,6 +110,31 @@ if (upgradeMode) {
                 ['from_version', 'to_version'].every { key -> item[key] instanceof String &&
                     item[key] ==~ /(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){0,3}/ }
         }, 'Schema 6 requires exact bounded Watch business dependency grants')
+}
+if (retirementMode) {
+    def fields = ['package_role', 'module', 'configuration', 'from_version'] as Set
+    def configurations = [
+        'watchAndroidDebugAndroidTestCompileClasspath',
+        'watchAndroidDebugCompileClasspath', 'watchAndroidDebugRuntimeClasspath',
+        'watchAndroidDebugUnitTestCompileClasspath', 'watchAndroidDebugUnitTestRuntimeClasspath',
+        'watchAndroidDiagnosticCompileClasspath', 'watchAndroidDiagnosticRuntimeClasspath',
+        'watchAndroidDiagnosticUnitTestCompileClasspath', 'watchAndroidDiagnosticUnitTestRuntimeClasspath',
+        'watchAndroidReleaseCompileClasspath', 'watchAndroidReleaseRuntimeClasspath',
+        'watchAndroidReleaseUnitTestCompileClasspath', 'watchAndroidReleaseUnitTestRuntimeClasspath']
+    def expected = configurations.findAll { it.endsWith('CompileClasspath') }.collect {
+        'org.jetbrains.kotlin:kotlin-stdlib-common|' + it + '|2.2.21'
+    } as Set
+    ['kotlin-stdlib-jdk7', 'kotlin-stdlib-jdk8'].each { module ->
+        configurations.each { expected.add('org.jetbrains.kotlin:' + module + '|' + it + '|1.8.0') }
+    }
+    requireMigration(request.allowed_dependency_retirements instanceof List && request.allowed_dependency_retirements.size() == 33 &&
+        request.allowed_dependency_retirements.every { item ->
+            item instanceof Map && item.keySet() == fields && item.package_role == 'watch' &&
+                fields.every { item[it] instanceof String }
+        }, 'Request 7 needs exactly 33 explicit Watch auxiliary retirement permissions')
+    def actual = request.allowed_dependency_retirements.collect { it.module + '|' + it.configuration + '|' + it.from_version }
+    requireMigration(actual.size() == actual.toSet().size() && actual.toSet() == expected,
+        'Request 7 cannot retire other modules, versions, configurations or duplicate bindings')
 }
 def specs = [watch: [project: ':app', flavor: 'WatchAndroid'], phone: [project: ':companion', flavor: 'PhoneAndroid']]
 def testRoles = request.plan.instrumentation_roles

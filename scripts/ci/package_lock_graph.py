@@ -20,11 +20,15 @@ def binary_upgrades(changes):
             for item in changes if item['module'] in modules}
 
 
-def validate(root, record, state, phase, changes):
+def validate(root, record, state, phase, changes, *, retirements=None):
     from package_migration import (COLLECTOR, STRICT_GRAPH_TASK,
                                    validate_archive_budget, validate_archive_consumers, writer_tasks)
     request = state['collection']['request']
-    require(request['schema_version'] == 6 and phase in FILES, 'Resolved graph validation belongs only to the independent schema 6')
+    require(request['schema_version'] in (6, 7) and phase in FILES, 'Resolved graph validation requires an explicit versioned request')
+    require(request['schema_version'] == 7 or retirements is None, 'Request 6 cannot authorize auxiliary retirement')
+    if request['schema_version'] == 7:
+        from package_lock_retirements import validate_actual_retirements
+        validate_actual_retirements(request['allowed_dependency_retirements'], retirements)
     fields = {'schema_version', 'kind', 'phase', 'request_sha256', 'variants', 'writer_tasks', 'graph_task',
               'graph_task_count', 'test_task_count', 'configuration_count', 'unresolved_dependency_count',
               'project_configurations', 'runtime_classpaths', 'consumers', 'upgrade_archives', 'archive_budget'} | set(state['binding'])
@@ -64,6 +68,10 @@ def validate(root, record, state, phase, changes):
             require(coordinates <= pinned_coordinates, 'A real selected module version has no retained verification pin')
             if project == ':app':
                 selected |= coordinates
+    if request['schema_version'] == 7:
+        require(all(item['configuration'] in projects[':app'] and
+                    item['module'] not in projects[':app'][item['configuration']] for item in retirements),
+                'An actual retirement is not absent from its real Watch configuration graph')
     require(sum(len(configurations) for configurations in projects.values()) == record['configuration_count'],
             'Resolved configuration count differs')
     files = validate_archive_consumers(record, request, strict=phase == 'strict-inputs')
