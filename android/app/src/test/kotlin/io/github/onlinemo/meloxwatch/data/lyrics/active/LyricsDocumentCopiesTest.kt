@@ -264,6 +264,7 @@ class LyricsDocumentCopiesTest {
         val openEntered = CountDownLatch(1)
         val releaseOpen = CountDownLatch(1)
         val closeEntered = CountDownLatch(1)
+        val releaseClose = CountDownLatch(1)
         val closeThreads = ConcurrentLinkedQueue<Thread>()
         val io = LocalProviderIo()
         val copies = LyricsDocumentCopies(context, io, openInput = { _, _ -> ByteArrayInputStream(bytes) },
@@ -277,6 +278,7 @@ class LyricsDocumentCopiesTest {
                         closeThreads.add(Thread.currentThread())
                         stream.close()
                         closeEntered.countDown()
+                        check(releaseClose.await(5L, TimeUnit.SECONDS))
                     }
                 }
             })
@@ -293,6 +295,7 @@ class LyricsDocumentCopiesTest {
             assertTrue(closeThreads.all { it !== callerThread })
             assertFalse(caller.isCompleted)
             expect(SourceReadIssue.BUSY) { copies.withReferenceWrite { error("Cursor cleanup still owns the gate") } }
+            releaseClose.countDown()
             dispatcher.awaitQueued()
             dispatcher.runNext()
             caller.join()
@@ -301,6 +304,7 @@ class LyricsDocumentCopiesTest {
             assertTrue(checkNotNull(OwnedLyricsProvider.root(context).list()).isEmpty())
         } finally {
             releaseOpen.countDown()
+            releaseClose.countDown()
             caller.cancel()
             dispatcher.finish(caller)
             caller.join()

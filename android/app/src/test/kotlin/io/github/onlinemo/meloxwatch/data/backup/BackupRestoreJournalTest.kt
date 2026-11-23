@@ -200,7 +200,8 @@ class BackupRestoreJournalTest {
         val root = root()
         val original = root.newGeneration()
         val ownership = original.ownership()
-        root.retireGeneration(original)
+        // 保留原inode，避免新目录立即复用已退休的inode而干扰身份断言。
+        Files.move(original.root.toPath(), root.child(stableUuid("fixture-held-original", ownership.id)).toPath())
         Files.createDirectory(root.child(ownership.id).toPath())
         expectBackupIssue(BackupIssue.INTEGRITY_MISMATCH) { root.openOwnedGeneration(ownership) }
         assertTrue(root.child(ownership.id).isDirectory)

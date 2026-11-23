@@ -2,7 +2,6 @@ package io.github.onlinemo.meloxwatch.data.artwork
 
 import android.graphics.Bitmap
 import android.os.CancellationSignal
-import android.os.StatFs
 import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
 import io.github.onlinemo.meloxwatch.data.storage.StorageLimits
 import java.io.File
@@ -113,7 +112,7 @@ internal class ArtworkDiskCache(private val directory: File) {
     }
 
     private fun requireRoom(next: Long) {
-        val available = try { StatFs(directory.absolutePath).availableBytes }
+        val available = try { Files.getFileStore(directory.toPath()).usableSpace }
             catch (failure: Exception) { throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE, failure) }
         if (next < 0L || available < StorageLimits.FREE_RESERVE_BYTES || next > available - StorageLimits.FREE_RESERVE_BYTES) {
             throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)

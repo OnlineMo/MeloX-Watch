@@ -25,6 +25,8 @@ import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CopyableThrowable
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -67,7 +69,9 @@ class ThemeRepositoryCancellationTest {
             val caller = async(Dispatchers.Default) { repository.prepareImport(Fixture.request()) }
             try {
                 awaitThemeLatch(source.entered)
-                caller.cancelAndJoin()
+                caller.cancel()
+                assertTrue(caller.isCancelled)
+                assertFalse(caller.isCompleted)
                 assertEquals(0, source.descriptorCloses.get())
                 assertTrue(checkNotNull(File(directory, "staging").list()).isNotEmpty())
                 Fixture.expectSuspending(ThemeIssue.BUSY) { repository.prepareImport(Fixture.request()) }
@@ -80,6 +84,7 @@ class ThemeRepositoryCancellationTest {
                 assertEquals(1, source.opens.get())
                 source.release.countDown()
                 io.awaitIdle()
+                caller.join()
                 assertTrue(source.inputCloses.get() >= 1)
                 assertEquals(1, source.descriptorCloses.get())
                 assertNull(repository.preview.value)
@@ -105,13 +110,16 @@ class ThemeRepositoryCancellationTest {
                 awaitThemeLatch(source.entered)
                 val stage = checkNotNull(File(directory, "staging").listFiles()).single()
                 assertArrayEquals(original, File(stage, "input.zip").readBytes())
-                caller.cancelAndJoin()
+                caller.cancel()
+                assertTrue(caller.isCancelled)
+                assertFalse(caller.isCompleted)
                 assertEquals(0, source.descriptorCloses.get())
                 assertEquals(0, source.inputCloses.get())
                 assertTrue(stage.isDirectory)
                 Fixture.expectSuspending(ThemeIssue.BUSY) { repository.read() }
                 source.release.countDown()
                 io.awaitIdle()
+                caller.join()
                 assertEquals(1, source.descriptorCloses.get())
                 assertEquals(1, source.inputCloses.get())
                 assertFalse(stage.exists())
@@ -150,12 +158,15 @@ class ThemeRepositoryCancellationTest {
             try {
                 awaitThemeLatch(entered)
                 assertEquals(1, source.descriptorCloses.get())
-                caller.cancelAndJoin()
+                caller.cancel()
+                assertTrue(caller.isCancelled)
+                assertFalse(caller.isCompleted)
                 Fixture.expectSuspending(ThemeIssue.BUSY) { repository.prepareImport(Fixture.request()) }
                 assertEquals(1, calls.get())
                 assertNull(repository.preview.value)
                 release.countDown()
                 io.awaitIdle()
+                caller.join()
                 assertTrue(checkNotNull(File(directory, "staging").list()).isEmpty())
                 assertEquals(ThemeBuiltins.defaultChoice, repository.read().selected)
             } finally {
@@ -225,10 +236,13 @@ class ThemeRepositoryCancellationTest {
             }
             try {
                 awaitThemeLatch(entered)
-                caller.cancelAndJoin()
+                caller.cancel()
+                assertTrue(caller.isCancelled)
+                assertFalse(caller.isCompleted)
                 Fixture.expectSuspending(ThemeIssue.BUSY) { repository.read() }
                 release.countDown()
                 io.awaitIdle()
+                caller.join()
                 assertFalse(delivered)
                 assertSame(preview, repository.preview.value)
                 assertEquals(ThemeBuiltins.defaultChoice, repository.state.value.selected)
@@ -295,7 +309,7 @@ class ThemeRepositoryCancellationTest {
         val source = PhysicalBlockingThemeSource(Fixture.packageOf().zip(), blockOpen)
         val directory = temporary.newFolder()
         val repository = Fixture.repository(directory, source, io)
-        val cancellation = CancellationException("Controlled Main-equivalent theme cancellation")
+        val cancellation = ControlledThemeCancellation()
         val delivered = AtomicBoolean(false)
         val completionCause = AtomicReference<Throwable?>(null)
         var caller: Deferred<ThemePreview>? = null
@@ -341,7 +355,7 @@ class ThemeRepositoryCancellationTest {
             assertEquals(0, source.descriptorCloses.get())
             assertEquals(if (blockOpen) 0 else 1, source.readCalls.get())
             if (!blockOpen) assertEquals(0L, source.readReturned.count)
-            // 原取消已完成；各关闭门仍未放行时，caller 队列必须继续推进。
+            // 取消命令已执行；各关闭门仍未放行时，caller 队列必须继续推进。
             assertCallerQueueProgress(scope, mainThread) {}
             assertEquals(1L, source.releaseInputClose.count)
             assertEquals(1L, source.inputCloseReturned.count)
@@ -404,6 +418,13 @@ class ThemeRepositoryCancellationTest {
                 dispatcher.close()
             }
         }
+    }
+
+    /** 保留受控取消的原对象，现有身份断言继续验证真实完成原因。 */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class ControlledThemeCancellation : CancellationException("Controlled Main-equivalent theme cancellation"),
+        CopyableThrowable<ControlledThemeCancellation> {
+        override fun createCopy(): ControlledThemeCancellation? = null
     }
 
     private suspend fun assertCallerQueueProgress(scope: CoroutineScope, thread: Thread, command: () -> Unit) {

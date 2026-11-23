@@ -762,7 +762,9 @@ class UserPreferencesRepositoryTest {
         val job = SupervisorJob()
         val scope = CoroutineScope(job + Dispatchers.IO)
         val store = createUserPreferencesDataStore(scope) { file }
-        return StoreSession(job, DataStoreUserPreferencesRepository(wrap(store), scope)).also { session ->
+        val observerJob = SupervisorJob(job)
+        val observerScope = CoroutineScope(observerJob + Dispatchers.IO)
+        return StoreSession(job, observerJob, DataStoreUserPreferencesRepository(wrap(store), observerScope)).also { session ->
             sessions.add(session)
         }
     }
@@ -830,9 +832,14 @@ class UserPreferencesRepositoryTest {
 
     private class StoreSession(
         private val job: Job,
+        private val observerJob: Job,
         val repository: DataStoreUserPreferencesRepository,
     ) {
-        suspend fun close() = job.cancelAndJoin()
+        suspend fun close() {
+            // 先让观察任务等待中的 identity read 收到 actor 回执，再取消 DataStore actor。
+            observerJob.cancelAndJoin()
+            job.cancelAndJoin()
+        }
 
         suspend fun ready(): PreferencesState.Ready = withTimeout(10000L) {
             repository.state.filterIsInstance<PreferencesState.Ready>().first()

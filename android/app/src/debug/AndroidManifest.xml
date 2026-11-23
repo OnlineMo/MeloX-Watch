@@ -4,7 +4,8 @@
         <provider
             android:name="io.github.onlinemo.meloxwatch.data.fileoperations.fixture.FileOperationFixtureDocumentsProvider"
             android:authorities="${applicationId}.lp10fixture"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS"
             android:grantUriPermissions="true">
             <intent-filter>
                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />

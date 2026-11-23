@@ -88,7 +88,9 @@ class ServicePlaybackOwnerTest {
         )
         val noListeningCalls = Proxy.newProxyInstance(ListeningRepository::class.java.classLoader,
             arrayOf(ListeningRepository::class.java)) { _, method, _ ->
-            throw AssertionError("An empty queue must not access listening storage: ${method.name}")
+            // 可空观察属性只返回接口默认值；实际存储方法仍禁止调用。
+            if (method.name == "getObservedEpochs" && method.parameterCount == 0) null
+            else throw AssertionError("An empty queue must not access listening storage: ${method.name}")
         } as ListeningRepository
         statistics = ServiceListeningObserver(owner.initialPlayer, noListeningCalls, scope) {
             throw AssertionError("An empty queue must not fail listening storage: $it")

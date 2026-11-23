@@ -3,7 +3,6 @@ package io.github.onlinemo.meloxwatch.data.lyrics.online
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsLimits
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseException
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsParseIssue
-import android.os.StatFs
 import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
 import io.github.onlinemo.meloxwatch.data.storage.StorageLimits
 import io.github.onlinemo.meloxwatch.model.onlineOpaqueHash
@@ -103,7 +102,7 @@ internal class DiskOnlineLyricsCache(private val directoryProvider: () -> File,
             if (size > maxBytes) return@withContext false
             checkCurrent(isCurrent)
             ensureDirectory()
-            val available = StatFs(directory.absolutePath).availableBytes
+            val available = Files.getFileStore(directory.toPath()).usableSpace
             if (available < StorageLimits.FREE_RESERVE_BYTES || size > available - StorageLimits.FREE_RESERVE_BYTES) return@withContext false
             val target = path(key.fileName)
             val entries = inventory()

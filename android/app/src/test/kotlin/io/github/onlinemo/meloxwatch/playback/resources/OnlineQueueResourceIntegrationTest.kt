@@ -231,6 +231,7 @@ class OnlineQueueResourceIntegrationTest {
         assertEquals(0, onlineCreations)
         coordinator.sessionPlayer.play()
         backend.played.await()
+        coordinator.state.first { !it.preparing }
         coordinator.flush()
         assertEquals(0L, backend.currentPosition)
         assertEquals(0L, store.snapshot()?.positionMs)
@@ -357,7 +358,7 @@ class OnlineQueueResourceIntegrationTest {
     @Test fun replayingAnAcceptedOnlineTicketAcknowledgesItWithoutRestoringAnOlderQueue() = onMain {
         val directory = OnlineQueueDirectory()
         val view = FrozenQueueView("directory-online-view", 1L, 4L)
-        val lease = OnlineCatalogQueueLease(view, "fixture-account", { true }, { first, limit ->
+        val lease = OnlineCatalogQueueLease(view, "101", { true }, { first, limit ->
             (first until minOf(4L, first + limit)).map { order -> OnlineCatalogRowEntity(view.id, order, "TRACK", (201L + order).toString(), "Fixture song") }
         }, {})
         val ticket = directory.register(lease, UUID.randomUUID().toString(), 2L, OnlineQueueAction.REPLACE_COMPLETE_LIST, null, StreamingQuality.STANDARD)

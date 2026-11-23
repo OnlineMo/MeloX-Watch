@@ -235,7 +235,7 @@ class SessionRepositoryTest {
         sessions.close()
     }
 
-    @Test fun accountSwitchAndCloseInvalidateTokensAndLeaveTheStoredSessionForExplicitRestore() = runBlocking {
+    @Test fun accountSwitchAndCloseInvalidateTokensAndLeaveTheStoredSessionForExplicitRestore(): Unit = runBlocking {
         val store = ControlledSessionStore()
         val sessions = SessionRepository(store)
         sessions.commit(fixtureSession(), sessions.loginEpoch()) { it() }

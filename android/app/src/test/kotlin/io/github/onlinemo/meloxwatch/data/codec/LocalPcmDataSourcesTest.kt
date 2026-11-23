@@ -89,13 +89,18 @@ class LocalPcmDataSourcesTest {
     }
 
     @Test fun changedOrLostKnownExtentOnSeekCannotBecomeDecodedAudio() {
-        val raw = CodecFixtures.dsf(CodecFixtures.dsdTone(1000))
+        val raw = CodecFixtures.dsf(CodecFixtures.dsdTone(1000, bits = 65_536))
         for (lost in listOf(true, false)) {
             LocalPcmDataSources(factory(raw, reportedLength = { position, available ->
                 if (position == 0L) available else if (lost) C.LENGTH_UNSET.toLong() else available + 1
             })).use { sources ->
                 val source = sources.createDataSource()
-                try { source.open(spec()); fail("The known source extent must remain observable") }
+                try {
+                    source.open(spec(position = 5_000L))
+                    // 读取第二个DSF块触发非零物理seek，先核原extent再交付PCM。
+                    readAll(source)
+                    fail("The known source extent must remain observable")
+                }
                 catch (error: CodecReadException) { assertEquals(CodecReadIssue.SOURCE_CHANGED, error.issue) }
                 finally { source.close() }
             }

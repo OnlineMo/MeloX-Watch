@@ -30,7 +30,7 @@ class HttpTransportGateTest {
         }
     }
 
-    @Test fun explicitHttpPermissionOnlyAppliesToTheExactConfiguredOriginAndCannotDowngradeHttps() = runBlocking {
+    @Test fun explicitHttpPermissionOnlyAppliesToTheExactConfiguredOriginAndCannotDowngradeHttps(): Unit = runBlocking {
         val repository = MetingConfigurationRepository { ControlledMetingStore(metingConfiguration(
             "http://service.invalid:8080/api", allowCleartext = true)) }
         try {

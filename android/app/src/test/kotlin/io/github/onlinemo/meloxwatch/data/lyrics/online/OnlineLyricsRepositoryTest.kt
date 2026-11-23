@@ -36,7 +36,7 @@ class OnlineLyricsRepositoryTest {
     @get:Rule val temporary = TemporaryFolder()
     @Before fun initializeSyntheticHttp() { OkHttp.initialize(RuntimeEnvironment.getApplication()) }
 
-    @Test fun nativeLyricsUseOneCallAndTheSharedParserWithoutOpeningMetingOrChangingAudio() = runBlocking {
+    @Test fun nativeLyricsUseOneCallAndTheSharedParserWithoutOpeningMetingOrChangingAudio(): Unit = runBlocking {
         OnlineLyricsRepositoryFixture(temporary.newFolder(), this).use { fixture ->
             fixture.signIn()
             fixture.openNative()
@@ -59,7 +59,7 @@ class OnlineLyricsRepositoryTest {
         }
     }
 
-    @Test fun nativeMissingAndAuxiliaryAccountDenialNeverFallBackOrExpireHealthyAudio() = runBlocking {
+    @Test fun nativeMissingAndAuxiliaryAccountDenialNeverFallBackOrExpireHealthyAudio(): Unit = runBlocking {
         OnlineLyricsRepositoryFixture(temporary.newFolder(), this).use { fixture ->
             fixture.signIn()
             fixture.openNative()
@@ -128,7 +128,7 @@ class OnlineLyricsRepositoryTest {
         }
     }
 
-    @Test fun onlyAnActuallyOpenedMetingResourceReadsItsLyricsTargetAndConfigurationChangesRetireIt() = runBlocking {
+    @Test fun onlyAnActuallyOpenedMetingResourceReadsItsLyricsTargetAndConfigurationChangesRetireIt(): Unit = runBlocking {
         OnlineLyricsRepositoryFixture(temporary.newFolder(), this).use { fixture ->
             fixture.signIn()
             fixture.openMeting()

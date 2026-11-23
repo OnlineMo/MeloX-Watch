@@ -66,14 +66,10 @@ internal object LibrarySql {
             ))))
     """.trimIndent()
 
-    /**
-     * Scan payloads remain unchanged. The shared artist projection is materialized so the
-     * correlated primary-artist selector does not rebuild names and overrides for every track.
-     */
-    private fun displayCtes(revision: Long): String = """
-        scanned_tracks AS (
-            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1
-        ), artist_overrides AS (
+    /** 全库筛选与已选窗口共用同一艺人覆盖、缺省和名称规则，避免显示语义分叉。 */
+    private fun artistCtes(revision: Long, tracks: String): String {
+        require(tracks == "scanned_tracks" || tracks == "page_artist_tracks")
+        return """artist_overrides AS (
             SELECT link.trackId, groups.groupKey, groups.originalName, groups.originalSortKey,
                 groups.originalSectionKey, groups.originalSearchName, link.included
             FROM display_artist_links link JOIN display_groups groups ON groups.entityId = link.groupId
@@ -82,14 +78,14 @@ internal object LibrarySql {
             SELECT t.versionId, t.trackId, artists.artistKey, artists.displayName,
                 artists.artistKey AS originalSortKey, NULL AS originalSectionKey,
                 '' AS originalSearchName, artists.ordinal
-            FROM scanned_tracks t JOIN local_artist_values artists ON artists.versionId = t.versionId
+            FROM $tracks t JOIN local_artist_values artists ON artists.versionId = t.versionId
             WHERE artists.artistKey != '4:' AND NOT EXISTS (
                 SELECT 1 FROM artist_overrides changed WHERE changed.trackId = t.trackId
                     AND changed.groupKey = artists.artistKey AND changed.included = 0)
             UNION ALL
             SELECT t.versionId, t.trackId, changed.groupKey, changed.originalName, changed.originalSortKey,
                 changed.originalSectionKey, changed.originalSearchName, 128
-            FROM scanned_tracks t JOIN artist_overrides changed ON changed.trackId = t.trackId
+            FROM $tracks t JOIN artist_overrides changed ON changed.trackId = t.trackId
             WHERE changed.included = 1 AND changed.groupKey != '4:' AND NOT EXISTS (
                 SELECT 1 FROM local_artist_values original WHERE original.versionId = t.versionId
                     AND original.artistKey = changed.groupKey)
@@ -97,7 +93,7 @@ internal object LibrarySql {
             SELECT raw.* FROM raw_artists raw
             UNION ALL
             SELECT t.versionId, t.trackId, '4:', NULL, '4:', 'UNKNOWN', '', 0
-            FROM scanned_tracks t WHERE NOT EXISTS (SELECT 1 FROM raw_artists raw WHERE raw.trackId = t.trackId)
+            FROM $tracks t WHERE NOT EXISTS (SELECT 1 FROM raw_artists raw WHERE raw.trackId = t.trackId)
         ), display_artist_rows AS MATERIALIZED (
             SELECT raw.versionId, raw.trackId, raw.artistKey, raw.ordinal,
                 COALESCE(names.displayName, raw.displayName) AS displayName,
@@ -111,7 +107,27 @@ internal object LibrarySql {
             FROM nonempty_artists raw
             LEFT JOIN display_groups groups ON groups.kind = 'ARTIST' AND groups.groupKey = raw.artistKey
             LEFT JOIN display_names names ON names.groupId = groups.entityId AND ${valid("names", revision)}
-        ), display_tracks AS (
+        )
+        """.trimIndent()
+    }
+
+    /** 艺人参与筛选或排序时，必须在选窗口前解析其显示值。 */
+    private fun artistsBeforeWindow(view: LibraryViewToken): Boolean =
+        view.sort.field == LibrarySortField.ARTIST || view.query.artistKey != null || view.query.search.isNotBlank()
+
+    /** 只在选窗不依赖艺人时延后显示投影，扫描元数据保持原值。 */
+    private fun displayCtes(revision: Long, includeArtists: Boolean = true): String {
+        val artistColumns = if (includeArtists) """,
+                primaryArtist.displayName AS displayArtist, primaryArtist.sortKey AS displayArtistSortKey,
+                primaryArtist.sectionKey AS displayArtistSection""" else ""
+        val artistJoin = if (includeArtists) """
+            LEFT JOIN display_artist_rows primaryArtist ON primaryArtist.trackId = t.trackId
+                AND primaryArtist.artistKey = (SELECT artistKey FROM display_artist_rows candidate
+                    WHERE candidate.trackId = t.trackId ORDER BY ordinal, artistKey LIMIT 1)""" else ""
+        return """
+        scanned_tracks AS (
+            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1
+        ), ${if (includeArtists) artistCtes(revision, "scanned_tracks") + ", " else ""}display_tracks AS (
             SELECT t.*, COALESCE(assigned.groupKey, t.albumKey) AS displayAlbumKey,
                 COALESCE(albumName.displayName, CASE WHEN albumLink.versionId IS NULL THEN t.album
                     ELSE albumGroup.originalName END) AS displayAlbum,
@@ -120,22 +136,18 @@ internal object LibrarySql {
                     ELSE albumGroup.originalSortKey END, '4:') AS displayAlbumSortKey,
                 COALESCE(albumName.sectionKey, CASE WHEN albumLink.versionId IS NULL THEN t.albumSection
                     ELSE albumGroup.originalSectionKey END, 'UNKNOWN') AS displayAlbumSection,
-                COALESCE(albumName.searchName, albumGroup.originalSearchName, '') AS displayAlbumSearchName,
-                primaryArtist.displayName AS displayArtist, primaryArtist.sortKey AS displayArtistSortKey,
-                primaryArtist.sectionKey AS displayArtistSection
+                COALESCE(albumName.searchName, albumGroup.originalSearchName, '') AS displayAlbumSearchName$artistColumns
             FROM scanned_tracks t
             LEFT JOIN display_album_links albumLink ON albumLink.trackId = t.trackId AND ${valid("albumLink", revision)}
             LEFT JOIN display_groups assigned ON assigned.entityId = albumLink.groupId AND assigned.kind = 'ALBUM'
             LEFT JOIN display_groups albumGroup ON albumGroup.kind = 'ALBUM'
                 AND albumGroup.groupKey = COALESCE(assigned.groupKey, t.albumKey)
-            LEFT JOIN display_names albumName ON albumName.groupId = albumGroup.entityId AND ${valid("albumName", revision)}
-            LEFT JOIN display_artist_rows primaryArtist ON primaryArtist.trackId = t.trackId
-                AND primaryArtist.artistKey = (SELECT artistKey FROM display_artist_rows candidate
-                    WHERE candidate.trackId = t.trackId ORDER BY ordinal, artistKey LIMIT 1)
+            LEFT JOIN display_names albumName ON albumName.groupId = albumGroup.entityId AND ${valid("albumName", revision)}$artistJoin
         )
-    """.trimIndent()
+        """.trimIndent()
+    }
 
-    private fun cte(view: LibraryViewToken): Pair<String, MutableList<Any?>> {
+    private fun cte(view: LibraryViewToken, includeArtists: Boolean = true): Pair<String, MutableList<Any?>> {
         val revision = view.revision
         val args = mutableListOf<Any?>()
         if (view.query.relativePathKeyword != null && view.query.sourceId != null) args += view.query.sourceId
@@ -179,7 +191,7 @@ internal object LibrarySql {
         // relation; permission and exclusion resolution must not be rebuilt for each track.
         val sql = """
             WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""}
-            ${displayCtes(revision)}, alias_rows AS MATERIALIZED (
+            ${displayCtes(revision, includeArtists)}, alias_rows AS MATERIALIZED (
                 SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
                     lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
@@ -271,32 +283,64 @@ internal object LibrarySql {
     }
 
     fun rows(view: LibraryViewToken, cursor: LibraryCursor?, limit: Int, before: Boolean = false): RoomRawQuery {
-        val (sql, args) = cte(view)
+        val full = artistsBeforeWindow(view)
+        val (sql, args) = cte(view, includeArtists = full)
         val where = if (cursor == null) "" else "WHERE ${boundary(view, cursor, before, args)}"
+        if (!full) return projectedWindow(view, sql, args, where, "ORDER BY ${ordering(view, before)}", limit)
         args += limit
         return raw("$sql SELECT * FROM ordered $where ORDER BY ${ordering(view, before)} LIMIT ?", args.toTypedArray())
     }
     fun row(view: LibraryViewToken, providerId: String, trackId: String): RoomRawQuery {
-        val (sql, args) = cte(view)
+        val full = artistsBeforeWindow(view)
+        val (sql, args) = cte(view, includeArtists = full)
         args += providerId; args += trackId
+        if (!full) return projectedWindow(view, sql, args, "WHERE providerId = ? AND trackId = ?", "", 1)
         return raw("$sql SELECT * FROM ordered WHERE providerId = ? AND trackId = ? LIMIT 1", args.toTypedArray())
     }
     fun rowsForKeys(view: LibraryViewToken, keys: List<TrackKey>): RoomRawQuery {
         require(keys.size <= LibraryLimits.PAGE_SIZE)
-        val (sql, args) = cte(view)
+        val full = artistsBeforeWindow(view)
+        val (sql, args) = cte(view, includeArtists = full)
         val predicate = keys.joinToString(" OR ") {
             args += it.providerId; args += it.trackId
             "(providerId = ? AND trackId = ?)"
         }.ifEmpty { "0" }
+        if (!full) return projectedWindow(view, sql, args, "WHERE ($predicate)", "", keys.size + 1)
         args += keys.size + 1
         return raw("$sql SELECT * FROM ordered WHERE ($predicate) LIMIT ?", args.toTypedArray())
+    }
+
+    /**
+     * 权限、版本、别名、过滤和排序先确定窗口，显示艺人随后投影。
+     * 主艺人关系按 trackId 关联，窗口中的每个标识保留全部有效版本。
+     */
+    private fun projectedWindow(view: LibraryViewToken, sql: String, args: MutableList<Any?>,
+        where: String, order: String, limit: Int): RoomRawQuery {
+        check(!artistsBeforeWindow(view))
+        args += limit
+        args += limit
+        return raw("""$sql, page_candidates AS MATERIALIZED (
+            SELECT * FROM ordered $where $order LIMIT ?
+        ), page_artist_tracks AS (
+            SELECT t.versionId, t.trackId FROM scanned_tracks t
+            WHERE t.trackId IN (SELECT trackId FROM page_candidates)
+        ), ${artistCtes(view.revision, "page_artist_tracks")}
+        SELECT page.*, primaryArtist.displayName AS displayArtist, primaryArtist.sortKey AS displayArtistSortKey,
+            primaryArtist.sectionKey AS displayArtistSection
+        FROM page_candidates page
+        LEFT JOIN display_artist_rows primaryArtist ON primaryArtist.trackId = page.trackId
+            AND primaryArtist.artistKey = (SELECT artistKey FROM display_artist_rows candidate
+                WHERE candidate.trackId = page.trackId ORDER BY ordinal, artistKey LIMIT 1)
+        $order LIMIT ?
+        """.trimIndent(), args.toTypedArray())
     }
     fun countBefore(view: LibraryViewToken, cursor: LibraryCursor): RoomRawQuery {
         val (sql, args) = cte(view)
         return raw("$sql SELECT COUNT(*) FROM ordered WHERE ${boundary(view, cursor, true, args)}", args.toTypedArray())
     }
     fun hasBeyond(view: LibraryViewToken, cursor: LibraryCursor, before: Boolean): RoomRawQuery {
-        val (sql, args) = cte(view)
+        // 存在性仍由真实别名、权限和游标边界证明；未参与选择的艺人关系可省去。
+        val (sql, args) = cte(view, includeArtists = artistsBeforeWindow(view))
         return raw("$sql SELECT EXISTS (SELECT 1 FROM ordered WHERE ${boundary(view, cursor, before, args)} LIMIT 1)", args.toTypedArray())
     }
     fun groups(view: LibraryViewToken, kind: LibraryGroupKind, after: String?, limit: Int): RoomRawQuery {

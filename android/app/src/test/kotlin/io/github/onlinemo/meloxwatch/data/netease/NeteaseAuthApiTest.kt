@@ -83,7 +83,7 @@ class NeteaseAuthApiTest {
         }
     }
 
-    @Test fun authorizedSetCookieFallbackIsBoundToTheExactAccountOriginAndPath() = runBlocking {
+    @Test fun authorizedSetCookieFallbackIsBoundToTheExactAccountOriginAndPath(): Unit = runBlocking {
         val headers = listOf("Set-Cookie" to "MUSIC_U=fixture; Path=/; Secure; HttpOnly", "Set-Cookie" to "__csrf=fixture; Path=/; Secure")
         val api = NeteaseAuthApi(NeteaseEapi(HttpExchange { json("{\"code\":803}", headers) }))
         val credential = requireNotNull(api.checkKey(LoginQrKey.parse("fixture")).credential)
@@ -93,7 +93,7 @@ class NeteaseAuthApiTest {
         expect(AuthIssue.INVALID_RESPONSE) { NeteaseCookie.fromSetCookie(listOf("MUSIC_U=fixture; Domain=other.invalid; Path=/"), 0) }
     }
 
-    @Test fun anOpaqueCookieStillRequiresAValidAuthenticatedAccountResponse() = runBlocking {
+    @Test fun anOpaqueCookieStillRequiresAValidAuthenticatedAccountResponse(): Unit = runBlocking {
         val credential = NeteaseCookie.fromHeader("MUSIC_U=fixture").credential()
         val api = NeteaseAuthApi(NeteaseEapi(HttpExchange { json("{\"code\":301,\"profile\":null}") }))
         expect(AuthIssue.LOGIN_REQUIRED) { runBlocking { api.verify(credential) } }

@@ -41,7 +41,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** Frozen 1→2, historical-v3 observations and production-v6 repository behavior stay separate. */
+/** Frozen 1→2, historical-v3 observations and production-v7 repository behavior stay separate. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -297,7 +297,7 @@ class RoomMigrationOneToTwoTest {
             requireNotNull(path)
         }
         assertEquals(file.canonicalPath, File(mainPath).canonicalPath)
-        assertEquals(6L, scalarLong("PRAGMA user_version"))
+        assertEquals(7L, scalarLong("PRAGMA user_version"))
         assertEquals(
             VERSION_THREE_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") +
                 VERSION_SIX_NEW_TABLES,

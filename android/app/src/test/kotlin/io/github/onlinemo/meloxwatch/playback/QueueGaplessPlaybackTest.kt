@@ -87,6 +87,7 @@ class QueueGaplessPlaybackTest {
     private lateinit var coordinator: QueuePlaybackCoordinator
     private val preferences = FixedPreferences()
     private val rounds = mutableListOf<String>()
+    private val naturalEndings = mutableListOf<String>()
     private val failures = mutableListOf<QueuePlaybackFailure>()
     private var timerActive = false
     private var timerBlocksEnd = false
@@ -103,7 +104,10 @@ class QueueGaplessPlaybackTest {
         coordinator = QueuePlaybackCoordinator(checked.player, gated, preferences, scope,
             operations = operations, onRoundChanged = { rounds += it.queueEntryId },
             onContinuousRoundChanged = { entry, _ -> rounds += entry.queueEntryId },
-            mayContinuousPlayback = { !timerActive }, beforeNaturalAdvance = { timerBlocksEnd },
+            mayContinuousPlayback = { !timerActive }, beforeNaturalAdvance = { binding ->
+                naturalEndings += binding.queueEntryId
+                timerBlocksEnd
+            },
             onFailure = failures::add)
         onMain { coordinator.initialize() }
     }
@@ -156,7 +160,8 @@ class QueueGaplessPlaybackTest {
         val saved = requireNotNull(store.snapshot())
         assertEquals("entry-1", saved.currentEntryId)
         assertEquals(DURATION_MS, saved.positionMs)
-        assertEquals(1, saved.checkpoint.completedCycles)
+        assertEquals(listOf("entry-1"), naturalEndings)
+        assertEquals(0, saved.checkpoint.completedCycles)
         assertFalse(checked.player.playWhenReady)
         assertEquals(before["prepare"], checked.calls["prepare"])
         assertEquals(before["seekTo"], checked.calls["seekTo"])
@@ -173,7 +178,8 @@ class QueueGaplessPlaybackTest {
         raw.completeNaturally(operations.boundaryPauseEnabled)
         idle()
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
-        assertEquals(1, store.snapshot()?.checkpoint?.completedCycles)
+        assertEquals(listOf("entry-1"), naturalEndings)
+        assertEquals(0, store.snapshot()?.checkpoint?.completedCycles)
         assertEquals(listOf("entry-0", "entry-1"), rounds)
         assertFalse(checked.player.playWhenReady)
     }

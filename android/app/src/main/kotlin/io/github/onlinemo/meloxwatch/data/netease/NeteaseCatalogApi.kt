@@ -19,6 +19,7 @@ import io.github.onlinemo.meloxwatch.data.network.NetworkLimits
 import io.github.onlinemo.meloxwatch.data.network.StrictJson
 import io.github.onlinemo.meloxwatch.data.network.jsonLong
 import io.github.onlinemo.meloxwatch.data.network.jsonObject
+import io.github.onlinemo.meloxwatch.data.online.authCatalogIssue
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogEntry
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogEntryKind
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogException
@@ -200,7 +201,11 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
         }
     }
     private suspend fun <T> checked(action: suspend () -> T): T = withContext(Dispatchers.Default) {
-        try { action() } catch (error: NetworkException) {
+        try { action() } catch (error: AuthException) {
+            // EAPI已转换传输错误；仅账号授权与限流继续由会话所有者处理。
+            if (error.issue == AuthIssue.LOGIN_REQUIRED || error.issue == AuthIssue.RATE_LIMITED) throw error
+            throw OnlineCatalogException(authCatalogIssue(error.issue))
+        } catch (error: NetworkException) {
             if (error.statusCode in setOf(401, 403)) throw AuthException(AuthIssue.LOGIN_REQUIRED)
             if (error.statusCode == 429) throw AuthException(AuthIssue.RATE_LIMITED)
             throw OnlineCatalogException(when (error.issue) {

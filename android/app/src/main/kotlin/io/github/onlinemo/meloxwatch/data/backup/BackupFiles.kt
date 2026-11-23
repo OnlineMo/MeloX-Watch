@@ -171,8 +171,29 @@ internal class BackupGenerationOwner(val id: String, val device: Long, val inode
 }
 
 internal fun syncBackupDirectory(directory: File) {
-    val descriptor = Os.open(directory.absolutePath, OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW, 0)
-    try { Os.fsync(descriptor) } finally { Os.close(descriptor) }
+    val expected = Os.lstat(directory.absolutePath)
+    if (!OsConstants.S_ISDIR(expected.st_mode)) throw BackupException(BackupIssue.PATH_ESCAPE)
+    // 公开旗标拒绝末级链接，并避免替换为FIFO后在FD身份核验前阻塞。
+    val descriptor = Os.open(directory.absolutePath,
+        OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW or OsConstants.O_NONBLOCK, 0)
+    var outgoing: Throwable? = null
+    try {
+        val opened = Os.fstat(descriptor)
+        if (!OsConstants.S_ISDIR(opened.st_mode) || opened.st_dev != expected.st_dev || opened.st_ino != expected.st_ino) {
+            throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+        }
+        Os.fsync(descriptor)
+    } catch (failure: Throwable) {
+        outgoing = failure
+        throw failure
+    } finally {
+        try { Os.close(descriptor) }
+        catch (closing: Throwable) {
+            val original = outgoing
+            if (original == null) throw closing
+            if (closing !== original) original.addSuppressed(closing)
+        }
+    }
 }
 
 /** New private output stops before consuming the same reserve used by other local imports. */

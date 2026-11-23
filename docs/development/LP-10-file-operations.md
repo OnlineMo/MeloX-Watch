@@ -76,7 +76,7 @@ requireFileMutationReady = {
 
 云端回归定义使用真实 Files-backed DocumentsProvider 的 create/write/rename/move/delete、精确 PFD 与套件限定 Linux Os shadow；不固定成功、不全局清 quarantine。独立 FLAC/ID3 reader 验字段、未知内容和完整 audio bytes；native SQLite journal reopen、未知阶段、意图隔离、只读/撤权、同字节新 inode、冲突、取消/补偿、复制删源失败、完整 20001 行及队列重放、全选视图借用、cache 保留原文件和释放失败围栏均已有定义。FULL-before-external 用例为明确 journal 故障注入，不冒充真实 SQLite 磁盘已满验收。
 
-Debug 专用、非导出 provider 和 plain Android Instrumentation 已定义真实 MMR 与 MediaExtractor/MediaCodec 前后 PCM 验证。静音 FLAC/MP3 输入按规范生成；其有效性、元数据和实际解码尚未执行确认，不称已测有效样本。没有新测试框架、依赖、build.gradle、workflow/actions 修改。未来可在设备上对已下载的同一 Cloud Debug APK 明确执行：
+Debug 专用 DocumentsProvider 使用导出、URI 授权及平台签名级 `android.permission.MANAGE_DOCUMENTS` 保护；provider 访问与路径授权分别核验，main/Release 权限不扩张。plain Android Instrumentation 已定义真实 MMR 与 MediaExtractor/MediaCodec 前后 PCM 验证。静音 FLAC/MP3 输入按规范生成；其有效性、元数据和实际解码尚未执行确认，不称已测有效样本。没有新测试框架、依赖、build.gradle、workflow/actions 修改。未来可在设备上对已下载的同一 Cloud Debug APK 明确执行：
 
 ```text
 adb shell am instrument -w -e case all io.github.onlinemo.meloxwatch.dev/io.github.onlinemo.meloxwatch.data.fileoperations.fixture.FileOperationNativeInstrumentation

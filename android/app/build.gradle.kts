@@ -155,6 +155,9 @@ tasks.withType<Test>().configureEach {
     // Core dumps can grow far beyond the test heap, so a fatal worker must not create one.
     jvmArgs("-XX:-CreateCoredumpOnCrash",
         "-XX:ErrorFile=${nativeCrashDirectory.get().asFile.absolutePath}/hs_err_pid%p.log")
+    // Linux/JDK17单元测试桥接真实主机FD，所需反射开放仅作用于Test JVM。
+    jvmArgs("--add-opens=java.base/sun.nio.fs=ALL-UNNAMED",
+        "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED", "--add-opens=java.base/java.io=ALL-UNNAMED")
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.usePreinstrumentedJars", "true")
     systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)

@@ -50,8 +50,10 @@ abstract class FileOperationPhysicalTestFixture {
             packageName = context.packageName
             name = FileOperationFixtureDocumentsProvider::class.java.name
             applicationInfo = context.applicationInfo
-            exported = false
+            exported = true
             grantUriPermissions = true
+            readPermission = android.Manifest.permission.MANAGE_DOCUMENTS
+            writePermission = android.Manifest.permission.MANAGE_DOCUMENTS
         }
         val provider = Robolectric.buildContentProvider(FileOperationFixtureDocumentsProvider::class.java).create(info).get()
         provider.installedTree = tree

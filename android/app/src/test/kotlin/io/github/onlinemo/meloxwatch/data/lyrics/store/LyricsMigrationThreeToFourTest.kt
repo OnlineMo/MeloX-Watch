@@ -38,7 +38,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** Historical 3→4 DDL, production 1→6 opens and pinned 1/2 schemas remain separate oracles. */
+/** Historical 3→4 DDL, production 1→7 opens and pinned 1/2 schemas remain separate oracles. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -219,8 +219,51 @@ internal class LyricsMigrationThreeToFourTest {
     }
 
     private suspend fun assertV3Unchanged(database: RoomDatabase, before: V3Observation) = database.withTestWriterSql {
-        assertEquals(before.catalog, query(CATALOG_QUERY, block = ::statementRows))
-        for ((table, rows) in before.rows) assertEquals(table, rows, query(select(table), block = ::statementRows))
+        val codecAdded = scalarLong("PRAGMA user_version") == 7L
+        val expectedCatalog = if (codecAdded) catalogWithCodecColumn(before.catalog) else before.catalog
+        assertEquals(expectedCatalog, query(CATALOG_QUERY, block = ::statementRows))
+        if (codecAdded) {
+            val columns = query("PRAGMA table_info(local_track_versions)") { statement ->
+                buildList { while (statement.step()) add(statement.getText(1)) }
+            }
+            assertEquals(before.rows.getValue("local_track_versions").columns + "codecParameters", columns)
+            assertEquals(0L, scalarLong("SELECT COUNT(*) FROM local_track_versions WHERE codecParameters IS NOT NULL"))
+        }
+        for ((table, rows) in before.rows) {
+            val sql = if (codecAdded && table == "local_track_versions") {
+                val oldColumns = rows.columns.joinToString(", ") { "`$it`" }
+                select(table).replace("SELECT *", "SELECT $oldColumns")
+            } else select(table)
+            assertEquals(table, rows, query(sql, block = ::statementRows))
+        }
+    }
+
+    /** V7仅增加这一个nullable列；旧定义、索引和原单元格仍逐字比较。 */
+    private fun catalogWithCodecColumn(before: FrozenCursorRows): FrozenCursorRows {
+        val typeColumn = before.columns.indexOf("type")
+        val nameColumn = before.columns.indexOf("name")
+        val sqlColumn = before.columns.indexOf("sql")
+        check(listOf(typeColumn, nameColumn, sqlColumn).all { it >= 0 })
+        var changed = 0
+        val rows = before.rows.map { row ->
+            if (row[typeColumn].value == "table" && row[nameColumn].value == "local_track_versions") {
+                changed++
+                val sql = checkNotNull(row[sqlColumn].value)
+                check(sql.endsWith(")"))
+                // SQLite 3.50.1在首个表约束前插入新列，原列定义、表约束和索引仍逐字比较。
+                val boundary = ", PRIMARY KEY("
+                val insertAt = sql.indexOf(boundary)
+                check(insertAt > 0 && sql.indexOf(boundary, insertAt + 1) < 0)
+                check(sql.substring(0, insertAt).endsWith("`statisticsEpoch` INTEGER NOT NULL"))
+                val expected = sql.substring(0, insertAt) + ", codecParameters TEXT DEFAULT NULL" + sql.substring(insertAt)
+                row.mapIndexed { index, cell ->
+                    if (index == sqlColumn) cell.copy(value = expected)
+                    else cell
+                }
+            } else row
+        }
+        assertEquals(1, changed)
+        return before.copy(rows = rows)
     }
 
     private suspend fun assertRollbackAndRetry(file: File, before: V3Observation) {
@@ -240,7 +283,7 @@ internal class LyricsMigrationThreeToFourTest {
     }
 
     private suspend fun assertCurrentSchema(database: RoomDatabase, expectedLyricsRows: Long = 0L): String = database.withTestWriterSql {
-        assertEquals(6L, scalarLong("PRAGMA user_version"))
+        assertEquals(7L, scalarLong("PRAGMA user_version"))
         assertEquals(
             V3_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") + VERSION_SIX_NEW_TABLES,
             applicationTables().toSet(),
@@ -289,7 +332,7 @@ internal class LyricsMigrationThreeToFourTest {
         context, MeloXDatabase::class.java, file.absolutePath,
     ).setDriver(BundledSQLiteDriver()).addMigrations(
         MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3, lastMigration,
-        MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6,
+        MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6, MeloXDatabase.MIGRATION_6_7,
     ).build()
 
     private fun supportOpen(file: File, failAfterDdl: Boolean): SupportSQLiteOpenHelper {
