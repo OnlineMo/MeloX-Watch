@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.ui.debugmask
 
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.edit
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -51,7 +52,7 @@ internal fun saveDebugRoundMask(context: Context, enabled: Boolean): Boolean {
     if (!BuildConfig.DEBUG) return false
     return try {
         context.getSharedPreferences(DEBUG_ROUND_MASK_PREFERENCES, Context.MODE_PRIVATE)
-            .edit().putBoolean(DEBUG_ROUND_MASK_SAVED_ENABLED, enabled).apply()
+            .edit { putBoolean(DEBUG_ROUND_MASK_SAVED_ENABLED, enabled) }
         true
     } catch (_: RuntimeException) { false }
 }
