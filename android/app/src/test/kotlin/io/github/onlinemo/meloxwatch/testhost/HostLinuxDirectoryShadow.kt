@@ -121,7 +121,7 @@ private object HostDirectoryPosix {
     private val unixAttributes = Class.forName("sun.nio.fs.UnixFileAttributes")
     private val dispatcher = Class.forName("sun.nio.fs.UnixNativeDispatcher")
     private val unixException = Class.forName("sun.nio.fs.UnixException")
-    val descriptorNumber = FileDescriptor::class.java.getDeclaredField("fd").apply { check(trySetAccessible()) }
+    val descriptorNumber = FileDescriptor::class.java.getDeclaredField("fd").apply { setAccessible(true) }
     val nativeOpen = dispatcher.accessibleMethod("open", unixPath, Integer.TYPE, Integer.TYPE)
     val nativeClose = dispatcher.accessibleMethod("close", Integer.TYPE)
     val nativeMknod = dispatcher.accessibleMethod("mknod", unixPath, Integer.TYPE, java.lang.Long.TYPE)
@@ -135,7 +135,7 @@ private object HostDirectoryPosix {
         .associateWith { unixAttributes.accessibleMethod(it) }
 
     private fun Class<*>.accessibleMethod(name: String, vararg types: Class<*>): Method =
-        getDeclaredMethod(name, *types).apply { check(trySetAccessible()) }
+        getDeclaredMethod(name, *types).apply { setAccessible(true) }
 
     fun number(descriptor: FileDescriptor, operation: String): Int {
         val value = descriptorNumber.getInt(descriptor)
