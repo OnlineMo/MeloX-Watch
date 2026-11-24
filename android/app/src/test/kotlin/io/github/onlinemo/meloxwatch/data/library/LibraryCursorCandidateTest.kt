@@ -6,6 +6,7 @@ import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.transfer.CompanionRoomFixture
 import io.github.onlinemo.meloxwatch.data.transfer.TransferCatalogRow
+import io.github.onlinemo.meloxwatch.data.transfer.TransferDisplayKind
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -114,9 +115,11 @@ class LibraryCursorCandidateTest {
             "version-middle" to LocalAudioMetadata(title = "M", artists = listOf("Alpha")),
             "version-tail" to LocalAudioMetadata(title = "Y", artists = listOf("Beta")),
         ))
+        // 正常搜索路径先注册原艺人组；单个 raw displayName 不等同搜索映射。
+        fixture.group(TransferDisplayKind.ARTIST, "Alpha")
         val original = fixture.tracks().single { it.title == "A" }
         val newVersionId = "cursor-second-valid-version"
-        fixture.library.libraryTransaction {
+        val earlier = fixture.library.libraryTransaction {
             val meta = checkNotNull(fixture.library.dao.meta())
             val old = checkNotNull(fixture.library.dao.currentTrack(original.trackKey.trackId))
             val revision = meta.revision + 1L
@@ -130,6 +133,7 @@ class LibraryCursorCandidateTest {
             fixture.library.dao.insertArtists(listOf(LibraryArtistEntity(newVersionId, 0,
                 LibrarySortKeys.text("Zulu"), "Zulu")))
             assertEquals(1, fixture.library.dao.updateMeta(meta.copy(revision = revision)))
+            old
         }
         for (query in listOf(LibraryQuery(), LibraryQuery(search = "Alpha"))) {
             val view = fixture.library.openView(query, owner = LibraryViewOwner.TRANSFER)
@@ -151,6 +155,30 @@ class LibraryCursorCandidateTest {
             } finally {
                 fixture.library.closeView(view.viewId)
             }
+        }
+        // raw 前窗为B/C，C被正常搜索排除；同标识的远端Z不能补成B/Z假满窗。
+        fixture.library.libraryTransaction {
+            fixture.library.dao.updateTrackVersion(earlier.copy(displayTitle = "B", title = "B",
+                titleKey = LibrarySortKeys.text("B"), titleSection = "B",
+                searchText = LibrarySortKeys.normalize("B Alpha version-original.mp3")))
+        }
+        fixture.append(source, listOf(
+            "raw-prefix-cursor" to LocalAudioMetadata(title = "A", artists = listOf("Alpha")),
+            "raw-prefix-filtered" to LocalAudioMetadata(title = "C", artists = listOf("Beta")),
+            "raw-prefix-matching" to LocalAudioMetadata(title = "D", artists = listOf("Alpha")),
+        ))
+        val filtered = fixture.library.openView(LibraryQuery(search = "Alpha"), owner = LibraryViewOwner.TRANSFER)
+        try {
+            val cursor = fullRows(filtered).single { it.track.displayTitle == "A" }.cursor(filtered)
+            fixture.library.transferTransaction(filtered) {
+                val expected = fixture.library.dao.rows(LibrarySql.rows(filtered, cursor, 2))
+                val candidate = fixture.library.dao.rows(checkNotNull(LibrarySql.rowsForTrackCursor(filtered, cursor, 2)))
+                assertEquals(listOf("B", "D"), expected.map { it.track.displayTitle })
+                assertEquals(listOf("B"), candidate.map { it.track.displayTitle })
+            }
+            assertWindow(filtered, cursor)
+        } finally {
+            fixture.library.closeView(filtered.viewId)
         }
     }
 

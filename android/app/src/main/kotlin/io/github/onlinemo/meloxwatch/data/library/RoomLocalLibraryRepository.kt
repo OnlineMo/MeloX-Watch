@@ -774,10 +774,8 @@ class RoomLocalLibraryRepository(
         val query = LibrarySql.rowsForTrackCursor(view, cursor, limit, before) ?: return null
         val rows = dao.rows(query)
         currentCoroutineContext().ensureActive()
-        // after 不可用行或 before 可用行时，原始元组边界是所有原结果的必要条件。
-        val onePartition = if (before) cursor.missingRank == 0 else cursor.missingRank == 1
-        if (onePartition) return rows
-        // 跨分区时，满窗且同分区证明完整原前缀；不足或夹带另一分区必须回退。
+        // raw 前窗有限，任何短窗都不能证明原页完整；缺值和过滤仍由原查询恢复。
+        // 满窗、同 missingRank 且不越 raw 最远元组，才证明完整原前缀。
         if (rows.size == limit && rows.all { it.missingRank == cursor.missingRank }) return rows
         return null
     }
