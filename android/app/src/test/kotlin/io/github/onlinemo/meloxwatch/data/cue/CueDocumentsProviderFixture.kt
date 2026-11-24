@@ -92,7 +92,7 @@ class CueDocumentsProviderFixture : DocumentsProvider() {
                     DocumentsContract.Document.COLUMN_LAST_MODIFIED -> if (directory) null else 1000L
                     DocumentsContract.Document.COLUMN_FLAGS -> 0
                     else -> null
-                } }.toTypedArray())
+                } }.toTypedArray<Any?>())
             }
         }
     }
