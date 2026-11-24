@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.queue
 
 import io.github.onlinemo.meloxwatch.model.FrozenQueueView
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
@@ -51,6 +52,7 @@ internal fun QueueEntry.record(generationId: String) = QueueEntryEntity(
     grantFlags = location?.grantFlags,
     access = location?.access?.name,
     contentRevision = location?.contentRevision,
+    cueReference = cueReference?.let(CueReferenceCodec::encode),
 )
 
 internal fun QueueEntryEntity.model(): QueueEntry {
@@ -76,6 +78,7 @@ internal fun QueueEntryEntity.model(): QueueEntry {
         durationMs,
         location,
         accountId,
+        cueReference?.let { CueReferenceCodec.decode(it) },
     )
 }
 

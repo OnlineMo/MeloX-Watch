@@ -15,6 +15,9 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryTrackEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackLocationEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningMetaEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueDao
+import io.github.onlinemo.meloxwatch.data.queue.HistoricalQueueDao
+import io.github.onlinemo.meloxwatch.data.queue.toCurrentQueueEntry
+import io.github.onlinemo.meloxwatch.data.queue.toCurrentQueueHead
 import io.github.onlinemo.meloxwatch.data.queue.QueueEntryEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueGenerationEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueHeadEntity
@@ -42,7 +45,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** Frozen 1→2, historical-v3 observations and production-v7 repository behavior stay separate. */
+/** 冻结的 1→2、历史 v3 观察与生产 v8 仓储行为保持独立。 */
 @RunWith(RobolectricTestRunner::class)
 // 迁移夹具独占其生产文件名，避免 Application 异步恢复初始化抢先打开同一库。
 @Config(sdk = [26], application = Application::class, manifest = Config.NONE)
@@ -75,7 +78,7 @@ class RoomMigrationOneToTwoTest {
     }
 
     @Test(timeout = 30000L)
-    fun applicationOpenMigratesASeededV1FileThroughV2ToV6AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
+    fun applicationOpenMigratesASeededV1FileThroughV2ToV8AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
         val context = RuntimeEnvironment.getApplication() as Context
         // Robolectric owns this application's database directory; the production filename and
         // applicationContext path are used so the test cannot bypass MeloXDatabase.open.
@@ -299,10 +302,10 @@ class RoomMigrationOneToTwoTest {
             requireNotNull(path)
         }
         assertEquals(file.canonicalPath, File(mainPath).canonicalPath)
-        assertEquals(7L, scalarLong("PRAGMA user_version"))
+        assertEquals(8L, scalarLong("PRAGMA user_version"))
         assertEquals(
             VERSION_THREE_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") +
-                VERSION_SIX_NEW_TABLES,
+                VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES,
             query(TABLES_QUERY, block = ::applicationTables),
         )
         val identity = query(IDENTITY_QUERY) { rows ->
@@ -316,12 +319,24 @@ class RoomMigrationOneToTwoTest {
         }
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
-        for (table in VERSION_SIX_NEW_TABLES) {
+        for (table in VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES) {
             assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table`"))
         }
         query("PRAGMA foreign_key_check", block = ::assertNoForeignKeyViolations)
         query("PRAGMA integrity_check", block = ::assertIntegrity)
         identity
+    }
+
+    private suspend fun assertLegacyQueueRows(database: RoomDatabase, dao: HistoricalQueueDao, before: Map<String, FrozenTableRows>) {
+        database.withTestReaderSql { schemaOne.assertRowsPreserved(before, this) }
+        assertEquals(legacyGeneration, dao.generation(GENERATION_ID))
+        assertEquals(legacyGeneration, dao.operation(legacyGeneration.operationId))
+        assertEquals(legacyHead, dao.head()?.toCurrentQueueHead())
+        assertEquals(legacyRows.sortedBy { it.playbackOrder }, dao.page(GENERATION_ID, 0L, 10).map { it.toCurrentQueueEntry() })
+        for (row in legacyRows) {
+            assertEquals(row, dao.entry(GENERATION_ID, row.queueEntryId)?.toCurrentQueueEntry())
+            assertEquals(row, dao.entryAtOriginalOrder(GENERATION_ID, row.originalOrder)?.toCurrentQueueEntry())
+        }
     }
 
     private suspend fun assertLegacyQueueRows(database: RoomDatabase, dao: QueueDao, before: Map<String, FrozenTableRows>) {
@@ -524,5 +539,7 @@ class RoomMigrationOneToTwoTest {
             "display_groups", "display_names", "display_album_links", "display_artist_links",
             "transfer_room_operations", "transfer_display_previews", "transferred_theme_candidates",
         )
+        val VERSION_EIGHT_CUE_TABLES = setOf("local_cue_documents", "local_cue_group_versions", "local_cue_native_segments",
+            "local_cue_aliases", "local_cue_alias_versions", "local_cue_alias_segments")
     }
 }

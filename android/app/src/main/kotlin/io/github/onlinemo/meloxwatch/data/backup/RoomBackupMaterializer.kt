@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.backup
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteStatement
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.library.DisplayAlbumLinkEntity
 import io.github.onlinemo.meloxwatch.data.library.DisplayArtistLinkEntity
 import io.github.onlinemo.meloxwatch.data.library.DisplayGroupEntity
@@ -137,6 +138,7 @@ internal class RoomBackupMaterializer(
         createSelection("backup_tracks")
         createSelection("backup_existing_tracks")
         try {
+            if (run.mode == BackupMergeMode.REPLACE_SELECTED) retireCueAccess(write.revision)
             each(stage, BackupRecordKind.SOURCE_HINT) { row ->
                 val binding = requiredBinding(stage, BackupBindingFamily.SOURCE, row.key)
                 select("backup_sources", binding.actualId)
@@ -244,7 +246,9 @@ internal class RoomBackupMaterializer(
                 eachId("SELECT trackId FROM local_track_versions WHERE validTo IS NULL AND member=1 AND trackId NOT IN (SELECT id FROM temp.backup_tracks) AND (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100") { id ->
                     val old = dao.currentTrack(id) ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
                     putTrackVersion(old.copy(versionId = stableUuid(run.id, "retire-track", id), validFrom = write.revision,
-                        validTo = null, member = false), old)
+                        validTo = null, member = false, cueReference = old.cueReference?.let {
+                            CueReferenceCodec.encode(CueReferenceCodec.decode(it).portable())
+                        }), old)
                 }
                 execute("UPDATE local_track_locations SET validTo=? WHERE validTo IS NULL", BackupCell.Integer(write.revision - 1L))
                 eachId("SELECT sourceId FROM local_sources WHERE state!='REMOVED' AND sourceId NOT IN (SELECT id FROM temp.backup_sources) AND (? IS NULL OR sourceId>?) ORDER BY sourceId LIMIT 100") { id ->
@@ -278,11 +282,36 @@ internal class RoomBackupMaterializer(
                     "restored-rule-" + backupStableId(run.archiveSha256, row.key), source, node, row.flag("subtree"), write.revision, null))
             }
             restoreDisplay(run, stage, write.revision)
+            each(stage, BackupRecordKind.TRACK) { row ->
+                if (row.portableCueReference() != null &&
+                    (run.mode == BackupMergeMode.REPLACE_SELECTED || scalar("SELECT EXISTS(SELECT 1 FROM temp.backup_existing_tracks WHERE id=?)",
+                        BackupCell.Text(row.key)) == 0L)) missing = increment(missing)
+            }
             return missing
         } finally {
             execute("DROP TABLE IF EXISTS temp.backup_tracks")
             execute("DROP TABLE IF EXISTS temp.backup_sources")
             execute("DROP TABLE IF EXISTS temp.backup_existing_tracks")
+        }
+    }
+
+    /** 替换在同一写事务中移除访问能力，同时保留原生标识与修订历史。 */
+    private suspend fun retireCueAccess(revision: Long) {
+        val cues = database.cueDao()
+        eachId("SELECT trackId FROM local_track_versions WHERE validTo IS NULL AND cueReference IS NOT NULL AND (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100") { id ->
+            val encoded = dao.currentTrack(id)?.cueReference ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            val reference = CueReferenceCodec.decode(encoded)
+            val documents = setOf(reference.identity.sourceId to reference.identity.cueId,
+                reference.actualDocument.sourceId to reference.actualDocument.cueId)
+            for ((sourceId, cueId) in documents) {
+                val document = cues.documentById(cueId) ?: continue
+                if (document.sourceId != sourceId || cues.closeGroup(cueId, revision) !in 0..1 ||
+                    cues.markReassociationPending(cueId) != 1) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            }
+            cues.alias(reference.identity.sourceId, reference.identity.cueId)?.let { alias ->
+                if (cues.closeAliasVersion(alias.aliasId, revision) !in 0..1 ||
+                    cues.markAliasReassociationPending(alias.aliasId) != 1) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            }
         }
     }
 
@@ -300,7 +329,8 @@ internal class RoomBackupMaterializer(
             LibrarySortKeys.normalize(listOfNotNull(title, metadata.artist, artists.joinToString(" "), metadata.album, filename).joinToString("\n")),
             LibrarySortKeys.section(title), LibrarySortKeys.section(artists.firstOrNull()), LibrarySortKeys.section(metadata.album),
             LibrarySortKeys.section(filename), old?.playCount ?: 0L, old?.listeningMs ?: 0L, old?.statisticsEpoch ?: write.statisticsEpoch,
-            codecParameters = metadata.codecParameters?.let(LocalCodecParametersCodec::encode))
+            codecParameters = metadata.codecParameters?.let(LocalCodecParametersCodec::encode),
+            cueReference = row.portableCueReference()?.let(CueReferenceCodec::encode))
     }
 
     private suspend fun putTrackVersion(next: LibraryTrackVersionEntity, old: LibraryTrackVersionEntity?) {
@@ -466,7 +496,8 @@ internal class RoomBackupMaterializer(
         row.optionalText("providerId")?.let { TrackKey(it, stage.actualId(BackupRecordKind.TRACK, row.text("trackId"))) },
         row.optionalText("placeholderId"), row.optionalText("issue")?.let(PlaylistReferenceIssue::valueOf),
         row.optionalText("titleHint"), row.optionalText("artistHint"), row.optionalText("albumHint"),
-        row.optionalText("relativePathHint"), row.optionalText("descriptionHint"), row.optionalLong("durationMs"))
+        row.optionalText("relativePathHint"), row.optionalText("descriptionHint"), row.optionalLong("durationMs"),
+        cueReference = row.portableCueReference())
 
     private suspend fun restoreQueue(run: BackupRestoreRun, stage: SqliteBackupStage): Long {
         val queue = database.queueDao()
@@ -497,7 +528,9 @@ internal class RoomBackupMaterializer(
                     if (local) stage.actualId(BackupRecordKind.TRACK, row.text("trackId")) else row.text("trackId"), row.long("originalOrder"),
                     row.long("playbackOrder"), row.optionalText("displayName"), row.optionalLong("durationMs"), null,
                     binding?.takeIf { it.verified }?.actualId, fence?.text("uri"), fence?.text("grantUri"),
-                    fence?.long("grantFlags")?.toInt(), fence?.text("access"), fence?.long("contentRevision"))
+                    fence?.long("grantFlags")?.toInt(), fence?.text("access"), fence?.long("contentRevision"),
+                    cueReference = (fence?.values?.get("cueReference") as? BackupCell.Text)?.value ?:
+                        row.portableCueReference()?.let(CueReferenceCodec::encode))
             }
             queue.insertEntries(entries)
             count = add(count, entries.size.toLong())
@@ -691,6 +724,16 @@ internal class RoomBackupMaterializer(
                 if (dao.track(hint.trackId) == null) {
                     dao.insertTrack(LibraryTrackEntity(hint.trackId, TrackKey.LOCAL_PROVIDER, stage.header.createdEpochMs, write.nextAdded))
                     write.nextAdded = increment(write.nextAdded); write.changed = true
+                }
+                val cue = hint.cueReference
+                if (cue != null && dao.currentTrack(hint.trackId) == null) {
+                    val identityRow = dao.track(hint.trackId) ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                    val next = library.emptyTrackVersion(identityRow, "CUE ${cue.identity.trackNumber}", write.revision).copy(
+                        member = false, trackNumber = cue.identity.trackNumber, durationMs = cue.identity.durationUs / 1000L,
+                        cueReference = CueReferenceCodec.encode(cue.portable()))
+                    dao.insertTrackVersion(next)
+                    dao.insertArtists(listOf(LibraryArtistEntity(next.versionId, 0, LibrarySortKeys.text(null), null)))
+                    write.changed = true
                 }
                 val identity = LibrarySortKeys.identity("BACKUP_UNVERIFIED", run.archiveSha256, hint.record.key)
                 val location = dao.location(hint.locationId)

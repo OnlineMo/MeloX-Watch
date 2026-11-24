@@ -6,6 +6,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryAvailability
 import io.github.onlinemo.meloxwatch.data.library.LibrarySql
 import io.github.onlinemo.meloxwatch.data.library.LibraryViewToken
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
+import io.github.onlinemo.meloxwatch.data.library.currentCueMatchesPortableHint
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
@@ -78,8 +79,17 @@ internal class RoomPlaylistExportSource(
             currentCoroutineContext().ensureActive()
             val reference = member.reference
             val track = if (reference.trackKey == null) null else tracks[keyIndex++]
-            val path = if (track?.sourceId != null && track.sourceId == relativeSourceId) {
-                library.playlistRelativePath(libraryView, track)?.let { full ->
+            val storedCue = reference.cueReference
+            val currentCue = track?.cueReference
+            // 保存的证明决定待确认状态，不能用同一逻辑标识的当前内容替换它。
+            val cue = storedCue ?: currentCue
+            val cueAvailable = track?.availability == LibraryAvailability.AVAILABLE &&
+                currentCue != null && currentCue.isBound &&
+                (storedCue == null || currentCueMatchesPortableHint(currentCue, storedCue))
+            val path = if ((cue == null || cueAvailable) &&
+                track?.sourceId != null && track.sourceId == relativeSourceId) {
+                (if (cue != null) library.cueRelativePath(libraryView, track)
+                    else library.playlistRelativePath(libraryView, track))?.let { full ->
                     val components = ExchangeRelativePath.parse(full).components
                     if (components.size <= rootPrefix.size || components.take(rootPrefix.size) != rootPrefix) null
                     else ExchangeRelativePath.parse(components.drop(rootPrefix.size).joinToString("/"))
@@ -88,11 +98,13 @@ internal class RoomPlaylistExportSource(
             val title = reference.titleHint ?: track?.metadata?.title ?: track?.title
             val exportMemberId = UUID.nameUUIDFromBytes("$exportId:${member.memberId}".toByteArray(Charsets.UTF_8)).toString()
             ExchangeMember(member.ordinal, exportMemberId, trackKey = reference.trackKey, relativePath = path,
+                mediaKind = if (cue == null) ExchangeMediaKind.AUDIO else ExchangeMediaKind.CUE_TRACK,
+                cue = cue?.let { ExchangeCueHint(path, it.identity.trackNumber, it.portable()) },
                 title = if (singleLineTitles) title?.replace('\r', ' ')?.replace('\n', ' ') else title,
                 artist = reference.artistHint ?: track?.metadata?.artist,
                 album = reference.albumHint ?: track?.metadata?.album,
                 durationMs = reference.durationMs ?: track?.metadata?.durationMs,
-                unresolved = reference.trackKey == null)
+                unresolved = reference.trackKey == null || cue != null && (!cueAvailable || path == null))
         }
     }
 

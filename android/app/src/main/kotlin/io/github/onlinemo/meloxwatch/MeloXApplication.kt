@@ -1,6 +1,9 @@
 package io.github.onlinemo.meloxwatch
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
+import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLimits
 import io.github.onlinemo.meloxwatch.data.bluetoothlyrics.WatchBluetoothLyricsController
 import io.github.onlinemo.meloxwatch.ui.lyrics.entry.ApplicationLyricsEntryOwner
 import io.github.onlinemo.meloxwatch.data.about.AppLicenseRepository
@@ -68,8 +71,12 @@ import io.github.onlinemo.meloxwatch.data.library.RoomPlaylistQueueMapper
 import io.github.onlinemo.meloxwatch.data.library.RoomPlaylistRecoveryController
 import io.github.onlinemo.meloxwatch.data.listening.RoomListeningRepository
 import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
+import io.github.onlinemo.meloxwatch.data.cue.AndroidCueLocalDocuments
+import io.github.onlinemo.meloxwatch.data.cue.CuePathMatcher
+import io.github.onlinemo.meloxwatch.data.cue.CueScanReader
 import io.github.onlinemo.meloxwatch.data.local.LocalMetadataReader
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
+import io.github.onlinemo.meloxwatch.data.local.LocalProviderFailureStage
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsMemoryOwner
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsFeatureOwner
 import io.github.onlinemo.meloxwatch.data.lyrics.active.LocalLyricsContext
@@ -116,6 +123,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -212,6 +221,7 @@ class MeloXApplication : Application() {
     override fun onTerminate() {
         if (bluetoothLyricsOwner.isInitialized()) bluetoothLyricsOwner.value.close()
         if (lyricsEntryRuntime.isInitialized()) lyricsEntryRuntime.value.close()
+        if (localProviderIoOwner.isInitialized()) localProviderIoOwner.value.closeFailureReceipts()
         diagnosticQueue.close()
         if (applicationScopeOwner.isInitialized()) applicationScopeOwner.value.cancel()
         try { closeOnlineResources() } finally { super.onTerminate() }
@@ -222,7 +232,15 @@ class MeloXApplication : Application() {
     val queues: QueueStore get() = roomQueues
     val library by lazy { RoomLocalLibraryRepository(database) }
     val listening by lazy { RoomListeningRepository(library) }
-    val localProviderIo by lazy { LocalProviderIo() }
+    private val localProviderIoOwner = lazy {
+        LocalProviderIo(reportRetiredFailure = { stage ->
+            recordDiagnostic(DiagnosticArea.LIBRARY, when (stage) {
+                LocalProviderFailureStage.READ -> DiagnosticCode.INTERNAL
+                LocalProviderFailureStage.RETIREMENT -> DiagnosticCode.RECOVERY_REQUIRED
+            })
+        })
+    }
+    val localProviderIo get() = localProviderIoOwner.value
     internal val filePlaybackHost by lazy { FileOperationPlaybackHost() }
     val fileOperations: FileOperationsRuntime by lazy {
         FileOperationsRuntime(this, library, roomQueues, localProviderIo, filePlaybackHost,
@@ -278,7 +296,23 @@ class MeloXApplication : Application() {
     private val playlistFences by lazy { RoomPlaylistFences(database) }
     private val roomPlaylists by lazy {
         RoomPlaylistRepository(database, database.playlistDao(), folderFenceVerifier = playlistFences,
-            libraryFenceVerifier = playlistFences)
+            libraryFenceVerifier = playlistFences, cueInputRegistrar = { generation ->
+                var first = 0L
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val page = database.playlistDao().membersPage(generation, first, PlaylistLimits.PAGE_SIZE)
+                    if (page.isEmpty()) break
+                    for (member in page) {
+                        currentCoroutineContext().ensureActive()
+                        val cue = member.cueReference?.let { CueReferenceCodec.decode(it, portableOnly = true) } ?: continue
+                        val metadata = LocalAudioMetadata(title = member.titleHint, artist = member.artistHint,
+                            album = member.albumHint, durationMs = member.durationMs ?: cue.identity.durationUs / 1000L,
+                            trackNumber = cue.identity.trackNumber)
+                        library.registerPortableCueHintUnlocked(cue, metadata, "CUE ${cue.identity.trackNumber}")
+                    }
+                    first = Math.addExact(page.last().ordinal, 1L)
+                }
+            })
     }
     val playlists: LocalPlaylistRepository get() = roomPlaylists
     val playlistFolders by lazy { RoomFolderPlaylistController(database, playlists, library) }
@@ -307,7 +341,7 @@ class MeloXApplication : Application() {
     val localSources by lazy { AndroidLocalSources(this, localProviderIo) }
     val lyricsAuthority by lazy { LyricsLoadAuthority() }
     val lyricsCopies by lazy { LyricsDocumentCopies(this, localProviderIo, backupBarrier = backupMutationBarrier) }
-    val lyricsContexts by lazy { RoomLyricsContextResolver(database, library) }
+    val lyricsContexts by lazy { RoomLyricsContextResolver(database, library, cueReadValidator = localSources::validateCueRead) }
     private val rawLyricsTracks by lazy { RoomLyricsTrackStore(database, database.lyricsDao()) }
     val lyricsTracks: LyricsTrackStore by lazy { ReferenceGatedLyricsTrackStore(rawLyricsTracks, lyricsCopies) }
     val lyricsDocuments: LyricsDocuments by lazy {
@@ -321,16 +355,21 @@ class MeloXApplication : Application() {
     /** Registration and physical read proofs are separate checks, outside a Room writer. */
     suspend fun validateLyricsContext(context: LocalLyricsContext): Boolean {
         if (!lyricsContexts.isCurrent(context)) return false
-        val verified = localSources.validateRead(context.audio)
+        val verified = if (context.cueReference != null) localSources.validateCueRead(context.audio) else localSources.validateRead(context.audio)
         return verified.contentValidation == LocalContentValidation.VERIFIED &&
             verified.copy(contentValidation = context.audio.contentValidation) == context.audio &&
             lyricsContexts.isCurrent(context)
     }
     val localMetadata by lazy { LocalMetadataReader(this, localProviderIo) }
+    private val cueScanReader by lazy {
+        CueScanReader(fileOperations.cueMutations, CuePathMatcher(localSources),
+            AndroidCueLocalDocuments(localSources))
+    }
     private val scansOwner = lazy {
         LocalScanEngine(localSources, localMetadata::read, fileOperations.mutations, localProviderIo,
             readContentToken = localMetadata::contentToken,
-            verifyMetadataCandidate = localSources::verifyMetadataCandidate)
+            verifyMetadataCandidate = localSources::verifyMetadataCandidate,
+            scanCue = { token, candidate, encoding -> cueScanReader.read(token, candidate, encoding) })
     }
     val scans get() = scansOwner.value
     val imports by lazy {

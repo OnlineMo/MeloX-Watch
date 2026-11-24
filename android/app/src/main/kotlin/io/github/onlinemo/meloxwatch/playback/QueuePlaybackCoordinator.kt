@@ -77,6 +77,9 @@ class QueuePlaybackCoordinator(
     private val onRetainedTrackBinding: (SleepTimerTrackBinding, SleepTimerTrackBinding) -> Unit = { _, _ -> },
     private val beforeNaturalAdvance: (SleepTimerTrackBinding) -> Boolean = { false },
     private val sourceResolver: SourcePlaybackResolver? = null,
+    private val checkCueBinding: suspend (QueueEntry) -> Unit = { entry ->
+        if (entry.cueReference != null) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_UNSUPPORTED, entry.queueEntryId))
+    },
     private val resolveMetadata: suspend (QueueEntry) -> MediaMetadata? = { null },
     private val mayContinuousPlayback: () -> Boolean = { true },
     private val mayBeginContinuousRound: () -> Boolean = { true },
@@ -1004,6 +1007,25 @@ class QueuePlaybackCoordinator(
                     applyWindow(live, window, live.positionMs, explicitPlay = true, token, newRound = false)
                 }
             }
+        } else if (loadedWindow?.current?.cueReference != null) {
+            val captured = requireNotNull(loadedWindow).current
+            launchCommand {
+                action { token ->
+                    val resolved = resolveEntry(captured)
+                    currentCoroutineContext().ensureActive()
+                    val current = loadedWindow?.current
+                    if (current == null || !sameSource(current, captured) || !sameSource(resolved, captured) ||
+                        backend.currentMediaItem?.mediaId != captured.queueEntryId || backend.playbackState != Player.STATE_READY) {
+                        throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, captured.queueEntryId))
+                    }
+                    loadedResources[captured.queueEntryId]?.checkCurrent()
+                        ?: throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.NOT_READY, captured.queueEntryId))
+                    resumeIntent = token == intentRevision
+                    if (resumeIntent) authorizePlay()
+                    resumeIntent = resumeIntent && backend.playWhenReady
+                    updateTicker()
+                }
+            }
         } else {
             invalidateSeekOwner()
             intentRevision += 1L
@@ -1019,6 +1041,48 @@ class QueuePlaybackCoordinator(
             updateTicker()
             refreshContinuousBoundary()
             refreshSeekState()
+        }
+    }
+
+    /** 只检查有界已加载条目；进度tick不能创建第二份权威状态。 */
+    internal fun cueEntriesSnapshot(): List<QueueEntry> {
+        assertMain()
+        if (isDetached || !backendBound || switchingBackend) return emptyList()
+        return loadedWindow?.entries.orEmpty().filter { entry ->
+            val resource = loadedResources[entry.queueEntryId]
+            entry.cueReference != null && resource != null && try {
+                resource.checkCurrent();
+                true
+            } catch (_: QueuePlaybackException) {
+                false
+            }
+        }
+    }
+
+    internal fun invalidateCueReference(entry: QueueEntry, issue: QueuePlaybackIssue) {
+        assertMain()
+        val window = loadedWindow ?: return
+        if (isDetached || !backendBound || switchingBackend || window.entries.none { sameSource(it, entry) }) return
+        val resource = loadedResources[entry.queueEntryId] ?: return
+        resource.cue?.owner?.invalidateCue(entry.queueEntryId)
+        if (window.current.queueEntryId == entry.queueEntryId) {
+            onUserPause()
+            pauseForInterruption()
+            invalidateSeekOwner()
+            report(QueuePlaybackFailure(issue, entry.queueEntryId))
+        } else {
+            val wasApplying = applyingWindow
+            applyingWindow = true
+            try {
+                val index = (0 until backend.mediaItemCount).firstOrNull { backend.getMediaItemAt(it).mediaId == entry.queueEntryId }
+                if (index != null) backend.removeMediaItem(index)
+                val kept = window.entries.filter { it.queueEntryId != entry.queueEntryId }
+                loadedWindow = window.copy(entries = kept, currentIndex = kept.indexOfFirst { it.queueEntryId == window.current.queueEntryId })
+                loadedResources = loadedResources - entry.queueEntryId
+                loadedMetadata = loadedMetadata - entry.queueEntryId
+                resource.close()
+            } finally { applyingWindow = wasApplying }
+            sessionBridge.logicalStateChanged()
         }
     }
 
@@ -1241,10 +1305,18 @@ class QueuePlaybackCoordinator(
                 currentCoroutineContext().ensureActive()
                 if (referenceFailure(entry) != null) continue
                 try {
-                    val resource = if (entry.trackKey.providerId == TrackKey.LOCAL_PROVIDER) {
+                    // 分轨token选择实际PCM窗口；注册不能由普通content资源包装代替。
+                    val resource = if (entry.trackKey.providerId == TrackKey.LOCAL_PROVIDER && entry.cueReference == null) {
                         RuntimePlaybackResource(resolveEntry(entry))
-                    } else if (retainCurrent && entry.queueEntryId == current.queueEntryId && loadedResources[entry.queueEntryId]?.isOnline == true) {
-                        requireNotNull(loadedResources[entry.queueEntryId]).retain(entry)
+                    } else if (retainCurrent && entry.queueEntryId == current.queueEntryId &&
+                        loadedResources[entry.queueEntryId]?.let { it.isOnline || it.cue != null } == true) {
+                        val retained = requireNotNull(loadedResources[entry.queueEntryId])
+                        if (retained.cue == null) retained.retain(entry) else {
+                            // 保留当前的编辑不重装内核URI；重核分轨后继续同一物理epoch。
+                            val checked = resolveEntry(entry)
+                            currentCoroutineContext().ensureActive()
+                            retained.retain(checked)
+                        }
                     } else {
                         val resolver = sourceResolver ?: throw QueuePlaybackException(
                             QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_UNSUPPORTED, entry.queueEntryId))
@@ -1289,7 +1361,7 @@ class QueuePlaybackCoordinator(
     }
 
     private fun sameSource(left: QueueEntry, right: QueueEntry): Boolean = left.queueEntryId == right.queueEntryId &&
-        left.trackKey == right.trackKey && left.accountId == right.accountId && left.location == right.location
+        left.trackKey == right.trackKey && left.accountId == right.accountId && left.location == right.location && left.cueReference == right.cueReference
 
     private fun windowMatches(window: PreparedPlaybackWindow, saved: QueueSnapshot): Boolean = window.generationId == saved.generationId &&
         window.queueRevision == saved.queueRevision && window.totalCount == saved.entryCount &&
@@ -1373,7 +1445,7 @@ class QueuePlaybackCoordinator(
         else -> QueuePlaybackFailure(QueuePlaybackIssue.OUTPUT_ERROR, entryId)
     }
 
-    /** No provider/database resource reads after queue acceptance; ownership and play intent still apply. */
+    /** 已接纳资源继续保留；后续CUE元数据变化仍可取消其使用。 */
     private suspend fun applyPreparedWindow(
         saved: QueueSnapshot,
         prepared: PreparedPlaybackWindow,
@@ -1394,7 +1466,8 @@ class QueuePlaybackCoordinator(
         fun matches(existing: MediaItem, entry: QueueEntry): Boolean {
             val previous = previousEntries[entry.queueEntryId] ?: return false
             return existing.mediaId == entry.queueEntryId && previous.trackKey == entry.trackKey &&
-                previous.location == entry.location && previous.displayName == entry.displayName &&
+                previous.location == entry.location && previous.cueReference == entry.cueReference && previous.displayName == entry.displayName &&
+                existing.clippingConfiguration == cuePlaybackClipping(entry.cueReference, backend is SystemMediaPlayerAdapter) &&
                 existing.localConfiguration?.uri == prepared.resources[entry.queueEntryId]?.mediaUri
         }
         applyingWindow = true
@@ -1454,6 +1527,9 @@ class QueuePlaybackCoordinator(
             backend.playerError?.let { throw it }
             val atEnd = backend.duration > 0L && backend.duration != C.TIME_UNSET && backend.currentPosition >= backend.duration
             if (atEnd) manualEndCycle = playbackCycle
+            if (current.cueReference != null) checkCueBinding(current)
+            currentCoroutineContext().ensureActive()
+            prepared.resources[current.queueEntryId]?.checkCurrent()
             resumeIntent = explicitPlay && token == intentRevision && !atEnd
             if (resumeIntent) authorizePlay()
             resumeIntent = resumeIntent && backend.playWhenReady
@@ -2310,7 +2386,7 @@ class QueuePlaybackCoordinator(
         if (duration == C.TIME_UNSET || duration <= 0L || playbackCycle < 0L) return null
         return SeekOwnerIdentity(sessionId, backendGeneration, saved.generationId, saved.queueRevision,
             current.queueEntryId, current.location?.locationId, current.location?.contentRevision ?: 0L,
-            duration, playbackCycle, seekActionId)
+            duration, playbackCycle, seekActionId, current.cueReference)
     }
 
     private fun referenceFailure(entry: QueueEntry): QueuePlaybackFailure? {
@@ -2327,6 +2403,7 @@ class QueuePlaybackCoordinator(
         .setMediaId(entry.queueEntryId)
         .setUri(loadedResources[entry.queueEntryId]?.mediaUri ?: error("Validated runtime resource required"))
         .setMediaMetadata(loadedMetadata[entry.queueEntryId] ?: MediaMetadata.Builder().setTitle(entry.displayName).build())
+        .setClippingConfiguration(cuePlaybackClipping(entry.cueReference, backend is SystemMediaPlayerAdapter))
         .build()
 
     private fun errorIssue(error: PlaybackException): QueuePlaybackIssue = mediaTransportIssue(error) ?: when (error.errorCode) {
@@ -2356,6 +2433,7 @@ class QueuePlaybackCoordinator(
         val durationMs: Long,
         val playbackCycle: Long,
         val actionId: String,
+        val cueReference: io.github.onlinemo.meloxwatch.model.LocalCueReference? = null,
     )
     private data class NaturalCompletion(val entryId: String, val cycle: Long, val backendGeneration: Long)
     private data class ContinuousBoundary(

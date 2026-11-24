@@ -352,8 +352,11 @@ class BackupCoordinator internal constructor(
     suspend fun previewRelink(missingTrackId: String, target: TrackKey): BackupRelinkPreview = action {
         relinker.preview(storageJournal(), missingTrackId, target)
     }
-    suspend fun confirmRelink(token: String, allowDifferentContent: Boolean = false): BackupRelinkReceipt = action {
-        withClosedStorage { relinker.confirm(storageJournal(), token, allowDifferentContent) }
+    suspend fun previewCueRelink(missingTrackId: String, target: TrackKey, preferRegisteredNative: Boolean = false): BackupRelinkPreview = action {
+        relinker.previewCue(missingTrackId, target, preferRegisteredNative = preferRegisteredNative)
+    }
+    suspend fun confirmRelink(token: String, allowDifferentContent: Boolean = false, allowCueDifferences: Boolean = false): BackupRelinkReceipt = action {
+        withClosedStorage { relinker.confirm(storageJournal(), token, allowDifferentContent, allowCueDifferences) }
     }
     suspend fun discardRelinkPreview(token: String) = action { relinker.discard(token) }
 
@@ -514,6 +517,7 @@ class BackupCoordinator internal constructor(
             if (page.isEmpty()) break
             val pending = page.mapNotNull { row ->
                 if (run.mode == BackupMergeMode.MERGE_KEEP_CURRENT && database.libraryDao().currentTrack(row.text("trackId")) != null) return@mapNotNull null
+                if (stage.row(BackupRecordKind.TRACK, row.text("trackId"))?.portableCueReference() != null) return@mapNotNull null
                 val binding = stage.binding(BackupBindingFamily.LOCATION, row.text("locationId")) ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
                 if (binding.verified) null else BackupRelinkHint(stableUuid(run.archiveSha256, row.text("trackId"), binding.actualId),
                     row.text("trackId"), binding.actualId, run.archiveSha256,
@@ -539,7 +543,8 @@ class BackupCoordinator internal constructor(
                         else -> null
                     } ?: continue
                     val queueMissing = kind == BackupRecordKind.QUEUE_ENTRY && stage.binding(BackupBindingFamily.QUEUE, row.key)?.verified != true
-                    stage.referenceTrack(track, queueMissing)
+                    val cue = stage.row(BackupRecordKind.TRACK, track)?.portableCueReference() ?: row.portableCueReference()
+                    stage.referenceTrack(track, queueMissing, cue)
                 }
                 cursor = page.last().key
             }
@@ -549,15 +554,20 @@ class BackupCoordinator internal constructor(
             val page = stage.referenceTrackPage(after)
             if (page.isEmpty()) break
             val hints = ArrayList<BackupRelinkHint>()
-            for ((trackId, missingQueue) in page) {
+            for ((trackId, missingQueue, cueReference) in page) {
                 val current = database.libraryDao().currentTrack(trackId)
                 val restoringLibraryTrack = BackupScope.LIBRARY in run.scopes && stage.row(BackupRecordKind.TRACK, trackId) != null
-                val needs = if (restoringLibraryTrack) !stage.hasAnyTrackLocation(trackId) &&
+                val needs = if (cueReference != null) {
+                    if (restoringLibraryTrack) run.mode == BackupMergeMode.REPLACE_SELECTED || current == null
+                    else current == null || missingQueue || current.cueReference?.let {
+                        !io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec.decode(it).isBound
+                    } == true
+                } else if (restoringLibraryTrack) !stage.hasAnyTrackLocation(trackId) &&
                     (run.mode == BackupMergeMode.REPLACE_SELECTED || current == null) else current == null || missingQueue
-                if (needs) hints += syntheticBackupRelinkHint(run.archiveSha256, trackId)
+                if (needs) hints += syntheticBackupRelinkHint(run.archiveSha256, trackId, cueReference)
             }
             physical { signal -> signal.throwIfCanceled(); saved.planRelinks(run.id, hints) }
-            after = page.last().first
+            after = page.last().trackId
         }
     }
     private suspend fun projectRelinks(saved: BackupRestoreJournal) {

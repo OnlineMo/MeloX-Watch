@@ -116,7 +116,8 @@ internal object LibrarySql {
         view.sort.field == LibrarySortField.ARTIST || view.query.artistKey != null || view.query.search.isNotBlank()
 
     /** 只在选窗不依赖艺人时延后显示投影，扫描元数据保持原值。 */
-    private fun displayCtes(revision: Long, includeArtists: Boolean = true, selectedTracks: String? = null): String {
+    private fun displayCtes(revision: Long, includeArtists: Boolean = true,
+        selectedTracks: String? = null, retainedCue: Boolean = false): String {
         val trackSelection = selectedTracks?.let { " AND ($it)" }.orEmpty()
         val artistColumns = if (includeArtists) """,
                 primaryArtist.displayName AS displayArtist, primaryArtist.sortKey AS displayArtistSortKey,
@@ -127,7 +128,7 @@ internal object LibrarySql {
                     WHERE candidate.trackId = t.trackId ORDER BY ordinal, artistKey LIMIT 1)""" else ""
         return """
         scanned_tracks AS (
-            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1$trackSelection
+            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND ${if (retainedCue) "(t.member = 1 OR t.cueReference IS NOT NULL)" else "t.member = 1"}$trackSelection
         ), ${if (includeArtists) artistCtes(revision, "scanned_tracks") + ", " else ""}display_tracks AS (
             SELECT t.*, COALESCE(assigned.groupKey, t.albumKey) AS displayAlbumKey,
                 COALESCE(albumName.displayName, CASE WHEN albumLink.versionId IS NULL THEN t.album
@@ -148,9 +149,108 @@ internal object LibrarySql {
         """.trimIndent()
     }
 
+    /** 分段需要两份带版本的访问路径，以及与自身完全一致的完整组修订。 */
+    private fun cueAvailability(revision: Long): String {
+        fun ref(field: String) = "json_extract(t.cueReference, '$.$field')"
+        fun actual(field: String) = "COALESCE(${ref("binding.actualDocument.$field")}, ${ref("identity.$field")})"
+        fun native(field: String) = "json_extract(cueNative.cueReference, '$.$field')"
+        val exactNativeFields = listOf("identity.trackNumber", "identity.startFrame", "identity.endFrameExclusive", "identity.endUsExclusive",
+            "identity.index00Frame", "identity.cueContentToken", "identity.boundaryVersion", "binding.cue", "binding.audio", "binding.pcm")
+        return """CASE
+            WHEN t.cueReference IS NULL THEN COALESCE(a.availabilityRank, 3)
+            WHEN ${ref("state")} IS NOT 'BOUND' THEN 3
+            WHEN a.availabilityRank = 5 OR cueSource.state = 'REMOVED' THEN 5
+            WHEN a.availabilityRank = 2 OR cueSource.state = 'NEEDS_AUTHORIZATION'
+                OR cueAccess.readIssue IN ('PERMISSION_DENIED', 'PERMISSION_REVOKED') THEN 2
+            WHEN a.availabilityRank = 4 OR cueAccess.readIssue = 'FILE_MISSING'
+                OR (cueSource.absenceScanId IS NOT NULL AND cueAccess.lastSeenSequence < cueSource.absenceScanSequence
+                    AND EXISTS (SELECT 1 FROM scan_absence_candidates absent WHERE absent.scanId = cueSource.absenceScanId AND absent.aliasId = cueAccess.aliasId)) THEN 4
+            WHEN COALESCE(a.availabilityRank, 3) = 3 OR cueSource.state = 'UNAVAILABLE'
+                OR cueAccess.readIssue IN ('SOURCE_UNAVAILABLE', 'SOURCE_CHANGED') THEN 3
+            WHEN cueDocument.reassociationPending = 1 OR cueGroup.versionId IS NULL OR cueNative.groupVersionId IS NULL
+                OR cueGroup.segmentCount != (SELECT COUNT(*) FROM local_cue_native_segments complete WHERE complete.groupVersionId = cueGroup.versionId)
+                OR cueDocument.cueId IS NULL OR cueAccess.versionId IS NULL
+                OR cueLocation.versionId IS NULL OR cueSource.sourceId IS NULL OR cueGrant.grantId IS NULL THEN 3
+            WHEN ${ref("binding.adoptionAliasId")} IS NULL AND t.cueReference IS NOT cueNative.cueReference THEN 3
+            WHEN ${ref("binding.adoptionAliasId")} IS NOT NULL AND (
+                cueAlias.aliasId IS NULL OR cueAlias.reassociationPending = 1 OR cueAliasVersion.versionId IS NULL
+                OR cueAliasSegment.cueReference IS NOT t.cueReference
+                OR cueAlias.logicalSourceId IS NOT ${ref("identity.sourceId")} OR cueAlias.logicalCueId IS NOT ${ref("identity.cueId")}
+                OR cueAliasVersion.nativeGroupVersionId IS NOT cueGroup.versionId
+                OR cueAliasVersion.nativeCueId IS NOT cueDocument.cueId OR cueAliasVersion.nativeGroupRevision IS NOT cueGroup.groupRevision
+                OR cueAliasVersion.nativeMemberCount IS NOT cueGroup.segmentCount
+                OR cueAliasVersion.memberCount != (SELECT COUNT(*) FROM local_cue_alias_segments complete WHERE complete.aliasVersionId = cueAliasVersion.versionId)
+                OR EXISTS (SELECT 1 FROM local_cue_alias_segments member
+                    LEFT JOIN local_track_versions logical ON logical.trackId = member.logicalTrackId AND ${valid("logical", revision)}
+                    WHERE member.aliasVersionId = cueAliasVersion.versionId AND logical.cueReference IS NOT member.cueReference)
+            ) THEN 3
+            WHEN ${exactNativeFields.joinToString(" OR ") { "${ref(it)} IS NOT ${native(it)}" }}
+                OR ${actual("sourceId")} IS NOT cueDocument.sourceId OR ${actual("trackNumber")} IS NOT ${ref("identity.trackNumber")}
+                OR (${ref("identity.audioContentTokenHint")} IS NOT NULL AND ${ref("identity.audioContentTokenHint")} IS NOT ${native("binding.audio.verifiedContentToken")}) THEN 3
+            WHEN cueGroup.rawContentToken IS NOT ${ref("identity.cueContentToken")}
+                OR cueGroup.boundaryVersion IS NOT ${ref("identity.boundaryVersion")}
+                OR cueGroup.documentContentRevision IS NOT ${ref("binding.cue.location.contentRevision")}
+                OR cueLocation.contentRevision IS NOT ${ref("binding.cue.location.contentRevision")}
+                OR payloadLocation.contentRevision IS NOT ${ref("binding.audio.location.contentRevision")}
+                OR cueDocument.sourceId IS NOT ${ref("binding.cue.sourceId")}
+                OR cueGroup.sourceRevision IS NOT ${ref("binding.cue.sourceRevision")}
+                OR cueGroup.authEpoch IS NOT ${ref("binding.cue.authEpoch")}
+                OR cueDocument.aliasId IS NOT ${ref("binding.cue.aliasId")}
+                OR cueDocument.objectId IS NOT ${ref("binding.cue.objectId")}
+                OR cueDocument.locationId IS NOT ${ref("binding.cue.location.locationId")}
+                OR cueSource.grantId IS NOT ${ref("binding.cue.grantId")}
+                OR payloadSource.grantId IS NOT ${ref("binding.audio.grantId")}
+                OR cueGrant.uri IS NOT ${ref("binding.cue.location.grantUri")}
+                OR payloadGrant.uri IS NOT ${ref("binding.audio.location.grantUri")}
+                OR payloadAccess.objectId IS NOT ${ref("binding.audio.objectId")}
+                OR payloadAlias.sourceId IS NOT ${ref("binding.audio.sourceId")}
+                OR payloadAlias.uri IS NOT ${ref("binding.audio.location.uri")}
+                OR cueAccess.uri IS NOT ${ref("binding.cue.location.uri")}
+                OR cueLocation.contentToken IS NOT ${ref("binding.cue.providerContentToken")}
+                OR payloadLocation.contentToken IS NOT ${ref("binding.audio.providerContentToken")}
+                OR (cueLocation.verifiedContentToken IS NOT NULL AND cueLocation.verifiedContentToken IS NOT ${ref("binding.cue.verifiedContentToken")})
+                OR (payloadLocation.verifiedContentToken IS NOT NULL AND payloadLocation.verifiedContentToken IS NOT ${ref("binding.audio.verifiedContentToken")})
+                OR (cueLocation.sizeBytes IS NOT NULL AND cueLocation.sizeBytes IS NOT ${ref("binding.cue.sizeBytes")})
+                OR (payloadLocation.sizeBytes IS NOT NULL AND payloadLocation.sizeBytes IS NOT ${ref("binding.audio.sizeBytes")}) THEN 3
+            WHEN ${nativeGroupUnavailable(revision)} THEN 3
+            WHEN COALESCE(a.availabilityRank, 1) = 1 OR cueGrant.readCapability != 'AVAILABLE' THEN 1
+            ELSE COALESCE(a.availabilityRank, 3) END""".trimIndent()
+    }
+
+    /** 有界原生组中的每份实际音频都须保留各自已接纳的访问围栏。 */
+    private fun nativeGroupUnavailable(revision: Long): String {
+        fun audio(field: String) = "json_extract(member.cueReference, '$.binding.audio.$field')"
+        return """EXISTS (SELECT 1 FROM local_cue_native_segments member
+            LEFT JOIN local_access_aliases identity ON identity.aliasId = ${audio("aliasId")}
+            LEFT JOIN local_alias_versions access ON access.aliasId = identity.aliasId AND ${valid("access", revision)}
+            LEFT JOIN local_location_versions content ON content.locationId = identity.locationId AND ${valid("content", revision)}
+            LEFT JOIN local_locations baseline ON baseline.locationId = content.locationId
+            LEFT JOIN local_source_versions source ON source.sourceId = identity.sourceId AND ${valid("source", revision)}
+            LEFT JOIN local_sources currentSource ON currentSource.sourceId = source.sourceId
+            LEFT JOIN local_grants grant ON grant.grantId = source.grantId
+            WHERE member.groupVersionId = cueGroup.versionId AND (
+                identity.aliasId IS NULL OR access.versionId IS NULL OR content.versionId IS NULL OR source.sourceId IS NULL
+                OR identity.sourceId IS NOT ${audio("sourceId")} OR identity.objectId IS NOT ${audio("objectId")}
+                OR identity.locationId IS NOT ${audio("location.locationId")} OR access.uri IS NOT ${audio("location.uri")}
+                OR source.state != 'ACTIVE' OR grant.readCapability != 'AVAILABLE' OR grant.grantId IS NOT ${audio("grantId")}
+                OR grant.uri IS NOT ${audio("location.grantUri")}
+                OR (source.validTo IS NULL AND (currentSource.revision IS NOT ${audio("sourceRevision")} OR currentSource.authEpoch IS NOT ${audio("authEpoch")}))
+                OR content.contentRevision IS NOT ${audio("location.contentRevision")} OR content.contentToken IS NOT ${audio("providerContentToken")}
+                OR (content.verifiedContentToken IS NOT NULL AND content.verifiedContentToken IS NOT ${audio("verifiedContentToken")})
+                OR (content.validTo IS NULL AND content.verifiedContentToken IS NULL AND baseline.previousVerifiedContentToken IS NOT NULL
+                    AND baseline.previousVerifiedContentToken IS NOT ${audio("verifiedContentToken")})
+                OR (content.sizeBytes IS NOT NULL AND content.sizeBytes IS NOT ${audio("sizeBytes")})
+                OR (access.sizeBytes IS NOT NULL AND access.sizeBytes IS NOT ${audio("sizeBytes")})
+                OR access.readIssue IN ('PERMISSION_DENIED', 'PERMISSION_REVOKED', 'FILE_MISSING', 'SOURCE_UNAVAILABLE', 'SOURCE_CHANGED')
+                OR (source.absenceScanId IS NOT NULL AND access.lastSeenSequence < source.absenceScanSequence
+                    AND EXISTS (SELECT 1 FROM scan_absence_candidates absent WHERE absent.scanId = source.absenceScanId AND absent.aliasId = access.aliasId))
+            ))""".trimIndent()
+    }
+
     private fun cte(view: LibraryViewToken, includeArtists: Boolean = true,
         selectedKeys: List<TrackKey>? = null, trackCursor: LibraryCursor? = null,
-        beforeCursor: Boolean = false, trackCursorLimit: Int = LibraryLimits.PAGE_SIZE): Pair<String, MutableList<Any?>> {
+        beforeCursor: Boolean = false, trackCursorLimit: Int = LibraryLimits.PAGE_SIZE,
+        retainedCue: Boolean = false): Pair<String, MutableList<Any?>> {
         require(selectedKeys == null || trackCursor == null)
         val revision = view.revision
         val args = mutableListOf<Any?>()
@@ -158,22 +258,21 @@ internal object LibrarySql {
         val cursorWindowSql = trackCursor?.let {
             checkNotNull(trackCursorWindow(view, it, beforeCursor, trackCursorLimit, args))
         }
-        val selectedTracks = when {
-            selectedKeys != null -> {
-                val predicate = selectedKeys.joinToString(" OR ") { key ->
-                    args += key.providerId
-                    args += key.trackId
-                    "(t.providerId = ? AND t.trackId = ?)"
-                }
-                if (selectedKeys.isEmpty()) "0" else {
-                    // 单列键域可使用 trackId 索引；成对谓词核验来源，全部有效版本仍参与投影。
-                    val trackIds = selectedKeys.joinToString(",") { key ->
-                        args += key.trackId
-                        "?"
-                    }
-                    "($predicate) AND t.trackId IN ($trackIds)"
-                }
+        // 同页成对键只绑定一次；trackId 准入仍包含每个标识的全部有效版本。
+        val selectedKeySql = selectedKeys?.takeIf { it.isNotEmpty() }?.let { keys ->
+            val values = keys.joinToString(",") { key ->
+                args += key.providerId
+                args += key.trackId
+                "(?, ?)"
             }
+            "selected_track_keys(providerId, trackId) AS MATERIALIZED (VALUES $values)"
+        }
+        val selectedTracks = when {
+            selectedKeys != null -> if (selectedKeys.isEmpty()) "0" else """
+                t.trackId IN (SELECT trackId FROM selected_track_keys)
+                AND EXISTS (SELECT 1 FROM selected_track_keys wanted
+                    WHERE t.providerId = wanted.providerId AND t.trackId = wanted.trackId)
+            """.trimIndent()
             trackCursor != null -> "t.trackId IN (SELECT trackId FROM track_cursor_window)"
             else -> null
         }
@@ -203,10 +302,12 @@ internal object LibrarySql {
             args += it
         }
         if (!view.query.includeHidden) aliases += "NOT ${excluded("av.sourceId", "av.nodeId", revision)}"
-        val filters = mutableListOf(valid("t", revision), "t.member = 1")
-        if (!view.query.includeHidden || view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null) filters += "a.aliasVersionId IS NOT NULL"
-        if (view.query.readableOnly) filters += "a.availabilityRank = 0"
-        if (!view.query.includeHidden) filters += "COALESCE(a.availabilityRank, 3) != 5"
+        val filters = mutableListOf(valid("t", revision), if (retainedCue) "(t.member = 1 OR t.cueReference IS NOT NULL)" else "t.member = 1")
+        val availability = cueAvailability(revision)
+        if (view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null) filters += "a.aliasVersionId IS NOT NULL"
+        else if (!view.query.includeHidden) filters += "(a.aliasVersionId IS NOT NULL OR (t.cueReference IS NOT NULL AND json_extract(t.cueReference, '$.state') = 'PENDING'))"
+        if (view.query.readableOnly) filters += "($availability) = 0"
+        if (!view.query.includeHidden) filters += "($availability) != 5"
         if (!view.query.includeHidden && view.shortAudioFilter) filters += "(t.durationMs IS NULL OR t.durationMs >= ${LibraryLimits.SHORT_AUDIO_MS})"
         view.query.albumKey?.let { filters += "t.displayAlbumKey = ?"; args += it }
         view.query.artistKey?.let { filters += "EXISTS (SELECT 1 FROM display_artist_rows artist WHERE artist.versionId = t.versionId AND artist.artistKey = ?)"; args += it }
@@ -223,7 +324,8 @@ internal object LibrarySql {
         // relation; permission and exclusion resolution must not be rebuilt for each track.
         val sql = """
             WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""}
-            ${cursorWindowSql?.let { "$it,\n" }.orEmpty()}${displayCtes(revision, includeArtists, selectedTracks)}, alias_rows AS MATERIALIZED (
+            ${selectedKeySql?.let { "$it,\n" }.orEmpty()}
+            ${cursorWindowSql?.let { "$it,\n" }.orEmpty()}${displayCtes(revision, includeArtists = includeArtists, selectedTracks = selectedTracks, retainedCue = retainedCue)}, alias_rows AS MATERIALIZED (
                 SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
                     lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
@@ -241,7 +343,7 @@ internal object LibrarySql {
                 JOIN local_grants g ON g.grantId = sv.grantId
                 WHERE ${aliases.joinToString(" AND ")}
             ), base AS (
-                SELECT t.*, COALESCE(a.availabilityRank, 3) AS availabilityRank,
+                SELECT t.*, $availability AS availabilityRank,
                     CASE WHEN t.statisticsEpoch = ${view.statisticsEpoch} THEN t.playCount ELSE 0 END AS effectivePlayCount,
                     CASE WHEN t.statisticsEpoch = ${view.statisticsEpoch} THEN t.listeningMs ELSE 0 END AS effectiveListeningMs,
                     a.aliasId AS selectedAliasId, a.sourceId AS selectedSourceId, a.locationId AS selectedLocationId,
@@ -254,6 +356,7 @@ internal object LibrarySql {
                     SELECT ar.aliasVersionId FROM local_track_locations relation
                     JOIN alias_rows ar ON ar.locationId = relation.locationId
                     WHERE relation.trackId = t.trackId AND ${valid("relation", revision)}
+                        AND (t.cueReference IS NULL OR ar.aliasId = json_extract(t.cueReference, '$.binding.audio.aliasId'))
                     ORDER BY ar.availabilityRank, ar.locationId, ar.aliasId LIMIT 1
                 )
                 LEFT JOIN local_alias_versions payloadAlias ON payloadAlias.versionId = a.aliasVersionId
@@ -261,6 +364,22 @@ internal object LibrarySql {
                 LEFT JOIN local_location_versions payloadLocation ON payloadLocation.versionId = a.locationVersionId
                 LEFT JOIN local_source_versions payloadSource ON payloadSource.sourceId = a.sourceId AND payloadSource.validFrom = a.sourceVersionFrom
                 LEFT JOIN local_grants payloadGrant ON payloadGrant.grantId = payloadSource.grantId
+                LEFT JOIN local_cue_documents cueDocument ON cueDocument.cueId = COALESCE(
+                    json_extract(t.cueReference, '$.binding.actualDocument.cueId'), json_extract(t.cueReference, '$.identity.cueId'))
+                LEFT JOIN local_cue_group_versions cueGroup ON cueGroup.cueId = cueDocument.cueId
+                    AND cueGroup.groupRevision = COALESCE(json_extract(t.cueReference, '$.binding.actualDocument.groupRevision'),
+                        json_extract(t.cueReference, '$.identity.groupRevision')) AND ${valid("cueGroup", revision)}
+                LEFT JOIN local_cue_native_segments cueNative ON cueNative.groupVersionId = cueGroup.versionId
+                    AND cueNative.trackNumber = json_extract(t.cueReference, '$.identity.trackNumber')
+                LEFT JOIN local_cue_aliases cueAlias ON cueAlias.aliasId = json_extract(t.cueReference, '$.binding.adoptionAliasId')
+                LEFT JOIN local_cue_alias_versions cueAliasVersion ON cueAliasVersion.aliasId = cueAlias.aliasId
+                    AND cueAliasVersion.logicalGroupRevision = json_extract(t.cueReference, '$.identity.groupRevision') AND ${valid("cueAliasVersion", revision)}
+                LEFT JOIN local_cue_alias_segments cueAliasSegment ON cueAliasSegment.aliasVersionId = cueAliasVersion.versionId
+                    AND cueAliasSegment.logicalTrackId = t.trackId AND cueAliasSegment.trackNumber = json_extract(t.cueReference, '$.identity.trackNumber')
+                LEFT JOIN local_alias_versions cueAccess ON cueAccess.aliasId = cueDocument.aliasId AND ${valid("cueAccess", revision)}
+                LEFT JOIN local_location_versions cueLocation ON cueLocation.locationId = cueDocument.locationId AND ${valid("cueLocation", revision)}
+                LEFT JOIN local_source_versions cueSource ON cueSource.sourceId = cueDocument.sourceId AND ${valid("cueSource", revision)}
+                LEFT JOIN local_grants cueGrant ON cueGrant.grantId = cueSource.grantId
                 WHERE ${filters.joinToString(" AND ")}
             ), ordered AS (
                 SELECT base.*, CASE WHEN availabilityRank = 0 THEN 0 ELSE 1 END AS missingRank,
@@ -409,14 +528,12 @@ internal object LibrarySql {
     fun rowsForKeys(view: LibraryViewToken, keys: List<TrackKey>): RoomRawQuery {
         require(keys.size <= LibraryLimits.PAGE_SIZE)
         val full = artistsBeforeWindow(view)
-        val (sql, args) = cte(view, includeArtists = full, selectedKeys = keys)
-        val predicate = keys.joinToString(" OR ") {
-            args += it.providerId; args += it.trackId
-            "(providerId = ? AND trackId = ?)"
-        }.ifEmpty { "0" }
-        if (!full) return projectedWindow(view, sql, args, "WHERE ($predicate)", "", keys.size + 1)
+        val (sql, args) = cte(view, includeArtists = full, selectedKeys = keys, retainedCue = true)
+        // ordered 继承扫描时的成对键限制；原 N+1 上限继续暴露重复有效行。
+        val where = if (keys.isEmpty()) "WHERE 0" else ""
+        if (!full) return projectedWindow(view, sql, args, where, "", keys.size + 1)
         args += keys.size + 1
-        return raw("$sql SELECT * FROM ordered WHERE ($predicate) LIMIT ?", args.toTypedArray())
+        return raw("$sql SELECT * FROM ordered $where LIMIT ?", args.toTypedArray())
     }
 
     /**
@@ -585,6 +702,42 @@ internal object LibrarySql {
                 ORDER BY t.providerId, t.trackId LIMIT ?
         """.trimIndent(), args.toTypedArray())
     }
+    fun cueAliasAt(revision: Long, aliasId: String): RoomRawQuery = raw(
+        "SELECT av.* FROM local_alias_versions av WHERE av.aliasId = ? AND ${valid("av", revision)} LIMIT 2", arrayOf(aliasId))
+
+    fun scopedCueDocumentMatches(revision: Long, sourceId: String, rootNodeId: String, components: List<String>): RoomRawQuery {
+        require(components.size in 1..16)
+        require(components.all { it.isNotBlank() && it.length <= 512 && it !in setOf(".", "..") &&
+            it.none { char -> char == '/' || char == '\\' || char == '\u0000' } &&
+            java.text.Normalizer.normalize(it, java.text.Normalizer.Form.NFC) == it })
+        val names = components.indices.joinToString(" ") { "WHEN $it THEN ?" }
+        val arguments = mutableListOf<Any?>(sourceId, rootNodeId, sourceId, sourceId)
+        arguments.addAll(components)
+        return raw("""
+            WITH RECURSIVE ${relativePaths(revision, true)}, path_matches(nodeId, depth, directory) AS (
+                SELECT n.nodeId, 0, n.directory FROM local_node_versions n
+                    WHERE n.nodeId = ? AND n.sourceId = ? AND n.directory = 1 AND ${valid("n", revision)}
+                        AND EXISTS (SELECT 1 FROM relative_paths proven WHERE proven.sourceId = n.sourceId AND proven.nodeId = n.nodeId AND proven.directory = 1)
+                UNION ALL
+                SELECT n.nodeId, p.depth + 1, n.directory FROM local_node_versions n JOIN path_matches p
+                    ON n.parentNodeId = p.nodeId AND p.directory = 1
+                    WHERE n.sourceId = ? AND ${valid("n", revision)} AND p.depth < ${components.size}
+                        AND ${pathSegment("n")} AND n.pathName = CASE p.depth $names END
+            )
+            SELECT DISTINCT document.* FROM path_matches p
+                JOIN local_alias_versions av ON av.nodeId = p.nodeId AND ${valid("av", revision)}
+                JOIN local_cue_documents document ON document.aliasId = av.aliasId AND document.sourceId = av.sourceId
+                JOIN local_source_versions sv ON sv.sourceId = av.sourceId AND ${valid("sv", revision)}
+                JOIN local_grants grantAccess ON grantAccess.grantId = sv.grantId
+                WHERE p.depth = ${components.size} AND p.directory = 0 AND sv.state = 'ACTIVE' AND grantAccess.readCapability = 'AVAILABLE'
+                    AND (av.readIssue IS NULL OR av.readIssue = 'METADATA_UNREADABLE')
+                    AND NOT ${excluded("av.sourceId", "av.nodeId", revision)}
+                    AND NOT (sv.absenceScanId IS NOT NULL AND av.lastSeenSequence < sv.absenceScanSequence
+                        AND EXISTS (SELECT 1 FROM scan_absence_candidates missing WHERE missing.scanId = sv.absenceScanId AND missing.aliasId = av.aliasId))
+                ORDER BY document.cueId LIMIT 2
+        """.trimIndent(), arguments.toTypedArray())
+    }
+
     fun absentAliases(sourceId: String, scanId: String, after: String?, limit: Int): RoomRawQuery {
         val args = mutableListOf<Any?>(sourceId, scanId)
         val where = if (after == null) "" else "AND a.aliasId > ?".also { args += after }

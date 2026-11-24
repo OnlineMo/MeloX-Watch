@@ -54,6 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * 服务在主线程创建并持有唯一后端，每个内核 lease 绑定一份实际路由观察者。
@@ -83,9 +84,11 @@ internal class ServicePlaybackOwner(
         val route: PlaybackAudioRoute,
         val media3: Media3PlaybackOperations? = null,
         val system: SystemMediaPlayerAdapter? = null,
+        val awaitCueResources: suspend () -> Unit = {},
     ) {
         private val release = ScheduledPlaybackRelease(releaseGuard, releaseLease, player,
             closeOperations = { media3?.close() },
+            afterNativeRelease = awaitCueResources,
             releasePlayer = { if (system != null) system.releaseOwnedPlayer() else player.release() })
 
         fun releaseLater(): Deferred<Unit> {
@@ -622,7 +625,8 @@ internal class ServicePlaybackOwner(
     ): Backend = when (kind) {
         PlaybackBackendKind.SYSTEM_MEDIA_PLAYER -> {
             val platform = SystemMediaPlayerAdapter(applicationContext, localIo, scope, route, speedTenths, remoteSources = dataSources)
-            val backend = Backend(kind, platform, platform, releaseGuard, lease, route, system = platform)
+            val backend = Backend(kind, platform, platform, releaseGuard, lease, route, system = platform,
+                awaitCueResources = { withTimeout(5000L) { dataSources.awaitCueRetirement() } })
             try {
                 platform.initializePlatform()
                 backend
@@ -649,7 +653,8 @@ internal class ServicePlaybackOwner(
                 .setReleaseTimeoutMs(1500L).build()
             val routedPlayer = RoutingPlaybackPlayer(player, route)
             val operations = Media3PlaybackOperations(routedPlayer)
-            val backend = Backend(kind, routedPlayer, operations, releaseGuard, lease, route, media3 = operations)
+            val backend = Backend(kind, routedPlayer, operations, releaseGuard, lease, route, media3 = operations,
+                awaitCueResources = { withTimeout(5000L) { dataSources.awaitCueRetirement() } })
             try {
                 player.setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), false)

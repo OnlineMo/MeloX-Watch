@@ -971,12 +971,17 @@ private fun ProbeApp(
                         if (!library.loading && tracks.isEmpty()) item { WatchText(stringResource(R.string.library_empty)) }
                         items(tracks, key = { "backup-target:${it.trackKey.providerId}:${it.trackKey.trackId}" }) { track ->
                             WatchContentRow(enabled = !library.loading && !library.showingPreviousData && library.issue == null &&
-                                track.availability in setOf(LibraryAvailability.AVAILABLE, LibraryAvailability.UNKNOWN),
+                                (track.availability in setOf(LibraryAvailability.AVAILABLE, LibraryAvailability.UNKNOWN) ||
+                                    targetRequest.cueTarget && track.cueReference != null),
                                 onClick = { backupViewModel.relinkTargetPicked(targetRequest, track.trackKey) }) {
                                 WatchText(track.title, primary = true)
                                 WatchText(track.displayArtist ?: stringResource(R.string.library_unknown))
                                 WatchText(track.filename)
                             }
+                            if (targetRequest.cueTarget && track.cueReference != null) WatchActionRow(
+                                stringResource(R.string.cue_relink_original_native), enabled = !library.loading &&
+                                    !library.showingPreviousData && library.issue == null,
+                                onClick = { backupViewModel.relinkTargetPicked(targetRequest, track.trackKey, preferRegisteredNative = true) })
                         }
                         item {
                             ProbeButton(stringResource(R.string.library_previous_page), library.hasPrevious, onClick = libraryViewModel::previousPage)
@@ -1719,6 +1724,7 @@ private fun volumeIssueText(issue: ServiceMediaVolumeIssue?): Int = when (issue)
 @Composable
 private fun BackendStatus(backend: PlaybackBackendState?) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        BodyText(stringResource(R.string.cue_backend_precision))
         if (backend == null) {
             BodyText(stringResource(R.string.playback_backend_waiting))
             return@Column
@@ -1987,6 +1993,7 @@ private fun queueIssueText(issue: QueuePlaybackIssue): Int = when (issue) {
     QueuePlaybackIssue.FILE_MISSING -> R.string.playback_file_missing
     QueuePlaybackIssue.SOURCE_DAMAGED -> R.string.playback_source_damaged
     QueuePlaybackIssue.SOURCE_UNAVAILABLE -> R.string.playback_source_unavailable
+    QueuePlaybackIssue.SOURCE_READ_TIMEOUT -> R.string.cue_read_timeout
     QueuePlaybackIssue.OUTPUT_ERROR -> R.string.playback_output_error
     QueuePlaybackIssue.NETWORK_UNAVAILABLE -> R.string.online_network_unavailable
     QueuePlaybackIssue.NETWORK_TIMEOUT -> R.string.online_network_timeout

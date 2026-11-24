@@ -183,6 +183,7 @@ data class LibraryTrackVersionEntity(
     val listeningMs: Long,
     val statisticsEpoch: Long = 0L,
     @ColumnInfo(defaultValue = "NULL") val codecParameters: String? = null,
+    @ColumnInfo(defaultValue = "NULL") val cueReference: String? = null,
 )
 
 @Entity(

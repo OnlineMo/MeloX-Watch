@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.library
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceSpec
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import io.github.onlinemo.meloxwatch.model.TrackKey
 
 object LibraryLimits {
@@ -154,6 +155,7 @@ data class LibraryTrack(
     val listeningMs: Long,
     val displayArtist: String? = metadata.artists.firstOrNull() ?: metadata.artist,
     val displayAlbum: String? = metadata.album,
+    val cueReference: LocalCueReference? = null,
 )
 
 data class LibraryPage(
@@ -183,6 +185,7 @@ data class LocalReadDescriptor(
     val sizeBytes: Long?,
     val verifiedContentToken: String? = null,
     val contentValidation: LocalContentValidation = LocalContentValidation.UNKNOWN,
+    val cueReference: LocalCueReference? = null,
 )
 
 data class LibraryExclusion(

@@ -236,6 +236,13 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         app.scans.start(latest, rules.revision)
     }
 
+    fun retryCueGb18030(source: LibrarySource) = runAction {
+        if (source.spec.kind != LocalSourceKind.TREE) throw LibraryException(LibraryIssue.INVALID_INPUT)
+        val latest = app.library.source(source.spec.sourceId) ?: throw LibraryException(LibraryIssue.SOURCE_UNAVAILABLE)
+        val rules = app.library.rules()
+        app.scans.start(latest, rules.revision, cueEncoding = io.github.onlinemo.meloxwatch.data.cue.CueEncoding.GB18030)
+    }
+
     fun cancelScan() {
         val id = mutableState.value.scan?.token?.scanId ?: return
         viewModelScope.launch { app.scans.cancel(id) }

@@ -47,6 +47,34 @@ interface QueueDao {
     )
     suspend fun originalPage(generationId: String, first: Long, limit: Int): List<QueueEntryEntity>
 
+    @Query("SELECT COUNT(*) FROM queue_entries WHERE generationId = :generationId AND providerId = :providerId AND trackId = :trackId")
+    suspend fun cueTrackEntryCount(generationId: String, providerId: String, trackId: String): Long
+
+    /** 按稳定实例标识分页覆盖每个重复项，不整体分配或截断完整队列。 */
+    @Query("SELECT * FROM queue_entries WHERE generationId = :generationId AND providerId = :providerId " +
+        "AND trackId = :trackId AND (:after IS NULL OR queueEntryId > :after) ORDER BY queueEntryId LIMIT 100")
+    suspend fun cueTrackEntryPage(generationId: String, providerId: String, trackId: String, after: String?): List<QueueEntryEntity>
+
+    @Query("UPDATE queue_entries SET cueReference = :reference, durationMs = :durationMs, " +
+        "locationId = :locationId, locationUri = :locationUri, grantUri = :grantUri, grantFlags = :grantFlags, " +
+        "access = :access, contentRevision = :contentRevision WHERE generationId = :generationId " +
+        "AND queueEntryId = :entryId AND providerId = :providerId AND trackId = :trackId " +
+        "AND cueReference IS :expectedReference AND EXISTS (SELECT 1 FROM queue_head WHERE id = 1 AND activeGenerationId = :generationId)")
+    suspend fun repairCueEntry(generationId: String, entryId: String, providerId: String, trackId: String,
+        expectedReference: String?, reference: String, durationMs: Long?, locationId: String, locationUri: String,
+        grantUri: String, grantFlags: Int, access: String, contentRevision: Long): Int
+
+    @Query("UPDATE queue_generations SET committedQueueRevision = :nextRevision WHERE generationId = :generationId " +
+        "AND phase = 2 AND committedQueueRevision = :expectedRevision")
+    suspend fun advanceCueRepairGeneration(generationId: String, expectedRevision: Long, nextRevision: Long): Int
+
+    @Query("UPDATE queue_head SET queueRevision = :nextQueueRevision, checkpointRevision = :nextCheckpointRevision, " +
+        "positionMs = :positionMs WHERE id = 1 AND activeGenerationId = :generationId " +
+        "AND queueRevision = :expectedQueueRevision AND checkpointRevision = :expectedCheckpointRevision " +
+        "AND currentEntryId IS :expectedCurrentEntryId")
+    suspend fun finishCueRepair(generationId: String, expectedQueueRevision: Long, expectedCheckpointRevision: Long,
+        expectedCurrentEntryId: String?, nextQueueRevision: Long, nextCheckpointRevision: Long, positionMs: Long): Int
+
     @Query("SELECT COUNT(*) FROM queue_entries WHERE generationId = :generationId AND originalOrder != playbackOrder")
     suspend fun nonOriginalOrders(generationId: String): Long
 

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="cue_read_timeout">CUE content verification timed out. Retry after the current read has stopped.</string>
+    <string name="cue_relink_group_counts">Whole CUE group: %1$d old tracks, %2$d verified tracks, %3$d queue entries.</string>
+    <string name="cue_relink_playlist_counts">%1$d playlist and favorite entries keep their identities.</string>
+    <string name="cue_relink_identity_change">The access document or source changes. Old logical track identities and original track numbers remain.</string>
+    <string name="cue_relink_cue_change">The CUE document content differs.</string>
+    <string name="cue_relink_audio_change">Audio content differs for %1$d tracks.</string>
+    <string name="cue_relink_audio_unknown">Original audio content is unknown for %1$d tracks.</string>
+    <string name="cue_relink_bounds_change">Precise segment boundaries differ for %1$d tracks.</string>
+    <string name="cue_relink_extra_members">The verified CUE group contains %1$d additional tracks.</string>
+    <string name="cue_relink_group_ack">Confirm the displayed source, identity and whole-group boundary changes</string>
+    <string name="cue_relink_action">Reassociate the whole CUE group</string>
+    <string name="cue_relink_pending">This CUE segment needs whole-group reassociation.</string>
+    <string name="cue_relink_original_native">Use this item’s originally scanned CUE group</string>
+    <string name="cue_relink_member_title">Track %1$d: %2$s</string>
+    <string name="cue_relink_old_bounds">Original: frame %1$d to %2$s; exclusive end %3$d μs.</string>
+    <string name="cue_relink_new_bounds">Selected: frame %1$d to %2$s; exclusive end %3$d μs.</string>
+    <string name="cue_relink_end_of_audio">audio end</string>
+    <string name="cue_scan_utf8">CUE scan uses UTF-8 and UTF-8 BOM.</string>
+    <string name="cue_scan_gb18030">Retry CUE scan using GB18030</string>
+    <string name="cue_scan_gb18030_explanation">Explicitly retry this authorized folder with GB18030. Files are read again; no automatic encoding guess is made.</string>
+    <string name="cue_backend_precision">Both playback engines read the exact PCM16 sample window. Seek and the public clock use milliseconds. Device output precision has not been measured.</string>
+</resources>

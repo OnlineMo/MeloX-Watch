@@ -44,13 +44,15 @@ class QueueMigrationTest {
         val database = open(file)
         try {
             database.withTestWriterSql {
-                assertEquals(7L, scalarLong("PRAGMA user_version"))
+                assertEquals(8L, scalarLong("PRAGMA user_version"))
                 assertEquals(0L, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
-                assertEquals(48L, scalarLong("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata')"))
+                assertEquals(54L, scalarLong("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata')"))
                 assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
                 for (table in listOf(
                     "display_groups", "display_names", "display_album_links", "display_artist_links",
                     "transfer_room_operations", "transfer_display_previews", "transferred_theme_candidates",
+                    "local_cue_documents", "local_cue_group_versions", "local_cue_native_segments",
+                    "local_cue_aliases", "local_cue_alias_versions", "local_cue_alias_segments",
                 )) {
                     assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table`"))
                 }
@@ -72,7 +74,7 @@ class QueueMigrationTest {
             assertTrue(replay.wasReplay)
             assertEquals(restored, replay.snapshot)
             SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { independent ->
-                assertEquals(7, independent.version)
+                assertEquals(8, independent.version)
                 independent.rawQuery("PRAGMA integrity_check", null).use {
                     assertTrue(it.moveToFirst()); assertEquals("ok", it.getString(0))
                 }
@@ -106,7 +108,7 @@ class QueueMigrationTest {
     ).setDriver(BundledSQLiteDriver())
         .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3,
             MeloXDatabase.MIGRATION_3_4, MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6,
-            MeloXDatabase.MIGRATION_6_7).build()
+            MeloXDatabase.MIGRATION_6_7, MeloXDatabase.MIGRATION_7_8).build()
 
     private suspend fun observeHistoricalVersionThree(file: File) {
         val context = RuntimeEnvironment.getApplication() as Context

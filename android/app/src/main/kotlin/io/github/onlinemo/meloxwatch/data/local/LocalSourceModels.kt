@@ -90,6 +90,9 @@ data class ObservedCandidate(
 
     val directory: Boolean get() = kind == LocalNodeKind.DIRECTORY
 
+    val mayContainCue: Boolean
+        get() = !directory && displayName.substringAfterLast('.', "").equals("cue", ignoreCase = true)
+
     val mayContainAudio: Boolean
         get() = kind == LocalNodeKind.AUDIO || (!directory && (
             mimeType?.startsWith("audio/", ignoreCase = true) == true ||

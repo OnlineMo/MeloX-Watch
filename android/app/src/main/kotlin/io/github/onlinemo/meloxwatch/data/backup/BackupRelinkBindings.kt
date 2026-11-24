@@ -7,21 +7,24 @@ import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
+import io.github.onlinemo.meloxwatch.data.library.currentCueMatchesPortableHint
 import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import kotlinx.coroutines.CancellationException
 
 internal enum class BackupBindingFamily { SOURCE, LOCATION, NODE, ALIAS, QUEUE }
 
 /** A missing logical reference receives no URI, source grant, fingerprint or audio ownership. */
-internal fun syntheticBackupRelinkHint(archiveSha256: String, trackId: String): BackupRelinkHint {
+internal fun syntheticBackupRelinkHint(archiveSha256: String, trackId: String, cueReference: LocalCueReference? = null): BackupRelinkHint {
     val key = stableUuid("backup-missing-reference", archiveSha256, trackId)
     val location = "restored-location-" + backupStableId(archiveSha256, BackupBindingFamily.LOCATION.name, key)
     val record = BackupRecord(BackupRecordKind.LOCATION_HINT, key, mapOf("sizeBytes" to BackupCell.Null,
         "modifiedEpochMs" to BackupCell.Null, "contentSha256" to BackupCell.Null, "providerContentTokenHint" to BackupCell.Null))
-    return BackupRelinkHint(stableUuid(archiveSha256, trackId, location), trackId, location, archiveSha256, record)
+    return BackupRelinkHint(stableUuid(archiveSha256, trackId, location), trackId, location, archiveSha256, record, cueReference?.portable())
 }
 
 /** Fences live only in the private stage. They are never among exportable logical records. */
@@ -137,6 +140,11 @@ internal class BackupPermissionVerifier(
                 stage.putBinding(BackupStoredBinding(BackupBindingFamily.QUEUE, row.key,
                     unresolvedId(BackupBindingFamily.QUEUE, archiveSha256, row.key), false))
                 val key = TrackKey(TrackKey.LOCAL_PROVIDER, row.text("trackId"))
+                val cue = row.portableCueReference()
+                if (cue != null) {
+                    prepareCueQueue(stage, row, cue, scopes, mode)
+                    continue
+                }
                 val hint = row.optionalText("locationIdHint")
                 val descriptor = if (hint == null) try { library.resolveLocalRead(key) }
                     catch (cancelled: CancellationException) { throw cancelled }
@@ -181,6 +189,36 @@ internal class BackupPermissionVerifier(
         }
     }
 
+    private suspend fun prepareCueQueue(stage: SqliteBackupStage, row: BackupRecord, cue: LocalCueReference,
+        scopes: Set<BackupScope>, mode: BackupMergeMode) {
+        if (BackupScope.LIBRARY in scopes && mode == BackupMergeMode.REPLACE_SELECTED) return
+        val read = try { library.resolveCueRead(cue.trackKey) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: LibraryException) {
+            if (failure.issue == LibraryIssue.BUSY) throw BackupException(BackupIssue.BUSY, failure)
+            return
+        }
+        if (!currentCueMatchesPortableHint(read.reference, cue)) return
+        for (descriptor in listOf(read.cue, read.audio)) {
+            val observed = try { sources.validateCueRead(descriptor) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: SourceReadException) {
+                if (failure.issue == SourceReadIssue.BUSY) throw BackupException(BackupIssue.BUSY, failure)
+                return
+            }
+            if (observed.contentValidation != LocalContentValidation.VERIFIED ||
+                observed.copy(contentValidation = descriptor.contentValidation) != descriptor) return
+        }
+        if (library.resolveCueRead(cue.trackKey, read.reference) != read) return
+        val audio = read.audio
+        stage.putBinding(BackupStoredBinding(BackupBindingFamily.QUEUE, row.key, audio.location.locationId, true, mapOf(
+            "trackId" to BackupCell.Text(cue.trackKey.trackId), "cueReference" to BackupCell.Text(CueReferenceCodec.encode(read.reference)),
+            "uri" to BackupCell.Text(audio.location.uri), "grantUri" to BackupCell.Text(audio.location.grantUri),
+            "grantFlags" to BackupCell.Integer(audio.location.grantFlags.toLong()), "access" to BackupCell.Text(audio.location.access.name),
+            "contentRevision" to BackupCell.Integer(audio.location.contentRevision),
+        )))
+    }
+
     private suspend fun currentDescriptor(key: TrackKey, locationId: String, revision: Long): LocalReadDescriptor? {
         try { return library.resolveLocalRead(key, locationId, revision) }
         catch (cancelled: CancellationException) { throw cancelled }
@@ -212,6 +250,12 @@ internal class BackupPermissionVerifier(
                         BackupBindingFamily.NODE -> dao.currentNode(binding.actualId)?.versionId == fence.text("versionId")
                         BackupBindingFamily.ALIAS -> dao.currentAlias(binding.actualId)?.versionId == fence.text("versionId")
                         BackupBindingFamily.QUEUE -> {
+                            val cue = (fence.values["cueReference"] as? BackupCell.Text)?.value
+                            if (cue != null) {
+                                val expected = CueReferenceCodec.decode(cue)
+                                val read = library.resolveCueReadUnlocked(expected.trackKey, expected)
+                                read.reference == expected && read.audio.location.locationId == binding.actualId
+                            } else {
                             val source = dao.source(fence.text("sourceId"))
                             val alias = dao.currentAlias(fence.text("aliasId"))
                             source != null && alias != null && source.revision == fence.long("sourceRevision") &&
@@ -219,6 +263,7 @@ internal class BackupPermissionVerifier(
                                 backupSha256(source.spec.toByteArray(Charsets.UTF_8)) == fence.text("sourceSpecSha256") &&
                                 alias.versionId == fence.text("aliasVersionId") && alias.locationId == binding.actualId &&
                                 dao.location(binding.actualId)?.contentRevision == fence.long("contentRevision")
+                            }
                         }
                     }
                     if (!valid) throw BackupException(BackupIssue.STALE_PREVIEW)

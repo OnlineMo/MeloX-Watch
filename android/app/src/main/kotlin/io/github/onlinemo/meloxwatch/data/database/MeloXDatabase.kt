@@ -1,6 +1,14 @@
 package io.github.onlinemo.meloxwatch.data.database
 
 import android.content.Context
+import io.github.onlinemo.meloxwatch.data.cue.CueDao
+import io.github.onlinemo.meloxwatch.data.cue.CueDocumentEntity
+import io.github.onlinemo.meloxwatch.data.cue.CueGroupVersionEntity
+import io.github.onlinemo.meloxwatch.data.cue.CueMigrations
+import io.github.onlinemo.meloxwatch.data.cue.CueNativeSegmentEntity
+import io.github.onlinemo.meloxwatch.data.cue.CueAliasEntity
+import io.github.onlinemo.meloxwatch.data.cue.CueAliasVersionEntity
+import io.github.onlinemo.meloxwatch.data.cue.CueAliasSegmentEntity
 import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
 import androidx.room.Database
 import androidx.room.Room
@@ -94,9 +102,10 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
         LyricsTrackPreferencesEntity::class, LibraryTransferredImportEntity::class,
         DisplayGroupEntity::class, DisplayNameEntity::class, DisplayAlbumLinkEntity::class,
         DisplayArtistLinkEntity::class, TransferRoomOperationEntity::class, TransferDisplayPreviewEntity::class,
-        TransferredThemeCandidateEntity::class,
+        TransferredThemeCandidateEntity::class, CueDocumentEntity::class, CueGroupVersionEntity::class,
+        CueNativeSegmentEntity::class, CueAliasEntity::class, CueAliasVersionEntity::class, CueAliasSegmentEntity::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
@@ -113,6 +122,7 @@ abstract class MeloXDatabase : RoomDatabase() {
 
     abstract fun queueDao(): QueueDao
     abstract fun libraryDao(): LibraryDao
+    abstract fun cueDao(): CueDao
     abstract fun listeningDao(): ListeningDao
     abstract fun playlistDao(): PlaylistDao
     abstract fun playlistExchangeDao(): PlaylistExchangeDao
@@ -177,11 +187,16 @@ abstract class MeloXDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) { CueMigrations.applyV7ToV8(db) }
+            override fun migrate(connection: SQLiteConnection) { CueMigrations.applyV7ToV8(connection) }
+        }
+
         fun open(context: Context, backupBarrier: BackupMutationBarrier? = null): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
         ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7).build().also { it.backupMutationBarrier = backupBarrier }
+            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8).build().also { it.backupMutationBarrier = backupBarrier }
     }
 }

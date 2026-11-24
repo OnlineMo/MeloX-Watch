@@ -4,6 +4,8 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryAvailability
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrack
 import io.github.onlinemo.meloxwatch.data.library.LibraryViewToken
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
+import io.github.onlinemo.meloxwatch.data.library.currentCueMatchesPortableHint
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistFolderBinding
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLimits
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistQueueAvailability
@@ -33,8 +35,9 @@ internal class RoomPlaylistImportResolver(
                 member.referenceIssue == ExchangeReferenceIssue.EXTERNAL_REFERENCE ||
                     member.referenceIssue == ExchangeReferenceIssue.UNSAFE_RELATIVE_PATH ->
                     Resolution(null, PlaylistImportMemberIssue.BLOCKED_REFERENCE)
+                member.mediaKind == ExchangeMediaKind.CUE_TRACK -> resolveCue(member, knownTrack, context)
                 // The index stores a bounded content proof, not the full-file SHA-256 advertised by an exchange document.
-                member.contentSha256 != null || member.mediaKind == ExchangeMediaKind.CUE_TRACK ||
+                member.contentSha256 != null ||
                     member.unresolved && member.referenceIssue == null ->
                     Resolution(null, PlaylistImportMemberIssue.REQUIRES_REASSOCIATION)
                 knownTrack != null -> Resolution(knownTrack, PlaylistImportMemberIssue.NONE)
@@ -53,7 +56,13 @@ internal class RoomPlaylistImportResolver(
                 else -> Resolution(null, PlaylistImportMemberIssue.UNMATCHED)
             }
             val track = resolution.track
-            val issue = if (track != null) null else when {
+            val portable = member.cue?.reference?.let { reference ->
+                if (reference.identity.audioContentTokenHint == null && member.contentSha256 != null)
+                    reference.copy(identity = reference.identity.copy(audioContentTokenHint = "sha256:" + member.contentSha256))
+                else reference
+            } ?: track?.cueReference?.portable()
+            val pendingKey = portable?.trackKey?.takeIf { track == null }
+            val issue = if (track != null || pendingKey != null) null else when {
                 member.blockedReference?.startsWith("http:", ignoreCase = true) == true ||
                     member.blockedReference?.startsWith("https:", ignoreCase = true) == true -> PlaylistReferenceIssue.NETWORK_REFERENCE
                 resolution.issue == PlaylistImportMemberIssue.REQUIRES_REASSOCIATION ||
@@ -62,13 +71,33 @@ internal class RoomPlaylistImportResolver(
                 else -> PlaylistReferenceIssue.UNMATCHED
             }
             PlaylistExchangeRowEntity(previewId, member.ordinal, member.memberId,
-                track?.trackKey?.trackId, member.memberId.takeIf { track == null }, issue?.name,
+                track?.trackKey?.trackId ?: pendingKey?.trackId, member.memberId.takeIf { track == null && pendingKey == null }, issue?.name,
                 member.title ?: track?.metadata?.title, member.artist ?: track?.metadata?.artist,
                 member.album ?: track?.metadata?.album, member.relativePath?.toString(),
                 // Raw absolute paths and URLs are not retained; the typed issue explains reassociation.
                 null, member.durationMs ?: track?.metadata?.durationMs, resolution.issue.name,
-                playlistImportAvailability(track).name)
+                (if (pendingKey != null) PlaylistQueueAvailability.MISSING else playlistImportAvailability(track)).name,
+                cueReference = portable?.let(CueReferenceCodec::encode))
         }
+    }
+
+    private suspend fun resolveCue(member: ExchangeMember, known: LibraryTrack?, context: PlaylistQueueCatalogToken): Resolution {
+        val cue = member.cue ?: return Resolution(null, PlaylistImportMemberIssue.REQUIRES_REASSOCIATION)
+        fun matches(track: LibraryTrack?): Boolean {
+            val reference = track?.cueReference ?: return false
+            return reference.isBound && reference.identity.trackNumber == cue.trackNumber &&
+                (cue.reference == null || currentCueMatchesPortableHint(reference, cue.reference))
+        }
+        if (matches(known)) return Resolution(known, PlaylistImportMemberIssue.NONE)
+        val path = cue.relativePath
+        val selected = root
+        if (path != null && selected != null) {
+            val keys = library.cueRelativeMatches(view, selected.nodeId, path.components, cue.trackNumber)
+            if (keys.size > 1) return Resolution(null, PlaylistImportMemberIssue.AMBIGUOUS)
+            val track = keys.singleOrNull()?.let { library.playlistTracks(context, listOf(it)).singleOrNull() }
+            if (matches(track)) return Resolution(track, PlaylistImportMemberIssue.NONE)
+        }
+        return Resolution(null, PlaylistImportMemberIssue.REQUIRES_REASSOCIATION)
     }
 
     private data class Resolution(val track: LibraryTrack?, val issue: PlaylistImportMemberIssue)

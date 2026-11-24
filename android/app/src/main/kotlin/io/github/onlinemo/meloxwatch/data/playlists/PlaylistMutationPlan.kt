@@ -49,6 +49,10 @@ internal fun PlaylistMutationRequest.fingerprint(): String {
         fields.add(value.relativePathHint)
         fields.add(value.descriptionHint)
         fields.add(value.durationMs?.toString())
+        value.cueReference?.let {
+            fields.add("cue-reference-v1");
+            fields.add(io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec.encode(it))
+        }
     }
     fun sourceFence(value: PlaylistCatalogFence) {
         fields.add(value.catalogRevision.toString())
@@ -108,6 +112,10 @@ internal fun PlaylistMutationRequest.fingerprint(): String {
             fields.add(edit.reference.relativePathHint)
             fields.add(edit.reference.descriptionHint)
             fields.add(edit.reference.durationMs?.toString())
+            edit.reference.cueReference?.let {
+                fields.add("cue-reference-v1");
+                fields.add(io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec.encode(it))
+            }
         }
         is PlaylistMutation.SynchronizeFolder -> {
             fields.add("synchronize-folder")

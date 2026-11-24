@@ -11,6 +11,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
+import android.os.SystemClock
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
@@ -20,6 +21,14 @@ import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
+import io.github.onlinemo.meloxwatch.data.cue.AndroidCueCompleteReads
+import io.github.onlinemo.meloxwatch.data.cue.AndroidCueOwnedInput
+import io.github.onlinemo.meloxwatch.data.cue.CueOwnedInput
+import io.github.onlinemo.meloxwatch.data.cue.CueEncoding
+import io.github.onlinemo.meloxwatch.data.cue.CuePhysicalReadOwner
+import io.github.onlinemo.meloxwatch.data.cue.CueWaveProof
+import io.github.onlinemo.meloxwatch.data.cue.ParsedCue
+import io.github.onlinemo.meloxwatch.model.CueFileBinding
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 
@@ -42,9 +51,40 @@ interface LocalSourceAccess {
 class AndroidLocalSources(
     private val context: Context,
     private val io: LocalProviderIo,
+    private val cueInputs: (CueFileBinding, CancellationSignal) -> CueOwnedInput = { binding, signal ->
+        AndroidCueOwnedInput(context, binding, signal)
+    },
+    private val cueNowMs: () -> Long = SystemClock::elapsedRealtime,
 ) : LocalSourceAccess {
     private val resolver = context.contentResolver
     private val cursorLive = AtomicBoolean(false)
+    private val cueReads by lazy { AndroidCueCompleteReads(io, ::cueFence, cueInputs, cueNowMs) }
+
+    /** 显式CUE操作流式读取完整内容；普通元数据工作保持原约束。 */
+    suspend fun validateCueRead(descriptor: LocalReadDescriptor): LocalReadDescriptor = cueReads.validate(descriptor)
+    suspend fun proveCueWave(descriptor: LocalReadDescriptor): CueWaveProof = cueReads.proveWave(descriptor)
+    suspend fun parseCue(descriptor: LocalReadDescriptor, encoding: CueEncoding, expected: ObservedCandidate? = null): ParsedCue =
+        cueReads.parse(descriptor, encoding, expected)
+
+    private fun cueFence(descriptor: LocalReadDescriptor, signal: CancellationSignal, owner: CuePhysicalReadOwner): ObservedCandidate {
+        val source = descriptor.source.spec
+        val uri = contentUri(descriptor.location.uri)
+        if (source.uri != descriptor.location.grantUri || source.authority != null && source.authority != uri.authority ||
+            contentUri(source.uri).authority != uri.authority) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+        if (source.kind == LocalSourceKind.TREE && (!DocumentsContract.isTreeUri(uri) ||
+                DocumentsContract.getTreeDocumentId(uri) != source.rootObjectId)) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+        if (descriptor.source.grant.persistedRead == ObservedCapability.AVAILABLE &&
+            grantFacts(source).persistedRead != ObservedCapability.AVAILABLE) throw SourceReadException(SourceReadIssue.PERMISSION_REVOKED)
+        val current = readCandidate(source, uri, signal, owner)
+        if (current.objectId != descriptor.objectId || current.uri != descriptor.location.uri || current.directory ||
+            descriptor.sizeBytes == null || current.sizeBytes != null && current.sizeBytes != descriptor.sizeBytes) {
+            throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+        }
+        val provider = descriptor.providerContentToken?.takeUnless { it.startsWith("sha256:") }
+        if (provider != null && current.providerContentToken != provider) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+        owner.checkpoint()
+        return current
+    }
 
     /** A fresh preview can prove access now; it cannot claim the old preview's byte identity. */
     suspend fun verifyTransientRead(location: LocalLocationReference): Unit = io.read { signal ->
@@ -203,8 +243,9 @@ class AndroidLocalSources(
         descriptor.copy(contentValidation = LocalContentValidation.VERIFIED)
     }
 
-    private fun readCandidate(source: LocalSourceSpec, uri: Uri, signal: CancellationSignal): ObservedCandidate {
-        if (source.kind != LocalSourceKind.MEDIA_STORE) return documentNode(source, uri, null, signal)
+    private fun readCandidate(source: LocalSourceSpec, uri: Uri, signal: CancellationSignal,
+        owner: CuePhysicalReadOwner? = null): ObservedCandidate {
+        if (source.kind != LocalSourceKind.MEDIA_STORE) return documentNode(source, uri, null, signal, owner)
         requireMediaPermission()
         val incarnation = mediaVersion(source.mediaVolume)
         if (source.providerIncarnation != null && incarnation != source.providerIncarnation) {
@@ -217,12 +258,12 @@ class AndroidLocalSources(
             projection += MediaStore.MediaColumns.GENERATION_ADDED
             projection += MediaStore.MediaColumns.GENERATION_MODIFIED
         }
-        return resolver.query(uri, projection.toTypedArray(), null, null, null, signal)?.use { row ->
+        return resolver.query(uri, projection.toTypedArray(), null, null, null, signal)?.let { opened -> readCursor(opened, owner) { row ->
             if (!row.moveToFirst()) throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
             val volume = if (Build.VERSION.SDK_INT >= 29) row.text(MediaStore.MediaColumns.VOLUME_NAME) else source.mediaVolume
             if (volume.isNullOrBlank() || volume.length > 256) throw SourceReadException(SourceReadIssue.INVALID_SOURCE)
             mediaRow(source, volume, mediaVersion(volume), row)
-        } ?: throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
+        } } ?: throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
     }
 
     override suspend fun observe(source: LocalSourceSpec): LocalSourceObservation = io.read { signal ->
@@ -376,6 +417,7 @@ class AndroidLocalSources(
         val flags = documentFlags(document, signal)
         val actual = source.copy(authority = uri.authority, rootObjectId = rootId)
         return LocalSourceObservation(actual, sourceIdentity(actual), grantFacts(actual).copy(
+            read = ObservedCapability.AVAILABLE,
             enumerate = ObservedCapability.AVAILABLE,
             declaredWrite = flags?.let { it and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0 },
             declaredDelete = flags?.let { it and DocumentsContract.Document.FLAG_SUPPORTS_DELETE != 0 },
@@ -384,20 +426,21 @@ class AndroidLocalSources(
         ), root)
     }
 
-    private fun documentNode(source: LocalSourceSpec, uri: Uri, parent: String?, signal: CancellationSignal): ObservedCandidate {
+    private fun documentNode(source: LocalSourceSpec, uri: Uri, parent: String?, signal: CancellationSignal,
+        owner: CuePhysicalReadOwner? = null): ObservedCandidate {
         val document = DocumentsContract.isDocumentUri(context, uri)
         if (document) {
             val cursor = resolver.query(uri, DOCUMENT_COLUMNS, null, null, null, signal)
                 ?: throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
-            return cursor.use {
+            return readCursor(cursor, owner) {
                 if (!it.moveToFirst()) throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
                 documentRow(source, uri, parent, it)
             }
         }
         val cursor = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null, signal)
-        val values = cursor?.use {
+        val values = cursor?.let { opened -> readCursor(opened, owner) {
             if (it.moveToFirst()) bounded(it.text(OpenableColumns.DISPLAY_NAME)) to it.number(OpenableColumns.SIZE) else null
-        }
+        } }
         val mime = bounded(resolver.getType(uri), 256).takeIf(String::isNotBlank)
         val owned = source.kind == LocalSourceKind.APP_OWNED
         if (owned && (uri.authority != OwnedAudioProvider.authority(context) || uri.pathSegments.size != 1 ||
@@ -423,6 +466,9 @@ class AndroidLocalSources(
             entityProof = "document:${uri.authority}:$id",
         )
     }
+
+    private fun <T> readCursor(cursor: Cursor, owner: CuePhysicalReadOwner?, action: (Cursor) -> T): T =
+        if (owner == null) cursor.use(action) else owner.withCursor(cursor, action)
 
     private fun mediaRow(source: LocalSourceSpec, volume: String, version: String?, cursor: Cursor): ObservedCandidate {
         val id = cursor.number(MediaStore.Audio.Media._ID)?.takeIf { it >= 0 }

@@ -297,20 +297,24 @@ class JsonPlaylistExchange(private val newMemberId: () -> String = ::exchangeId)
         val seen = mutableSetOf<String>()
         var path: ExchangeRelativePath? = null
         var track: Long? = null
+        var reference: io.github.onlinemo.meloxwatch.model.LocalCueReference? = null
         while (jsonRead { reader.hasNext() }) {
             when (field(reader, seen)) {
                 "relativePath" -> {
-                    path = ExchangeRelativePath.parse(text(reader))
+                    path = optionalText(reader)?.let(ExchangeRelativePath::parse)
                 }
                 "trackNumber" -> {
                     track = integer(reader)
                 }
+                "reference" -> reference = if (readNull(reader)) null else ExchangeCueReferenceCodec.decode(
+                    text(reader, PlaylistExchangeLimits.CUE_REFERENCE_BYTES))
                 else -> exchangeFail(PlaylistExchangeIssue.UNKNOWN_FIELD)
             }
         }
         jsonRead { reader.endObject() }
-        if (path == null || track == null || track !in 1L..99L) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
-        return ExchangeCueHint(checkNotNull(path), checkNotNull(track).toInt())
+        if (path == null && reference == null || track == null || track !in 1L..99L ||
+            reference != null && reference.identity.trackNumber.toLong() != track) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
+        return ExchangeCueHint(path, checkNotNull(track).toInt(), reference)
     }
 
     private fun writeMember(writer: JsonWriter, member: ExchangeMember) = jsonWrite {
@@ -326,8 +330,9 @@ class JsonPlaylistExchange(private val newMemberId: () -> String = ::exchangeId)
         member.relativePath?.let { writer.name("relativePath").value(it.toString()) }
         member.cue?.let { cue ->
             writer.name("cue").beginObject()
-            writer.name("relativePath").value(cue.relativePath.toString())
+            cue.relativePath?.let { writer.name("relativePath").value(it.toString()) }
             writer.name("trackNumber").value(cue.trackNumber.toLong())
+            cue.reference?.let { writer.name("reference").value(ExchangeCueReferenceCodec.encode(it)) }
             writer.endObject()
         }
         member.title?.let { writer.name("title").value(it) }

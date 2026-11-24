@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import android.content.Intent
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -173,7 +175,14 @@ internal fun LibraryTrackVersionEntity.metadata() = LocalAudioMetadata(title, ar
     durationMs, discNumber, trackNumber, compilation, mimeType, parserVersion,
     codecParameters?.let(LocalCodecParametersCodec::decode))
 
-internal fun LibraryRowRecord.reference(): LocalLocationReference? {
+internal fun LibraryRowRecord.cueReference(): LocalCueReference? = track.cueReference?.let {
+    CueReferenceCodec.decode(it).also { reference ->
+        require(reference.trackKey == TrackKey(track.providerId, track.trackId))
+    }
+}
+
+internal fun LibraryRowRecord.reference(cue: LocalCueReference? = cueReference()): LocalLocationReference? {
+    if (cue != null) return cue.binding?.audio?.location
     val locationId = selectedLocationId ?: return null
     val uri = selectedUri ?: return null
     val grant = selectedGrantObservation?.let(LibraryCodec::grant) ?: return null
@@ -187,10 +196,13 @@ internal fun LibraryRowRecord.reference(): LocalLocationReference? {
     return LocalLocationReference(locationId, uri, selectedGrantUri ?: uri, grant.acceptedPersistedFlags, access, selectedContentRevision ?: 0L)
 }
 
-internal fun LibraryRowRecord.model() = LibraryTrack(TrackKey(track.providerId, track.trackId), track.displayTitle, track.filename,
-    track.metadata(), LibraryAvailability.entries.getOrNull(availabilityRank) ?: throw LibraryException(LibraryIssue.RECOVERY_REQUIRED),
-    track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, displayAlbumKey, reference(), selectedSourceId,
-    selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs, displayArtist, displayAlbum)
+internal fun LibraryRowRecord.model(): LibraryTrack {
+    val cue = cueReference()
+    return LibraryTrack(TrackKey(track.providerId, track.trackId), track.displayTitle, track.filename,
+        track.metadata(), LibraryAvailability.entries.getOrNull(availabilityRank) ?: throw LibraryException(LibraryIssue.RECOVERY_REQUIRED),
+        track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, displayAlbumKey, reference(cue), selectedSourceId,
+        selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs, displayArtist, displayAlbum, cue)
+}
 
 internal fun LibraryRowRecord.cursor(view: LibraryViewToken) = LibraryCursor(view.viewId, view.revision, view.sortRuleVersion,
     missingRank, nullRank, sortKey, track.providerId, track.trackId)

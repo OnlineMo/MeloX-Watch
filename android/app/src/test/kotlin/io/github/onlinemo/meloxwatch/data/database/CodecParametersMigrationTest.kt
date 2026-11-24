@@ -37,18 +37,18 @@ class CodecParametersMigrationTest {
 
     @Test(timeout = 30_000L)
     fun bundledMigrationPreservesHistoricalCellsAndLyricsThenReopensWithUnknownCodecParameters() = runBlocking {
-        val file = File(temporary.root, "codec-v6-to-v7.db")
+        val file = File(temporary.root, "codec-v6-to-v8.db")
         val before = seed(file)
         val database = open(file)
         try {
             database.withTestWriterSql {
                 schema.assertRowsPreserved(before.rows, this)
-                assertEquals(7L, scalarLong("PRAGMA user_version"))
+                assertEquals(8L, scalarLong("PRAGMA user_version"))
                 assertEquals("ok", scalarText("PRAGMA integrity_check"))
                 query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
                 assertEquals(1L, scalarLong("SELECT COUNT(*) FROM local_track_versions WHERE codecParameters IS NULL"))
                 assertTrue(scalarText(IDENTITY) != before.identity)
-                assertEquals(before.unchangedCatalog, query(UNCHANGED_CATALOG) { rows ->
+                assertEquals(before.unchangedV8Catalog, query(UNCHANGED_V8_CATALOG) { rows ->
                     buildList { while (rows.step()) add(rows.getText(0)) }
                 })
             }
@@ -168,12 +168,13 @@ class CodecParametersMigrationTest {
         database.execSQL("INSERT INTO lyrics_track_preferences(trackId, schemaVersion, revision, userDelayMs) VALUES ('historical-audio', 1, 7, -300)")
         val identity = database.rawQuery(IDENTITY, null).use { rows -> assertTrue(rows.moveToFirst())
         rows.getString(0) }
-        Before(schema.snapshotRows { database.rawQuery(it, null) }, identity, catalog { database.rawQuery(it, null) })
+        Before(schema.snapshotRows { database.rawQuery(it, null) }, identity, catalog { database.rawQuery(it, null) },
+            database.rawQuery(UNCHANGED_V8_CATALOG, null).use { rows -> buildList { while (rows.moveToNext()) add(rows.getString(0)) } })
     }
 
     private fun open(file: File, last: Migration = MeloXDatabase.MIGRATION_6_7): MeloXDatabase = Room.databaseBuilder(
         context, MeloXDatabase::class.java, file.absolutePath,
-    ).setDriver(BundledSQLiteDriver()).addMigrations(last).build()
+    ).setDriver(BundledSQLiteDriver()).addMigrations(last, MeloXDatabase.MIGRATION_7_8).build()
 
     private fun supportOpen(file: File, fail: Boolean): SupportSQLiteOpenHelper {
         val callback = object : SupportSQLiteOpenHelper.Callback(7) {
@@ -201,11 +202,16 @@ class CodecParametersMigrationTest {
     }
 
     private class ControlledFailure : IllegalStateException("Controlled failure after codec column")
-    private data class Before(val rows: Map<String, FrozenTableRows>, val identity: String, val unchangedCatalog: List<String>)
+    private data class Before(val rows: Map<String, FrozenTableRows>, val identity: String, val unchangedCatalog: List<String>,
+        val unchangedV8Catalog: List<String>)
     companion object {
         private const val IDENTITY = "SELECT identity_hash FROM room_master_table WHERE id = 42"
         private const val UNCHANGED_CATALOG = "SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' " +
             "AND name NOT IN ('room_master_table', 'android_metadata') AND type = 'table' " +
             "AND name != 'local_track_versions' ORDER BY name"
+        private const val UNCHANGED_V8_CATALOG = "SELECT sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' " +
+            "AND name NOT IN ('room_master_table', 'android_metadata', 'local_track_versions', 'queue_entries', 'playlist_members', 'playlist_exchange_rows', " +
+            "'local_cue_documents', 'local_cue_group_versions', 'local_cue_native_segments', 'local_cue_aliases', " +
+            "'local_cue_alias_versions', 'local_cue_alias_segments') AND type = 'table' ORDER BY name"
     }
 }

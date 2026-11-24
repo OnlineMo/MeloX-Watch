@@ -26,6 +26,7 @@ class BackupUiActions(
     val selectMissing: (BackupMissingFile) -> Unit,
     val chooseExistingTarget: () -> Unit,
     val allowDifferent: (Boolean) -> Unit,
+    val allowCueDifferences: (Boolean) -> Unit,
     val confirmRelink: () -> Unit,
     val openSources: () -> Unit,
     val openAppearance: () -> Unit,
@@ -68,6 +69,7 @@ class BackupUiActions(
                 if (request != null) chooseExistingTarget(request)
             },
             allowDifferent = model::acknowledgeDifferentContent,
+            allowCueDifferences = model::acknowledgeCueDifferences,
             confirmRelink = model::confirmRelink,
             openSources = openSources,
             openAppearance = openAppearance,
