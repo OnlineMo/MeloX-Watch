@@ -169,7 +169,7 @@ internal class CuePcmDataSource(
     private val resources: RuntimePlaybackResources,
     private val proofs: CueBlockProofs,
     private val nowMs: () -> Long,
-) : BaseDataSource(false) {
+) : BaseDataSource(false), AutoCloseable {
     @Volatile private var state: CueRuntimeResourceState? = null
     @Volatile private var cueFile: CueSeekableInput? = null
     @Volatile private var audioFile: CueSeekableInput? = null

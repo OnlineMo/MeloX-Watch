@@ -5,7 +5,7 @@ import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.library.LibrarySql
-import io.github.onlinemo.meloxwatch.data.library.LocalLibraryRepository
+import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
 import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
 import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.local.LocalInputLimits
@@ -29,7 +29,7 @@ data class LocalLyricsContext(
 /** Indexed parent edges grant no access; the loader independently observes and opens each input. */
 class RoomLyricsContextResolver(
     private val database: MeloXDatabase,
-    private val library: LocalLibraryRepository,
+    private val library: RoomLocalLibraryRepository,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO.limitedParallelism(1),
     private val cueReadValidator: (suspend (LocalReadDescriptor) -> LocalReadDescriptor)? = null,
 ) {

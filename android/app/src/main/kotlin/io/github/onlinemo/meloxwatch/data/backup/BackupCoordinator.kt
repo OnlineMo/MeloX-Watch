@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.backup
 import android.content.Context
 import android.os.CancellationSignal
 import android.os.SystemClock
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationsRuntime
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
@@ -560,7 +561,7 @@ class BackupCoordinator internal constructor(
                 val needs = if (cueReference != null) {
                     if (restoringLibraryTrack) run.mode == BackupMergeMode.REPLACE_SELECTED || current == null
                     else current == null || missingQueue || current.cueReference?.let {
-                        !io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec.decode(it).isBound
+                        !CueReferenceCodec.decode(it).isBound
                     } == true
                 } else if (restoringLibraryTrack) !stage.hasAnyTrackLocation(trackId) &&
                     (run.mode == BackupMergeMode.REPLACE_SELECTED || current == null) else current == null || missingQueue
