@@ -1,0 +1,22 @@
+{
+  "compiler_cloud_apk_device_original_ac": "NOT_RUN",
+  "fixtures": {
+    "candidate.json": {
+      "bytes": 2356,
+      "sha256": "191a0b09c40552295c70c106a8f7dada2d3b8e6804afe31ecade8d3d61cbfc15"
+    },
+    "catalog.json": {
+      "bytes": 675,
+      "sha256": "8e4a6b12acb4c1d3030eb6ac2a4fc13211fe769a636a17ad0c9e846668335966"
+    },
+    "publication.json": {
+      "bytes": 2148,
+      "sha256": "c1afc2d77c95b23dd87bf237878bc559176219d8af3ff5c2e5490e1f266a7639"
+    }
+  },
+  "format_source": "scripts/ci/package_contract.py",
+  "format_source_sha256": "f668e0fbb44673099943dd662face291803f8f80b56891cf8a0c77d79c99ab36",
+  "kind": "SYNTHETIC_CI_FORMAT_INTEROPERABILITY_FIXTURES",
+  "package_set_sha256": "c3b26695bfc781a9d4af5e2d87caadd7bf841cdb596276d9db44b6a103d16001",
+  "schema_version": 1
+}

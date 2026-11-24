@@ -168,6 +168,104 @@ class ServiceListeningObserverTest {
     }
 
     @Test
+    fun aContinuousShortRoundRetainsRealSamplesWhileItsNewEpochReadIsPending() = runBlocking {
+        val first = entry(0)
+        val second = entry(1)
+        beginPlaying(first)
+        advance(1000L, 1000L)
+        advance(200L, 1200L)
+        val old = backend.positionInfo()
+        backend.choose(second)
+        val next = backend.positionInfo()
+        backend.notifyDiscontinuity(old, next, Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        val gate = repository.blockNextState()
+        observer.beginContinuousRound(second, 0L)
+        assertTrue(gate.entered.isCompleted)
+        assertFalse(observer.canBeginContinuousRound())
+        advance(200L, 200L)
+        backend.notifyPlaying(false)
+        gate.release.complete(Unit)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        observer.detach()
+        backend.player.release()
+        observer.close()
+        val tracks = repository.accepted.values.associateBy { it.trackKey }
+        assertEquals(2, tracks.size)
+        assertEquals(1200L, requireNotNull(tracks[first.trackKey]).totalListeningMs)
+        assertEquals(200L, requireNotNull(tracks[second.trackKey]).totalListeningMs)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun aLateEpochReadCannotRebindAStartedContinuousRoundsCapturedSamples() = runBlocking {
+        val first = entry(0)
+        val second = entry(1)
+        beginPlaying(first)
+        advance(1000L, 1000L)
+        val old = backend.positionInfo()
+        backend.choose(second)
+        val next = backend.positionInfo()
+        backend.notifyDiscontinuity(old, next, Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        val original = repository.state()
+        val gate = repository.blockNextState()
+        observer.beginContinuousRound(second, 0L)
+        advance(200L, 200L)
+        repository.changeEpochs(ListeningEpochs(historyEpoch = 3L, statisticsEpoch = 4L))
+        backend.notifyPlaying(false)
+        gate.release.complete(Unit)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        observer.detach()
+        backend.player.release()
+        observer.close()
+        val submitted = repository.attempts.single { it.trackKey == second.trackKey }
+        assertEquals(original, submitted.epochs)
+        assertEquals(200L, submitted.totalListeningMs)
+        assertEquals(0, backend.lateCalls)
+    }
+
+    @Test
+    fun aDuplicateOldAutomaticEventCannotEraseTheIncomingRoundsFirstObservedInterval() = runBlocking {
+        val first = entry(0)
+        val second = entry(1)
+        beginPlaying(first)
+        advance(1000L, 1000L)
+        val old = backend.positionInfo()
+        backend.choose(second)
+        val next = backend.positionInfo()
+        backend.notifyDiscontinuity(old, next, Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        observer.beginContinuousRound(second, 0L)
+        advance(200L, 200L)
+        backend.notifyDiscontinuity(old, next, Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        advance(200L, 400L)
+        backend.notifyPlaying(false)
+        assertEquals(400L, repository.accepted.values.single { it.trackKey == second.trackKey }.totalListeningMs)
+        assertEquals(2, repository.accepted.size)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun aCapturedContinuousRoundFinishesItsEpochReadAfterDetachWithoutTouchingTheReleasedPlayer() = runBlocking {
+        val first = entry(0)
+        val second = entry(1)
+        beginPlaying(first)
+        advance(1000L, 1000L)
+        val old = backend.positionInfo()
+        backend.choose(second)
+        val next = backend.positionInfo()
+        backend.notifyDiscontinuity(old, next, Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        val gate = repository.blockNextState()
+        observer.beginContinuousRound(second, 0L)
+        advance(300L, 300L)
+        observer.detach()
+        backend.player.release()
+        gate.release.complete(Unit)
+        observer.close()
+        assertEquals(300L, repository.accepted.values.single { it.trackKey == second.trackKey }.totalListeningMs)
+        assertEquals(0, backend.lateCalls)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
     fun aDelayedAckRetainsNewProgressAndCoalescesWriteRequests() = runBlocking {
         val gate = repository.blockNextSubmit()
         beginPlaying(entry(0))
@@ -272,6 +370,35 @@ class ServiceListeningObserverTest {
         assertEquals(0, backend.lateCalls)
     }
 
+    @Test
+    fun aListenerRemovalFailureStillFencesTheReleasedBackendAndPreservesTheRoundOnRebind() = runBlocking {
+        val entry = entry(0)
+        beginPlaying(entry)
+        advance(1000L, 1000L)
+        val previous = backend
+        val stale = previous.listeners.single()
+        previous.failNextRemoval = true
+        try { observer.unbindBackend(); throw AssertionError("Expected listener removal failure") }
+        catch (_: IllegalStateException) { }
+        previous.player.release()
+        stale.onIsPlayingChanged(true)
+        stale.onTimelineChanged(Timeline.EMPTY, Player.TIMELINE_CHANGE_REASON_SOURCE_UPDATE)
+
+        backend = ControlledPlayer().also { it.choose(entry) }
+        observer.bindBackend(backend.player)
+        backend.notifyPlaying(true)
+        advance(1000L, 1000L)
+        backend.notifyPlaying(false)
+        observer.detach()
+        backend.player.release()
+        observer.close()
+
+        assertEquals(0, previous.lateCalls)
+        assertEquals(0, backend.lateCalls)
+        assertEquals(1, repository.accepted.size)
+        assertEquals(2000L, repository.totalListeningMs)
+    }
+
     private suspend fun beginPlaying(entry: QueueEntry) {
         backend.choose(entry)
         observer.beginRound(entry)
@@ -293,6 +420,7 @@ class ServiceListeningObserverTest {
         var positionMs = 0L
         var playing = false
         var speed = 1f
+        var failNextRemoval = false
         var released = false
             private set
         var lateCalls = 0
@@ -313,7 +441,10 @@ class ServiceListeningObserverTest {
                         "isPlaying" -> playing
                         "getPlaybackParameters" -> PlaybackParameters(speed)
                         "addListener" -> { listeners.add(requireNotNull(args)[0] as Player.Listener); null }
-                        "removeListener" -> { listeners.remove(requireNotNull(args)[0] as Player.Listener); null }
+                        "removeListener" -> {
+                            if (failNextRemoval) { failNextRemoval = false; throw IllegalStateException("Controlled listener removal failure") }
+                            listeners.remove(requireNotNull(args)[0] as Player.Listener); null
+                        }
                         "release" -> { released = true; null }
                         else -> throw AssertionError("unexpected player method ${method.name}")
                     }
@@ -358,7 +489,8 @@ class ServiceListeningObserverTest {
     }
 
     private class ControlledListeningRepository : ListeningRepository {
-        private val epochs = ListeningEpochs(historyEpoch = 2L, statisticsEpoch = 3L)
+        private var epochs = ListeningEpochs(historyEpoch = 2L, statisticsEpoch = 3L)
+        override val observedEpochs = kotlinx.coroutines.flow.MutableStateFlow<ListeningEpochs?>(epochs)
         private val gates = mutableListOf<Gate>()
         private var stateGate: Gate? = null
         private var submitGate: Gate? = null
@@ -370,6 +502,10 @@ class ServiceListeningObserverTest {
         fun blockNextState() = Gate().also { stateGate = it; gates += it }
         fun blockNextSubmit(ignoreCancellation: Boolean = false) = Gate(ignoreCancellation).also { submitGate = it; gates += it }
         fun releaseGates() = gates.forEach { it.release.complete(Unit) }
+        fun changeEpochs(next: ListeningEpochs) {
+            epochs = next
+            observedEpochs.value = next
+        }
 
         override suspend fun state(): ListeningEpochs {
             stateGate?.also { stateGate = null }?.await()

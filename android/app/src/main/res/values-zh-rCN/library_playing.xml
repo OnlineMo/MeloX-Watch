@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="library_insert_all_next">
+        <item quantity="other">将全部 %1$d 首插入下一首</item>
+    </plurals>
+    <plurals name="library_insert_impact">
+        <item quantity="other">插入会将 %1$d 首放在当前项之后。“插入并播放”会从新增的第一首开始播放。</item>
+    </plurals>
+    <string name="library_insert_next">插入下一首，继续当前播放</string>
+    <string name="library_open_detail">查看歌曲详情</string>
+    <string name="library_play_choice">选择播放方式</string>
+    <string name="library_preparing_play">正在核对所选列表…</string>
+    <string name="library_replace_impact">将现有队列（%1$s）替换为此列表的全部歌曲（%2$s），从第 %3$d 项开始播放。</string>
+</resources>

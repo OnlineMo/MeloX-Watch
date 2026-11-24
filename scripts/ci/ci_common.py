@@ -11,6 +11,7 @@ REPOSITORY = 'OnlineMo/MeloX-Watch'
 OWNER = 'OnlineMo'
 OWNER_EMAIL = '143324986+OnlineMo@users.noreply.github.com'
 APPLICATION_ID = 'io.github.onlinemo.meloxwatch'
+PHONE_APPLICATION_ID = APPLICATION_ID + '.companion'
 PACKAGES = {'debug': APPLICATION_ID + '.dev', 'release': APPLICATION_ID,
             'diagnostic': APPLICATION_ID + '.diagnostic'}
 SHA_PATTERN = re.compile(r'[0-9a-f]{40}')
@@ -89,8 +90,12 @@ def trusted_context(workflow, environment=None):
     require(SHA_PATTERN.fullmatch(environment.get('GITHUB_SHA', '')) is not None, 'Invalid source SHA')
 
 
-def expected_identity(mode, version):
+def expected_identity(mode, version, role='watch'):
     require(mode in PACKAGES, 'Unknown APK mode')
-    return {'package': PACKAGES[mode], 'version_name': version['versionName'],
+    require(role in ('watch', 'phone'), 'Unknown application role')
+    package = PACKAGES[mode] if role == 'watch' else PHONE_APPLICATION_ID + {
+        'debug': '.dev', 'release': '', 'diagnostic': '.diagnostic'}[mode]
+    return {'package': package, 'version_name': version['versionName'],
             'version_code': str(version['versionCode']), 'debuggable': mode == 'debug',
-            'profileable': mode == 'diagnostic'}
+            # The phone editor currently has no shell-profileable diagnostic manifest.
+            'profileable': mode == 'diagnostic' and role == 'watch'}

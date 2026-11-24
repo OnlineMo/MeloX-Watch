@@ -30,4 +30,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "MeloXWatch"
-include(":app")
+include(":app", ":companion")

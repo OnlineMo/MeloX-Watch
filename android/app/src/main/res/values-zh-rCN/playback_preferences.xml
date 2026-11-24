@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="prefs_song_tap">点击歌曲</string>
+    <string name="prefs_song_tap_ask">每次询问</string>
+    <string name="prefs_song_tap_insert">插入后播放</string>
+    <string name="prefs_song_tap_replace">播放当前完整列表</string>
+    <string name="prefs_song_tap_value">点歌方式：%1$s</string>
+    <string name="prefs_song_tap_scope">完整列表包含当前筛选和排序下的全部结果。</string>
+    <string name="prefs_playback_backend">播放内核</string>
+    <string name="prefs_backend_media3">Media3</string>
+    <string name="prefs_backend_system">系统 MediaPlayer</string>
+    <string name="prefs_playback_backend_value">已保存内核：%1$s</string>
+    <string name="prefs_backend_scope">切换内核会暂停播放，并保留当前歌曲和位置。准备好后再播放。</string>
+    <string name="prefs_playback_speed">播放速度</string>
+    <string name="prefs_playback_speed_value">速度：%1$.1f 倍</string>
+    <string name="prefs_speed_slower">降低 0.1 倍</string>
+    <string name="prefs_speed_faster">提高 0.1 倍</string>
+    <string name="prefs_speed_normal">正常速度（1.0 倍）</string>
+    <string name="prefs_speed_scope">范围为 0.5～2.0 倍，保留音调。保存后在当前内核允许时应用；实际速度以播放页为准。</string>
+    <string name="prefs_gapless">连续播放</string>
+    <string name="prefs_gapless_value">连续播放：%1$s</string>
+    <string name="prefs_gapless_scope">当前内核支持时用于兼容的连续曲目。无法应用已保存选项时，播放页会说明。</string>
+    <string name="prefs_media_buttons">响应耳机媒体按键</string>
+    <string name="prefs_media_buttons_value">耳机按键：%1$s</string>
+    <string name="prefs_media_buttons_scope">仅控制本应用的响应，耳机配对和系统设置独立管理。</string>
+    <string name="prefs_audio_focus">管理音频焦点</string>
+    <string name="prefs_audio_focus_value">音频焦点管理：%1$s</string>
+    <string name="prefs_audio_focus_scope">默认开启。关闭后仍遵守系统播放条件，耳机断连仍会暂停。</string>
+</resources>

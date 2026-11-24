@@ -78,8 +78,10 @@
     <string name="library_artwork_refresh_failed">封面刷新失败，已有可用封面保留。</string>
     <string name="library_artwork_refresh_counts">已处理 %1$d/%2$d · 更新 %3$d · 无封面 %4$d · 失败 %5$d</string>
     <string name="library_file_value">文件名：%1$s</string>
-    <string name="library_artist_value">艺人：%1$s</string>
-    <string name="library_album_value">专辑：%1$s</string>
+    <string name="library_display_artist_value">库内艺人：%1$s</string>
+    <string name="library_display_album_value">库内专辑：%1$s</string>
+    <string name="library_artist_value">原标签艺人：%1$s</string>
+    <string name="library_album_value">原标签专辑：%1$s</string>
     <string name="library_album_artist_value">专辑艺人：%1$s</string>
     <string name="library_duration_value">时长：%1$s</string>
     <string name="library_format_value">格式：%1$s</string>

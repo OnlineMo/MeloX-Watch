@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="watch_open_menu">Open menu</string>
+    <string name="watch_swipe_queue">Swipe right for the queue.</string>
+    <string name="watch_playback_details">Playback details</string>
+    <string name="watch_device_checks">Device checks</string>
+</resources>

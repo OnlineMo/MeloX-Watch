@@ -15,12 +15,12 @@
     <string name="prefs_shape_auto">自动</string>
     <string name="prefs_shape_round">圆形</string>
     <string name="prefs_shape_rectangle">矩形</string>
-    <string name="prefs_save_scope">保存会将恢复播放位置和界面形状写为当前格式，替换无法识别的旧设置字段。音乐和曲库保留。</string>
+    <string name="prefs_save_scope">保存此草稿中的播放、控制、外观、封面读取和曲库排序等设置，替换无法识别的旧设置字段。音乐和曲库保留。</string>
     <string name="prefs_save">保存</string>
     <string name="prefs_retry_save">重试保存此草稿</string>
     <string name="prefs_reset">恢复默认</string>
     <string name="prefs_retry_reset">重试恢复默认</string>
-    <string name="prefs_reset_question">将恢复播放位置设为开启、界面形状设为自动？音乐、曲库和队列保留。</string>
+    <string name="prefs_reset_question">将全部播放、控制、外观、封面读取和曲库排序设置恢复默认？更换播放后端会暂停音频。音乐、歌单和队列保留，已启用的睡眠定时需单独管理。</string>
     <string name="prefs_reset_confirm">确认恢复默认</string>
     <string name="prefs_reset_cancel">保留当前设置</string>
     <string name="prefs_cancel_edit">取消编辑</string>
@@ -46,7 +46,7 @@
     <string name="prefs_revision_exhausted">设置记录已达上限，无法保存更多更改。当前值和草稿保留。</string>
     <string name="prefs_saved">设置已保存。</string>
     <string name="prefs_unchanged">这些设置已保存，本次没有写入新更改。</string>
-    <string name="prefs_defaults_restored">恢复播放位置和界面形状已恢复默认，音乐、曲库和队列保留。</string>
-    <string name="prefs_defaults_already_set">这两项设置已经是默认值，音乐、曲库和队列保留。</string>
+    <string name="prefs_defaults_restored">全部应用设置已恢复默认，音乐、歌单和队列保留。</string>
+    <string name="prefs_defaults_already_set">全部应用设置已经是默认值，音乐、歌单和队列保留。</string>
     <string name="prefs_defaults_cancelled">已取消恢复默认，设置保持原样。</string>
 </resources>

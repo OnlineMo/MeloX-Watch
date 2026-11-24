@@ -1,17 +1,27 @@
 package io.github.onlinemo.meloxwatch.data.database
 
 import androidx.room.migration.Migration
+import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.sqlite.execSQL
 
 /** The queue schema is untouched. Migration performs no provider access or library enrollment. */
 object LibraryMigrations {
     val V1_TO_V2: Migration = object : Migration(1, 2) {
         override fun migrate(db: SupportSQLiteDatabase) {
-            for (statement in tables) db.execSQL(statement.trimIndent())
-            for (statement in indices) db.execSQL(statement)
-            db.execSQL("INSERT INTO library_meta (id, revision, rulesRevision, nextAddedSequence, nextScanSequence, shortAudioFilter, statisticsEpoch) VALUES (1, 0, 0, 1, 1, 0, 0)")
-            db.execSQL("INSERT INTO listening_meta (id, historyEpoch, statisticsEpoch, rulesVersion, nextHistorySequence, historyFloorSequence, totalPlayCount, totalListeningMs) VALUES (1, 0, 0, 1, 1, 1, 0, 0)")
+            applyV1ToV2 { db.execSQL(it) }
         }
+
+        override fun migrate(connection: SQLiteConnection) {
+            applyV1ToV2 { connection.execSQL(it) }
+        }
+    }
+
+    private fun applyV1ToV2(execute: (String) -> Unit) {
+        for (statement in tables) execute(statement.trimIndent())
+        for (statement in indices) execute(statement)
+        execute("INSERT INTO library_meta (id, revision, rulesRevision, nextAddedSequence, nextScanSequence, shortAudioFilter, statisticsEpoch) VALUES (1, 0, 0, 1, 1, 0, 0)")
+        execute("INSERT INTO listening_meta (id, historyEpoch, statisticsEpoch, rulesVersion, nextHistorySequence, historyFloorSequence, totalPlayCount, totalListeningMs) VALUES (1, 0, 0, 1, 1, 1, 0, 0)")
     }
 
     private val tables = listOf(

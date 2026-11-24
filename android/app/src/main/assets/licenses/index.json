@@ -1,0 +1,693 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "androidx.activity.activity-compose.1.11.0",
+      "name": "Activity Compose",
+      "version": "1.11.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.activity.activity-compose.1.11.0.txt",
+      "notice_sha256": "c7494c4380a185492a3b0991828f6775c1bf53fd7ec8e7da4dc5aebd01b05ab9"
+    },
+    {
+      "id": "androidx.activity.activity-ktx.1.11.0",
+      "name": "Activity Kotlin Extensions",
+      "version": "1.11.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.activity.activity-ktx.1.11.0.txt",
+      "notice_sha256": "b12858dd940cd36d6c079620c5b8e488b440d9b170ffcfcf15c1feca414249da"
+    },
+    {
+      "id": "androidx.activity.activity.1.11.0",
+      "name": "Activity",
+      "version": "1.11.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.activity.activity.1.11.0.txt",
+      "notice_sha256": "5c0b5d46a24fe56cad7baa00fbe5217dbfc01036c0f78035d7503390a20afd7f"
+    },
+    {
+      "id": "androidx.annotation.annotation-experimental.1.5.0",
+      "name": "Experimental annotation",
+      "version": "1.5.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.annotation.annotation-experimental.1.5.0.txt",
+      "notice_sha256": "c43bc4e3875267f01f3fcf2ff1e45fb26d7a5f45b491cdf54aecee53c4d660b0"
+    },
+    {
+      "id": "androidx.annotation.annotation-jvm.1.10.0",
+      "license": "Apache-2.0",
+      "name": "Annotation",
+      "notice_asset": "licenses/androidx.annotation.annotation-jvm.1.10.0.txt",
+      "notice_sha256": "c55013679fb1b994c19a728ed7c9e0ebe79656dd7cb7034862966c1d8a667bb2",
+      "version": "1.10.0"
+    },
+    {
+      "id": "androidx.arch.core.core-common.2.2.0",
+      "name": "Android Arch-Common",
+      "version": "2.2.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.arch.core.core-common.2.2.0.txt",
+      "notice_sha256": "83f70fdce4fc96e7cb5ea8d47abf9f307674b53c5490599f3ec748e327946ca9"
+    },
+    {
+      "id": "androidx.arch.core.core-runtime.2.2.0",
+      "name": "Android Arch-Runtime",
+      "version": "2.2.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.arch.core.core-runtime.2.2.0.txt",
+      "notice_sha256": "f50b17d0968917df9bd4606f0d958b47640329d8486518bb381edf75a3b1d01c"
+    },
+    {
+      "id": "androidx.autofill.autofill.1.0.0",
+      "name": "AndroidX Autofill",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.autofill.autofill.1.0.0.txt",
+      "notice_sha256": "fef31ce51f910e110797435d1e8ce381a244f5f7e4b2542d30575e3ed1b9537e"
+    },
+    {
+      "id": "androidx.collection.collection-jvm.1.5.0",
+      "name": "collections",
+      "version": "1.5.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.collection.collection-jvm.1.5.0.txt",
+      "notice_sha256": "8e39af811537d59963cfb32067cd1569282d8fb34c2f7c273a79fed21ac3d4e2"
+    },
+    {
+      "id": "androidx.compose.animation.animation-android.1.9.3",
+      "name": "Compose Animation",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.animation.animation-android.1.9.3.txt",
+      "notice_sha256": "a6a43327589c77fe3c278b7ad093de2dca2c2217ef2b0c842a6d4c1139e4ec49"
+    },
+    {
+      "id": "androidx.compose.animation.animation-core-android.1.9.3",
+      "name": "Compose Animation Core",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.animation.animation-core-android.1.9.3.txt",
+      "notice_sha256": "ae11e01da77009627662b16c38614bf341578765b95c369d00a3fa42b29b9a37"
+    },
+    {
+      "id": "androidx.compose.foundation.foundation-android.1.9.3",
+      "name": "Compose Foundation",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.foundation.foundation-android.1.9.3.txt",
+      "notice_sha256": "34ba21d5c81047958d40b9c736353742d7af6a290862d01552cdf5627585c876"
+    },
+    {
+      "id": "androidx.compose.foundation.foundation-layout-android.1.9.3",
+      "name": "Compose Layouts",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.foundation.foundation-layout-android.1.9.3.txt",
+      "notice_sha256": "2426d7bac2779f111092f26e464aa0fd380febe1f033b2261726bccbe121cedb"
+    },
+    {
+      "id": "androidx.compose.material.material-ripple-android.1.8.1",
+      "name": "Compose Material Ripple",
+      "version": "1.8.1",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.material.material-ripple-android.1.8.1.txt",
+      "notice_sha256": "da895478450e31287a10f1193bc8c29cabef2545a637837aff05921ee9c2b318"
+    },
+    {
+      "id": "androidx.compose.material3.material3-android.1.4.0",
+      "name": "Compose Material3 Components",
+      "version": "1.4.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.material3.material3-android.1.4.0.txt",
+      "notice_sha256": "3b6faf11e603c3714df1156da6bceea831dd19dff5653d8cb62f7570c76720a4"
+    },
+    {
+      "id": "androidx.compose.runtime.runtime-android.1.9.3",
+      "name": "Compose Runtime",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.runtime.runtime-android.1.9.3.txt",
+      "notice_sha256": "7d8cfba3259486cb13ea7edee1fae8c5cb2e5930b87a275f83591f96bd5c8e16"
+    },
+    {
+      "id": "androidx.compose.runtime.runtime-annotation-android.1.9.3",
+      "name": "Compose Runtime Annotation",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.runtime.runtime-annotation-android.1.9.3.txt",
+      "notice_sha256": "cacb2d842ef52f3b0a8e55fd384c59b068c7b03ebd3b5e1b492fc739c513d110"
+    },
+    {
+      "id": "androidx.compose.runtime.runtime-saveable-android.1.9.3",
+      "name": "Compose Saveable",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.runtime.runtime-saveable-android.1.9.3.txt",
+      "notice_sha256": "2eccd8e91292d68bb7bb63e8f84400dfc6d77e6ada626d03ae7c758fbd594da2"
+    },
+    {
+      "id": "androidx.compose.ui.ui-android.1.9.3",
+      "name": "Compose UI",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.ui.ui-android.1.9.3.txt",
+      "notice_sha256": "3067d4afe0ed3c74c0245c7eaefb9ba248f6d6c98e79b7ebbab661961c39a830"
+    },
+    {
+      "id": "androidx.compose.ui.ui-geometry-android.1.9.3",
+      "name": "Compose Geometry",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.ui.ui-geometry-android.1.9.3.txt",
+      "notice_sha256": "3ba3874d7a4e0c19e522e2d5957ced8c93bcb3029e849207d0cb0cc50b81d5f2"
+    },
+    {
+      "id": "androidx.compose.ui.ui-graphics-android.1.9.3",
+      "name": "Compose Graphics",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.ui.ui-graphics-android.1.9.3.txt",
+      "notice_sha256": "82cd62f9c36f9caeb0389cade22967fe3eefb7dd6a9ab496a4f835dd2a300b7b"
+    },
+    {
+      "id": "androidx.compose.ui.ui-text-android.1.9.3",
+      "name": "Compose UI Text",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.ui.ui-text-android.1.9.3.txt",
+      "notice_sha256": "888e7b2f3efefef6e4fd509598075d846e31f09c60a268dfc318083f32a8183f"
+    },
+    {
+      "id": "androidx.compose.ui.ui-unit-android.1.9.3",
+      "name": "Compose Unit",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.ui.ui-unit-android.1.9.3.txt",
+      "notice_sha256": "3e038634d7f0713ad017028ae871066924f902a880dc4b3b7833aa75d249dae9"
+    },
+    {
+      "id": "androidx.compose.ui.ui-util-android.1.9.3",
+      "name": "Compose Util",
+      "version": "1.9.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.compose.ui.ui-util-android.1.9.3.txt",
+      "notice_sha256": "2052f6054ebfb00660fb9632af4089365131771ea9cc4f93589bf34c6151f215"
+    },
+    {
+      "id": "androidx.concurrent.concurrent-futures.1.1.0",
+      "name": "AndroidX Futures",
+      "version": "1.1.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.concurrent.concurrent-futures.1.1.0.txt",
+      "notice_sha256": "77a4cabe841e4c6e817b0af9600d88eee4b2581ddebba1f6ec60750d606b0300"
+    },
+    {
+      "id": "androidx.core.core-ktx.1.17.0",
+      "name": "Core Kotlin Extensions",
+      "version": "1.17.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.core.core-ktx.1.17.0.txt",
+      "notice_sha256": "6261e9089d15c77657b9d9282d00e153220ace3292ed9af32f99ec0097dd534b"
+    },
+    {
+      "id": "androidx.core.core-viewtree.1.0.0",
+      "name": "androidx.core:core-viewtree",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.core.core-viewtree.1.0.0.txt",
+      "notice_sha256": "e49bb0222ebf81b39bdf09fadfd5a5a9fdeadf10a2b156648070ad345e368821"
+    },
+    {
+      "id": "androidx.core.core.1.17.0",
+      "name": "Core",
+      "version": "1.17.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.core.core.1.17.0.txt",
+      "notice_sha256": "0bfe91a256a1ee6efa6029d230e661eadcf443ffc003a9c8105a84cd1ed6506a"
+    },
+    {
+      "id": "androidx.customview.customview-poolingcontainer.1.0.0",
+      "name": "androidx.customview:poolingcontainer",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.customview.customview-poolingcontainer.1.0.0.txt",
+      "notice_sha256": "feb5e957fbf383009c1a83d3b42cd64f6a7946dbe7b32381367fae54196d029a"
+    },
+    {
+      "id": "androidx.datastore.datastore-android.1.1.7",
+      "name": "DataStore",
+      "version": "1.1.7",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.datastore.datastore-android.1.1.7.txt",
+      "notice_sha256": "d871dfd0b0462cb7b68423d3f587b1837d71c6cff9584f3abf9546cef4f1361c"
+    },
+    {
+      "id": "androidx.datastore.datastore-core-android.1.1.7",
+      "name": "DataStore Core",
+      "version": "1.1.7",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.datastore.datastore-core-android.1.1.7.txt",
+      "notice_sha256": "7f280b0dcf1453e3ca5bd2421bf4116796292a2da3cad1ad43540d0bf8149f10"
+    },
+    {
+      "id": "androidx.datastore.datastore-core-okio-jvm.1.1.7",
+      "name": "DataStore Core Okio",
+      "version": "1.1.7",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.datastore.datastore-core-okio-jvm.1.1.7.txt",
+      "notice_sha256": "212da997feb8ff412679ee79db27e2e16e3fbe0dffc3e18ffab58779ce4c20d2"
+    },
+    {
+      "id": "androidx.datastore.datastore-preferences-android.1.1.7",
+      "name": "Preferences DataStore",
+      "version": "1.1.7",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.datastore.datastore-preferences-android.1.1.7.txt",
+      "notice_sha256": "a3ec5bab39b15e55426b29d1a194825c2f12b6c781639e0d8e1f56d923fba9a6"
+    },
+    {
+      "id": "androidx.datastore.datastore-preferences-core-android.1.1.7",
+      "name": "Preferences DataStore Core",
+      "version": "1.1.7",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.datastore.datastore-preferences-core-android.1.1.7.txt",
+      "notice_sha256": "72d35fcb6b1e4a94a9ec60bbed0d2f4f9b5d254c95689f8317dc84bcdfe3398c"
+    },
+    {
+      "id": "androidx.datastore.datastore-preferences-external-protobuf.1.1.7",
+      "name": "Preferences External Protobuf",
+      "version": "1.1.7 (Protobuf 4.28.2)",
+      "license": "BSD-3-Clause",
+      "notice_asset": "licenses/androidx.datastore.datastore-preferences-external-protobuf.1.1.7.txt",
+      "notice_sha256": "117bb6a25b7c97d7bc327b14636eebb0ad174eb953d856918320d68ca07a95a8"
+    },
+    {
+      "id": "androidx.datastore.datastore-preferences-proto.1.1.7",
+      "name": "Preferences DataStore Proto",
+      "version": "1.1.7",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.datastore.datastore-preferences-proto.1.1.7.txt",
+      "notice_sha256": "057cfbf43b921b21f25f28c1c4b21c87a629c12f020deac616481a67f6fa551b"
+    },
+    {
+      "id": "androidx.emoji2.emoji2.1.4.0",
+      "name": "Emoji2",
+      "version": "1.4.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.emoji2.emoji2.1.4.0.txt",
+      "notice_sha256": "7d8ba423361786ab767c23cce68f1a5cdb6439d4193442bc8e42a180353ecfd4"
+    },
+    {
+      "id": "androidx.exifinterface.exifinterface.1.3.6",
+      "name": "Android Support ExifInterface",
+      "version": "1.3.6",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.exifinterface.exifinterface.1.3.6.txt",
+      "notice_sha256": "5bdfe2a1e68c195d6411020dd512ae0f04e5b849b397e8cad0755e1f6db1c08b"
+    },
+    {
+      "id": "androidx.graphics.graphics-path.1.0.1",
+      "name": "Android Graphics Path",
+      "version": "1.0.1",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.graphics.graphics-path.1.0.1.txt",
+      "notice_sha256": "142a4b9894f225b11baa1ae8d058f25a0c7f2e5cfdbbc55011d0ae9cd7e7c031"
+    },
+    {
+      "id": "androidx.interpolator.interpolator.1.0.0",
+      "name": "Android Support Library Interpolators",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.interpolator.interpolator.1.0.0.txt",
+      "notice_sha256": "a1db759bb17dd0cfc71acc0423498e67c55623066c3565b0639a432fa9420b9d"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-common-jvm.2.9.4",
+      "name": "Lifecycle-Common",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-common-jvm.2.9.4.txt",
+      "notice_sha256": "0b3ef39d732ba285c5d9eff27c13a56e600c016053f074f91846fcc3e7e1eff9"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-livedata-core.2.9.4",
+      "name": "Lifecycle LiveData Core",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-livedata-core.2.9.4.txt",
+      "notice_sha256": "db830044daea52757220c33bcd8f17d8e11af72437f369796997f1f1a55bd01d"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-process.2.9.4",
+      "name": "Lifecycle Process",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-process.2.9.4.txt",
+      "notice_sha256": "95d5df6cd437869764e0601043af5e69745db22f692b8d847e555043ef4ad0ff"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-runtime-android.2.9.4",
+      "name": "Lifecycle Runtime",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-runtime-android.2.9.4.txt",
+      "notice_sha256": "8c8f20fc98d61c4ab0a50127412d790f4bb541380cd638014fcedfe92b5660fb"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-runtime-compose-android.2.9.4",
+      "name": "Lifecycle Runtime Compose",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-runtime-compose-android.2.9.4.txt",
+      "notice_sha256": "c06903fec9118de81a5dd41537ff2e29c55dc4ea0405e7feebc46333fc760b52"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-viewmodel-android.2.9.4",
+      "name": "Lifecycle ViewModel",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-viewmodel-android.2.9.4.txt",
+      "notice_sha256": "25f958342d5b43e77419caddd312a9135429a38f3507c0d294e41bb04c2b055a"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-viewmodel-ktx.2.9.4",
+      "name": "Lifecycle ViewModel Kotlin Extensions",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-viewmodel-ktx.2.9.4.txt",
+      "notice_sha256": "3abceeec0535028e3f593571a87e72a7a004073b8beb3879af6d18cda145904b"
+    },
+    {
+      "id": "androidx.lifecycle.lifecycle-viewmodel-savedstate-android.2.9.4",
+      "name": "Lifecycle ViewModel with SavedState",
+      "version": "2.9.4",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.lifecycle.lifecycle-viewmodel-savedstate-android.2.9.4.txt",
+      "notice_sha256": "c69bd881c7b382b04e18005cc16a18e715b75fffc2f2589d63aab3e43f31649c"
+    },
+    {
+      "id": "androidx.media.media.1.7.0",
+      "name": "Media",
+      "version": "1.7.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media.media.1.7.0.txt",
+      "notice_sha256": "143cc385859c7982d6d74b565dc927120a4c20655405c60d73e87e6642f7c8ec"
+    },
+    {
+      "id": "androidx.media3.media3-common.1.8.0",
+      "name": "Media3 common module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-common.1.8.0.txt",
+      "notice_sha256": "420ca83b156fa5f200d247240a2567b1faa5a1a521afce18390e8f63da619e68"
+    },
+    {
+      "id": "androidx.media3.media3-container.1.8.0",
+      "name": "Media3 Container module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-container.1.8.0.txt",
+      "notice_sha256": "3cd89b80a649218c578a843869e8170218633b7ea0960149863749ea22702ca0"
+    },
+    {
+      "id": "androidx.media3.media3-database.1.8.0",
+      "name": "Media3 database module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-database.1.8.0.txt",
+      "notice_sha256": "683c7bf82c73fd54b66736d9f62a8310b19e44b2255cc1c8d7f2b881052f8743"
+    },
+    {
+      "id": "androidx.media3.media3-datasource.1.8.0",
+      "name": "Media3 DataSource module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-datasource.1.8.0.txt",
+      "notice_sha256": "bbb28265d6dee2dc55158bb138f783ebb9a11fddccf00e28f5e8729307a8f9b8"
+    },
+    {
+      "id": "androidx.media3.media3-decoder.1.8.0",
+      "name": "Media3 decoder module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-decoder.1.8.0.txt",
+      "notice_sha256": "326b9a6962f273ac2274ad9602a5a530964a2cab0eef6adbc35e1c282c44b3f5"
+    },
+    {
+      "id": "androidx.media3.media3-exoplayer.1.8.0",
+      "name": "Media3 ExoPlayer module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-exoplayer.1.8.0.txt",
+      "notice_sha256": "478e9a3abcc4cfc5e56b92ab1596e646ca3192653beada4655ced27e78bcc7c6"
+    },
+    {
+      "id": "androidx.media3.media3-extractor.1.8.0",
+      "name": "Media3 Extractor module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-extractor.1.8.0.txt",
+      "notice_sha256": "62162318fd7a664c6ca787d7ad31777e9f4356433233b0e610a0b434ce594de8"
+    },
+    {
+      "id": "androidx.media3.media3-session.1.8.0",
+      "name": "Media3 Session module",
+      "version": "1.8.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.media3.media3-session.1.8.0.txt",
+      "notice_sha256": "2e088ce6adf0aa0da96482d1f9a78789fbdc53bc32931e0fccd76362e684594e"
+    },
+    {
+      "id": "androidx.profileinstaller.profileinstaller.1.4.0",
+      "name": "Profile Installer",
+      "version": "1.4.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.profileinstaller.profileinstaller.1.4.0.txt",
+      "notice_sha256": "15d266fe6340f8a72f420915a5a41d3134ced50a95091272ed90731977e02523"
+    },
+    {
+      "id": "androidx.room.room-common-jvm.2.8.5",
+      "name": "Room-Common",
+      "version": "2.8.5",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.room.room-common-jvm.2.8.5.txt",
+      "notice_sha256": "b3a4711ffdbdbedb479cd3278087b1e6edf1d3e40ac8681ba8861c267526c629"
+    },
+    {
+      "id": "androidx.room.room-runtime-android.2.8.5",
+      "name": "Room-Runtime",
+      "version": "2.8.5",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.room.room-runtime-android.2.8.5.txt",
+      "notice_sha256": "acb7602f3bf75d7297282201dbde2aae95dc8d9eb2a6e82a28f8821798b4f95e"
+    },
+    {
+      "id": "androidx.savedstate.savedstate-android.1.3.3",
+      "name": "Saved State",
+      "version": "1.3.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.savedstate.savedstate-android.1.3.3.txt",
+      "notice_sha256": "ab49f725166886790c3b35833da8404a51cf253a704f5930e21c15cf3118d553"
+    },
+    {
+      "id": "androidx.savedstate.savedstate-compose-android.1.3.3",
+      "name": "Saved State Compose",
+      "version": "1.3.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.savedstate.savedstate-compose-android.1.3.3.txt",
+      "notice_sha256": "5aa4e5bae8fb1c0866f4ce5699955f75e2a6337b5c9103c3f41aecf5686f7cd5"
+    },
+    {
+      "id": "androidx.savedstate.savedstate-ktx.1.3.3",
+      "name": "SavedState Kotlin Extensions",
+      "version": "1.3.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.savedstate.savedstate-ktx.1.3.3.txt",
+      "notice_sha256": "1e6d6dac935cfb808aaa81a4b0b04db4ad6419168234a76f35a0d2e5796ce904"
+    },
+    {
+      "id": "androidx.sqlite.sqlite-android.2.6.2",
+      "name": "SQLite",
+      "version": "2.6.2",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.sqlite.sqlite-android.2.6.2.txt",
+      "notice_sha256": "890d93f429f5ef416751f3cf0be64847c114ac7d8e086a80232bae51ce4b97fe"
+    },
+    {
+      "id": "androidx.sqlite.sqlite-bundled-android.2.6.2",
+      "name": "SQLite Bundled Integration",
+      "version": "2.6.2",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.sqlite.sqlite-bundled-android.2.6.2.txt",
+      "notice_sha256": "5283ac05e4904c887dd53f1b8575ce50c4cf684fb67318e54d2c3409ba49de73"
+    },
+    {
+      "id": "androidx.sqlite.sqlite-framework-android.2.6.2",
+      "name": "SQLite Framework Integration",
+      "version": "2.6.2",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.sqlite.sqlite-framework-android.2.6.2.txt",
+      "notice_sha256": "1662e1933d521b059af594a2f06b65474fcc0a80d8eba9e30b50e4c27c5e5f32"
+    },
+    {
+      "id": "androidx.startup.startup-runtime.1.2.0",
+      "license": "Apache-2.0",
+      "name": "Startup Runtime",
+      "notice_asset": "licenses/androidx.startup.startup-runtime.1.2.0.txt",
+      "notice_sha256": "11232e70112bdf7bce30ad9c3a8fea759e93c4f0028ae9371e14d92f213ad6d0",
+      "version": "1.2.0"
+    },
+    {
+      "id": "androidx.tracing.tracing.1.2.0",
+      "name": "Android Tracing",
+      "version": "1.2.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.tracing.tracing.1.2.0.txt",
+      "notice_sha256": "b7769c8b112b88ea39744966699b5f84313150192afb5ccfad5eecbedb0af659"
+    },
+    {
+      "id": "androidx.versionedparcelable.versionedparcelable.1.1.1",
+      "name": "VersionedParcelable",
+      "version": "1.1.1",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/androidx.versionedparcelable.versionedparcelable.1.1.1.txt",
+      "notice_sha256": "edf88de0b81cfa40d5323f4674f5033e2ac6d2b38bf82f4828fc50599079dde3"
+    },
+    {
+      "id": "com.google.guava.failureaccess.1.0.2",
+      "name": "Guava InternalFutureFailureAccess and InternalFutures",
+      "version": "1.0.2",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/com.google.guava.failureaccess.1.0.2.txt",
+      "notice_sha256": "f350ae02600f74a119bd287b50e0ff82bb4cbee9c4badaaef6a22f42a0efe4cb"
+    },
+    {
+      "id": "com.google.guava.guava.33.3.1-android",
+      "name": "Guava: Google Core Libraries for Java",
+      "version": "33.3.1-android",
+      "license": "Apache-2.0; public domain/CC0-1.0 notices",
+      "notice_asset": "licenses/com.google.guava.guava.33.3.1-android.txt",
+      "notice_sha256": "1baec1ca7a3afcda5afebb62e0c0fccbdd0a7c1934bfc2eb908de3b61e2d38bd"
+    },
+    {
+      "id": "com.google.zxing.core.3.5.3",
+      "name": "ZXing core",
+      "version": "3.5.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/com.google.zxing.core.3.5.3.txt",
+      "notice_sha256": "325914f9a505acbe9b4962bcbd20689b6b44ca68beab8375564ee0e5d26c26c7"
+    },
+    {
+      "id": "com.squareup.okhttp3.okhttp-android.5.4.0",
+      "name": "OkHttp Android",
+      "version": "5.4.0",
+      "license": "Apache-2.0 AND MPL-2.0 AND Unicode-3.0",
+      "notice_asset": "licenses/com.squareup.okhttp3.okhttp-android.5.4.0.txt",
+      "notice_sha256": "414615d70755ac2ee8ce49f1dd82258d94d952d639aef906d1f5cc3414610436"
+    },
+    {
+      "id": "com.squareup.okio.okio-jvm.3.17.0",
+      "license": "Apache-2.0",
+      "name": "okio",
+      "notice_asset": "licenses/com.squareup.okio.okio-jvm.3.17.0.txt",
+      "notice_sha256": "90a44b9698cd55f75d03b3c66aa2141f5edf6ba3e9c7351ba8625a25d30242ed",
+      "version": "3.17.0"
+    },
+    {
+      "id": "jmac",
+      "name": "JMAC adapted decoder",
+      "version": "1.7.6v",
+      "license": "GPL-2.0-or-later",
+      "notice_asset": "licenses/jmac-NOTICE.txt",
+      "notice_sha256": "9a5202d933efd4b0dd9441e4abe66bf2334e7968e409ea5926ecc2f32486ed6e"
+    },
+    {
+      "id": "jmac-original-gpl2-license",
+      "name": "JMAC original license text",
+      "version": "GPL v2 or later",
+      "license": "GPL-2.0-or-later",
+      "notice_asset": "licenses/jmac-GPL-2.0-or-later.txt",
+      "notice_sha256": "204d8eff92f95aac4df6c8122bc1505f468f3a901e5a4cc08940e0ede1938994"
+    },
+    {
+      "id": "melox-watch-project-license",
+      "name": "MeloX Watch project license",
+      "version": "GPL v3",
+      "license": "GPL-3.0-only",
+      "notice_asset": "licenses/GPL-3.0.txt",
+      "notice_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "id": "org.jetbrains.annotations.23.0.0",
+      "name": "JetBrains Java Annotations",
+      "version": "23.0.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jetbrains.annotations.23.0.0.txt",
+      "notice_sha256": "c92e2d3145b794660eaef4416377101fa96e25607864b870b2acf785c83c26c0"
+    },
+    {
+      "id": "org.jetbrains.kotlin.kotlin-android-extensions-runtime.1.9.22",
+      "name": "Kotlin Android Extensions Runtime",
+      "version": "1.9.22",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jetbrains.kotlin.kotlin-android-extensions-runtime.1.9.22.txt",
+      "notice_sha256": "3b0a1ee134dceec7ece26350dc0404c1a9728483ceb3d44520ec57ef5ad9ad4b"
+    },
+    {
+      "id": "org.jetbrains.kotlin.kotlin-parcelize-runtime.1.9.22",
+      "name": "Parcelize Runtime",
+      "version": "1.9.22",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jetbrains.kotlin.kotlin-parcelize-runtime.1.9.22.txt",
+      "notice_sha256": "ba66008d2de50b1c1ef9e2b41414612f5a27a0a7915c0bf5a66b4641973860a4"
+    },
+    {
+      "id": "org.jetbrains.kotlin.kotlin-stdlib.2.2.21",
+      "name": "Kotlin Stdlib",
+      "version": "2.2.21",
+      "license": "Apache-2.0; BSL-1.0; BSD-3-Clause",
+      "notice_asset": "licenses/org.jetbrains.kotlin.kotlin-stdlib.2.2.21.txt",
+      "notice_sha256": "d4ea144310c564567d9ee9eaf40e3fc9b3a1e3d47b19fa4fe5fe1bfc7b8ba875"
+    },
+    {
+      "id": "org.jetbrains.kotlinx.kotlinx-coroutines-android.1.10.2",
+      "name": "kotlinx-coroutines-android",
+      "version": "1.10.2",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jetbrains.kotlinx.kotlinx-coroutines-android.1.10.2.txt",
+      "notice_sha256": "636d1ea161177f5ba6e0fcc873562a9b9ad3648bed3aedbdc3ee25ef9899c972"
+    },
+    {
+      "id": "org.jetbrains.kotlinx.kotlinx-coroutines-core-jvm.1.10.2",
+      "name": "kotlinx-coroutines-core",
+      "version": "1.10.2",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jetbrains.kotlinx.kotlinx-coroutines-core-jvm.1.10.2.txt",
+      "notice_sha256": "9c6c950611a4449647efc5964afcbfd8499b892f8a365232e672fac3f914d472"
+    },
+    {
+      "id": "org.jetbrains.kotlinx.kotlinx-serialization-core-jvm.1.7.3",
+      "name": "kotlinx-serialization-core",
+      "version": "1.7.3",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jetbrains.kotlinx.kotlinx-serialization-core-jvm.1.7.3.txt",
+      "notice_sha256": "1c206b34cc11a25ae60923b7ed55f30b0bfb56f299694c2c12162750db3b0901"
+    },
+    {
+      "id": "org.jspecify.jspecify.1.0.0",
+      "name": "JSpecify annotations",
+      "version": "1.0.0",
+      "license": "Apache-2.0",
+      "notice_asset": "licenses/org.jspecify.jspecify.1.0.0.txt",
+      "notice_sha256": "c17dafd05a8f11ae0e4c6cb386c964a836b0be708d200c95dedce87494fc8812"
+    },
+    {
+      "id": "sqlite",
+      "name": "SQLite",
+      "version": "3.50.1",
+      "license": "Public domain",
+      "notice_asset": "licenses/sqlite-NOTICE.txt",
+      "notice_sha256": "b0dc7055279a4bfcf0c4a702434ec494e4466583f3974d12e1173a538d13af70"
+    }
+  ]
+}

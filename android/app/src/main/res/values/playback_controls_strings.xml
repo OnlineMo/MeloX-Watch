@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="prefs_section_general">Library and display</string>
+    <string name="prefs_section_playback">Playback</string>
+    <string name="prefs_section_controls">Progress, crown and timer</string>
+    <string name="prefs_back_to_sections">Back to settings</string>
+    <string name="prefs_show_saved_values">View saved settings</string>
+    <string name="prefs_hide_saved_values">Hide saved settings</string>
+    <string name="prefs_main_progress">Show playback progress</string>
+    <string name="prefs_progress_gesture">Progress gesture</string>
+    <string name="prefs_progress_drag">Drag, then release to seek</string>
+    <string name="prefs_progress_tap">Tap to seek</string>
+    <string name="prefs_progress_scope">Seeking keeps the current play or pause state. The separate seek controls remain available when progress is hidden.</string>
+    <string name="prefs_main_progress_value">Playback progress: %1$s · %2$s</string>
+    <string name="prefs_rotary">Crown playback control</string>
+    <string name="prefs_rotary_target">Crown action</string>
+    <string name="prefs_rotary_direction">Crown direction</string>
+    <string name="prefs_rotary_volume">Media volume</string>
+    <string name="prefs_rotary_seek">Playback position</string>
+    <string name="prefs_rotary_normal">Normal direction</string>
+    <string name="prefs_rotary_reversed">Reverse direction</string>
+    <string name="prefs_rotary_haptics">Crown vibration</string>
+    <string name="prefs_rotary_scope">On the playback page, one step adjusts one volume level or seeks five seconds. Lists keep their scrolling control. Touch controls are always available.</string>
+    <string name="prefs_rotary_value">Crown: %1$s · %2$s · %3$s</string>
+    <string name="prefs_rotary_haptics_value">Crown vibration: %1$s</string>
+    <string name="prefs_sleep_summary">Timer notification</string>
+    <string name="prefs_sleep_summary_scope">Show the remaining minutes and ending mode in a notification. Turning this off keeps the timer running. You can manage the timer in the app even if notifications are unavailable.</string>
+    <string name="prefs_sleep_summary_value">Timer notification: %1$s</string>
+</resources>

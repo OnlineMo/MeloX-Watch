@@ -16,6 +16,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
+import io.github.onlinemo.meloxwatch.ui.fileoperations.fileIssueText
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import java.util.Locale
 
@@ -38,6 +39,7 @@ internal fun LazyListScope.sourcesContent(
             }
             state.libraryIssue?.let { LibraryText(stringResource(libraryIssueText(it)), error = true) }
             state.importIssue?.let { LibraryText(stringResource(importIssueText(it)), error = true) }
+            state.fileIssue?.let { LibraryText(stringResource(fileIssueText(it)), error = true) }
             state.notice?.let { LibraryText(stringResource(noticeText(it))) }
             if (state.working) LibraryButton(stringResource(R.string.probe_cancel), !state.stopping, model::cancelRead)
             LibraryButton(stringResource(R.string.library_reload_sources), !state.working, model::reload)
@@ -124,7 +126,10 @@ internal fun LazyListScope.sourcesContent(
     } }
     state.removeConfirmation?.let { source -> item(key = "sources:remove-confirmation") {
         LibraryText(stringResource(R.string.library_remove_source_confirmation, sourceName(source)), primary = true)
-        LibraryButton(stringResource(R.string.library_confirm_remove_source), !state.working, model::confirmRemoveSource)
+        state.removePreview?.let { preview ->
+            LibraryText(stringResource(R.string.file_source_impact, preview.affectedTracks, preview.affectedAliases))
+        }
+        LibraryButton(stringResource(R.string.library_confirm_remove_source), !state.working && state.removePreview != null, model::confirmRemoveSource)
         LibraryButton(stringResource(R.string.probe_cancel), !state.working, model::cancelRemoveSource)
     } }
     items(state.page?.sources.orEmpty(), key = { "source:${it.spec.sourceId}" }) { source ->

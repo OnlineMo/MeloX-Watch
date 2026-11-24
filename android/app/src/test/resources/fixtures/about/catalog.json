@@ -1,0 +1,21 @@
+[
+  {
+    "assets": [
+      {
+        "browser_download_url": "https://github.com/OnlineMo/MeloX-Watch/releases/download/v0.1.0/candidate-manifest.json",
+        "name": "candidate-manifest.json",
+        "size": 12000
+      },
+      {
+        "browser_download_url": "https://github.com/OnlineMo/MeloX-Watch/releases/download/v0.1.0/publication-record.json",
+        "name": "publication-record.json",
+        "size": 12000
+      }
+    ],
+    "body": "Synthetic regression fixture: local playback and a companion app.",
+    "draft": false,
+    "html_url": "https://github.com/OnlineMo/MeloX-Watch/releases/tag/v0.1.0",
+    "prerelease": true,
+    "tag_name": "v0.1.0"
+  }
+]

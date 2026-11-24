@@ -12,6 +12,21 @@ enum class PreferencesField {
     LIBRARY_LAYOUT,
     ARTWORK_READ_PATH,
     LIBRARY_SORTS,
+    SONG_TAP_POLICY,
+    MEDIA_BUTTONS,
+    AUDIO_FOCUS,
+    PLAYBACK_BACKEND,
+    PLAYBACK_SPEED,
+    GAPLESS,
+    ROTARY_CONTROL,
+    ROTARY_TARGET,
+    ROTARY_DIRECTION,
+    ROTARY_HAPTICS,
+    MAIN_PROGRESS,
+    SEEK_GESTURE,
+    SLEEP_SUMMARY,
+    HELP,
+    BLUETOOTH_LYRICS,
 }
 
 enum class PreferencesRecoveryReason {
@@ -29,6 +44,7 @@ data class PreferencesRecovery(
 
 enum class PreferencesFailure {
     IO,
+    BUSY,
     UNSUPPORTED_SCHEMA,
     INVALID_REVISION,
     REVISION_EXHAUSTED,

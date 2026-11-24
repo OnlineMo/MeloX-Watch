@@ -10,10 +10,39 @@ new File(repositoryRoot, 'version.properties').withInputStream { releaseVersion.
 if (gradle.gradleVersion != toolchain.getProperty('gradle.version')) {
     throw new GradleException('Gradle version differs from the cloud toolchain lock')
 }
-// 仅缺锁的无秘密PR五阶段开启；普通构建不安装监听器，也不额外解析图。
+def packagePhase = System.getenv('MELOX_CI_BUILD_PHASE')
+def packageDebugBinding = null
+if (packagePhase == 'package-test-debug') {
+    def raw = System.getenv('CI_PACKAGE_DEBUG_BINDING')
+    if (raw == null || raw.getBytes('UTF-8').length > 2048) {
+        throw new GradleException('Current-run Debug evidence binding is missing')
+    }
+    packageDebugBinding = new groovy.json.JsonSlurper().parseText(raw)
+    def keys = ['repository', 'source_sha', 'build_sha', 'run_id', 'run_attempt', 'event', 'ref'] as Set
+    if (!(packageDebugBinding instanceof Map) || packageDebugBinding.keySet() != keys ||
+        packageDebugBinding.repository != 'OnlineMo/MeloX-Watch' ||
+        !(packageDebugBinding.source_sha ==~ /[0-9a-f]{40}/) || !(packageDebugBinding.build_sha ==~ /[0-9a-f]{40}/) ||
+        packageDebugBinding.source_sha != System.getenv('SOURCE_SHA') ||
+        packageDebugBinding.event != System.getenv('GITHUB_EVENT_NAME') || packageDebugBinding.ref != System.getenv('GITHUB_REF') ||
+        ['run_id': 'GITHUB_RUN_ID', 'run_attempt': 'GITHUB_RUN_ATTEMPT'].any { key, variable ->
+            !(packageDebugBinding[key] instanceof Integer || packageDebugBinding[key] instanceof Long || packageDebugBinding[key] instanceof BigInteger) ||
+            packageDebugBinding[key].toString() != System.getenv(variable)
+        }) {
+        throw new GradleException('Current-run Debug evidence binding differs')
+    }
+} else if (System.getenv('CI_PACKAGE_DEBUG_BINDING')) {
+    throw new GradleException('Debug evidence binding belongs only to its full test stage')
+}
+def freshPackageSchema = System.getenv('CI_PACKAGE_FRESH_ROOM_SCHEMA') == 'true'
+if (freshPackageSchema && !(packagePhase == 'package-strict-inputs' &&
+    System.getenv('GITHUB_EVENT_NAME') == 'pull_request' && System.getenv('CI_UNSIGNED_APK') == 'true')) {
+    throw new GradleException('Fresh package schema export requires the explicit strict owner PR stage')
+}
+// 仅缺依赖/Room输入的无秘密PR采集开启；普通构建不安装监听器，也不额外解析图。
 def dependencyDiagnosticPhase = System.getenv('CI_DEPENDENCY_DIAGNOSTIC_PHASE')
 def dependencyDiagnosticEnabled = System.getenv('GITHUB_EVENT_NAME') == 'pull_request' &&
-    ['verification-collection', 'normal-lock-collection', 'strict-debug', 'strict-release',
+    ['verification-collection', 'verification-debug', 'verification-release', 'verification-diagnostic',
+     'normal-lock-collection', 'strict-debug', 'strict-release',
      'strict-diagnostic'].contains(dependencyDiagnosticPhase)
 def diagnosticConfigurations = (['implementationDependenciesMetadata'] +
     ['Debug', 'Release', 'Diagnostic'].collectMany { variant ->
@@ -216,6 +245,109 @@ gradle.beforeProject { project ->
     }
 }
 gradle.projectsEvaluated {
+    if (packagePhase?.startsWith('package-')) {
+        if (gradle.rootProject.allprojects.collect { it.path }.sort() != [':', ':app', ':companion']) {
+            throw new GradleException('Package builds require exactly the watch and phone application projects')
+        }
+        def fullDebugTests = [':app:testWatchAndroidDebugUnitTest', ':companion:testPhoneAndroidDebugUnitTest']
+        if (packagePhase == 'package-test-debug') {
+            fullDebugTests.each { id ->
+                def selected = gradle.rootProject.tasks.getByPath(id)
+                if (!(selected instanceof org.gradle.api.tasks.testing.Test)) {
+                    throw new GradleException('The complete package Debug test scope is unavailable')
+                }
+                // Current-run JUnit evidence is required; compilation still uses its normal cache.
+                selected.outputs.upToDateWhen { false }
+                selected.outputs.doNotCacheIf('The full Debug scope needs current-run evidence') { true }
+                selected.scanForTestClasses = true
+                selected.reports.junitXml.required.set(true)
+                def scopeFor = {
+                    if (!(selected.options instanceof org.gradle.api.tasks.testing.junit.JUnitOptions)) {
+                        throw new GradleException('The declared full Debug scope requires the locked JUnit4 task')
+                    }
+                    [includes: selected.includes.toList().sort(), excludes: selected.excludes.toList().sort(),
+                     include_patterns: selected.filter.includePatterns.toList().sort(),
+                     exclude_patterns: selected.filter.excludePatterns.toList().sort(),
+                     command_line_include_patterns: selected.filter.commandLineIncludePatterns.toList().sort(),
+                     include_categories: selected.options.includeCategories.toList().sort(),
+                     exclude_categories: selected.options.excludeCategories.toList().sort(),
+                     test_framework: 'junit4', scan_for_test_classes: selected.scanForTestClasses]
+                }
+                def expectedScope = [includes: [], excludes: [], include_patterns: [], exclude_patterns: [],
+                    command_line_include_patterns: [], include_categories: [], exclude_categories: [],
+                    test_framework: 'junit4', scan_for_test_classes: true]
+                def requireScope = {
+                    if (!selected.enabled || scopeFor() != expectedScope) {
+                        throw new GradleException('The full Debug task cannot be disabled or filtered')
+                    }
+                }
+                requireScope()
+                selected.doFirst { requireScope() }
+                def completedRoot = [result: null]
+                selected.addTestListener(new org.gradle.api.tasks.testing.TestListener() {
+                    void beforeSuite(org.gradle.api.tasks.testing.TestDescriptor suite) {}
+                    void beforeTest(org.gradle.api.tasks.testing.TestDescriptor test) {}
+                    void afterTest(org.gradle.api.tasks.testing.TestDescriptor test, org.gradle.api.tasks.testing.TestResult result) {}
+                    void afterSuite(org.gradle.api.tasks.testing.TestDescriptor suite, org.gradle.api.tasks.testing.TestResult result) {
+                        if (suite.parent == null) {
+                            if (completedRoot.result != null) {
+                                throw new GradleException('Debug Test task produced duplicate root TestResult')
+                            }
+                            completedRoot.result = result
+                        }
+                    }
+                })
+                gradle.taskGraph.afterTask { task, state ->
+                    if (task.path == id && state.failure == null) {
+                        requireScope()
+                        def result = completedRoot.result
+                        if (!state.executed || state.skipped || state.noSource || state.upToDate || !state.didWork ||
+                            result == null || result.resultType != org.gradle.api.tasks.testing.TestResult.ResultType.SUCCESS ||
+                            result.testCount <= 0 || result.testCount > 20000 || result.successfulTestCount != result.testCount ||
+                            result.failedTestCount != 0 || result.skippedTestCount != 0) {
+                            throw new GradleException('Current-run full Debug TestResult is missing, cached, skipped or incomplete')
+                        }
+                        def role = id.startsWith(':app:') ? 'watch' : 'phone'
+                        def record = [schema_version: 1, kind: 'package-debug-task-result', role: role, task: id,
+                            outcome: 'executed', result: 'SUCCESS', test_count: result.testCount,
+                            successful_test_count: result.successfulTestCount, failed_test_count: result.failedTestCount,
+                            skipped_test_count: result.skippedTestCount, started_at_epoch_ms: result.startTime,
+                            completed_at_epoch_ms: result.endTime, scope: scopeFor()] + packageDebugBinding
+                        byte[] bytes = (groovy.json.JsonOutput.toJson(record) + '\n').getBytes('UTF-8')
+                        if (bytes.length > 8192) throw new GradleException('Debug TestResult receipt exceeds its bound')
+                        def path = new File(repositoryRoot, 'android/app/build/reports/package-debug-tests/' + role + '-task-result.json').toPath()
+                        def cursor = path
+                        while (cursor != null) {
+                            if (java.nio.file.Files.isSymbolicLink(cursor)) throw new GradleException('Debug evidence path is linked')
+                            cursor = cursor.parent
+                        }
+                        java.nio.file.Files.write(path, bytes, java.nio.file.StandardOpenOption.CREATE_NEW,
+                            java.nio.file.StandardOpenOption.WRITE, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                    }
+                }
+            }
+        }
+        if (freshPackageSchema) {
+            def selected = gradle.rootProject.tasks.getByPath(':app:kspWatchAndroidDebugKotlin')
+            // Regenerate only the current schema producer after its new writer export is removed.
+            selected.outputs.upToDateWhen { false }
+            selected.outputs.doNotCacheIf('The current Room export needs an independent strict producer') { true }
+        }
+        gradle.taskGraph.whenReady { graph ->
+            def observed = graph.allTasks.findAll { it instanceof org.gradle.api.tasks.testing.Test }.collect { it.path }.sort()
+            if (observed != (packagePhase == 'package-test-debug' ? fullDebugTests.sort() : [])) {
+                throw new GradleException('Package stages must run the declared full Debug scope exactly once')
+            }
+            if (freshPackageSchema && !graph.hasTask(':app:kspWatchAndroidDebugKotlin')) {
+                throw new GradleException('The independent strict Room schema producer is missing')
+            }
+            if (['package-acquire', 'package-strict-inputs'].contains(packagePhase) && graph.allTasks.any {
+                it.path ==~ /:(app|companion):(assemble|package)(WatchAndroid|PhoneAndroid)(Debug|Release|Diagnostic)(AndroidTest)?/
+            }) {
+                throw new GradleException('Input acquisition cannot assemble or package APKs')
+            }
+        }
+    }
     // Gradle保留本轮未解析的旧锁配置；up-to-date任务不能替代显式解析证据。
     // 此任务只供无秘密PR采集正常图，三轮独立strict仍决定资料是否完整。
     gradle.rootProject.tasks.register('ciResolveAndLockAll') { task ->

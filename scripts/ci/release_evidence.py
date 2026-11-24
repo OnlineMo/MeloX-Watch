@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from ci_common import ROOT, OWNER, git, require, sha256
+from package_contract import exact_data, package_identity
 
 GATES = {'P0_device_and_login', 'P1_playback_foundation', 'P2_online_features', 'P3_watch_mvp',
          'reference_device_background_audio', 'privacy_and_source_licenses',
@@ -29,6 +30,11 @@ fragment RequiredProtection on BranchProtectionRule {
 
 
 def candidate_identity(manifest, provenance):
+    if manifest.get('schema_version') == 2:
+        return {'run_id': provenance['run_id'], 'run_attempt': provenance['run_attempt'],
+                'artifact_id': provenance['id'], 'archive_sha256': provenance['sha256'],
+                'source_sha': manifest['source_sha'], 'snapshot_sha': manifest['snapshot_sha'],
+                'version': manifest['version'], **package_identity(manifest['apks'], manifest['protocol'])}
     return {'run_id': provenance['run_id'], 'run_attempt': provenance['run_attempt'],
             'artifact_id': provenance['id'], 'archive_sha256': provenance['sha256'],
             'source_sha': manifest['source_sha'], 'snapshot_sha': manifest['snapshot_sha'],
@@ -63,11 +69,13 @@ def report_file(root, relative, version, approval):
 
 def validate_approval(readiness, report, identity, approval, root=ROOT):
     version = identity['version']['versionName']
-    require(readiness.get('schema_version') == 2 and readiness.get('candidate') == identity, 'Readiness candidate binding missing')
+    require(type(readiness.get('schema_version')) is int and readiness['schema_version'] == 2 and
+            exact_data(readiness.get('candidate'), identity), 'Readiness candidate binding missing')
     require(readiness.get('owner_approved') is True, 'Explicit candidate publication approval is missing')
     require(set(readiness.get('gates', {})) == GATES and all(value is True for value in readiness['gates'].values()),
             'Readiness gates are incomplete')
-    require(report.get('schema_version') == 1 and report.get('candidate') == identity, 'Evidence identifies a different candidate')
+    require(type(report.get('schema_version')) is int and report['schema_version'] == (2 if 'packages' in identity else 1) and
+            exact_data(report.get('candidate'), identity), 'Evidence identifies a different candidate')
     decision = report.get('publication_approval', {})
     require(decision.get('owner') == OWNER and decision.get('approved') is True, 'Owner decision missing')
     try:
@@ -88,12 +96,26 @@ def validate_approval(readiness, report, identity, approval, root=ROOT):
     background = report.get('background_audio', {})
     require(background.get('validation_kind') == 'physical-device' and background.get('screen_off') is True,
             'Physical-device screen-off evidence is required')
-    require(background.get('apk_sha256') == identity['apk_sha256'], 'Background evidence uses a different APK')
+    watch_sha = next(entry['sha256'] for entry in identity['packages'] if entry['role'] == 'watch') if 'packages' in identity else identity['apk_sha256']
+    require(background.get('apk_sha256') == watch_sha, 'Background evidence uses a different Watch APK')
     require(isinstance(background.get('reference_device'), str) and bool(background['reference_device'].strip()),
             'Reference device evidence is missing')
     for key, minimum in [('online_minutes', 60), ('local_minutes', 120)]:
         value = background.get(key)
         require(type(value) in (int, float) and minimum <= value < float('inf'), 'Required background duration missing: ' + key)
+    if 'packages' in identity:
+        interaction = report.get('interoperability', {})
+        cases = {'pairing', 'disconnect', 'revision_conflict', 'cancel', 'recovery', 'independent_playback'}
+        require(exact_data(interaction.get('packages'), identity['packages']) and exact_data(interaction.get('protocol'), identity['protocol']) and
+                interaction.get('status') == 'passed' and set(interaction.get('cases', {})) == cases and
+                all(value == 'passed' for value in interaction['cases'].values()),
+                'Interoperability evidence must bind both actual APKs and the exact shared protocol')
+        records = interaction.get('reports')
+        require(type(records) is list and bool(records), 'Interoperability needs committed report evidence')
+        for record in records:
+            path = report_file(root, record['path'], version, approval)
+            require(sha256(path) == record['sha256'], 'Interoperability report hash differs')
+            hashes[record['path']] = record['sha256']
     return hashes
 
 

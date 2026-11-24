@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lyrics_offset_draft_review_required">Your offset draft is kept. Read the current lyrics and settings before saving.</string>
+    <string name="lyrics_offset_draft_review">Review draft with current lyrics</string>
+    <string name="lyrics_offset_draft_other_entry">This draft belongs to the previous queue entry. Cancel it to start a new offset draft.</string>
+</resources>

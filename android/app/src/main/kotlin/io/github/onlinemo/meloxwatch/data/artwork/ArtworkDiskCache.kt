@@ -2,6 +2,8 @@ package io.github.onlinemo.meloxwatch.data.artwork
 
 import android.graphics.Bitmap
 import android.os.CancellationSignal
+import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
+import io.github.onlinemo.meloxwatch.data.storage.StorageLimits
 import java.io.File
 import java.io.FileOutputStream
 import java.io.OutputStream
@@ -43,11 +45,12 @@ internal class ArtworkDiskCache(private val directory: File) {
     fun put(key: String, bitmap: Bitmap, signal: CancellationSignal) {
         if (!keyPattern.matches(key)) throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)
         initialize(signal)
+        requireRoom(ArtworkLimits.DISK_ENTRY_BYTES)
         trim(ArtworkLimits.DISK_ENTRY_BYTES, key, signal)
         val temporary = child("$key-${UUID.randomUUID()}.part")
         try {
             FileOutputStream(temporary).use { file ->
-                val bounded = BoundedOutput(file, signal)
+                val bounded = BoundedOutput(file, signal, ::requireRoom)
                 if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, bounded)) throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)
                 bounded.flush()
                 file.fd.sync()
@@ -64,6 +67,57 @@ internal class ArtworkDiskCache(private val directory: File) {
     }
 
     internal fun occupiedBytes(): Long = bytes
+
+    fun measure(signal: CancellationSignal): StorageCategory {
+        initialize(signal)
+        var actual = 0L
+        var count = 0L
+        Files.newDirectoryStream(directory.toPath()).use { files ->
+            for (path in files) {
+                signal.throwIfCanceled()
+                val file = child(path.fileName.toString())
+                if (!file.isFile || Files.isSymbolicLink(path)) throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)
+                actual = Math.addExact(actual, Files.size(path))
+                count = Math.addExact(count, 1L)
+            }
+        }
+        return StorageCategory(actual, count)
+    }
+
+    /** 磁盘缓存所有者清理并重建自己的索引，调用方不能绕过 LRU 删除目录。 */
+    fun clear(signal: CancellationSignal): StorageCategory {
+        initialize(signal)
+        try {
+            Files.newDirectoryStream(directory.toPath()).use { files ->
+                for (path in files) {
+                    signal.throwIfCanceled()
+                    val name = path.fileName.toString()
+                    if (name == "index.json") continue
+                    val file = child(name)
+                    if (!file.isFile) throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)
+                    Files.delete(file.toPath())
+                    if (name.endsWith(".png")) entries.remove(name.removeSuffix(".png"))?.let { bytes -= it }
+                }
+            }
+            entries.clear()
+            bytes = 0L
+            writeIndex(signal)
+        } finally {
+            // 部分清理取消或失败后，重试须依据实际保留的文件重建缓存状态。
+            initialized = false
+            entries.clear()
+            bytes = 0L
+        }
+        return measure(signal)
+    }
+
+    private fun requireRoom(next: Long) {
+        val available = try { Files.getFileStore(directory.toPath()).usableSpace }
+            catch (failure: Exception) { throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE, failure) }
+        if (next < 0L || available < StorageLimits.FREE_RESERVE_BYTES || next > available - StorageLimits.FREE_RESERVE_BYTES) {
+            throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)
+        }
+    }
 
     private fun initialize(signal: CancellationSignal) {
         if (initialized) return
@@ -155,7 +209,7 @@ internal class ArtworkDiskCache(private val directory: File) {
         return result
     }
 
-    private class BoundedOutput(private val output: OutputStream, private val signal: CancellationSignal) : OutputStream() {
+    private class BoundedOutput(private val output: OutputStream, private val signal: CancellationSignal, private val requireRoom: (Long) -> Unit) : OutputStream() {
         private var bytes = 0L
         override fun write(value: Int) { check(1); output.write(value) }
         override fun write(buffer: ByteArray, offset: Int, length: Int) { check(length); output.write(buffer, offset, length) }
@@ -163,6 +217,7 @@ internal class ArtworkDiskCache(private val directory: File) {
         private fun check(length: Int) {
             signal.throwIfCanceled()
             if (length < 0 || bytes + length > ArtworkLimits.DISK_ENTRY_BYTES) throw ArtworkException(ArtworkIssue.CACHE_UNAVAILABLE)
+            requireRoom(length.toLong())
             bytes += length
         }
     }

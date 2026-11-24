@@ -21,7 +21,7 @@ def properties(path):
     return result
 
 
-def check(require_android=False, release_snapshot=False):
+def check(require_android=False, release_snapshot=False, unit_checks=None):
     env = properties(ROOT / '.ci/toolchain.properties')
     version = properties(ROOT / 'version.properties')
     if release_snapshot:
@@ -66,7 +66,11 @@ def check(require_android=False, release_snapshot=False):
         for action in re.findall(r'uses:\s*([^\s#]+)', text):
             assert action.startswith('./') or re.fullmatch(r'[^@]+@[0-9a-f]{40}', action), 'Unpinned action: ' + action
     subprocess.run(['node', str(ROOT / 'scripts/ci/test-policy.cjs')], check=True)
-    subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(ROOT / 'scripts/ci'), '-p', 'test_*.py'], check=True)
+    from build_applicability import outputs as applicable_outputs
+    applicability = applicable_outputs(ROOT)
+    run_unit_checks = applicability['policy-tests-applicable'] == 'true' if unit_checks is None else unit_checks
+    if run_unit_checks:
+        subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(ROOT / 'scripts/ci'), '-p', 'test_*.py'], check=True)
     subprocess.run([sys.executable, str(ROOT / 'scripts/ci/check-upstreams.py')], check=True)
     outputs = {
         'android-ready': str(ready).lower(), 'runner': env['runner'],
@@ -75,17 +79,21 @@ def check(require_android=False, release_snapshot=False):
         'cmdline-tools': env['android.commandLineTools'],
         'sdk-packages': 'platform-tools platforms;android-' + env['android.compileSdk'] + ' build-tools;' + env['android.buildTools'],
     }
+    outputs.update(applicability)
     if os.environ.get('GITHUB_OUTPUT'):
         with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as stream:
             stream.writelines(key + '=' + value + '\n' for key, value in outputs.items())
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as stream:
-            stream.write('## Project state\n' + ('Android project detected; compilation runs in the next job.\n' if ready else 'Planning/configuration checks only. Android build, APK and device tests have NOT run.\n'))
+            state = ('Applicable Android source detected; compilation remains pending.\n' if ready and applicability['android-applicable'] == 'true'
+                     else 'Policy/document checks only. Android build, APK and device tests have NOT run for this change.\n')
+            stream.write('## Project state\n' + state)
     print('Repository checks passed. Android project ready:', ready)
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--require-android', action='store_true')
+    parser.add_argument('--skip-unit-checks', action='store_true')
     args = parser.parse_args()
-    check(args.require_android)
+    check(args.require_android, unit_checks=False if args.skip_unit_checks else None)

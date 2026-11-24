@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="online_lyrics_native">网易云 LRC 歌词</string>
+    <string name="online_lyrics_service">已配置服务提供的歌词</string>
+    <string name="online_lyrics_cached">%1$s · 已保存在此手表</string>
+    <string name="online_lyrics_missing">当前来源未返回本曲歌词。</string>
+    <string name="online_lyrics_offline">当前离线，本账号与来源没有可读的已存歌词。</string>
+    <string name="online_lyrics_login_required">获取新歌词前请验证本账号。已存歌词可离线查看。</string>
+    <string name="online_lyrics_session_unavailable">账号暂不可用，请恢复账号或登录后重试。</string>
+    <string name="online_lyrics_timeout">歌词请求超时，可点按重试。</string>
+    <string name="online_lyrics_certificate">无法验证歌词连接的证书。</string>
+    <string name="online_lyrics_rate_limited">歌词来源限制了请求，请稍后重试。</string>
+    <string name="online_lyrics_source_changed">曲目、账号或来源已改变，请重新打开歌词。</string>
+    <string name="online_lyrics_unsupported">当前播放来源无法提供歌词。</string>
+    <string name="online_lyrics_read_failed">歌词读取失败，音频播放可继续。</string>
+    <string name="online_lyrics_memory_limit">这份歌词过大，手表暂无法显示。</string>
+    <string name="online_lyrics_busy">上一歌词操作仍在清理，请稍后重试。</string>
+    <string name="online_lyrics_closed">歌词入口已关闭，请重新打开。</string>
+</resources>

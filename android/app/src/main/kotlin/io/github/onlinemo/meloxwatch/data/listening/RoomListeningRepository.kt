@@ -4,6 +4,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryMetaEntity
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.time.DateTimeException
 import java.time.Instant
@@ -13,15 +14,29 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 
 /** Cumulative service acknowledgements, history and statistics share one local transaction owner. */
 class RoomListeningRepository(private val library: RoomLocalLibraryRepository) : ListeningRepository {
     private val dao = library.database.listeningDao()
+    private val epochObservation = Any()
+    private var observationRevision = 0L
+    private var pendingEpochChanges = 0
+    private val mutableObservedEpochs = MutableStateFlow<ListeningEpochs?>(null)
+    override val observedEpochs = mutableObservedEpochs.asStateFlow()
 
     override suspend fun state(): ListeningEpochs = access {
-        library.libraryTransaction { metadata().epochs() }
+        val revision = synchronized(epochObservation) { observationRevision }
+        val epochs = library.libraryTransaction { metadata().epochs() }
+        synchronized(epochObservation) {
+            if (revision == observationRevision && pendingEpochChanges == 0) mutableObservedEpochs.value = epochs
+        }
+        epochs
     }
 
     override suspend fun summary(): ListeningSummary = access {
@@ -41,7 +56,12 @@ class RoomListeningRepository(private val library: RoomLocalLibraryRepository) :
         }
     }
 
-    override fun observeSummary(): Flow<ListeningSummary> = dao.observeMeta().map { summary() }.distinctUntilChanged()
+    override fun observeSummary(): Flow<ListeningSummary> = flow {
+        library.database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeMeta().map {
+            library.database.backupMutationBarrier.readBackupProjection { summary() }
+        })
+    }.distinctUntilChanged()
 
     override suspend fun submit(update: ListeningRoundUpdate): ListeningCommit = access {
         validateEpochs(update.epochs)
@@ -176,29 +196,55 @@ class RoomListeningRepository(private val library: RoomLocalLibraryRepository) :
 
     override suspend fun clearHistory(expectedHistoryEpoch: Long): ListeningEpochs = access {
         if (expectedHistoryEpoch < 0L) fail(ListeningIssue.INVALID_INPUT)
-        val result = library.libraryTransaction(finalPublication = true) {
-            val current = metadata()
-            if (current.historyEpoch != expectedHistoryEpoch) fail(ListeningIssue.CONFLICT)
-            val next = current.copy(historyEpoch = increment(current.historyEpoch), historyFloorSequence = current.nextHistorySequence)
-            dao.updateMeta(next)
-            next.epochs()
+        val revision = beginEpochChange()
+        var result: ListeningEpochs? = null
+        try {
+            result = library.libraryTransaction(finalPublication = true) {
+                val current = metadata()
+                if (current.historyEpoch != expectedHistoryEpoch) fail(ListeningIssue.CONFLICT)
+                val next = current.copy(historyEpoch = increment(current.historyEpoch), historyFloorSequence = current.nextHistorySequence)
+                dao.updateMeta(next)
+                next.epochs()
+            }
+        } finally {
+            finishEpochChange(revision, result)
         }
         reclaim()
-        result
+        requireNotNull(result)
     }
 
     override suspend fun clearStatistics(expectedStatisticsEpoch: Long): ListeningEpochs = access {
         if (expectedStatisticsEpoch < 0L) fail(ListeningIssue.INVALID_INPUT)
-        val result = library.libraryTransaction(finalPublication = true) {
-            val current = metadata()
-            if (current.statisticsEpoch != expectedStatisticsEpoch) fail(ListeningIssue.CONFLICT)
-            val next = current.copy(statisticsEpoch = increment(current.statisticsEpoch), totalPlayCount = 0L, totalListeningMs = 0L)
-            library.clearListeningProjectionUnlocked(current.statisticsEpoch, next.statisticsEpoch)
-            dao.updateMeta(next)
-            next.epochs()
+        val revision = beginEpochChange()
+        var result: ListeningEpochs? = null
+        try {
+            result = library.libraryTransaction(finalPublication = true) {
+                val current = metadata()
+                if (current.statisticsEpoch != expectedStatisticsEpoch) fail(ListeningIssue.CONFLICT)
+                val next = current.copy(statisticsEpoch = increment(current.statisticsEpoch), totalPlayCount = 0L, totalListeningMs = 0L)
+                library.clearListeningProjectionUnlocked(current.statisticsEpoch, next.statisticsEpoch)
+                dao.updateMeta(next)
+                next.epochs()
+            }
+        } finally {
+            finishEpochChange(revision, result)
         }
         reclaim()
-        result
+        requireNotNull(result)
+    }
+
+    /** 只锁短内存更新；IO/事务绝不持有这把锁。清除前先禁止用旧观察授权自动边界。 */
+    private fun beginEpochChange(): Long = synchronized(epochObservation) {
+        observationRevision += 1L
+        pendingEpochChanges += 1
+        mutableObservedEpochs.value = null
+        observationRevision
+    }
+
+    private fun finishEpochChange(revision: Long, epochs: ListeningEpochs?) = synchronized(epochObservation) {
+        pendingEpochChanges -= 1
+        // 并发清除或不确定 COMMIT 后保持未知；下一次真实 state() 读取才能重新发布。
+        if (pendingEpochChanges == 0 && revision == observationRevision) mutableObservedEpochs.value = epochs
     }
 
     private suspend fun metadata(): ListeningMetaEntity {

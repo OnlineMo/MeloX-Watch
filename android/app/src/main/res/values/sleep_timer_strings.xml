@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sleep_timer_title">Sleep Timer</string>
+    <string name="sleep_timer_channel">Sleep timer</string>
+    <string name="sleep_timer_pause_immediately">Pause at the deadline</string>
+    <string name="sleep_timer_after_current">At expiry, finish the current track</string>
+    <string name="sleep_timer_off">Timer off</string>
+    <string name="sleep_timer_loading">Reading the timer from the playback service…</string>
+    <string name="sleep_timer_waiting_for_end">Waiting for the current track to finish</string>
+    <string name="sleep_timer_set">Set a timer</string>
+    <string name="sleep_timer_replace">Replace this timer</string>
+    <string name="sleep_timer_cancel">Cancel the active timer</string>
+    <string name="sleep_timer_cancelled">Timer cancelled</string>
+    <string name="sleep_timer_cancelled_by_pause">Timer cancelled by your pause</string>
+    <string name="sleep_timer_cancelled_by_track">Timer cancelled by your track change</string>
+    <string name="sleep_timer_completed">Timer finished; playback paused</string>
+    <string name="sleep_timer_bound_track_lost">The waiting track changed; timer cancelled</string>
+    <string name="sleep_timer_interrupted">The previous timer ended during recovery. Playback stays paused.</string>
+    <string name="sleep_timer_draft">Timer draft</string>
+    <string name="sleep_timer_one_minute_less">One minute less</string>
+    <string name="sleep_timer_one_minute_more">One minute more</string>
+    <string name="sleep_timer_waiting_scope">In finish-current-track mode, your pause or track change cancels this timer. Repeats stop when the chosen track finishes after expiry.</string>
+    <string name="sleep_timer_continue">Review this timer</string>
+    <string name="sleep_timer_enable_confirm">Start this countdown now? Editing alone does not start it.</string>
+    <string name="sleep_timer_replace_confirm">Replace the active timer and start this countdown now?</string>
+    <string name="sleep_timer_enable">Start the timer</string>
+    <string name="sleep_timer_discard_draft">Discard this draft</string>
+    <string name="sleep_timer_changed_while_editing">The timer changed. Review its current state before submitting again.</string>
+    <string name="sleep_timer_reload_draft">Use the current timer as the baseline</string>
+    <string name="sleep_timer_saving">The runtime timer has changed; saving is pending.</string>
+    <string name="sleep_timer_save_failed">Saving is unconfirmed. The runtime state shown here remains effective; retry before relying on process recovery.</string>
+    <string name="sleep_timer_disk_conflict">Stored timer data changed. Explicit retry saves the runtime state currently shown.</string>
+    <string name="sleep_timer_retry_save">Retry saving the current timer state</string>
+    <string name="sleep_timer_retired_owner">This playback service no longer owns timer storage. Reconnect to read the current service.</string>
+    <string name="sleep_timer_newer_schema">Timer storage uses a newer format. This version will not overwrite it.</string>
+    <string name="sleep_timer_revision_exhausted">Timer storage cannot accept another revision. The runtime timer can still be cancelled.</string>
+    <string name="sleep_timer_binding_too_large">The waiting-track identity exceeds the timer storage limit. Its runtime timer remains effective but is not confirmed saved.</string>
+    <string name="sleep_timer_recovered_settings">Timer storage needed recovery. Review the current state before setting another timer.</string>
+    <string name="sleep_timer_notification_unavailable">Timer notifications are unavailable. The timer still runs and can be managed here.</string>
+    <string name="sleep_timer_restore_scope">A verified timer can survive process recreation within the same device boot. Recovery never starts playback. Device restart or unverifiable timing ends the previous timer.</string>
+    <string name="sleep_timer_command_pending">Waiting for the playback service…</string>
+    <string name="sleep_timer_connection_failed">Connect to the playback service to manage its timer.</string>
+    <string name="sleep_timer_busy">The timer service is busy. Review the current state and retry.</string>
+    <string name="sleep_timer_invalid_input">This timer input is invalid. Choose 1–180 minutes and an ending mode.</string>
+    <string name="sleep_timer_command_failed">The timer command could not be confirmed. Review the service state before retrying.</string>
+    <string name="sleep_summary_read_failed">The notification preference could not be read. The value shown is the last confirmed value or a temporary default.</string>
+    <string name="sleep_summary_recovered">Some stored settings needed safe recovery. Review the notification value shown here; full recovery details are available in Settings.</string>
+    <string name="sleep_summary_conflict">Settings changed after this draft began. The confirmed notification value is shown above; reload before saving.</string>
+    <string name="sleep_summary_save_failed">Saving this notification preference is unconfirmed. Its confirmed or last known value is shown above; the draft remains available to retry.</string>
+    <string name="sleep_summary_saved">Notification preference confirmed</string>
+    <string name="sleep_summary_default">Use the default: notification off</string>
+    <string name="sleep_summary_save_scope">Only the notification draft changes here. Cancel discards an unsaved draft; a save you already requested may still complete. This does not start or cancel a timer.</string>
+    <plurals name="sleep_timer_duration">
+        <item quantity="one">%1$d minute</item>
+        <item quantity="other">%1$d minutes</item>
+    </plurals>
+    <plurals name="sleep_timer_minutes_remaining">
+        <item quantity="one">%1$d minute remaining</item>
+        <item quantity="other">%1$d minutes remaining</item>
+    </plurals>
+</resources>

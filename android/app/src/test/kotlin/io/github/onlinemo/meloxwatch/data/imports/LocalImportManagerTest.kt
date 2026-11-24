@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.os.CancellationSignal
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.RoomImportLedger
@@ -26,6 +28,7 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.scan.LocalScanEngine
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
+import io.github.onlinemo.meloxwatch.data.transfer.TransferUploadKind
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -166,10 +169,12 @@ class LocalImportManagerTest {
     }
 
     @Test fun installationSurvivesDatabasePublicationRollbackAndRecoversWithoutRecopy() = runBlocking {
-        database.openHelper.writableDatabase.execSQL(
-            "CREATE TRIGGER reject_import_publication BEFORE UPDATE OF phase ON import_operations " +
-                "WHEN NEW.phase = 'COMMITTED' BEGIN SELECT RAISE(ABORT, 'controlled commit failure'); END",
-        )
+        database.withTestWriterSql {
+            execute(
+                "CREATE TRIGGER reject_import_publication BEFORE UPDATE OF phase ON import_operations " +
+                    "WHEN NEW.phase = 'COMMITTED' BEGIN SELECT RAISE(ABORT, 'controlled commit failure'); END",
+            )
+        }
         val manager = manager()
         val preview = manager.prepare(source)
         val installed = manager.confirmCopy(preview)
@@ -180,7 +185,7 @@ class LocalImportManagerTest {
         assertNull(installed.trackKey)
         val installedBytes = OwnedAudioProvider.finalFile(context, installed.intent.fileToken).readBytes()
         val copyOpenings = openings
-        database.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_import_publication")
+        database.withTestWriterSql { execute("DROP TRIGGER reject_import_publication") }
         reopenDatabase()
         assertEquals(ImportPhase.INSTALLED, ledger.record(installed.intent.operationId)?.phase)
         assertEquals(ImportRecoverySummary(1, 0, 0), manager().recover())
@@ -210,6 +215,33 @@ class LocalImportManagerTest {
         assertFalse(OwnedAudioProvider.finalFile(context, interruptedIntent.fileToken).exists())
         assertArrayEquals(bytes, original.readBytes())
         assertEquals(1L, library.overview().totalTracks)
+    }
+
+    @Test(timeout = 30_000L) fun interruptedCopyRetryRetiresItsSharedReservationWithoutRecopyingTheOriginal() = runBlocking {
+        val manager = manager()
+        val preview = manager.prepare(source)
+        ledger.begin(preview.intent)
+        manager.copyQuota.reserveImport(preview.intent.operationId, original.length())
+        io.read {
+            OwnedAudioProvider.stagingFile(context, preview.intent.fileToken).writeBytes(ByteArray(4096))
+            manager.copyQuota.recordImportBytesOnPhysicalWorker(preview.intent.operationId, 4096L)
+        }
+        val originalBytes = original.readBytes()
+        val interrupted = manager.confirmCopy(preview)
+        assertEquals(ImportPhase.FAILED, interrupted.phase)
+        assertEquals(ImportIssue.INTERRUPTED, interrupted.issue)
+        assertEquals(interrupted, manager.confirmCopy(preview))
+        assertEquals(0, openings)
+        assertFalse(OwnedAudioProvider.stagingFile(context, preview.intent.fileToken).exists())
+        assertFalse(OwnedAudioProvider.finalFile(context, preview.intent.fileToken).exists())
+        assertArrayEquals(originalBytes, original.readBytes())
+        assertEquals(0L, library.overview().totalTracks)
+        val ticket = UUID.randomUUID().toString()
+        try {
+            val available = manager.copyQuota.reserve(ticket, TransferUploadKind.AUDIO, ImportLimits.QUOTA_BYTES)
+            assertEquals(0L, available.ownedAudioBytes)
+            assertEquals(0L, available.otherReservedAudioBytes)
+        } finally { manager.copyQuota.release(ticket) }
     }
 
     @Test fun missingOrDifferentInstalledBytesStayPendingAndAreNeverReplaced() = runBlocking {
@@ -359,7 +391,8 @@ class LocalImportManagerTest {
         readMetadata = read, openInput = open, freeBytes = free, syncDirectory = { })
 
     private suspend fun openDatabase() {
-        database = Room.databaseBuilder(context, MeloXDatabase::class.java, databaseFile.absolutePath).build()
+        database = Room.databaseBuilder(context, MeloXDatabase::class.java, databaseFile.absolutePath)
+            .setDriver(BundledSQLiteDriver()).build()
         library = RoomLocalLibraryRepository(database)
         library.initialize()
         ledger = RoomImportLedger(library, OwnedAudioProvider.authority(context))

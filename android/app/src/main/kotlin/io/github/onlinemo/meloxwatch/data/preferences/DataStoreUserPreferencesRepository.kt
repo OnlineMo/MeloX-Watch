@@ -4,7 +4,19 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
+import io.github.onlinemo.meloxwatch.data.backup.publishForBackup
+import io.github.onlinemo.meloxwatch.data.backup.publishFailureForBackup
+import io.github.onlinemo.meloxwatch.data.backup.publishIfCurrentForBackup
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
+import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.IOException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +35,7 @@ import kotlinx.coroutines.sync.withLock
 class DataStoreUserPreferencesRepository internal constructor(
     private val dataStore: DataStore<Preferences>,
     scope: CoroutineScope,
+    private val backupBarrier: BackupMutationBarrier? = null,
 ) : UserPreferencesRepository {
     private val _state = MutableStateFlow<PreferencesState>(PreferencesState.Loading)
     override val state = _state.asStateFlow()
@@ -36,9 +49,15 @@ class DataStoreUserPreferencesRepository internal constructor(
             while (isActive) {
                 var observedGeneration = synchronized(publicationLock) { readGeneration }
                 try {
-                    dataStore.data.collect { stored ->
-                        publishObserved(PreferencesCodec.decode(stored))?.let { generation ->
-                            observedGeneration = generation
+                    backupBarrier.readBackupProjection { Unit }
+                    dataStore.data.collect {
+                        // Cache emissions are notifications; the locked identity read confirms bytes.
+                        val generation = synchronized(publicationLock) { readGeneration }
+                        val decoded = backupBarrier.readBackupProjection {
+                            mutations.withLock { PreferencesCodec.decode(completedUpdate { it }) }
+                        }
+                        publishObserved(decoded, generation)?.let { currentGeneration ->
+                            observedGeneration = currentGeneration
                         }
                     }
                 } catch (error: CancellationException) {
@@ -51,11 +70,17 @@ class DataStoreUserPreferencesRepository internal constructor(
                         } else {
                             CompletableDeferred<Unit>().also { signal ->
                                 pendingReadRetry = signal
-                                _state.value = PreferencesState.Unavailable(lastKnown(), PreferencesFailure.IO)
                             }
                         }
                     }
                     if (retry != null) {
+                        backupBarrier.publishFailureForBackup(this) {
+                            synchronized(publicationLock) {
+                                if (observedGeneration === readGeneration && pendingReadRetry === retry) {
+                                    _state.value = PreferencesState.Unavailable(lastKnown(), PreferencesFailure.IO)
+                                }
+                            }
+                        }
                         try {
                             retry.await()
                         } finally {
@@ -69,7 +94,24 @@ class DataStoreUserPreferencesRepository internal constructor(
         }
     }
 
-    override suspend fun save(expectedRevision: Long, draft: UserPreferencesDraft): PreferencesWriteResult {
+    override suspend fun save(expectedRevision: Long, draft: UserPreferencesDraft): PreferencesWriteResult = try {
+        backupBarrier.withBackupMutation({ BackupException(BackupIssue.BUSY) }) { saveActual(expectedRevision, draft) }
+    } catch (error: BackupException) {
+        if (error.issue != BackupIssue.BUSY) throw error
+        PreferencesWriteResult.Failed(lastKnown(), PreferencesFailure.BUSY)
+    }
+
+    /** A restore never uses a cached notification as the old generation's durable configuration. */
+    internal suspend fun readForBackup(): UserPreferences = backupBarrier.withBackupMutation({ BackupException(BackupIssue.BUSY) }) {
+        mutations.withLock {
+            val actual = PreferencesCodec.decode(completedUpdate { it })
+            if (!actual.canWrite || actual.recovery != null) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            publishAuthoritative(actual)
+            actual.preferences
+        }
+    }
+
+    private suspend fun saveActual(expectedRevision: Long, draft: UserPreferencesDraft): PreferencesWriteResult {
         if (expectedRevision < 0L) {
             return PreferencesWriteResult.Failed(lastKnown(), PreferencesFailure.INVALID_REVISION)
         }
@@ -77,7 +119,7 @@ class DataStoreUserPreferencesRepository internal constructor(
             var readAtWrite: DecodedPreferences? = null
             var changed = false
             try {
-                val committed = dataStore.updateData { stored ->
+                val committed = completedUpdate { stored ->
                     val decoded = PreferencesCodec.decode(stored)
                     readAtWrite = decoded
                     if (!decoded.canWrite) throw RejectedWrite(PreferencesFailure.UNSUPPORTED_SCHEMA)
@@ -98,6 +140,15 @@ class DataStoreUserPreferencesRepository internal constructor(
                                 libraryLayout = draft.libraryLayout,
                                 artworkReadPath = draft.artworkReadPath,
                                 librarySorts = draft.librarySorts.toMap(),
+                                songTapPolicy = draft.songTapPolicy,
+                                mediaButtonsEnabled = draft.mediaButtonsEnabled,
+                                audioFocusManagement = draft.audioFocusManagement,
+                                playbackBackend = draft.playbackBackend,
+                                playbackSpeedTenths = draft.playbackSpeedTenths,
+                                gaplessPlayback = draft.gaplessPlayback,
+                                controls = draft.controls,
+                                help = draft.help,
+                                bluetoothLyricsEnabled = draft.bluetoothLyricsEnabled,
                             ),
                         )
                     }
@@ -119,9 +170,12 @@ class DataStoreUserPreferencesRepository internal constructor(
                 readAtWrite?.let(::publishAuthoritative)
                 PreferencesWriteResult.Failed(readAtWrite?.preferences ?: lastKnown(), error.failure)
             } catch (_: IOException) {
-                val known = readAtWrite
-                if (known == null) publishUnavailable() else publishAuthoritative(known)
-                PreferencesWriteResult.Failed(known?.preferences ?: lastKnown(), PreferencesFailure.IO)
+                // A failed ack may follow a real commit. The true file read precedes any retry/UI state.
+                val actual = try { PreferencesCodec.decode(completedUpdate { it }) }
+                catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: IOException) { null }
+                if (actual == null) publishUnavailable() else publishAuthoritative(actual)
+                PreferencesWriteResult.Failed(actual?.preferences ?: readAtWrite?.preferences ?: lastKnown(), PreferencesFailure.IO)
             }
         }
     }
@@ -135,35 +189,70 @@ class DataStoreUserPreferencesRepository internal constructor(
         synchronized(publicationLock) { pendingReadRetry?.complete(Unit) }
     }
 
-    private fun publishObserved(decoded: DecodedPreferences): Any? = synchronized(publicationLock) {
-        val previous = _state.value
-        val known = previous.lastKnown()
-        // collector 可晚于 updateData 的完成回调；活跃存储只有本仓库的递增 revision 写入。
-        if (known == null || decoded.preferences.revision >= known.revision) {
-            _state.value = decoded.asReady()
-            readGeneration
-        } else {
-            null
+    private fun publishObserved(decoded: DecodedPreferences, expectedGeneration: Any): Any? {
+        var generation: Any? = null
+        backupBarrier.publishIfCurrentForBackup(this, { synchronized(publicationLock) { expectedGeneration === readGeneration } }) {
+            synchronized(publicationLock) {
+                val known = _state.value.lastKnown()
+                if (expectedGeneration === readGeneration && (known == null || decoded.preferences.revision >= known.revision)) {
+                    _state.value = decoded.asReady()
+                    generation = readGeneration
+                }
+            }
         }
+        return generation
     }
 
     private fun publishAuthoritative(decoded: DecodedPreferences) {
-        synchronized(publicationLock) {
-            // 原子 transform 的真实当前值优先，恢复/未知 schema 也不能被旧 revision 护栏隐藏。
-            readGeneration = Any()
-            _state.value = decoded.asReady()
-            // 明确操作已成功读取存储，解除旧读失败等待，不留下下次故障可消费的重试请求。
-            pendingReadRetry?.complete(Unit)
+        // Retire old reads at the durable result, before its visible value is deferred.
+        val generation = synchronized(publicationLock) {
+            Any().also { readGeneration = it; pendingReadRetry?.complete(Unit) }
+        }
+        backupBarrier.publishIfCurrentForBackup(this, { synchronized(publicationLock) { generation === readGeneration } }) {
+            synchronized(publicationLock) {
+                if (generation === readGeneration) _state.value = decoded.asReady()
+            }
         }
     }
 
     private fun DecodedPreferences.asReady() = PreferencesState.Ready(preferences, recovery, canWrite)
 
     private fun publishUnavailable() {
-        synchronized(publicationLock) {
-            val previous = _state.value
-            _state.value = PreferencesState.Unavailable(previous.lastKnown(), PreferencesFailure.IO)
+        backupBarrier.publishFailureForBackup(this) {
+            synchronized(publicationLock) {
+                _state.value = PreferencesState.Unavailable(_state.value.lastKnown(), PreferencesFailure.IO)
+            }
         }
+    }
+
+    private suspend fun completedUpdate(transform: (Preferences) -> Preferences): Preferences {
+        val caller = currentCoroutineContext()
+        caller.ensureActive()
+        // 变换保留原caller Job，COMMIT之前的取消仍能中止写入。
+        val attempt = runCatching {
+            dataStore.updateData { stored ->
+                caller.ensureActive()
+                transform(stored).also { caller.ensureActive() }
+            }
+        }
+        val drainFailure = if (attempt.exceptionOrNull() is CancellationException || !caller.isActive) {
+            // 取消ack可能早于actor的实际写盘退出；同一actor后续identity更新形成串行fence。
+            // 该边界前继续持有mutex与备份admission。
+            withContext(NonCancellable) { runCatching { dataStore.updateData { it } }.exceptionOrNull() }
+        } else null
+        try { caller.ensureActive() }
+        catch (cancelled: CancellationException) {
+            listOfNotNull(attempt.exceptionOrNull(), drainFailure)
+                .filterNot { it is CancellationException }
+                .forEach { if (cancelled.suppressed.none { known -> known === it }) cancelled.addSuppressed(it) }
+            throw cancelled
+        }
+        attempt.exceptionOrNull()?.let { failure ->
+            if (drainFailure != null && drainFailure !== failure && drainFailure !is CancellationException) {
+                failure.addSuppressed(drainFailure)
+            }
+        }
+        return attempt.getOrThrow()
     }
 
     private fun lastKnown(): UserPreferences? = _state.value.lastKnown()

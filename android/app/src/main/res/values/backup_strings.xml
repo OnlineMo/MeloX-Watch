@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="backup_storage_busy">Backup or restore is in progress. Try again when it finishes.</string>
+</resources>

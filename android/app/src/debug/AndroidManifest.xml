@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <provider
+            android:name="io.github.onlinemo.meloxwatch.data.fileoperations.fixture.FileOperationFixtureDocumentsProvider"
+            android:authorities="${applicationId}.lp10fixture"
+            android:exported="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS"
+            android:grantUriPermissions="true">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+    </application>
+    <instrumentation
+        android:name="io.github.onlinemo.meloxwatch.data.fileoperations.fixture.FileOperationNativeInstrumentation"
+        android:targetPackage="${applicationId}"
+        android:functionalTest="true"
+        android:handleProfiling="false" />
+</manifest>

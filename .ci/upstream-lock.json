@@ -36,6 +36,13 @@
       "commit": "e812b0e8596e6891f5615769b969693e5f92b614",
       "localPath": "research/Meting",
       "role": "Protocol reference only for user-configured Meting service; not an application runtime dependency"
+    },
+    {
+      "name": "JMAC",
+      "url": "https://github.com/umjammer/jmac.git",
+      "commit": "0cedfd83a3005c1c4e4dd5fa7cb3796c79b765f3",
+      "localPath": "research/JMAC",
+      "role": "Narrow GPL-2.0-or-later pure Java APE3990 decoder source; no encoder, native binary, JavaSound or upstream build inputs"
     }
   ]
 }

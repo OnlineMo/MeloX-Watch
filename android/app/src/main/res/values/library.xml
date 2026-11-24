@@ -80,8 +80,10 @@
     <string name="library_artwork_refresh_failed">Artwork refresh failed. Existing usable covers are kept.</string>
     <string name="library_artwork_refresh_counts">Processed %1$d/%2$d · Updated %3$d · Missing %4$d · Failed %5$d</string>
     <string name="library_file_value">Filename: %1$s</string>
-    <string name="library_artist_value">Artist: %1$s</string>
-    <string name="library_album_value">Album: %1$s</string>
+    <string name="library_display_artist_value">Library artist: %1$s</string>
+    <string name="library_display_album_value">Library album: %1$s</string>
+    <string name="library_artist_value">Original tag artist: %1$s</string>
+    <string name="library_album_value">Original tag album: %1$s</string>
     <string name="library_album_artist_value">Album artist: %1$s</string>
     <string name="library_duration_value">Duration: %1$s</string>
     <string name="library_format_value">Format: %1$s</string>

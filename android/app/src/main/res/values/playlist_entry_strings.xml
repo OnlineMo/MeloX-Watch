@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_entry_browse">Browse playlists</string>
+    <plurals name="playlist_entry_add_all">
+        <item quantity="one">Add this entire list · %1$d track</item>
+        <item quantity="other">Add this entire list · %1$d tracks</item>
+    </plurals>
+    <string name="playlist_entry_preparing">Preparing…</string>
+    <string name="playlist_entry_saving">Saving…</string>
+    <string name="playlist_entry_picker_pending">Choosing a document…</string>
+    <string name="playlist_entry_picker_cancelled">Document selection cancelled.</string>
+    <string name="playlist_entry_no_picker">A document picker is unavailable. Your playlist draft is kept.</string>
+    <string name="playlist_entry_dismiss">Dismiss</string>
+    <string name="playlist_entry_retry">Retry</string>
+    <string name="playlist_entry_folder_heading">Choose an indexed folder</string>
+    <string name="playlist_entry_import_root">Choose the source folder for relative paths</string>
+    <string name="playlist_entry_import_root_explanation">Choose the indexed folder that the playlist paths start from. Only files in this authorized folder can match relative paths.</string>
+    <string name="playlist_entry_use_folder">Use this folder and its subfolders</string>
+    <string name="playlist_entry_no_indexed_folders">No indexed subfolders on this page. Add or refresh an authorized folder in Sources.</string>
+    <string name="playlist_entry_replacement_heading">Choose a library track</string>
+    <string name="playlist_entry_replacement_explanation">Choose the exact indexed track for this playlist entry, then review and confirm it.</string>
+    <string name="playlist_entry_reassociation_heading">Review this playlist entry</string>
+    <string name="playlist_entry_original_member">Entry %1$d: %2$s</string>
+    <string name="playlist_entry_replacement_member">Link to: %1$s</string>
+    <string name="playlist_entry_reassociation_impact">This updates this playlist entry. Its position stays the same.</string>
+    <string name="playlist_entry_preview_changed">The library or playlist changed. Reload and select the entry again.</string>
+    <string name="playlist_entry_reassociation_checked">Confirmed: link this entry to the selected track</string>
+    <string name="playlist_entry_reassociation_unchecked">Confirm linking this entry to the selected track</string>
+    <string name="playlist_entry_confirm_reassociation">Save this link</string>
+    <string name="playlist_entry_choose_another_track">Choose another track</string>
+    <string name="playlist_entry_reassociation_completed">Playlist entry updated.</string>
+    <string name="playlist_entry_reauthorization_explanation">Open Sources to choose the original source again. Review its identity and confirm the renewed access there.</string>
+    <string name="playlist_entry_open_reauthorization">Review source access</string>
+    <string name="playlist_entry_identity_required">Open this track from the local library to use favorites and playlists.</string>
+    <string name="playlist_entry_queue_waiting">Reading the current queue…</string>
+</resources>
