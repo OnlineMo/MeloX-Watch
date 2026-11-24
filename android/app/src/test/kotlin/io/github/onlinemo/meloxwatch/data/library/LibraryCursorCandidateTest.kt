@@ -7,6 +7,7 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.transfer.CompanionRoomFixture
 import io.github.onlinemo.meloxwatch.data.transfer.TransferCatalogRow
 import io.github.onlinemo.meloxwatch.data.transfer.TransferDisplayKind
+import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
@@ -179,6 +180,57 @@ class LibraryCursorCandidateTest {
             assertWindow(filtered, cursor)
         } finally {
             fixture.library.closeView(filtered.viewId)
+        }
+    }
+
+    @Test(timeout = 30_000L)
+    fun nativeKeyWindowsKeepProvidersDuplicatesValidVersionsAndOneHundredKeyBindings() = runBlocking(Dispatchers.IO) {
+        seedPartitions()
+        fixture.group(TransferDisplayKind.ARTIST, "Alpha")
+        val original = fixture.tracks().single { it.title == "N" }
+        val newVersionId = "key-window-second-valid-version"
+        fixture.library.libraryTransaction {
+            val meta = checkNotNull(fixture.library.dao.meta())
+            val old = checkNotNull(fixture.library.dao.currentTrack(original.trackKey.trackId))
+            val revision = meta.revision + 1L
+            // 同标识的两个有效版本保留不同原艺人；查询仍须解析完整显示关系。
+            val next = old.copy(versionId = newVersionId, validFrom = revision, validTo = null,
+                displayTitle = "N version", title = "N version", titleKey = LibrarySortKeys.text("N version"),
+                artist = "Zulu", artists = LibraryCodec.strings(listOf("Zulu")),
+                artistKey = LibrarySortKeys.text("Zulu"), artistSection = "Z",
+                searchText = LibrarySortKeys.normalize("N version Zulu readable-3.mp3"))
+            fixture.library.dao.insertTrackVersion(next)
+            fixture.library.dao.insertArtists(listOf(LibraryArtistEntity(newVersionId, 0,
+                LibrarySortKeys.text("Zulu"), "Zulu")))
+            assertEquals(1, fixture.library.dao.updateMeta(meta.copy(revision = revision)))
+        }
+        for (query in listOf(LibraryQuery(), LibraryQuery(search = "Alpha"))) {
+            val view = fixture.library.openView(query, owner = LibraryViewOwner.TRANSFER)
+            try {
+                val all = fullRows(view)
+                if (query.search.isEmpty()) assertEquals(7, all.size)
+                assertEquals(2, all.count { it.track.trackId == original.trackKey.trackId })
+                val changed = all.single { it.track.versionId == newVersionId }
+                assertEquals("Alpha", changed.displayArtist)
+                assertEquals(listOf("Zulu"), changed.track.metadata().artists)
+                val exactKeys = all.map { TrackKey(it.track.providerId, it.track.trackId) }.distinct()
+                val hundredKeys = exactKeys + List(LibraryLimits.PAGE_SIZE - exactKeys.size) { index ->
+                    TrackKey(TrackKey.LOCAL_PROVIDER, "absent-key-" + index)
+                }
+                assertEquals(100, hundredKeys.size)
+                val wrongProvider = TrackKey("different-provider", original.trackKey.trackId)
+                val partial = listOf(original.trackKey, original.trackKey, wrongProvider,
+                    TrackKey(TrackKey.LOCAL_PROVIDER, "absent-key"))
+                for (keys in listOf(emptyList(), listOf(wrongProvider), partial, hundredKeys)) {
+                    val expected = all.filter { TrackKey(it.track.providerId, it.track.trackId) in keys }
+                    val actual = fixture.library.transferTransaction(view) {
+                        fixture.library.dao.rows(LibrarySql.rowsForKeys(view, keys))
+                    }
+                    assertEquals(expected.groupingBy { it }.eachCount(), actual.groupingBy { it }.eachCount())
+                }
+            } finally {
+                fixture.library.closeView(view.viewId)
+            }
         }
     }
 

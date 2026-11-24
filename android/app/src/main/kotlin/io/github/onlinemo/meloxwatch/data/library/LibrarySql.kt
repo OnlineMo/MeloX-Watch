@@ -159,11 +159,21 @@ internal object LibrarySql {
             checkNotNull(trackCursorWindow(view, it, beforeCursor, trackCursorLimit, args))
         }
         val selectedTracks = when {
-            selectedKeys != null -> selectedKeys.joinToString(" OR ") { key ->
-                args += key.providerId
-                args += key.trackId
-                "(t.providerId = ? AND t.trackId = ?)"
-            }.ifEmpty { "0" }
+            selectedKeys != null -> {
+                val predicate = selectedKeys.joinToString(" OR ") { key ->
+                    args += key.providerId
+                    args += key.trackId
+                    "(t.providerId = ? AND t.trackId = ?)"
+                }
+                if (selectedKeys.isEmpty()) "0" else {
+                    // 单列键域可使用 trackId 索引；成对谓词核验来源，全部有效版本仍参与投影。
+                    val trackIds = selectedKeys.joinToString(",") { key ->
+                        args += key.trackId
+                        "?"
+                    }
+                    "($predicate) AND t.trackId IN ($trackIds)"
+                }
+            }
             trackCursor != null -> "t.trackId IN (SELECT trackId FROM track_cursor_window)"
             else -> null
         }
