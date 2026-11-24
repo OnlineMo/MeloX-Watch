@@ -200,7 +200,7 @@ internal class RoomBackupRelinker(
         }
         val fileHint = hint
             ?: throw BackupException(BackupIssue.STALE_PREVIEW)
-        if (originalHint == null || fileHint.trackId != originalHint.trackId || fileHint.locationId != originalHint.locationId ||
+        if (fileHint.trackId != originalHint.trackId || fileHint.locationId != originalHint.locationId ||
             fileHint.archiveSha256 != originalHint.archiveSha256 || !fileHint.record.sameContent(originalHint.record) || !isMissing(fileHint)) {
             throw BackupException(BackupIssue.STALE_PREVIEW)
         }
