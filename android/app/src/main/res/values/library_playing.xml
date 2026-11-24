@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="library_insert_all_next">
+        <item quantity="one">Insert all %1$d track next</item>
+        <item quantity="other">Insert all %1$d tracks next</item>
+    </plurals>
+    <plurals name="library_insert_impact">
+        <item quantity="one">Insertion adds %1$d track after the current item. Insert and play starts the first added track.</item>
+        <item quantity="other">Insertion adds %1$d tracks after the current item. Insert and play starts the first added track.</item>
+    </plurals>
+    <string name="library_insert_next">Insert next and keep playing</string>
+    <string name="library_open_detail">View song details</string>
+    <string name="library_play_choice">Choose how to play</string>
+    <string name="library_preparing_play">Checking the selected list…</string>
+    <string name="library_replace_impact">Replace the current queue (%1$s) with the full list (%2$s), starting at item %3$d.</string>
+</resources>

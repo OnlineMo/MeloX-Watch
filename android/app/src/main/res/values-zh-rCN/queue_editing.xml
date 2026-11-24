@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="queue_confirm_remove">确认移除</string>
+    <string name="queue_current_removed_paused">当前项已移除，播放已暂停。</string>
+    <string name="queue_cycle_limit_label">每首完成次数（1–99）</string>
+    <string name="queue_cycle_limit_scope">次数包含当前这一轮的完成。单曲循环达到次数后前进到下一队列项；关闭次数限制时，单曲循环会持续到你选择另一项为止。</string>
+    <string name="queue_cycle_limit_toggle">限制单曲循环次数</string>
+    <string name="queue_destination">目标位置（1–%1$d）</string>
+    <string name="queue_destination_invalid">请输入此队列范围内的位置。</string>
+    <string name="queue_edit_conflict">队列或当前项已改变。请取消并重载后重新编辑。</string>
+    <string name="queue_edit_mode">编辑播放模式</string>
+    <string name="queue_edit_target">第 %1$d 项：%2$s</string>
+    <string name="queue_item_moved">队列顺序已保存。</string>
+    <string name="queue_item_removed">队列项已移除。</string>
+    <string name="queue_locate_current">定位当前项</string>
+    <string name="queue_manage_entry">管理第 %1$d 个队列项</string>
+    <string name="queue_mode_saved">播放模式已保存。</string>
+    <string name="queue_move_down">向后移动一位</string>
+    <string name="queue_move_entry">移动此项</string>
+    <string name="queue_move_scope">选择完整队列中的位置。保存后保留当前歌曲和播放位置。</string>
+    <string name="queue_move_shuffle_scope">选择已保存的随机顺序中的位置。原顺序会保留，关闭随机时恢复。</string>
+    <string name="queue_move_up">向前移动一位</string>
+    <string name="queue_remove_current_last">这是播放顺序中的最后一项。播放将停止，其余队列继续保存。</string>
+    <string name="queue_remove_current_next">将选择下一可用项并保持暂停。</string>
+    <string name="queue_remove_current_only">这是唯一的队列项。移除后队列为空并停止播放。</string>
+    <string name="queue_remove_entry">移除此队列项</string>
+    <string name="queue_remove_scope">仅移除这个入队实例。音频文件、音乐库和歌单继续保留。</string>
+    <string name="queue_shuffle_scope">开启随机会保存新的完整顺序，并将当前项放在首位；关闭随机恢复原顺序。保存相同模式会保留现有顺序。</string>
+</resources>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playback_backend_actual">当前实际后端：%1$s</string>
+    <string name="playback_backend_none">当前没有活动播放后端。</string>
+    <string name="playback_backend_requested">请求的后端：%1$s</string>
+    <string name="playback_backend_switching">正在切换后端，将恢复当前歌曲和位置并保持暂停。</string>
+    <string name="playback_backend_waiting">正在等待播放状态…</string>
+    <string name="playback_engine_prepare_failed">后端无法准备此音频。已保留队列，可重试播放。</string>
+    <string name="playback_engine_switch_failed">请求的后端无法恢复。请核对当前实际后端，并从设置重试；播放保持暂停。</string>
+    <string name="playback_focus_denied">未获得音频焦点，播放保持暂停。其他音频结束后可再试。</string>
+    <string name="playback_gapless_active">相邻本地曲目已准备连续播放。</string>
+    <string name="playback_gapless_fallback">已请求连续播放；当前组合使用普通切歌。</string>
+    <string name="playback_gapless_backend">当前后端使用普通切歌。</string>
+    <string name="playback_gapless_timer">睡眠定时期间使用普通切歌，以遵守停止方式。</string>
+    <string name="playback_gapless_repeat">当前重复边界使用普通切歌。</string>
+    <string name="playback_gapless_sources">在线及混合来源使用普通切歌。</string>
+    <string name="playback_gapless_successor">当前没有准备好连续播放的后项。</string>
+    <string name="playback_gapless_preparing">正在等待连续播放的后项。</string>
+    <string name="playback_seek_failed">无法跳转到所选位置。重试前请核对当前进度。</string>
+    <string name="playback_seek_open">选择播放位置</string>
+    <string name="playback_seek_start">预览本曲起点</string>
+    <string name="playback_speed_actual">请求速度 %1$.1f× · 实际 %2$.2f× · 音高 %3$.2f×</string>
+    <string name="playback_speed_pending">已保存速度，将在当前后端可接受时应用。</string>
+    <string name="playback_speed_unsupported">无法应用请求的速度，上方显示当前实际速度。</string>
+</resources>

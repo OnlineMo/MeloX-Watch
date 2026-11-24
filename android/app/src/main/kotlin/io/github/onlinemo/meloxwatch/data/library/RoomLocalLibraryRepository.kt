@@ -1,13 +1,15 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import android.database.sqlite.SQLiteConstraintException
-import android.database.sqlite.SQLiteException
 import android.database.sqlite.SQLiteFullException
 import android.os.SystemClock
 import androidx.core.net.toUri
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.SQLiteException
+import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
+import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.backup.readBackupProjection
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -26,6 +28,7 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
+import io.github.onlinemo.meloxwatch.data.playlists.PlaylistQueueCatalogToken
 import io.github.onlinemo.meloxwatch.model.FrozenQueueView
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.TrackKey
@@ -34,14 +37,20 @@ import org.json.JSONException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /** One application owner; only short database work is serialized, never provider I/O. */
 class RoomLocalLibraryRepository(
@@ -86,7 +95,12 @@ class RoomLocalLibraryRepository(
     }
 
     override suspend fun overview(): LibraryOverview = access { database.withPreservedTransaction { overviewUnlocked() } }
-    override fun observeOverview(): Flow<LibraryOverview> = dao.observeMeta().map { overview() }.distinctUntilChanged()
+    override fun observeOverview(): Flow<LibraryOverview> = flow {
+        database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeMeta().map {
+            database.backupMutationBarrier.readBackupProjection { overview() }
+        })
+    }.distinctUntilChanged()
     override suspend fun source(sourceId: String): LibrarySource? = access { dao.source(sourceId)?.let { sourceModel(it) } }
     override suspend fun sourcesPage(afterSourceId: String?, limit: Int): LibrarySourcePage = access {
         pageLimit(limit)
@@ -102,6 +116,13 @@ class RoomLocalLibraryRepository(
         database.withPreservedTransaction {
             expireViews()
             val current = meta()
+            query.folderNodeId?.let { nodeId ->
+                val folder = dao.currentNode(nodeId) ?: fail(LibraryIssue.INVALID_INPUT)
+                if (folder.sourceId != query.sourceId || !folder.directory) fail(LibraryIssue.INVALID_INPUT)
+                if (dao.text(LibrarySql.relativePath(current.revision, folder.sourceId, nodeId)) == null) {
+                    fail(LibraryIssue.SOURCE_CHANGED)
+                }
+            }
             val draft = LibraryViewToken(id(), current.revision, current.rulesRevision, 0L, query, sort, current.shortAudioFilter, owner,
                 statisticsEpoch = current.statisticsEpoch)
             val token = draft.copy(totalCount = dao.scalar(LibrarySql.count(draft)))
@@ -124,14 +145,17 @@ class RoomLocalLibraryRepository(
     override suspend fun page(view: LibraryViewToken, after: LibraryCursor?, limit: Int): LibraryPage = access {
         database.withPreservedTransaction {
             checkPageInput(view, after, limit)
-            pageResult(view, dao.rows(LibrarySql.rows(view, after, limit)))
+            // 合法 after 已在同一事务中核验，它证明上一页存在；查询窗口仍保持原 limit。
+            val rows = readOrderedRowsUnlocked(view, after, limit)
+            pageResult(view, rows, moreBefore = after != null, moreAfter = null)
         }
     }
 
     override suspend fun previousPage(view: LibraryViewToken, before: LibraryCursor, limit: Int): LibraryPage = access {
         database.withPreservedTransaction {
             checkPageInput(view, before, limit)
-            pageResult(view, dao.rows(LibrarySql.rows(view, before, limit, before = true)).asReversed())
+            val rows = readOrderedRowsUnlocked(view, before, limit, before = true).asReversed()
+            pageResult(view, rows, moreBefore = null, moreAfter = true)
         }
     }
 
@@ -178,15 +202,118 @@ class RoomLocalLibraryRepository(
         }
     }
 
+    /** Resolve only within the exact live lease; a caller-supplied id cannot open latest data. */
+    internal suspend fun playlistTracks(context: PlaylistQueueCatalogToken, keys: List<TrackKey>): List<LibraryTrack?> = access {
+        if (keys.size > LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT)
+        database.withPreservedTransaction {
+            val view = liveViews[context.id] ?: fail(LibraryIssue.VIEW_EXPIRED)
+            checkView(view)
+            if (view.revision != context.revision || view.rulesRevision != context.rulesRevision) fail(LibraryIssue.SOURCE_CHANGED)
+            val distinct = keys.distinct()
+            val rows = dao.rows(LibrarySql.rowsForKeys(view, distinct))
+            val resolved = linkedMapOf<TrackKey, LibraryTrack>()
+            for (row in rows) {
+                val track = row.model()
+                if (track.trackKey !in distinct || resolved.put(track.trackKey, track) != null) fail(LibraryIssue.RECOVERY_REQUIRED)
+            }
+            keys.map { resolved[it] }
+        }
+    }
+
+    internal suspend fun playlistRelativeMatches(
+        view: LibraryViewToken, rootNodeId: String, components: List<String>,
+    ): List<TrackKey> = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            if (view.query.sourceId == null || view.query.folderNodeId != rootNodeId || !view.query.folderSubtree) {
+                fail(LibraryIssue.INVALID_INPUT)
+            }
+            dao.trackKeys(LibrarySql.scopedRelativePathMatches(view.revision, view.query.sourceId, rootNodeId, components, 2))
+                .map { TrackKey(it.providerId, it.trackId) }
+        }
+    }
+
+    internal suspend fun playlistRelativePath(view: LibraryViewToken, track: LibraryTrack): String? = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            if (track.sourceId == null || track.nodeId == null || track.availability != LibraryAvailability.AVAILABLE) null
+            else dao.text(LibrarySql.relativePath(view.revision, track.sourceId, track.nodeId))
+        }
+    }
+
+    internal suspend fun validatePlaylistView(view: LibraryViewToken) = access {
+        database.withPreservedTransaction { checkView(view) }
+    }
+
+    internal suspend fun playlistOverlap(view: LibraryViewToken, base: io.github.onlinemo.meloxwatch.data.playlists.PlaylistViewToken): Long = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            val playlistDao = database.playlistDao()
+            val lease = playlistDao.view(base.viewId) ?: fail(LibraryIssue.VIEW_EXPIRED)
+            if (lease.generationId != base.snapshot.generationId || lease.expiresElapsedMs <= elapsedMs()) {
+                fail(LibraryIssue.VIEW_EXPIRED)
+            }
+            val generation = playlistDao.generation(base.snapshot.generationId) ?: fail(LibraryIssue.VIEW_EXPIRED)
+            if (generation.revision != base.snapshot.revision || generation.memberCount != base.snapshot.memberCount) {
+                fail(LibraryIssue.SOURCE_CHANGED)
+            }
+            dao.scalar(LibrarySql.playlistOverlap(view, generation.dataGenerationId))
+        }
+    }
+
+    internal suspend fun playlistAvailableScopeCount(view: LibraryViewToken): Long = access {
+        database.withPreservedTransaction {
+            checkView(view)
+            dao.scalar(LibrarySql.count(view.copy(query = LibraryQuery(readableOnly = true))))
+        }
+    }
+
     override suspend fun closeView(viewId: String) {
         // A cancelled owner still releases its lease; large reclamation retains cancellation.
         withContext(NonCancellable) {
-            access {
-                database.withPreservedTransaction { dao.deleteView(viewId) }
-                liveViews.remove(viewId)
-            }
+            releaseViewMetadata(viewId)
         }
         access { cleanVersions() }
+    }
+
+    /** A playlist owner retains this exact token when the cancellable close deadline expires. */
+    suspend fun closePlaylistView(viewId: String, timeoutMs: Long) {
+        require(timeoutMs > 0L)
+        withContext(NonCancellable) {
+            // Room 2.8 retries every TimeoutCancellationException from its connection wait.
+            // Keep the worker outside the await deadline, then join a plain cancellation so
+            // queued metadata cannot delete the retained token after this handoff returns.
+            // Supervision preserves a worker failure for await while the handoff stays active.
+            supervisorScope {
+                val metadata = async {
+                    releaseViewMetadata(viewId)
+                    access { cleanVersions() }
+                }
+                var failure: Throwable? = null
+                try {
+                    withTimeout(timeoutMs) { metadata.await() }
+                } catch (error: Throwable) {
+                    failure = error
+                    try { metadata.cancel(CancellationException("Playlist view close did not complete", error)) }
+                    catch (cleanup: Throwable) {
+                        if (cleanup !== error) error.addSuppressed(cleanup)
+                    }
+                    throw error
+                } finally {
+                    try { metadata.cancelAndJoin() }
+                    catch (cleanup: Throwable) {
+                        val original = failure
+                        if (original == null) throw cleanup
+                        if (cleanup !== original) original.addSuppressed(cleanup)
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun releaseViewMetadata(viewId: String) = access {
+        database.withPreservedTransaction { dao.deleteView(viewId) }
+        liveViews.remove(viewId)
     }
 
     override fun queueSource(view: LibraryViewToken): QueuePageSource {
@@ -516,7 +643,12 @@ class RoomLocalLibraryRepository(
         }
     }
     override suspend fun latestScan(sourceId: String): ScanState? = access { dao.source(sourceId)?.latestScanId?.let { dao.scan(it)?.model() } }
-    override fun observeScan(scanId: String): Flow<ScanState?> = dao.observeScan(scanId).map { it?.model() }.distinctUntilChanged()
+    override fun observeScan(scanId: String): Flow<ScanState?> = flow {
+        database.backupMutationBarrier.readBackupProjection { Unit }
+        emitAll(dao.observeScan(scanId).map {
+            database.backupMutationBarrier.readBackupProjection { dao.scan(scanId)?.model() }
+        })
+    }.distinctUntilChanged()
 
     override suspend fun rules(): LibraryRules = access { rulesUnlocked() }
     override suspend fun exclusionPage(afterRuleId: String?, limit: Int): LibraryExclusionPage = access {
@@ -601,6 +733,94 @@ class RoomLocalLibraryRepository(
         result
     }
 
+    /** 主库提交已核验；清除旧查询和初始化缓存，后续读取使用恢复后的代次。 */
+    internal suspend fun invalidateAfterBackupRestore() = access {
+        database.backupMutationBarrier?.requireExclusiveOwner()
+        liveViews.clear()
+        initialized = false
+    }
+
+    /** The transfer owner queries only its exact lease inside this repository's real transaction. */
+    internal suspend fun <T> transferTransaction(view: LibraryViewToken? = null,
+        action: suspend (LibraryMetaEntity) -> T): T = access {
+        database.withPreservedTransaction {
+            if (view != null) {
+                if (view.owner != LibraryViewOwner.TRANSFER) fail(LibraryIssue.INVALID_INPUT)
+                checkView(view)
+            }
+            action(meta())
+        }
+    }
+
+    /**
+     * 调用方已持有库锁、核验视图并进入真实 writer。候选和完整回退共用该事务，
+     * 中途不释放连接、不缓存失败候选；曲目窗口始终不超过原 limit。
+     */
+    internal suspend fun readOrderedRowsUnlocked(view: LibraryViewToken, cursor: LibraryCursor?,
+        limit: Int, before: Boolean = false): List<LibraryRowRecord> {
+        currentCoroutineContext().ensureActive()
+        if (!database.hasCurrentWriterTransaction()) fail(LibraryIssue.RECOVERY_REQUIRED)
+        pageLimit(limit)
+        if (cursor != null) {
+            val candidate = readTrackCursorWindowUnlocked(view, cursor, limit, before)
+            if (candidate != null) return candidate
+        }
+        currentCoroutineContext().ensureActive()
+        return dao.rows(LibrarySql.rows(view, cursor, limit, before))
+    }
+
+    private suspend fun readTrackCursorWindowUnlocked(view: LibraryViewToken, cursor: LibraryCursor,
+        limit: Int, before: Boolean): List<LibraryRowRecord>? {
+        val query = LibrarySql.rowsForTrackCursor(view, cursor, limit, before) ?: return null
+        val rows = dao.rows(query)
+        currentCoroutineContext().ensureActive()
+        // raw 前窗有限，任何短窗都不能证明原页完整；缺值和过滤仍由原查询恢复。
+        // 满窗、同 missingRank 且不越 raw 最远元组，才证明完整原前缀。
+        if (rows.size == limit && rows.all { it.missingRank == cursor.missingRank }) return rows
+        return null
+    }
+
+    /** 与读窗共用已核 writer；只有候选为真可以省去完整存在性查询。 */
+    internal suspend fun hasRowsBeyondUnlocked(view: LibraryViewToken, cursor: LibraryCursor,
+        before: Boolean): Boolean {
+        currentCoroutineContext().ensureActive()
+        if (!database.hasCurrentWriterTransaction()) fail(LibraryIssue.RECOVERY_REQUIRED)
+        val query = LibrarySql.hasBeyondForTrackCursor(view, cursor, before)
+        if (query != null) {
+            val found = dao.scalar(query) != 0L
+            currentCoroutineContext().ensureActive()
+            if (found) return true
+        }
+        currentCoroutineContext().ensureActive()
+        return dao.scalar(LibrarySql.hasBeyond(view, cursor, before)) != 0L
+    }
+
+    /** Called only by transferTransaction; it must not reacquire the library mutex. */
+    internal suspend fun openTransferViewUnlocked(query: LibraryQuery = LibraryQuery(),
+        sort: LibrarySort = LibrarySort()): LibraryViewToken {
+        if (!database.hasCurrentWriterTransaction()) fail(LibraryIssue.RECOVERY_REQUIRED)
+        val current = meta()
+        val draft = LibraryViewToken(id(), current.revision, current.rulesRevision, 0L, query, sort,
+            current.shortAudioFilter, LibraryViewOwner.TRANSFER, statisticsEpoch = current.statisticsEpoch)
+        return draft.copy(totalCount = dao.scalar(LibrarySql.count(draft))).also { storeView(it) }
+    }
+
+    /** Metadata retirement is bounded and idempotent; no unrelated user's view can be released. */
+    internal suspend fun closeTransferView(view: LibraryViewToken) = withContext(NonCancellable) {
+        access {
+            if (view.owner != LibraryViewOwner.TRANSFER) fail(LibraryIssue.INVALID_INPUT)
+            val held = liveViews[view.viewId]
+            if (held != null && held != view) fail(LibraryIssue.INVALID_INPUT)
+            database.withPreservedTransaction {
+                val row = dao.view(view.viewId)
+                if (row != null && (row.sessionId != sessionId || row.owner != LibraryViewOwner.TRANSFER.name ||
+                        row.fingerprint != fingerprint(view))) fail(LibraryIssue.INVALID_INPUT)
+                dao.deleteView(view.viewId)
+            }
+            liveViews.remove(view.viewId)
+        }
+    }
+
     /** Called only in the ledger transaction; it must never acquire the repository mutex again. */
     internal suspend fun commitOwnedCopyUnlocked(spec: LocalSourceSpec, grant: LocalGrantObservation,
         candidate: ObservedCandidate, metadata: LocalAudioMetadata): TrackKey {
@@ -628,15 +848,29 @@ class RoomLocalLibraryRepository(
     }
 
     private suspend fun ownedObservation(spec: LocalSourceSpec, observed: ObservedCandidate): ObservedCandidate {
-        val value = dao.ownedImport(spec.sourceId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
-        val record = value.model()
-        val original = value.ownedCandidate?.let(LibraryCodec::candidate) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
-        if (observed.objectId != record.intent.fileToken || observed.uri != spec.uri ||
-            (observed.sizeBytes != null && observed.sizeBytes != record.actualBytes) ||
+        val ordinary = dao.ownedImport(spec.sourceId)
+        val actualBytes: Long
+        val original: ObservedCandidate
+        if (ordinary != null) {
+            val record = ordinary.model()
+            actualBytes = record.actualBytes
+            original = ordinary.ownedCandidate?.let(LibraryCodec::candidate) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+            if (original.objectId != record.intent.fileToken || original.displayName != record.intent.candidate.displayName) fail(LibraryIssue.RECOVERY_REQUIRED)
+        } else {
+            val transferred = database.transferredImportDao().ownedTransferredImport(spec.sourceId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+            val record = transferred.transferModel()
+            actualBytes = record.actualBytes
+            original = transferred.ownedCandidate?.let(LibraryCodec::candidate) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+            if (transferred.ownedSpec?.let(LibraryCodec::source) != spec || original.objectId != record.selection.fileToken ||
+                original.displayName != record.selection.declaration.displayName) fail(LibraryIssue.RECOVERY_REQUIRED)
+        }
+        if (original.sizeBytes != actualBytes) fail(LibraryIssue.RECOVERY_REQUIRED)
+        if (observed.objectId != original.objectId || observed.uri != spec.uri ||
+            (observed.sizeBytes != null && observed.sizeBytes != actualBytes) ||
             (observed.providerContentToken != null && observed.providerContentToken != original.providerContentToken) ||
             (observed.entityProof != null && observed.entityProof != original.entityProof)) fail(LibraryIssue.SOURCE_CHANGED)
-        return observed.copy(displayName = record.intent.candidate.displayName, kind = LocalNodeKind.AUDIO,
-            mimeType = observed.mimeType ?: record.metadata?.mimeType,
+        return observed.copy(displayName = original.displayName, kind = LocalNodeKind.AUDIO,
+            mimeType = observed.mimeType ?: original.mimeType,
             providerContentToken = original.providerContentToken, entityProof = original.entityProof)
     }
 
@@ -649,7 +883,7 @@ class RoomLocalLibraryRepository(
         val visible = internalView(current)
         val all = internalView(current, LibraryQuery(includeHidden = true))
         return LibraryOverview(current.revision, current.rulesRevision, dao.scalar(LibrarySql.count(all)), dao.scalar(LibrarySql.count(visible)),
-            dao.scalar(LibrarySql.availableCount(visible)), dao.scalar(SimpleSQLiteQuery("SELECT COUNT(*) FROM local_sources WHERE state != 'REMOVED'")), current.shortAudioFilter)
+            dao.scalar(LibrarySql.availableCount(visible)), dao.scalar(LibrarySql.raw("SELECT COUNT(*) FROM local_sources WHERE state != 'REMOVED'")), current.shortAudioFilter)
     }
     private fun internalView(meta: LibraryMetaEntity, query: LibraryQuery = LibraryQuery()) = LibraryViewToken("internal", meta.revision, meta.rulesRevision,
         0L, query, LibrarySort(), meta.shortAudioFilter, LibraryViewOwner.UI, statisticsEpoch = meta.statisticsEpoch)
@@ -658,7 +892,10 @@ class RoomLocalLibraryRepository(
         val root = source.spec.rootObjectId?.let { dao.node(value.sourceId, it) }
         return source.copy(displayName = root?.lastKnownName)
     }
-    private fun sourceVersion(value: LibrarySourceEntity, revision: Long) = LibrarySourceVersionEntity(value.sourceId, revision, null, value.state, value.spec, value.grantId, value.absenceScanId, value.absenceScanSequence)
+    private fun sourceVersion(value: LibrarySourceEntity, revision: Long) = LibrarySourceVersionEntity(
+        value.sourceId, revision, null, value.state, value.spec, value.grantId, value.absenceScanId, value.absenceScanSequence,
+        rootObjectId = LibraryCodec.source(value.spec).rootObjectId,
+    )
     private fun grantRecord(id: String, spec: LocalSourceSpec, value: LocalGrantObservation) = LibraryGrantEntity(id, spec.sourceId, spec.uri, LibraryCodec.grant(value), value.read.name, value.acceptedPersistedFlags, value.appOwned)
     private fun sourceState(grant: LocalGrantObservation) = if (grant.read == ObservedCapability.AVAILABLE) LibrarySourceState.ACTIVE else if (grant.read == ObservedCapability.UNAVAILABLE) LibrarySourceState.NEEDS_AUTHORIZATION else LibrarySourceState.UNAVAILABLE
     private fun validateSource(spec: LocalSourceSpec, grant: LocalGrantObservation) {
@@ -713,11 +950,16 @@ class RoomLocalLibraryRepository(
     }
     private fun fingerprint(view: LibraryViewToken): String = LibrarySortKeys.fingerprint(LibrarySortKeys.identity(view.revision.toString(), view.rulesRevision.toString(), view.totalCount.toString(),
         view.query.search, view.query.sourceId.orEmpty(), view.query.folderNodeId.orEmpty(), view.query.albumKey.orEmpty(), view.query.artistKey.orEmpty(), view.query.addedSinceEpochMs?.toString().orEmpty(),
-        view.query.includeHidden.toString(), view.sort.field.name, view.sort.descending.toString(), view.shortAudioFilter.toString(), view.owner.name,
+        view.query.includeHidden.toString(), view.query.folderSubtree.toString(), view.query.relativePathKeyword.orEmpty(),
+        view.query.readableOnly.toString(), view.sort.field.name, view.sort.descending.toString(), view.shortAudioFilter.toString(), view.owner.name,
         view.sortRuleVersion.toString(), view.statisticsEpoch.toString()))
     private suspend fun storeView(token: LibraryViewToken) {
         expireViews()
-        val cap = if (token.owner == LibraryViewOwner.UI) LibraryLimits.UI_VIEWS else LibraryLimits.QUEUE_VIEWS
+        val cap = when (token.owner) {
+            LibraryViewOwner.UI -> LibraryLimits.UI_VIEWS
+            LibraryViewOwner.QUEUE -> LibraryLimits.QUEUE_VIEWS
+            LibraryViewOwner.TRANSFER -> LibraryLimits.TRANSFER_VIEWS
+        }
         if (dao.views().count { it.owner == token.owner.name } >= cap) fail(LibraryIssue.BUSY)
         dao.insertView(LibraryViewEntity(token.viewId, sessionId, token.revision, token.totalCount, fingerprint(token), token.owner.name, expiry(), token.sortRuleVersion))
         liveViews[token.viewId] = token
@@ -736,11 +978,14 @@ class RoomLocalLibraryRepository(
             if (row.cursor(view) != cursor) fail(LibraryIssue.INVALID_INPUT)
         }
     }
-    private suspend fun pageResult(view: LibraryViewToken, rows: List<LibraryRowRecord>): LibraryPage {
+    private suspend fun pageResult(view: LibraryViewToken, rows: List<LibraryRowRecord>,
+        moreBefore: Boolean?, moreAfter: Boolean?): LibraryPage {
         val first = rows.firstOrNull()?.cursor(view)
         val last = rows.lastOrNull()?.cursor(view)
-        return LibraryPage(view, rows.map { it.model() }, last?.takeIf { dao.scalar(LibrarySql.hasBeyond(view, it, before = false)) != 0L },
-            first?.takeIf { dao.scalar(LibrarySql.hasBeyond(view, it, before = true)) != 0L })
+        // 未知方向保留完整存在性回退；真实已核验的游标省去相反方向的重复探测。
+        return LibraryPage(view, rows.map { it.model() },
+            last?.takeIf { moreAfter ?: hasRowsBeyondUnlocked(view, it, before = false) },
+            first?.takeIf { moreBefore ?: hasRowsBeyondUnlocked(view, it, before = true) })
     }
     private suspend fun cursorBefore(view: LibraryViewToken, cursor: LibraryCursor): LibraryCursor? = dao.rows(LibrarySql.rows(view, cursor, 1, before = true)).firstOrNull()?.cursor(view)
     private suspend fun folderUnlocked(view: LibraryViewToken, nodeId: String): LibraryFolder? = dao.nodeRows(LibrarySql.folders(view, null, null, 1, nodeId)).firstOrNull()?.let { LibraryFolder(it.nodeId, it.sourceId, it.name, it.parentNodeId) }
@@ -748,7 +993,8 @@ class RoomLocalLibraryRepository(
     private suspend fun cleanVersions() {
         expireViews()
         for (clean in listOf<suspend () -> Int>(dao::cleanTrackVersions, dao::cleanAliasVersions, dao::cleanLocationVersions, dao::cleanNodeVersions,
-            dao::cleanRelations, dao::cleanRules, dao::cleanSourceVersions, dao::cleanGrants)) {
+            dao::cleanRelations, dao::cleanRules, dao::cleanSourceVersions, dao::cleanGrants,
+            database.displayDao()::cleanNames, database.displayDao()::cleanAlbums, database.displayDao()::cleanArtists)) {
             currentCoroutineContext().ensureActive()
             database.withPreservedTransaction { clean() }
         }
@@ -770,7 +1016,7 @@ class RoomLocalLibraryRepository(
         }
         // An existing placeholder may already have children; only a newly inserted identity cannot form a cycle.
         if (parent != null && existingNode != null) {
-            val cycle = dao.scalar(SimpleSQLiteQuery("""
+            val cycle = dao.scalar(LibrarySql.raw("""
                 WITH RECURSIVE parents(nodeId) AS (SELECT ? UNION SELECT n.parentNodeId
                     FROM local_node_versions n JOIN parents p ON n.nodeId = p.nodeId
                     WHERE n.validTo IS NULL AND n.parentNodeId IS NOT NULL)
@@ -780,7 +1026,8 @@ class RoomLocalLibraryRepository(
         }
         val old = existingNode?.let { dao.currentNode(it.nodeId) }
         val version = LibraryNodeVersionEntity(if (old?.validFrom == revision) old.versionId else id(), node.nodeId, candidate.sourceId,
-            parent?.nodeId, candidate.displayName, candidate.uri, candidate.directory, revision, null)
+            parent?.nodeId, candidate.displayName, candidate.uri, candidate.directory, revision, null,
+            pathName = java.text.Normalizer.normalize(candidate.displayName, java.text.Normalizer.Form.NFC))
         if (old?.validFrom == revision) dao.updateNodeVersion(version)
         else {
             if (existingNode != null) dao.closeNodeVersion(node.nodeId, revision)
@@ -891,6 +1138,7 @@ class RoomLocalLibraryRepository(
             filename = filename, displayTitle = title, title = metadata.title, artist = metadata.artist, artists = LibraryCodec.strings(metadata.artists),
             album = metadata.album, albumArtist = metadata.albumArtist, durationMs = metadata.durationMs, discNumber = metadata.discNumber,
             trackNumber = metadata.trackNumber, compilation = metadata.compilation, mimeType = metadata.mimeType, parserVersion = metadata.parserVersion,
+            codecParameters = metadata.codecParameters?.let(LocalCodecParametersCodec::encode),
             metadataIssue = issue, titleKey = LibrarySortKeys.text(title), artistKey = LibrarySortKeys.text(primaryArtist), albumSortKey = LibrarySortKeys.text(metadata.album),
             filenameKey = LibrarySortKeys.natural(filename), albumKey = LibrarySortKeys.album(metadata.copy(artists = artists)),
             searchText = LibrarySortKeys.normalize(listOfNotNull(title, metadata.artist, artists.joinToString(" "), metadata.album, filename).joinToString("\n")),
@@ -904,18 +1152,27 @@ class RoomLocalLibraryRepository(
         dao.insertArtists(projections)
     }
     private suspend fun <T> access(action: suspend () -> T): T = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            try { action() }
-            catch (error: CancellationException) { throw error }
-            catch (error: LibraryException) { throw error }
-            catch (error: SQLiteFullException) { throw LibraryException(LibraryIssue.STORAGE_FULL, error) }
-            catch (error: SQLiteConstraintException) { throw LibraryException(LibraryIssue.INVALID_INPUT, error) }
-            catch (error: SQLiteException) { throw LibraryException(LibraryIssue.STORAGE_UNAVAILABLE, error) }
-            catch (error: IllegalStateException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
-            catch (error: JSONException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
-            catch (error: IllegalArgumentException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
+        // IO边界返回已退出写入者的结果后再抛领域错误，保留原异常身份。
+        runCatching {
+            mutex.withLock {
+                try { action() }
+                catch (error: CancellationException) { throw error }
+                catch (error: LibraryException) { throw error }
+                catch (error: SQLiteException) {
+                    val failure = error.toPlatformSQLiteException()
+                    val issue = when (failure) {
+                        is SQLiteFullException -> LibraryIssue.STORAGE_FULL
+                        is SQLiteConstraintException -> LibraryIssue.INVALID_INPUT
+                        else -> LibraryIssue.STORAGE_UNAVAILABLE
+                    }
+                    throw LibraryException(issue, failure)
+                }
+                catch (error: IllegalStateException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
+                catch (error: JSONException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
+                catch (error: IllegalArgumentException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
+            }
         }
-    }
+    }.getOrThrow()
     private fun pageLimit(size: Int) { if (size !in 1..LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT) }
     private fun batch(size: Int) { if (size !in 1..LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT) }
     private fun validateCandidate(sourceId: String, candidate: ObservedCandidate) {

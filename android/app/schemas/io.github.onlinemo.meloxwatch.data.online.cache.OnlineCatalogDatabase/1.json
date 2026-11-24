@@ -1,0 +1,225 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 1,
+    "identityHash": "4eadcb1b8eb3a38ef3b03aa0828e52da",
+    "entities": [
+      {
+        "tableName": "online_catalog_view",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `ownerHash` TEXT NOT NULL, `queryKey` TEXT NOT NULL, `kind` TEXT NOT NULL, `revision` INTEGER NOT NULL, `count` INTEGER NOT NULL, `rawOffset` INTEGER NOT NULL, `reportedTotal` INTEGER, `indexed` INTEGER NOT NULL, `complete` INTEGER NOT NULL, `metadataCursor` INTEGER NOT NULL, `missingMetadataCount` INTEGER NOT NULL, `cachedAtEpochMs` INTEGER NOT NULL, `published` INTEGER NOT NULL, `usedBytes` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "ownerHash",
+            "columnName": "ownerHash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "queryKey",
+            "columnName": "queryKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "count",
+            "columnName": "count",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rawOffset",
+            "columnName": "rawOffset",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "reportedTotal",
+            "columnName": "reportedTotal",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "indexed",
+            "columnName": "indexed",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "complete",
+            "columnName": "complete",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "metadataCursor",
+            "columnName": "metadataCursor",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "missingMetadataCount",
+            "columnName": "missingMetadataCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cachedAtEpochMs",
+            "columnName": "cachedAtEpochMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "published",
+            "columnName": "published",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "usedBytes",
+            "columnName": "usedBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_online_catalog_view_ownerHash_queryKey_published",
+            "unique": false,
+            "columnNames": [
+              "ownerHash",
+              "queryKey",
+              "published"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_online_catalog_view_ownerHash_queryKey_published` ON `${TABLE_NAME}` (`ownerHash`, `queryKey`, `published`)"
+          }
+        ]
+      },
+      {
+        "tableName": "online_catalog_row",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`viewId` TEXT NOT NULL, `position` INTEGER NOT NULL, `kind` TEXT NOT NULL, `itemId` TEXT NOT NULL, `title` TEXT, `artist` TEXT, `album` TEXT, `durationMs` INTEGER, `trackCount` INTEGER, `artworkKey` TEXT, `metadataMissing` INTEGER NOT NULL, PRIMARY KEY(`viewId`, `position`), FOREIGN KEY(`viewId`) REFERENCES `online_catalog_view`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "viewId",
+            "columnName": "viewId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "position",
+            "columnName": "position",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "itemId",
+            "columnName": "itemId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "artist",
+            "columnName": "artist",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "album",
+            "columnName": "album",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "durationMs",
+            "columnName": "durationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "trackCount",
+            "columnName": "trackCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "artworkKey",
+            "columnName": "artworkKey",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "metadataMissing",
+            "columnName": "metadataMissing",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "viewId",
+            "position"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_online_catalog_row_viewId_itemId",
+            "unique": false,
+            "columnNames": [
+              "viewId",
+              "itemId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_online_catalog_row_viewId_itemId` ON `${TABLE_NAME}` (`viewId`, `itemId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "online_catalog_view",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "viewId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '4eadcb1b8eb3a38ef3b03aa0828e52da')"
+    ]
+  }
+}

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sleep_timer_title">睡眠定时</string>
+    <string name="sleep_timer_channel">睡眠定时</string>
+    <string name="sleep_timer_pause_immediately">到期立即暂停</string>
+    <string name="sleep_timer_after_current">到期后播完当前曲再暂停</string>
+    <string name="sleep_timer_off">定时未启用</string>
+    <string name="sleep_timer_loading">正在读取播放服务的定时状态…</string>
+    <string name="sleep_timer_waiting_for_end">正在等待当前曲结束</string>
+    <string name="sleep_timer_set">设定睡眠定时</string>
+    <string name="sleep_timer_replace">替换当前定时</string>
+    <string name="sleep_timer_cancel">取消正在运行的定时</string>
+    <string name="sleep_timer_cancelled">定时已取消</string>
+    <string name="sleep_timer_cancelled_by_pause">手动暂停已取消本次定时</string>
+    <string name="sleep_timer_cancelled_by_track">手动切歌已取消本次定时</string>
+    <string name="sleep_timer_completed">定时已结束，播放保持暂停</string>
+    <string name="sleep_timer_bound_track_lost">等待的曲目已改变，本次定时已取消</string>
+    <string name="sleep_timer_interrupted">上次定时已在恢复时结清，播放保持暂停。</string>
+    <string name="sleep_timer_draft">定时草稿</string>
+    <string name="sleep_timer_one_minute_less">减少 1 分钟</string>
+    <string name="sleep_timer_one_minute_more">增加 1 分钟</string>
+    <string name="sleep_timer_waiting_scope">选择播完当前曲时，手动暂停或切歌会取消本次定时。到期后的当前曲结束时暂停，不再继续循环。</string>
+    <string name="sleep_timer_continue">确认定时方案</string>
+    <string name="sleep_timer_enable_confirm">现在开始倒计时？仅编辑草稿不会启动定时。</string>
+    <string name="sleep_timer_replace_confirm">替换正在运行的定时，并现在开始这次倒计时？</string>
+    <string name="sleep_timer_enable">启用本次定时</string>
+    <string name="sleep_timer_discard_draft">丢弃这份草稿</string>
+    <string name="sleep_timer_changed_while_editing">定时状态已改变，请查看当前状态后再提交。</string>
+    <string name="sleep_timer_reload_draft">以当前定时作为提交基线</string>
+    <string name="sleep_timer_saving">运行中的定时状态已改变，正在等待保存。</string>
+    <string name="sleep_timer_save_failed">尚未确认保存。此处显示的运行状态仍然有效；依赖进程重建恢复前请先重试保存。</string>
+    <string name="sleep_timer_disk_conflict">存储中的定时已改变。明确重试会保存当前显示的运行状态。</string>
+    <string name="sleep_timer_retry_save">重试保存当前定时状态</string>
+    <string name="sleep_timer_retired_owner">本播放服务已失去定时存储所有权，请重新连接并读取当前服务。</string>
+    <string name="sleep_timer_newer_schema">定时存储使用更新的格式，本版本不会覆盖它。</string>
+    <string name="sleep_timer_revision_exhausted">定时存储不能再接受新修订，运行中的定时仍可取消。</string>
+    <string name="sleep_timer_binding_too_large">等待曲目的身份超过定时存储限额。运行中的定时仍有效，但尚未确认保存。</string>
+    <string name="sleep_timer_recovered_settings">定时存储经过安全恢复，请查看当前状态后再设定。</string>
+    <string name="sleep_timer_notification_unavailable">定时通知不可用，定时仍会运行，并可在此管理。</string>
+    <string name="sleep_timer_restore_scope">同一次设备启动内，经过核验的定时可在进程重建后恢复，恢复不会发声。设备重启或无法核验计时会结清上次定时。</string>
+    <string name="sleep_timer_command_pending">正在等待播放服务…</string>
+    <string name="sleep_timer_connection_failed">请先连接播放服务，再管理它的定时。</string>
+    <string name="sleep_timer_busy">定时服务暂时忙碌，请查看当前状态后重试。</string>
+    <string name="sleep_timer_invalid_input">定时输入无效，请选择 1～180 分钟和结束方式。</string>
+    <string name="sleep_timer_command_failed">未能确认定时命令，请查看服务状态后再重试。</string>
+    <string name="sleep_summary_read_failed">未能读取通知偏好。此处显示最后确认的值，或临时安全默认。</string>
+    <string name="sleep_summary_recovered">部分设置经过安全恢复。请查看此处的通知值，完整恢复详情可在设置中查看。</string>
+    <string name="sleep_summary_conflict">草稿建立后设置已改变。上方显示已确认的通知值，请重新载入后再保存。</string>
+    <string name="sleep_summary_save_failed">尚未确认通知偏好保存。上方显示已确认或最后已知的值，草稿仍可重试。</string>
+    <string name="sleep_summary_saved">通知偏好已确认</string>
+    <string name="sleep_summary_default">恢复默认：关闭通知摘要</string>
+    <string name="sleep_summary_save_scope">此页只修改通知草稿。取消会丢弃尚未保存的草稿；已经明确发起的保存仍可能完成。该操作不会启用或取消定时。</string>
+    <plurals name="sleep_timer_duration">
+        <item quantity="other">%1$d 分钟</item>
+    </plurals>
+    <plurals name="sleep_timer_minutes_remaining">
+        <item quantity="other">还剩 %1$d 分钟</item>
+    </plurals>
+</resources>

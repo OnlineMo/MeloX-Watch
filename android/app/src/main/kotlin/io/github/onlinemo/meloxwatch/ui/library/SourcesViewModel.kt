@@ -1,11 +1,18 @@
 package io.github.onlinemo.meloxwatch.ui.library
 
 import android.app.Application
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
 import android.net.Uri
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationConfirmation
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationPhase
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationPreview
 import io.github.onlinemo.meloxwatch.data.imports.ImportException
 import io.github.onlinemo.meloxwatch.data.imports.ImportIssue
 import io.github.onlinemo.meloxwatch.data.imports.ImportPreview
@@ -56,6 +63,7 @@ data class SourcesUiState(
     val selected: SourceSelection? = null,
     val reauthorization: LibrarySource? = null,
     val removeConfirmation: LibrarySource? = null,
+    val removePreview: FileOperationPreview? = null,
     val importPreview: ImportPreview? = null,
     val importRecord: ImportRecord? = null,
     val importProgress: ImportProgress? = null,
@@ -68,6 +76,7 @@ data class SourcesUiState(
     val sourceIssue: SourceReadIssue? = null,
     val libraryIssue: LibraryIssue? = null,
     val importIssue: ImportIssue? = null,
+    val fileIssue: FileOperationIssue? = null,
     val notice: SourcesNotice? = null,
 )
 
@@ -87,6 +96,14 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         if (visible) return
         visible = true
         observer = viewModelScope.launch {
+            try { app.requireBackupStorageReady() }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) {
+                val busy = (failure as? BackupException)?.issue == BackupIssue.BUSY
+                mutableState.update { it.copy(libraryIssue = if (busy) LibraryIssue.BUSY else LibraryIssue.STORAGE_UNAVAILABLE,
+                    importIssue = if (busy) ImportIssue.BUSY else ImportIssue.RECOVERY_REQUIRED) }
+                return@launch
+            }
             launch { app.scans.state.collect { scan -> mutableState.update { it.copy(scan = scan) } } }
             launch { app.imports.state.collect { record -> mutableState.update { it.copy(importRecord = record) } } }
             launch { app.imports.progress.collect { progress -> mutableState.update { it.copy(importProgress = progress) } } }
@@ -108,6 +125,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun reload() = runAction(quietIfBusy = true) {
+        app.requireBackupStorageReady()
         app.library.initialize()
         val page = app.library.sourcesPage()
         val rules = app.library.rules()
@@ -177,7 +195,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         val selection = mutableState.value.selected ?: return@runAction
         if (selection.original != null) throw LibraryException(LibraryIssue.INVALID_INPUT)
         val refreshed = refreshSelection(selection)
-        val source = app.library.registerSource(refreshed.observation.source, refreshed.observation.access)
+        val source = app.fileOperations.mutations.registerSource(refreshed.observation.source, refreshed.observation.access)
         val rules = app.library.rules()
         app.scans.start(source, rules.revision)
         discardPreview()
@@ -193,9 +211,9 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         verifySelection(selection)
         val verified = app.localSources.verifyReauthorization(original.spec, selection.observation.source)
         readSelection(verified, original, selection)
-        val updated = app.library.reauthorizeSource(original.spec.sourceId, original.authEpoch, verified.source, verified.access)
+        val updated = app.fileOperations.mutations.reauthorizeSource(original.spec.sourceId, original.authEpoch, verified.source, verified.access)
         val rules = app.library.rules()
-        app.scans.start(updated, rules.revision)
+        if (!app.fileOperations.hasPendingSource(updated.spec.sourceId)) app.scans.start(updated, rules.revision)
         mutableState.update { it.copy(selected = null, reauthorization = null, notice = SourcesNotice.REAUTHORIZED) }
         val page = app.library.sourcesPage()
         mutableState.update { it.copy(page = page) }
@@ -205,7 +223,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         val source = LocalSourceSpec(UUID.randomUUID().toString(), LocalSourceKind.MEDIA_STORE,
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI.toString())
         val observed = app.localSources.observe(source)
-        val registered = app.library.registerSource(observed.source, observed.access)
+        val registered = app.fileOperations.mutations.registerSource(observed.source, observed.access)
         val rules = app.library.rules()
         app.scans.start(registered, rules.revision)
         val page = app.library.sourcesPage()
@@ -265,17 +283,26 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
 
     fun retryImportRecovery() = runAction { app.imports.recover() }
 
-    fun askRemoveSource(source: LibrarySource) {
-        mutableState.update { it.copy(removeConfirmation = source) }
+    fun askRemoveSource(source: LibrarySource) = runAction {
+        val preview = app.fileOperations.prepareSourceRemoval(UUID.randomUUID().toString(), source.spec.sourceId, source.authEpoch)
+        mutableState.update { it.copy(removeConfirmation = source, removePreview = preview) }
     }
 
-    fun cancelRemoveSource() { mutableState.update { it.copy(removeConfirmation = null) } }
+    fun cancelRemoveSource() = runAction {
+        val preview = mutableState.value.removePreview
+        if (preview != null) app.fileOperations.confirm(FileOperationConfirmation(preview.operationId, preview.binding, preview.kind,
+            accepted = false, wholePhysicalFileImpactAccepted = false, playbackPauseAndCloseAccepted = false))
+        mutableState.update { it.copy(removeConfirmation = null, removePreview = null) }
+    }
 
     fun confirmRemoveSource() = runAction {
         val source = mutableState.value.removeConfirmation ?: return@runAction
-        app.library.removeSource(source.spec.sourceId, source.authEpoch)
+        val preview = mutableState.value.removePreview ?: return@runAction
+        val result = app.fileOperations.confirm(FileOperationConfirmation(preview.operationId, preview.binding, preview.kind,
+            accepted = true, wholePhysicalFileImpactAccepted = false, playbackPauseAndCloseAccepted = false))
+        if (result.phase != FileOperationPhase.COMPLETED) throw FileOperationException(FileOperationIssue.PARTIAL_RESULT)
         val page = app.library.sourcesPage()
-        mutableState.update { it.copy(page = page, removeConfirmation = null, notice = SourcesNotice.REMOVED) }
+        mutableState.update { it.copy(page = page, removeConfirmation = null, removePreview = null, notice = SourcesNotice.REMOVED) }
     }
 
     fun editFilter() {
@@ -289,25 +316,25 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         val state = mutableState.value
         val rules = state.rules ?: return@runAction
         val draft = state.filterDraft ?: return@runAction
-        val saved = app.library.setShortAudioFilter(rules.revision, draft)
+        val saved = app.fileOperations.withExclusiveLibraryMutation { app.library.setShortAudioFilter(rules.revision, draft) }
         mutableState.update { it.copy(rules = saved, filterDraft = null, notice = SourcesNotice.RULES_SAVED) }
     }
 
     fun excludeTrack(sourceId: String, nodeId: String) = runAction {
         val rules = app.library.rules()
-        val updated = app.library.addExclusion(rules.revision, sourceId, nodeId, subtree = false)
+        val updated = app.fileOperations.withExclusiveLibraryMutation { app.library.addExclusion(rules.revision, sourceId, nodeId, subtree = false) }
         mutableState.update { it.copy(rules = updated, notice = SourcesNotice.RULES_SAVED) }
     }
 
     fun excludeFolder(folder: io.github.onlinemo.meloxwatch.data.library.LibraryFolder) = runAction {
         val rules = app.library.rules()
-        val updated = app.library.addExclusion(rules.revision, folder.sourceId, folder.nodeId, subtree = true)
+        val updated = app.fileOperations.withExclusiveLibraryMutation { app.library.addExclusion(rules.revision, folder.sourceId, folder.nodeId, subtree = true) }
         mutableState.update { it.copy(rules = updated, notice = SourcesNotice.RULES_SAVED) }
     }
 
     fun removeExclusion(ruleId: String) = runAction {
         val rules = mutableState.value.rules ?: return@runAction
-        val updated = app.library.removeExclusion(rules.revision, ruleId)
+        val updated = app.fileOperations.withExclusiveLibraryMutation { app.library.removeExclusion(rules.revision, ruleId) }
         val exclusions = app.library.exclusionPage()
         mutableState.update { it.copy(rules = updated, exclusions = exclusions, notice = SourcesNotice.RULES_SAVED) }
     }
@@ -331,7 +358,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
             return
         }
         mutableState.update { it.copy(working = true, stopping = false, sourceIssue = null,
-            libraryIssue = null, importIssue = null, notice = null) }
+            libraryIssue = null, importIssue = null, fileIssue = null, notice = null) }
         action = viewModelScope.launch {
             try { block() }
             catch (error: CancellationException) {
@@ -355,6 +382,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
             is LibraryException -> state.copy(libraryIssue = error.issue,
                 notice = if (error.issue == LibraryIssue.CONFLICT && state.filterDraft != null) SourcesNotice.RULES_CONFLICT else null)
             is ImportException -> state.copy(importIssue = error.issue)
+            is FileOperationException -> state.copy(fileIssue = error.issue)
             else -> state.copy(sourceIssue = SourceReadIssue.SOURCE_UNAVAILABLE)
         } }
     }

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="prefs_section_general">音乐库与显示</string>
+    <string name="prefs_section_playback">播放</string>
+    <string name="prefs_section_controls">进度、表冠与定时</string>
+    <string name="prefs_back_to_sections">返回设置分类</string>
+    <string name="prefs_show_saved_values">查看已保存的设置</string>
+    <string name="prefs_hide_saved_values">收起已保存的设置</string>
+    <string name="prefs_main_progress">显示播放进度</string>
+    <string name="prefs_progress_gesture">进度操作方式</string>
+    <string name="prefs_progress_drag">拖动，松手后跳转</string>
+    <string name="prefs_progress_tap">点按跳转</string>
+    <string name="prefs_progress_scope">跳转保持当前播放或暂停状态。隐藏主页面进度后，仍可使用独立的进度控制。</string>
+    <string name="prefs_main_progress_value">播放进度：%1$s · %2$s</string>
+    <string name="prefs_rotary">表冠控制播放</string>
+    <string name="prefs_rotary_target">表冠作用对象</string>
+    <string name="prefs_rotary_direction">表冠方向</string>
+    <string name="prefs_rotary_volume">媒体音量</string>
+    <string name="prefs_rotary_seek">播放位置</string>
+    <string name="prefs_rotary_normal">正常方向</string>
+    <string name="prefs_rotary_reversed">反向</string>
+    <string name="prefs_rotary_haptics">表冠振动反馈</string>
+    <string name="prefs_rotary_scope">在播放页，每步调整一档音量或跳转五秒；列表页保持滚动操作。触控操作始终可用。</string>
+    <string name="prefs_rotary_value">表冠：%1$s · %2$s · %3$s</string>
+    <string name="prefs_rotary_haptics_value">表冠振动：%1$s</string>
+    <string name="prefs_sleep_summary">定时通知摘要</string>
+    <string name="prefs_sleep_summary_scope">在通知中显示剩余分钟与结束方式。关闭摘要仍保留定时；通知不可用时，也可在应用内管理定时。</string>
+    <string name="prefs_sleep_summary_value">定时通知：%1$s</string>
+</resources>

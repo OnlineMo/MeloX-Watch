@@ -5,11 +5,19 @@ import androidx.annotation.MainThread
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.artwork.ArtworkLimits
+import io.github.onlinemo.meloxwatch.data.queue.QueueArtistReader
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
 import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.QueueLimits
+import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.QueueMutation
+import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
+import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
+import io.github.onlinemo.meloxwatch.model.TrackKey
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +34,51 @@ enum class QueueViewerFailure {
     READ_FAILED,
 }
 
+enum class QueueEditAction { MENU, CHOOSE_ENTRY, CHOOSE, REMOVE, MOVE, MODE }
+enum class QueueEditMessage { REMOVED, CURRENT_REMOVED_PAUSED, MOVED, MODE_SAVED }
+enum class QueueArtistPhase { IDLE, LOADING, READY, FAILED }
+
+/** Editing keeps only one instance and its revision; the queue itself stays in durable rows. */
+data class QueueEditDraft(
+    val base: QueueSnapshot,
+    val operationId: String,
+    val action: QueueEditAction,
+    val entry: QueueEntry? = null,
+    val destinationText: String = "",
+    val shuffle: Boolean = base.mode.shuffle,
+    val repeat: QueueRepeatMode = base.mode.repeat,
+    val limitEnabled: Boolean = base.mode.cycleLimit != null,
+    val limitText: String = (base.mode.cycleLimit ?: 2).toString(),
+    val submitted: Boolean = false,
+) {
+    val destinationOrder: Long? get() = destinationText.toLongOrNull()?.takeIf {
+        it in 1L..base.entryCount
+    }?.minus(1L)
+    val mode: QueueMode? get() {
+        val limit = if (limitEnabled) limitText.toIntOrNull()?.takeIf { it in 1..99 } ?: return null else null
+        return QueueMode(shuffle, repeat, limit)
+    }
+    val canSubmit: Boolean get() = when (action) {
+        QueueEditAction.MENU, QueueEditAction.CHOOSE_ENTRY, QueueEditAction.CHOOSE -> false
+        QueueEditAction.MOVE -> destinationOrder != null
+        QueueEditAction.MODE -> mode != null
+        QueueEditAction.REMOVE -> entry != null
+    }
+
+    fun request(): QueueMutationRequest {
+        check(canSubmit)
+        val edit = when (action) {
+            QueueEditAction.REMOVE -> checkNotNull(entry).let {
+                QueueMutation.Remove(it.queueEntryId, it.queueEntryId == base.currentEntryId)
+            }
+            QueueEditAction.MOVE -> QueueMutation.Move(checkNotNull(entry).queueEntryId, checkNotNull(destinationOrder))
+            QueueEditAction.MODE -> QueueMutation.SetMode(checkNotNull(mode))
+            QueueEditAction.MENU, QueueEditAction.CHOOSE_ENTRY, QueueEditAction.CHOOSE -> error("Choose a queue edit first")
+        }
+        return QueueMutationRequest(operationId, base.generationId, base.queueRevision, base.currentEntryId, edit)
+    }
+}
+
 /** snapshot 与 entries 只成对发布；保留一页，不把 UI 窗口当作完整队列。 */
 data class QueueViewerState(
     val snapshot: QueueSnapshot? = null,
@@ -35,6 +88,12 @@ data class QueueViewerState(
     val failure: QueueViewerFailure? = null,
     val showingPreviousData: Boolean = false,
     val hasLoaded: Boolean = false,
+    val editor: QueueEditDraft? = null,
+    val editMessage: QueueEditMessage? = null,
+    val rowsIdentity: Any? = null,
+    val visibleEntryIds: Set<String> = emptySet(),
+    val artists: Map<TrackKey, String?> = emptyMap(),
+    val artistPhase: QueueArtistPhase = QueueArtistPhase.IDLE,
 ) {
     val canSelect: Boolean
         get() = hasLoaded && snapshot != null && !loading && failure == null && !showingPreviousData
@@ -44,6 +103,12 @@ data class QueueViewerState(
 
     val hasNextPage: Boolean
         get() = canSelect && snapshot != null && snapshot.entryCount - pageStart > entries.size.toLong()
+
+    val editorConflict: Boolean get() = editor?.base?.let { base ->
+        val actual = snapshot ?: return@let true
+        actual.generationId != base.generationId || actual.queueRevision != base.queueRevision ||
+            actual.currentEntryId != base.currentEntryId
+    } == true
 }
 
 /**
@@ -51,7 +116,9 @@ data class QueueViewerState(
  * 请求身份同时约束分页和观察错误，取消后迟到的结果不能覆盖后来页面。
  */
 class QueueViewModel(application: Application) : AndroidViewModel(application) {
-    private val queues = (application as MeloXApplication).queues
+    private val app = application as MeloXApplication
+    private val queues = app.queues
+    private val artistReader = QueueArtistReader(app.library.database.libraryDao())
     private val mutableUiState = MutableStateFlow(QueueViewerState())
     val uiState: StateFlow<QueueViewerState> = mutableUiState.asStateFlow()
 
@@ -61,6 +128,8 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
     private var requestIdentity: Any? = null
     private var observationJob: Job? = null
     private var pageJob: Job? = null
+    private var artistIdentity: Any? = null
+    private var artistJob: Job? = null
     private var target: PageTarget? = null
 
     @MainThread
@@ -74,7 +143,18 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
     fun onHidden() {
         visible = false
         cancelReads()
-        mutableUiState.value = mutableUiState.value.copy(loading = false)
+        mutableUiState.value = mutableUiState.value.copy(loading = false, editor = null)
+    }
+
+    /** The host reports laid-out keys, with the exact published page token; prefetch grants no artwork work. */
+    @MainThread
+    fun setVisibleItemKeys(rowsIdentity: Any?, keys: List<Any>) {
+        val state = mutableUiState.value
+        if (!visible || !state.canSelect || rowsIdentity == null || state.rowsIdentity !== rowsIdentity) return
+        val rowKeys = state.entries.associate { "queue:entry:${it.queueEntryId}" to it.queueEntryId }
+        val ids = keys.asSequence().take(QueueLimits.PAGE_SIZE).filterIsInstance<String>().mapNotNull { rowKeys[it] }
+            .distinct().take(ArtworkLimits.VISIBLE_REFRESH_ITEMS).toSet()
+        if (ids != state.visibleEntryIds) mutableUiState.value = state.copy(visibleEntryIds = ids)
     }
 
     @MainThread
@@ -96,8 +176,116 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
     fun retry() {
         if (!visible || mutableUiState.value.loading) return
         reloadRequired = false
-        mutableUiState.value = mutableUiState.value.copy(failure = null)
+        mutableUiState.value = mutableUiState.value.copy(failure = null, editor = null)
         startObserving()
+    }
+
+    fun locateCurrent() {
+        val state = mutableUiState.value
+        if (visible && state.canSelect) loadPage(state.snapshot, currentSegment(state.snapshot))
+    }
+
+    fun beginQueueControls() {
+        val state = mutableUiState.value
+        val base = state.snapshot ?: return
+        if (!visible || !state.canSelect || state.editor != null) return
+        mutableUiState.value = state.copy(
+            editor = QueueEditDraft(base, "queue:" + UUID.randomUUID(), QueueEditAction.MENU),
+            editMessage = null,
+        )
+    }
+
+    /** 管理选择只保留一个实例草稿；迟到的菜单/行回调不能重新进入已退出的任务。 */
+    fun beginEntryManagement() {
+        val state = mutableUiState.value
+        val base = state.snapshot ?: return
+        if (!visible || !state.canSelect || state.editorConflict || state.editor?.action != QueueEditAction.MENU) return
+        mutableUiState.value = state.copy(
+            editor = QueueEditDraft(base, "queue:" + UUID.randomUUID(), QueueEditAction.CHOOSE_ENTRY),
+            editMessage = null,
+        )
+    }
+
+    fun beginEntryEdit(entry: QueueEntry) {
+        val state = mutableUiState.value
+        val base = state.snapshot ?: return
+        if (!visible || !state.canSelect || state.editorConflict ||
+            state.editor?.action != QueueEditAction.CHOOSE_ENTRY || state.entries.none { it == entry }
+        ) return
+        mutableUiState.value = state.copy(editor = QueueEditDraft(
+            base, "queue:" + UUID.randomUUID(), QueueEditAction.CHOOSE, entry,
+            destinationText = (entry.playbackOrder + 1L).toString(),
+        ), editMessage = null)
+    }
+
+    fun chooseEntryAction(action: QueueEditAction) {
+        if (action != QueueEditAction.REMOVE && action != QueueEditAction.MOVE) return
+        editDraft { if (it.entry == null) it else it.copy(action = action) }
+    }
+
+    fun beginModeEdit() {
+        val state = mutableUiState.value
+        val base = state.snapshot ?: return
+        if (!visible || !state.canSelect || state.editorConflict || state.editor?.action != QueueEditAction.MENU) return
+        mutableUiState.value = state.copy(editor = QueueEditDraft(base, "queue:" + UUID.randomUUID(), QueueEditAction.MODE),
+            editMessage = null)
+    }
+
+    fun setDestination(value: String) {
+        if (value.length <= 19 && value.all { it in '0'..'9' }) editDraft { it.copy(destinationText = value) }
+    }
+
+    fun stepDestination(delta: Int) {
+        val draft = mutableUiState.value.editor ?: return
+        val current = draft.destinationText.toLongOrNull()?.takeIf { it in 1L..draft.base.entryCount } ?: return
+        val next = when {
+            delta < 0 && current > 1L -> current - 1L
+            delta > 0 && current < draft.base.entryCount -> current + 1L
+            else -> return
+        }
+        setDestination(next.toString())
+    }
+
+    fun setShuffle(value: Boolean) = editDraft { it.copy(shuffle = value) }
+    fun setRepeat(value: QueueRepeatMode) = editDraft { it.copy(repeat = value) }
+    fun setCycleLimitEnabled(value: Boolean) = editDraft { it.copy(limitEnabled = value) }
+    fun setCycleLimitText(value: String) {
+        if (value.length <= 2 && value.all { it in '0'..'9' }) editDraft { it.copy(limitText = value) }
+    }
+
+    fun cancelEdit() { mutableUiState.value = mutableUiState.value.copy(editor = null) }
+
+    fun submitEdit(onSubmit: (QueueMutationRequest) -> Unit) {
+        val state = mutableUiState.value
+        val draft = state.editor ?: return
+        if (visible && state.canSelect && !state.editorConflict && draft.canSubmit) {
+            mutableUiState.value = state.copy(editor = draft.copy(submitted = true))
+            onSubmit(draft.request())
+        }
+    }
+
+    fun finishEdit(operationId: String) {
+        val state = mutableUiState.value
+        val draft = state.editor?.takeIf { it.operationId == operationId } ?: return
+        val message = when (draft.action) {
+            QueueEditAction.REMOVE -> if (draft.entry?.queueEntryId == draft.base.currentEntryId)
+                QueueEditMessage.CURRENT_REMOVED_PAUSED else QueueEditMessage.REMOVED
+            QueueEditAction.MOVE -> QueueEditMessage.MOVED
+            QueueEditAction.MODE -> QueueEditMessage.MODE_SAVED
+            QueueEditAction.MENU, QueueEditAction.CHOOSE_ENTRY, QueueEditAction.CHOOSE -> return
+        }
+        mutableUiState.value = state.copy(editor = null, editMessage = message)
+    }
+
+    private fun editDraft(change: (QueueEditDraft) -> QueueEditDraft) {
+        if (!visible) return
+        mutableUiState.value = mutableUiState.value.let { state -> state.copy(editor = state.editor?.let { draft ->
+            val changed = change(draft)
+            if (changed == draft) draft else changed.copy(
+                operationId = if (draft.submitted) "queue:" + UUID.randomUUID() else draft.operationId,
+                submitted = false,
+            )
+        }) }
     }
 
     private fun startObserving() {
@@ -111,10 +299,18 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
         }
         observationJob = viewModelScope.launch {
             try {
+                app.requireBackupStorageReady()
                 queues.snapshots().collect { snapshot ->
                     if (ownsObservation(identity) && !reloadRequired) {
                         val state = mutableUiState.value
                         val pending = target
+                        if (state.hasLoaded && !state.loading && !state.showingPreviousData && pending == null &&
+                            sameRows(state.snapshot, snapshot)
+                        ) {
+                            // A checkpoint update does not change rows. Avoid rereading a page every five seconds.
+                            mutableUiState.value = state.copy(snapshot = snapshot)
+                            return@collect
+                        }
                         val start = when {
                             pending != null && pending.generationId == snapshot?.generationId -> pending.pageStart
                             state.hasLoaded && state.snapshot?.generationId == snapshot?.generationId -> state.pageStart
@@ -137,6 +333,7 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
         val identity = Any()
         requestIdentity = identity
         pageJob?.cancel()
+        cancelArtistRead()
         target = PageTarget(snapshot?.generationId, start)
         mutableUiState.value = mutableUiState.value.let { state ->
             state.copy(loading = true, showingPreviousData = state.hasLoaded)
@@ -153,12 +350,19 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
                 if (!sameRows(snapshot, verified)) throw QueueStoreException(QueueStoreIssue.CONFLICT)
                 verifyPage(verified, entries, start)
                 if (ownsRequest(identity)) {
+                    target = null
+                    val previousState = mutableUiState.value
                     mutableUiState.value = QueueViewerState(
                         snapshot = verified,
                         entries = entries,
                         pageStart = start,
                         hasLoaded = true,
+                        editor = previousState.editor,
+                        editMessage = previousState.editMessage,
+                        rowsIdentity = identity,
+                        artistPhase = QueueArtistPhase.LOADING,
                     )
+                    loadArtists(identity, entries)
                 }
             } catch (error: CancellationException) {
                 throw error
@@ -172,6 +376,7 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
         reloadRequired = true
         requestIdentity = null
         pageJob?.cancel()
+        cancelArtistRead()
         target = null
         val failure = when ((error as? QueueStoreException)?.issue) {
             QueueStoreIssue.CONFLICT, QueueStoreIssue.SOURCE_CHANGED -> QueueViewerFailure.CONFLICT
@@ -190,10 +395,43 @@ class QueueViewModel(application: Application) : AndroidViewModel(application) {
         requestIdentity = null
         observationJob?.cancel()
         pageJob?.cancel()
+        cancelArtistRead()
         observationJob = null
         pageJob = null
         target = null
     }
+
+    private fun loadArtists(rowsIdentity: Any, entries: List<QueueEntry>) {
+        val identity = Any()
+        artistIdentity = identity
+        artistJob = viewModelScope.launch {
+            try {
+                val artists = artistReader.read(entries)
+                if (ownsArtistRead(identity, rowsIdentity)) {
+                    mutableUiState.value = mutableUiState.value.copy(artists = artists, artistPhase = QueueArtistPhase.READY)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                if (ownsArtistRead(identity, rowsIdentity)) {
+                    mutableUiState.value = mutableUiState.value.copy(artists = emptyMap(), artistPhase = QueueArtistPhase.FAILED)
+                }
+            }
+        }
+    }
+
+    private fun cancelArtistRead() {
+        artistIdentity = null
+        artistJob?.cancel()
+        artistJob = null
+        mutableUiState.value = mutableUiState.value.let { state ->
+            state.copy(rowsIdentity = null, visibleEntryIds = emptySet(),
+                artistPhase = if (state.artistPhase == QueueArtistPhase.LOADING) QueueArtistPhase.IDLE else state.artistPhase)
+        }
+    }
+
+    private fun ownsArtistRead(identity: Any, rowsIdentity: Any): Boolean =
+        visible && !reloadRequired && artistIdentity === identity && mutableUiState.value.rowsIdentity === rowsIdentity
 
     private fun ownsObservation(identity: Any): Boolean = visible && observationIdentity === identity
 

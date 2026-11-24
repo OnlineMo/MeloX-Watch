@@ -4,12 +4,16 @@ import base64
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 
 from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk, require_unsigned
+from apk_licenses import require_license_evidence
 from artifact_io import GitHub, fetch_artifact, verify_checksums
 from ci_common import (ROOT, expected_identity, properties, require, run_tool, sha256,
                        trusted_context, write_checksums, write_json)
+from package_contract import artifact_files, native_abis, project_plan, validate_artifacts
+from package_test_evidence import ARCHIVE_FILE, BINDING_KEYS, validate_archive as validate_debug
 
 
 def context(mode):
@@ -47,6 +51,9 @@ def prepare(mode, artifact_id, snapshot=None):
         descriptor = json.loads(Path(snapshot).read_text(encoding='utf-8'))
         require(descriptor['source_sha'] == source, 'Candidate source mismatch')
         version, build_sha = descriptor['version'], descriptor['snapshot_sha']
+    plan = project_plan(ROOT, build_sha, require_phone=mode != 'debug')
+    if plan['application_roles'] == ['watch', 'phone']:
+        return prepare_packages(mode, artifact_id, version, build_sha, plan)
     attempt, run_id = int(os.environ['GITHUB_RUN_ATTEMPT']), int(os.environ['GITHUB_RUN_ID'])
     allowed = {f'watch-{mode}.apk', 'build-manifest.json', 'SHA256SUMS'}
     if mode == 'diagnostic' and os.environ.get('HAS_INSTRUMENTATION') == 'true':
@@ -79,6 +86,12 @@ def sign(mode):
     verified = json.loads((ROOT / 'verified-signing-input.json').read_text(encoding='utf-8'))
     manifest = verified['manifest']
     require(manifest['mode'] == mode, 'Prepared signing mode mismatch')
+    if manifest.get('schema_version') == 2:
+        plan = project_plan(ROOT, manifest['build_sha'])
+        sanitized = {**manifest, 'artifacts': [{key: value for key, value in entry.items() if key != 'identity'}
+                                               for entry in manifest['artifacts']]}
+        validate_artifacts(sanitized, mode, manifest['version'], plan, signing='unsigned')
+        validate_debug(ROOT / 'signing-input' / ARCHIVE_FILE, {key: manifest[key] for key in BINDING_KEYS}, manifest['debug_test_evidence'])
     verify_checksums(ROOT / 'signing-input')
     tools = build_tools(properties(ROOT / '.ci/toolchain.properties'))
     pins = json.loads((ROOT / '.ci/signing-certificates.json').read_text(encoding='utf-8'))
@@ -92,6 +105,8 @@ def sign(mode):
         for entry in manifest['artifacts']:
             apk = ROOT / 'signing-input' / entry['file']
             require(sha256(apk) == entry['sha256'], 'Signing input changed after verification')
+            if manifest.get('schema_version') == 2 and entry['kind'] == 'application':
+                require_license_evidence(apk, entry['role'], manifest)
             run_tool([str(tools / 'zipalign'), '-P', '16', '-f', '4', str(apk), str(directory / entry['file'])])
         keystore = directory / 'signing.p12'
         keystore.write_bytes(base64.b64decode(os.environ['SIGNING_KEY_B64'], validate=True))
@@ -106,12 +121,53 @@ def sign(mode):
             inspect_apk(target, tools, entry.pop('identity'))
             entry.update(unsigned_sha256=entry['sha256'], sha256=sha256(target),
                          signing='stable', certificate_sha256=digest)
+            if manifest.get('schema_version') == 2:
+                require(native_abis(target) == entry['abis'], 'Signing changed the APK ABI inventory')
+                if entry['kind'] == 'application':
+                    require_license_evidence(target, entry['role'], manifest)
     manifest['input_artifact'] = verified['input_artifact']
     # 默认v4会额外写.idsig旁文件；归档契约只包含声明APK、manifest及校验和。
     require({path.name for path in output.iterdir()} == {entry['file'] for entry in manifest['artifacts']},
             'Signing produced unexpected files; no signed archive may be uploaded')
+    if manifest.get('schema_version') == 2:
+        shutil.copyfile(ROOT / 'signing-input' / ARCHIVE_FILE, output / ARCHIVE_FILE)
     write_json(output / 'build-manifest.json', manifest)
     write_checksums(output)
+
+
+def prepare_packages(mode, artifact_id, version, build_sha, plan):
+    run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
+    job = 'android-compile' if mode == 'debug' else os.environ.get('CANDIDATE_COMPILE_JOB')
+    require(job in ({'android-compile'} if mode == 'debug' else {'compile-candidate'}),
+            'Unknown package producing job')
+    provenance = fetch_artifact(GitHub(), artifact_id, run_id=run_id, attempt=attempt,
+        source_sha=os.environ['GITHUB_SHA'],
+        workflow_path='.github/workflows/cloud-build.yml' if mode == 'debug' else '.github/workflows/release.yml',
+        event=os.environ['GITHUB_EVENT_NAME'], branch=os.environ['GITHUB_REF'].removeprefix('refs/heads/'),
+        job=job, name=f'unsigned-{mode}-{run_id}-{attempt}', destination=ROOT / 'signing-input',
+        allowed=artifact_files(mode, plan))
+    manifest = json.loads((ROOT / 'signing-input/build-manifest.json').read_text(encoding='utf-8'))
+    for key, value in {'repository': os.environ['GITHUB_REPOSITORY'], 'source_sha': os.environ['GITHUB_SHA'],
+                       'build_sha': build_sha, 'run_id': run_id, 'run_attempt': attempt,
+                       'event': os.environ['GITHUB_EVENT_NAME'], 'ref': os.environ['GITHUB_REF']}.items():
+        require(type(manifest.get(key)) is type(value) and manifest[key] == value, 'Unsigned package provenance mismatch')
+    validate_artifacts(manifest, mode, version, plan, signing='unsigned')
+    validate_debug(ROOT / 'signing-input' / ARCHIVE_FILE, {key: manifest[key] for key in BINDING_KEYS}, manifest['debug_test_evidence'])
+    tools = build_tools(properties(ROOT / '.ci/toolchain.properties'))
+    for entry in manifest['artifacts']:
+        apk = ROOT / 'signing-input' / entry['file']
+        require(sha256(apk) == entry['sha256'] and native_abis(apk) == entry['abis'], 'Unsigned package bytes or ABIs differ')
+        identity = expected_identity(mode, version, entry['role'])
+        if entry['kind'] == 'instrumentation':
+            actual = inspect_test_apk(apk, tools, identity['package'])
+            require(all(entry.get(key) == value for key, value in actual.items()), 'Unsigned test package identity differs')
+            identity = actual
+        else:
+            inspect_apk(apk, tools, identity)
+            require_license_evidence(apk, entry['role'], manifest)
+        require_unsigned(apk, tools)
+        entry['identity'] = identity
+    write_json(ROOT / 'verified-signing-input.json', {'manifest': manifest, 'input_artifact': provenance})
 
 
 if __name__ == '__main__':

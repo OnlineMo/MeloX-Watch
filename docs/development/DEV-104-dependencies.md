@@ -73,3 +73,23 @@ Debug/Release/Diagnostic各26套226个唯一测试，failure/error/skipped均0�
 | MeloXDatabase/2.json | `bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf` |
 
 导入后须普通PR严格构建。真实1→2迁移、覆盖升级、声音输出、最终APK许可说明和256原AC仍未通过；readiness全部false、candidate=null。原日志、截图、设备地址和标识只留ignored本地，不上传。
+
+## 第三十一轮SQLite与主库V3输入准入
+
+[run44796881589](https://github.com/OnlineMo/MeloX-Watch/actions/runs/44796881589)/attempt1绑定source `5df9fe9895051ca7f2489327540e6681b87f2f7c`、build `c64b8601c103fe76d210ca49406038e157e59ddb`、compile job `136498943710`、artifact `14665145464`。三个采集和三个STRICT阶段均真实成功；Debug/Release/Diagnostic各114份原JUnit、1349项全部通过，各lint3条Hint、无Error/Warning。最终按资料未审合同拒绝输出APK，不能将工作流failure解释为六阶段失败或据此重复整轮。
+
+新增`androidx.sqlite:sqlite-bundled:2.6.2`的Android实现进入Room运行时，非传递`sqlite-bundled-jvm:2.6.2`只给测试提供核验后的宿主JNI文件，不把JVM数据库类加入应用或测试classpath。三份官方module和三份归档共6个新哈希均与Google Maven原件、module大小/SHA-512/SHA-256匹配；原1011条校验未删改，现共1017条。app锁204→205配置、2751→2779绑定，旧绑定保持，只有采集Debug阶段产生增量，后两个采集没有再次改写。
+
+三份官方POM声明Apache-2.0，归档内相同的原LICENSE文本为10175字节、SHA-256 `809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0`。直接POM散列：root `ba7c4c3b39d1cfac2e6da681baeea7f09a69a5ad82c5b30f82d9ad95e5f13972`、Android `fe8af7fc6676bdbcbb14610099227493544aaf649ea885f66492b7ce4a176350`、JVM `7c0de5d8f7d86c7d3919b2bfcbbd0ffc5df5dd47d25e946976cbe7a1d66f74c6`。最终APK许可/NOTICE及包体审查仍须按实际产物执行；本次只批准输入，不分发研究归档或修改许可证。
+
+V3原schema为39实体，9个新表、15个新索引、6个新增列与实际2→3迁移SQL及双driver注册一致；旧字段、主键、外键和索引保持。源根与NFC路径回填保留原值，使用100行keyset批次。此处的DDL文本核对和当次真实测试证据各自保留，不用静态SQL核对代替运行。
+
+| 导入的精确云输入 | SHA-256 |
+| --- | --- |
+| verification-metadata.xml | `fc02b086ab41535c99ce7437d58a9a7a603949c375e50aa40824cb94e0304204` |
+| app/gradle.lockfile | `ec93e77102212d1b51b1da0e0e79f1c6914f9581cda5b4f1d74b5bd7e46318ba` |
+| MeloXDatabase/1.json（原字节保持） | `3a36d662a8ee80e70d76180d564f8d9858243631dd20e2648c2492df8ff39c79` |
+| MeloXDatabase/2.json（原字节保持） | `bab895d032d46556e4615a44130dc523e8942e942cd34ab68832969ecc7696bf` |
+| MeloXDatabase/3.json | `bfa96f621e166d734338e606704b631162ed007bcd4a71ba0c27c840e4e2b708` |
+
+组合输入准入收据SHA-256为`00cb204e8f489daeb115c63369981aff51fec3d846fbc49254a1adf11db6ddbd`；原Reader仍记录process_originals_validated=false，真实六进程/JUnit/lint/Git证明由另一个固定原件审查组合，不重写Reader收据追认。新增手机端和主库V6属于下一次独立输入采集；不能把V3云验套到V6或手机App。后续须正常严格双APK构建、精确原产物签名/设备验证，readiness全部false、candidate=null。

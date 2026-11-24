@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="online_lyrics_native">NetEase LRC</string>
+    <string name="online_lyrics_service">Lyrics from the configured service</string>
+    <string name="online_lyrics_cached">%1$s · saved on this watch</string>
+    <string name="online_lyrics_missing">This source did not return lyrics for the current track.</string>
+    <string name="online_lyrics_offline">Offline. No saved lyrics are available for this account and source.</string>
+    <string name="online_lyrics_login_required">Verify this account to fetch new lyrics. Saved lyrics can be read offline.</string>
+    <string name="online_lyrics_session_unavailable">The account is unavailable. Try again after restoring or signing in.</string>
+    <string name="online_lyrics_timeout">The lyrics request timed out. Tap Retry to try again.</string>
+    <string name="online_lyrics_certificate">The lyrics connection could not verify its certificate.</string>
+    <string name="online_lyrics_rate_limited">The lyrics source is limiting requests. Try again later.</string>
+    <string name="online_lyrics_source_changed">The track, account or source changed. Open lyrics again.</string>
+    <string name="online_lyrics_unsupported">This active source cannot provide lyrics.</string>
+    <string name="online_lyrics_read_failed">Lyrics could not be read. Audio playback can continue.</string>
+    <string name="online_lyrics_memory_limit">These lyrics are too large to display on this watch.</string>
+    <string name="online_lyrics_busy">An earlier lyrics operation is still closing. Try again shortly.</string>
+    <string name="online_lyrics_closed">The lyrics entry has closed. Open it again.</string>
+</resources>

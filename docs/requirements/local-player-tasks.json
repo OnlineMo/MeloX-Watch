@@ -119,7 +119,7 @@
       "depends_on": [
         "LP-04"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-06",
@@ -164,7 +164,7 @@
         "LP-04",
         "LP-03"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-08",
@@ -181,7 +181,7 @@
         "LP-04",
         "LP-07"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-09",
@@ -204,7 +204,7 @@
       "depends_on": [
         "LP-03"
       ],
-      "status": "not_started"
+      "status": "in_progress"
     },
     {
       "id": "LP-10",

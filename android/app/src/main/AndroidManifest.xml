@@ -3,12 +3,19 @@
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
 
     <queries>
         <intent>
@@ -21,6 +28,7 @@
         </intent>
     </queries>
 
+    <!-- 自填 HTTP 主机需要静态平台开关；实际 HTTP 请求仍由共享门禁默认拒绝并逐跳核验。 -->
     <application
         android:name=".MeloXApplication"
         android:allowBackup="false"
@@ -29,6 +37,7 @@
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/Theme.MeloXWatch">
         <activity
             android:name=".ui.MainActivity"
@@ -50,6 +59,10 @@
                 <data android:mimeType="audio/*" />
             </intent-filter>
         </activity>
+        <activity
+            android:name=".ui.bluetoothlyrics.BluetoothLyricsSettingsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
         <!-- Media3 允许系统/耳机绑定；onConnect 校验 UID/信任及命令，外部不能添加 URI。 -->
         <service
             android:name=".playback.ProbePlaybackService"
@@ -65,5 +78,23 @@
             android:authorities="${applicationId}.owned-audio"
             android:exported="false"
             android:grantUriPermissions="false" />
+        <provider
+            android:name=".data.lyrics.active.OwnedLyricsProvider"
+            android:authorities="${applicationId}.owned-lyrics"
+            android:exported="false"
+            android:grantUriPermissions="false" />
+        <provider
+            android:name=".data.backup.BackupResourceProvider"
+            android:authorities="${applicationId}.backup-resources"
+            android:exported="false"
+            android:grantUriPermissions="false" />
+        <!-- Local entry points stay independent of OkHttp platform initialization. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data android:name="okhttp3.internal.platform.PlatformInitializer" tools:node="remove" />
+        </provider>
     </application>
 </manifest>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="queue_controls">Queue controls</string>
+    <string name="queue_manage_items">Manage items</string>
+    <string name="queue_choose_manage">Choose an item to manage</string>
+    <string name="queue_management_hint">Selecting an item here opens its details and editing actions. It does not start playback.</string>
+    <string name="queue_back_to_list">Back to queue</string>
+    <string name="queue_mode_summary">%1$s · %2$s</string>
+    <string name="queue_repeat_until_changed">Repeats until you choose another item</string>
+    <string name="queue_repeat_progress">Repeat progress: %1$d/%2$d</string>
+    <string name="queue_row_number">#%1$d</string>
+    <string name="queue_row_current">%1$s · %2$s</string>
+    <string name="queue_row_artist">%1$s · %2$s</string>
+    <string name="queue_artist_detail">Artist: %1$s</string>
+    <string name="queue_artist_loading">Loading artist…</string>
+    <string name="queue_artist_unavailable">Artist unavailable</string>
+    <string name="queue_artist_read_failed">Artist information could not be read</string>
+    <string name="queue_open_item">Play this queue item</string>
+    <string name="queue_open_management">Manage this queue item</string>
+</resources>

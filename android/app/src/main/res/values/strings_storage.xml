@@ -1,0 +1,22 @@
+<resources>
+    <string name="storage_title">Storage</string>
+    <string name="storage_reference_scope">Original capacity covers accessible registered references. Unknown or inaccessible files are listed separately.</string>
+    <string name="storage_measure">Measure storage</string>
+    <string name="storage_unmeasured">No current measurement. Press Measure storage.</string>
+    <string name="storage_originals">Original references</string>
+    <string name="storage_copies">Imported and received audio copies</string>
+    <string name="storage_artwork">Artwork cache</string>
+    <string name="storage_lyrics">Fetched lyrics cache</string>
+    <string name="storage_recovery">Recovery and transfer staging</string>
+    <string name="storage_category">%1$s: %2$s · Files observed: %3$d</string>
+    <string name="storage_unknown_files">References or entries with unknown capacity: %1$d</string>
+    <string name="storage_incomplete">Some capacities could not be measured. Retry after access or pending work is resolved.</string>
+    <string name="storage_available">Observed available space: %1$s</string>
+    <string name="storage_available_change">Observed available space: %1$s → %2$s</string>
+    <string name="storage_clear_category">%1$s: %2$s → %3$s</string>
+    <string name="storage_clear_observed">Cache observations after cleanup</string>
+    <string name="storage_clear">Clear derived caches</string>
+    <string name="storage_clear_confirm">Confirm cache cleanup</string>
+    <string name="storage_clear_scope">Remove cached artwork and fetched lyric files. Original music, audio copies, saved lyric documents, fonts, themes, favorites, playlists and recovery files stay intact. Active playback may continue.</string>
+    <string name="storage_copy_delete_scope">To delete an audio copy, open its track details and confirm Delete app audio copy separately.</string>
+</resources>

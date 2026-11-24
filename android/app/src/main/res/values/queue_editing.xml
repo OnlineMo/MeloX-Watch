@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="queue_confirm_remove">Confirm removal</string>
+    <string name="queue_current_removed_paused">Current item removed. Playback is paused.</string>
+    <string name="queue_cycle_limit_label">Completions per track (1–99)</string>
+    <string name="queue_cycle_limit_scope">The limit includes the current completion. In single-track repeat, reaching it advances to the next queue item. With the limit off, single-track repeat continues until you choose another item.</string>
+    <string name="queue_cycle_limit_toggle">Limit single-track repeat</string>
+    <string name="queue_destination">Target position (1–%1$d)</string>
+    <string name="queue_destination_invalid">Enter a position within this queue.</string>
+    <string name="queue_edit_conflict">The queue or current item changed. Cancel and reload before editing again.</string>
+    <string name="queue_edit_mode">Edit playback mode</string>
+    <string name="queue_edit_target">Item %1$d: %2$s</string>
+    <string name="queue_item_moved">Queue order saved.</string>
+    <string name="queue_item_removed">Queue item removed.</string>
+    <string name="queue_locate_current">Find the current item</string>
+    <string name="queue_manage_entry">Manage queue item %1$d</string>
+    <string name="queue_mode_saved">Playback mode saved.</string>
+    <string name="queue_move_down">Move one position down</string>
+    <string name="queue_move_entry">Move this item</string>
+    <string name="queue_move_scope">Choose a position in the complete queue. Saving keeps the current song and playback position.</string>
+    <string name="queue_move_shuffle_scope">Choose a position in the saved shuffle order. The original order is kept for when shuffle is turned off.</string>
+    <string name="queue_move_up">Move one position up</string>
+    <string name="queue_remove_current_last">This is the last item in playback order. Playback will stop; the remaining queue stays saved.</string>
+    <string name="queue_remove_current_next">The next available item will be selected and remain paused.</string>
+    <string name="queue_remove_current_only">This is the only queue item. Removing it leaves an empty, stopped queue.</string>
+    <string name="queue_remove_entry">Remove this queue item</string>
+    <string name="queue_remove_scope">Remove this exact queue instance. The audio file, music library and playlists are kept.</string>
+    <string name="queue_shuffle_scope">Turning shuffle on saves a new complete order with the current item first. Turning it off restores the original order. Saving an unchanged mode keeps the existing order.</string>
+</resources>

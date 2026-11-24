@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="licenses">开源许可</string>
+    <string name="licenses_offline">查看手机伴侣及所含组件的许可与版权原文。</string>
+    <string name="license_entry">%1$s · %2$s</string>
+    <string name="license_details">版本 %1$s · %2$s</string>
+    <string name="back_to_licenses">返回许可列表</string>
+    <string name="licenses_loading">正在读取本地许可…</string>
+    <string name="licenses_unavailable">许可内容暂时无法读取，请重试。</string>
+    <string name="licenses_cancelled">已取消读取许可。</string>
+    <string name="licenses_retry">重新读取</string>
+</resources>

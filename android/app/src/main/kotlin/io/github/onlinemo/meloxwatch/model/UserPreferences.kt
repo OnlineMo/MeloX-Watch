@@ -15,19 +15,42 @@ data class UserPreferences(
     val libraryLayout: LibraryLayout = LibraryLayout.LIST,
     val artworkReadPath: ArtworkReadPath = ArtworkReadPath.SYSTEM_THUMBNAIL,
     val librarySorts: Map<LibraryListContext, LibrarySort> = defaultLibrarySorts(),
+    val songTapPolicy: SongTapPolicy = SongTapPolicy.ASK,
+    val mediaButtonsEnabled: Boolean = true,
+    val audioFocusManagement: Boolean = true,
+    val playbackBackend: PlaybackBackendKind = PlaybackBackendKind.MEDIA3,
+    val playbackSpeedTenths: Int = PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS,
+    val gaplessPlayback: Boolean = true,
+    val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
+    val help: HelpPreferences = HelpPreferences(),
+    val bluetoothLyricsEnabled: Boolean = false,
 ) {
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION)
         require(revision >= 0L)
         require(librarySorts.keys == LibraryListContext.entries.toSet())
+        require(playbackSpeedTenths in PlaybackPreferenceLimits.MIN_SPEED_TENTHS..PlaybackPreferenceLimits.MAX_SPEED_TENTHS)
     }
 
     fun asDraft(): UserPreferencesDraft = UserPreferencesDraft(
-        restorePosition, screenShape, libraryLayout, artworkReadPath, librarySorts.toMap(),
+        restorePosition = restorePosition,
+        screenShape = screenShape,
+        libraryLayout = libraryLayout,
+        artworkReadPath = artworkReadPath,
+        librarySorts = librarySorts.toMap(),
+        songTapPolicy = songTapPolicy,
+        mediaButtonsEnabled = mediaButtonsEnabled,
+        audioFocusManagement = audioFocusManagement,
+        playbackBackend = playbackBackend,
+        playbackSpeedTenths = playbackSpeedTenths,
+        gaplessPlayback = gaplessPlayback,
+        controls = controls,
+        help = help,
+        bluetoothLyricsEnabled = bluetoothLyricsEnabled,
     )
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 2
+        const val CURRENT_SCHEMA_VERSION = 6
     }
 }
 
@@ -38,8 +61,18 @@ data class UserPreferencesDraft(
     val libraryLayout: LibraryLayout = LibraryLayout.LIST,
     val artworkReadPath: ArtworkReadPath = ArtworkReadPath.SYSTEM_THUMBNAIL,
     val librarySorts: Map<LibraryListContext, LibrarySort> = defaultLibrarySorts(),
+    val songTapPolicy: SongTapPolicy = SongTapPolicy.ASK,
+    val mediaButtonsEnabled: Boolean = true,
+    val audioFocusManagement: Boolean = true,
+    val playbackBackend: PlaybackBackendKind = PlaybackBackendKind.MEDIA3,
+    val playbackSpeedTenths: Int = PlaybackPreferenceLimits.DEFAULT_SPEED_TENTHS,
+    val gaplessPlayback: Boolean = true,
+    val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
+    val help: HelpPreferences = HelpPreferences(),
+    val bluetoothLyricsEnabled: Boolean = false,
 ) {
     init {
         require(librarySorts.keys == LibraryListContext.entries.toSet())
+        require(playbackSpeedTenths in PlaybackPreferenceLimits.MIN_SPEED_TENTHS..PlaybackPreferenceLimits.MAX_SPEED_TENTHS)
     }
 }

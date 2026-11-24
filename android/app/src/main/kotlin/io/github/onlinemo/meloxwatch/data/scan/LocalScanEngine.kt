@@ -17,6 +17,7 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** One scan job; the database owns the bounded, durable directory frontier and generation fences. */
 class LocalScanEngine(
@@ -76,12 +78,16 @@ class LocalScanEngine(
             publish(task, ScanState(token, ScanPhase.PREPARING))
             task.job.invokeOnCompletion {
                 if (!task.entered.get()) scope.launch(NonCancellable) {
-                    io.awaitIdle()
-                    val terminal = if (backgrounded) ScanPhase.PAUSED_BACKGROUND else task.terminal
-                    val state = try { store.setScanState(task.token, terminal) }
-                        catch (_: LibraryException) { ScanState(task.token, terminal) }
-                    publish(task, state)
-                    synchronized(activeLock) { if (active === task) active = null }
+                    try {
+                        io.awaitIdle()
+                        val terminal = if (backgrounded) ScanPhase.PAUSED_BACKGROUND else task.terminal
+                        val state = try { store.setScanState(task.token, terminal) }
+                            catch (_: LibraryException) { ScanState(task.token, terminal) }
+                        publish(task, state)
+                    } finally {
+                        synchronized(activeLock) { if (active === task) active = null }
+                        task.settled.complete(Unit)
+                    }
                 }
             }
             task.job.start()
@@ -90,6 +96,18 @@ class LocalScanEngine(
     }
 
     suspend fun cancel(scanId: String) { stop(scanId, ScanPhase.CANCELLED) }
+
+    /** 原件操作须等待已接受的提供方、游标和终态收尾，包括从未启动的扫描 job。 */
+    suspend fun cancelAndAwait(scanId: String) = withContext(NonCancellable) {
+        val task = synchronized(activeLock) { active?.takeIf { it.token.scanId == scanId } } ?: return@withContext
+        stop(scanId, ScanPhase.CANCELLED)
+        if (withTimeoutOrNull(5_000L) {
+                task.settled.await()
+                true
+            } != true) {
+            throw SourceReadException(SourceReadIssue.BUSY)
+        }
+    }
 
     private fun reusableToken(task: Active, source: LibrarySource, rulesRevision: Long, mode: ScanMode): ScanToken {
         val token = task.token
@@ -262,6 +280,7 @@ class LocalScanEngine(
             }
         } finally {
             synchronized(activeLock) { if (active === task) active = null }
+            task.settled.complete(Unit)
         }
     }
 
@@ -284,6 +303,7 @@ class LocalScanEngine(
         lateinit var job: Job
         val stopping = AtomicBoolean(false)
         val entered = AtomicBoolean(false)
+        val settled = CompletableDeferred<Unit>()
         @Volatile var terminal = ScanPhase.CANCELLED
     }
 }

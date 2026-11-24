@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.MeloXCompanion.Base" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#FF375F</item>
+        <item name="android:windowBackground">#000000</item>
+    </style>
+    <style name="Theme.MeloXCompanion" parent="Theme.MeloXCompanion.Base" />
+</resources>

@@ -2,8 +2,10 @@ package io.github.onlinemo.meloxwatch.data.library
 
 import android.content.Context
 import androidx.room.Room
-import androidx.sqlite.db.SimpleSQLiteQuery
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.database.withTestReaderSql
+import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -314,8 +316,9 @@ class RoomLocalLibraryRepositoryTest {
         assertEquals(originalRule, library.exclusionPage().exclusions.first { it.nodeId == folderNode.nodeId })
         val view = library.openView()
         library.closeView(view.viewId)
-        assertEquals(0L, database.libraryDao().scalar(SimpleSQLiteQuery(
-            "SELECT COUNT(*) FROM local_node_versions WHERE validTo IS NOT NULL AND name IS NOT NULL")))
+        assertEquals(0L, database.withTestReaderSql {
+            scalarLong("SELECT COUNT(*) FROM local_node_versions WHERE validTo IS NOT NULL AND name IS NOT NULL")
+        })
 
         val rename = begin(source)
         library.commitSeen(rename, listOf(root.copy(displayName = "新根目录"), folder.copy(displayName = "已更名 Music")))
@@ -385,11 +388,13 @@ class RoomLocalLibraryRepositoryTest {
         library.commitSeen(token, listOf(root(source), one, two))
         val before = tracks().associateBy { it.filename }
         val beforeRevision = library.overview().revision
-        database.openHelper.writableDatabase.execSQL("""
-            CREATE TRIGGER fail_metadata BEFORE INSERT ON local_track_versions
-            WHEN NEW.displayTitle = 'refused'
-            BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END
-        """.trimIndent())
+        database.withTestWriterSql {
+            execute("""
+                CREATE TRIGGER fail_metadata BEFORE INSERT ON local_track_versions
+                WHEN NEW.displayTitle = 'refused'
+                BEGIN SELECT RAISE(ABORT, 'injected metadata failure'); END
+            """.trimIndent())
+        }
         val hash = "sha256:${"a".repeat(64)}"
         val outcomes = listOf(MetadataOutcome("one", LocalAudioMetadata(title = "Updated"), verifiedContentToken = hash),
             MetadataOutcome("two", LocalAudioMetadata(title = "refused"), verifiedContentToken = hash))
@@ -405,7 +410,7 @@ class RoomLocalLibraryRepositoryTest {
                 val key = before.getValue(candidate.displayName).trackKey
                 assertNull(library.resolveLocalRead(key).verifiedContentToken)
             }
-        } finally { database.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_metadata") }
+        } finally { database.withTestWriterSql { execute("DROP TRIGGER fail_metadata") } }
         val retry = library.commitMetadata(token, outcomes)
         assertEquals(beforeRevision + 1L, retry.revision)
         assertEquals(2L, retry.processed)
@@ -584,7 +589,8 @@ class RoomLocalLibraryRepositoryTest {
     }
 
     private fun open(): MeloXDatabase = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context,
-        MeloXDatabase::class.java, file.absolutePath).addMigrations(MeloXDatabase.MIGRATION_1_2).build()
+        MeloXDatabase::class.java, file.absolutePath).setDriver(BundledSQLiteDriver())
+        .addMigrations(MeloXDatabase.MIGRATION_1_2).build()
     private fun repository() = RoomLocalLibraryRepository(database, { elapsed }, { epoch })
     private suspend fun reopen() {
         database.close()

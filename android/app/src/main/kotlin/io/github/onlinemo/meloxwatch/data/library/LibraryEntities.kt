@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.library
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -72,6 +73,7 @@ data class LibrarySourceVersionEntity(
     val grantId: String,
     val absenceScanId: String?,
     val absenceScanSequence: Long?,
+    val rootObjectId: String? = null,
 )
 
 @Entity(tableName = "local_locations", indices = [Index(value = ["identityKey"], unique = true, name = "index_local_locations_identityKey")])
@@ -180,6 +182,7 @@ data class LibraryTrackVersionEntity(
     val playCount: Long,
     val listeningMs: Long,
     val statisticsEpoch: Long = 0L,
+    @ColumnInfo(defaultValue = "NULL") val codecParameters: String? = null,
 )
 
 @Entity(
@@ -221,6 +224,7 @@ data class LibraryNodeVersionEntity(
     val directory: Boolean,
     val validFrom: Long,
     val validTo: Long?,
+    val pathName: String? = null,
 )
 
 @Entity(

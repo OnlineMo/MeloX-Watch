@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.data.scan
 
 import android.content.Context
 import androidx.room.Room
+import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.library.LibraryAvailability
 import io.github.onlinemo.meloxwatch.data.library.LibraryQuery
@@ -61,13 +62,16 @@ class LocalScanEngineTest {
 
     @Before fun setup() = runBlocking {
         database = Room.databaseBuilder(RuntimeEnvironment.getApplication() as Context, MeloXDatabase::class.java,
-            File(temporary.root, "scan.db").absolutePath).build()
+            File(temporary.root, "scan.db").absolutePath).setDriver(BundledSQLiteDriver()).build()
         library = RoomLocalLibraryRepository(database)
         library.initialize()
         io = LocalProviderIo()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     }
-    @After fun cleanup() { scope.cancel(); database.close() }
+    @After fun cleanup() {
+        if (::scope.isInitialized) scope.cancel()
+        if (::database.isInitialized) database.close()
+    }
 
     @Test fun completeRecursiveScanDeduplicatesCyclesAndPublishesAcknowledgedCounters() = runBlocking {
         val access = Graph(treeSpec)

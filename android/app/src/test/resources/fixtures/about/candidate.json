@@ -1,0 +1,59 @@
+{
+  "apks": [
+    {
+      "abis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "certificate_sha256": "71efe629047abc6a3149a22ddb305d0dce0d2d1012b9e8a054921a121981d188",
+      "debuggable": false,
+      "file": "watch-release.apk",
+      "kind": "application",
+      "package": "io.github.onlinemo.meloxwatch",
+      "profileable": false,
+      "role": "watch",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "signing": "stable",
+      "unsigned_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "version_code": "7",
+      "version_name": "0.1.0"
+    },
+    {
+      "abis": [],
+      "certificate_sha256": "71efe629047abc6a3149a22ddb305d0dce0d2d1012b9e8a054921a121981d188",
+      "debuggable": false,
+      "file": "phone-release.apk",
+      "kind": "application",
+      "package": "io.github.onlinemo.meloxwatch.companion",
+      "profileable": false,
+      "role": "phone",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "signing": "stable",
+      "unsigned_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "version_code": "7",
+      "version_name": "0.1.0"
+    }
+  ],
+  "files": {
+    "phone-release.apk": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "watch-release.apk": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "kind": "release-candidate",
+  "prerelease": true,
+  "protocol": {
+    "schema": 2,
+    "source_hashes": {
+      "android/shared-transfer/src/main/kotlin/io/github/onlinemo/meloxwatch/data/transfer/TransferContracts.kt": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "android/shared-transfer/src/main/kotlin/io/github/onlinemo/meloxwatch/data/transfer/TransferProtocolCodec.kt": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "android/shared-transfer/src/main/kotlin/io/github/onlinemo/meloxwatch/data/transfer/TransferTls.kt": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    }
+  },
+  "repository": "OnlineMo/MeloX-Watch",
+  "schema_version": 2,
+  "snapshot_sha": "2222222222222222222222222222222222222222",
+  "source_sha": "1111111111111111111111111111111111111111",
+  "version": {
+    "versionCode": "7",
+    "versionName": "0.1.0"
+  }
+}

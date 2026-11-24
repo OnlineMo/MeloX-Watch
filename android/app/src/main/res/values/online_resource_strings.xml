@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="online_network_unavailable">Network unavailable. Local music remains available.</string>
+    <string name="online_network_timeout">The music request timed out. Tap retry when the network is ready.</string>
+    <string name="online_certificate_error">The secure connection could not be verified.</string>
+    <string name="online_rate_limited">The music service is busy. Try again later.</string>
+    <string name="online_login_required">Sign in to the matching account to play this online track.</string>
+    <string name="online_session_unavailable">The saved account is unavailable. Sign in again or retry later.</string>
+    <string name="playback_local_only_skipped_online">Local playback: skipped an online queue entry.</string>
+    <string name="online_resource_unavailable">This online resource is unavailable.</string>
+    <string name="online_resource_auth_required">This music resource requires authorization.</string>
+    <string name="online_resource_invalid">The music resource is invalid. Retry or choose another track.</string>
+    <string name="online_resource_expired">This music link has expired. Tap retry to request it again.</string>
+    <string name="online_redirect_limit">The music link has too many redirects.</string>
+    <string name="online_retry_limit">This request has reached its retry limit. Tap retry to start again.</string>
+    <string name="online_stream_stalled">Playback made no progress. Tap retry to continue.</string>
+</resources>

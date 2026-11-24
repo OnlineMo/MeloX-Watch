@@ -4,7 +4,6 @@ import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import java.io.FileNotFoundException
 import java.io.IOException
-import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -31,15 +30,33 @@ class LocalProviderIo(
         signal: CancellationSignal = CancellationSignal(),
         abandoned: (T) -> Unit = {},
         failed: (Exception) -> Unit = {},
+        admitted: () -> Unit = {},
         action: (CancellationSignal) -> T,
-    ): T = suspendCancellableCoroutine { continuation ->
-        val accepted = synchronized(lock) {
-            if (occupied) false else { occupied = true; busy.value = true; true }
+    ): T = suspendCancellableCoroutine<Result<T>> { continuation ->
+        fun resumeFailure(failure: Throwable) {
+            if (continuation.isActive) continuation.resumeWith(Result.success(Result.failure(failure)))
+        }
+        val accepted = try { synchronized(lock) {
+            if (occupied) false else {
+                occupied = true
+                busy.value = true
+                // Acceptance and the owner's fence are one synchronous admission decision.
+                try { admitted() }
+                catch (failure: Throwable) {
+                    occupied = false
+                    busy.value = false
+                    throw failure
+                }
+                true
+            }
+        } } catch (failure: Throwable) {
+            resumeFailure(if (failure is Exception) map(failure) else failure)
+            return@suspendCancellableCoroutine
         }
         if (!accepted) {
             val failure = SourceReadException(SourceReadIssue.BUSY)
-            failed(failure)
-            continuation.resumeWithException(failure)
+            notifyFailure(failure, failed)
+            resumeFailure(failure)
             return@suspendCancellableCoroutine
         }
         continuation.invokeOnCancellation { signal.cancel() }
@@ -50,28 +67,37 @@ class LocalProviderIo(
                 val value = action(signal)
                 if (continuation.isActive) outcome = Result.success(value) else abandoned(value)
             } catch (error: Exception) {
-                failed(error)
+                notifyFailure(error, failed)
                 outcome = Result.failure(map(error))
             } catch (error: OutOfMemoryError) {
                 val failure = SourceReadException(SourceReadIssue.METADATA_UNREADABLE, error)
-                failed(failure)
+                notifyFailure(failure, failed)
                 outcome = Result.failure(failure)
             } finally {
                 drainAndRelease()
             }
             // A resumed sequential caller must observe the channel as available.
             outcome?.fold(
-                onSuccess = { continuation.resume(it) { _, result, _ -> abandoned(result) } },
-                onFailure = { if (continuation.isActive) continuation.resumeWithException(it) },
+                // 失败以值跨过continuation，保留原领域异常身份。
+                onSuccess = { continuation.resume(Result.success(it)) { _, result, _ ->
+                    if (result.isSuccess) abandoned(result.getOrThrow())
+                } },
+                onFailure = { resumeFailure(it) },
             )
         }
         try {
             dispatcher.dispatch(continuation.context, worker)
         } catch (error: RuntimeException) {
-            failed(error)
+            notifyFailure(error, failed)
             drainAndRelease()
-            if (continuation.isActive) continuation.resumeWithException(map(error))
+            resumeFailure(map(error))
         }
+    }.getOrThrow()
+
+    /** Reporting a failure cannot strand the caller or the accepted physical slot. */
+    private fun notifyFailure(error: Exception, report: (Exception) -> Unit) {
+        try { report(error) }
+        catch (reporting: Throwable) { if (reporting !== error) error.addSuppressed(reporting) }
     }
 
     /** Only the single live enumeration cursor may use this bounded retirement slot. */

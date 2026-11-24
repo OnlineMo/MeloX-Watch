@@ -16,15 +16,25 @@ import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
 import io.github.onlinemo.meloxwatch.data.preferences.ResetConfirmation
 import io.github.onlinemo.meloxwatch.data.preferences.createUserPreferencesDataStore
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.HelpPreferenceLimits
+import io.github.onlinemo.meloxwatch.model.HelpPreferences
+import io.github.onlinemo.meloxwatch.model.PrivacyNoticeChoice
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
+import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
+import io.github.onlinemo.meloxwatch.model.PlaybackControlsPreferences
+import io.github.onlinemo.meloxwatch.model.ProgressGestureMode
+import io.github.onlinemo.meloxwatch.model.RotaryAction
+import io.github.onlinemo.meloxwatch.model.RotaryOrientation
 import io.github.onlinemo.meloxwatch.model.ScreenShape
+import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +66,35 @@ class UserPreferencesRepositoryTest {
     val temporaryFolder = TemporaryFolder()
     private val sessions = mutableListOf<StoreSession>()
 
+    @Test(timeout = 30000L)
+    fun schemaFivePreservesHelpAndDefaultsBluetoothOffUntilAnExplicitSave() = runBlocking {
+        val file = preferencesFile()
+        writeFixture(file, completeFixture(5, 11L).toMutablePreferences().apply {
+            this[booleanPreferencesKey("help_show_tips")] = false
+            this[intPreferencesKey("guide_step")] = 2
+            this[intPreferencesKey("privacy_notice_version")] = HelpPreferenceLimits.PRIVACY_NOTICE_VERSION
+            this[stringPreferencesKey("privacy_notice_choice")] = PrivacyNoticeChoice.LATER.name
+        })
+        val bytes = file.readBytes()
+        val first = open(file)
+        val before = first.ready().preferences
+        assertFalse(before.bluetoothLyricsEnabled)
+        assertEquals(2, before.help.onboardingStep)
+        assertFalse(before.help.showTips)
+        assertEquals(PrivacyNoticeChoice.LATER, before.help.privacyNoticeChoice)
+        assertArrayEquals(bytes, file.readBytes())
+        val saved = (first.repository.save(before.revision,
+            before.asDraft().copy(bluetoothLyricsEnabled = true)) as PreferencesWriteResult.Saved).preferences
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved, reopened.ready().preferences)
+        assertEquals(before.help, reopened.ready().preferences.help)
+        assertTrue(reopened.ready().preferences.bluetoothLyricsEnabled)
+        val untouched = file.readBytes()
+        assertTrue(reopened.repository.save(before.revision, before.asDraft()) is PreferencesWriteResult.Conflict)
+        assertArrayEquals(untouched, file.readBytes())
+    }
+
     @After
     fun closeStores() = runBlocking {
         sessions.asReversed().forEach { session -> session.close() }
@@ -69,6 +108,66 @@ class UserPreferencesRepositoryTest {
         assertEquals(UserPreferences(), loaded.preferences)
         assertNull(loaded.recovery)
         assertTrue(loaded.canWrite)
+    }
+
+    @Test(timeout = 30000L)
+    fun noticeChoiceTipsAndGuideProgressSurviveRealFileReopenAndStaleWrites() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val help = HelpPreferences(onboardingStep = 2, showTips = false,
+            privacyNoticeVersion = HelpPreferenceLimits.PRIVACY_NOTICE_VERSION, privacyNoticeChoice = PrivacyNoticeChoice.LATER)
+        val saved = (first.repository.save(0L, UserPreferencesDraft(help = help)) as PreferencesWriteResult.Saved).preferences
+        val bytes = file.readBytes()
+        assertEquals(saved, (first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict).current)
+        assertArrayEquals(bytes, file.readBytes())
+        first.close()
+        val second = open(file)
+        assertEquals(help, second.ready().preferences.help)
+        val completed = help.copy(onboardingCompletedVersion = HelpPreferenceLimits.GUIDE_VERSION,
+            onboardingStep = HelpPreferenceLimits.GUIDE_STEP_COUNT - 1)
+        assertTrue(second.repository.save(saved.revision, saved.asDraft().copy(help = completed)) is PreferencesWriteResult.Saved)
+        second.close()
+        val reopened = open(file).ready()
+        assertEquals(completed, reopened.preferences.help)
+        assertFalse(reopened.preferences.help.offerInitialGuide)
+    }
+
+    @Test(timeout = 30000L)
+    fun priorSchemasKeepTheirBytesAndDoNotOfferNewInstallGuidanceUntilExplicitSave() = runBlocking {
+        for (schema in 1..4) {
+            val file = preferencesFile()
+            writeFixture(file, if (schema == 1) fixture(schema, 9L) else completeFixture(schema, 9L))
+            val bytes = file.readBytes()
+            val first = open(file)
+            val loaded = first.ready()
+            assertNull(loaded.recovery)
+            assertEquals(HelpPreferenceLimits.Legacy, loaded.preferences.help)
+            assertFalse(loaded.preferences.help.offerInitialGuide)
+            assertArrayEquals(bytes, file.readBytes())
+            val migrated = first.repository.save(9L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+            first.close()
+            val reopened = open(file)
+            assertEquals(migrated.preferences, reopened.ready().preferences)
+            // 每个历史版本完成真实重开后关闭同一路径 actor，下一轮才可写入夹具。
+            reopened.close()
+        }
+    }
+
+    @Test(timeout = 30000L)
+    fun invalidHelpFieldsExplainRecoveryWithoutRewritingTheStoredChoice() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(UserPreferences.CURRENT_SCHEMA_VERSION, 2L).toMutablePreferences().apply {
+            this[intPreferencesKey("guide_step")] = HelpPreferenceLimits.GUIDE_STEP_COUNT
+            this[intPreferencesKey("privacy_notice_version")] = 1
+            this[stringPreferencesKey("privacy_notice_choice")] = "UNANSWERED"
+        }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val loaded = open(file).ready()
+        assertEquals(setOf(PreferencesField.HELP), loaded.recovery?.fields)
+        assertEquals(HelpPreferences(), loaded.preferences.help)
+        assertArrayEquals(bytes, file.readBytes())
     }
 
     @Test(timeout = 30000L)
@@ -211,7 +310,8 @@ class UserPreferencesRepositoryTest {
         val originalBytes = file.readBytes()
         val session = open(file)
         val recovered = session.ready()
-        assertEquals(UserPreferences(revision = 8L), recovered.preferences)
+        // schema1沿用旧引导选择；坏字段恢复只重置对应字段，不能伪造新安装。
+        assertEquals(UserPreferences(revision = 8L, help = HelpPreferenceLimits.Legacy), recovered.preferences)
         assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, recovered.recovery?.reason)
         assertEquals(
             setOf(PreferencesField.RESTORE_POSITION, PreferencesField.SCREEN_SHAPE),
@@ -258,7 +358,8 @@ class UserPreferencesRepositoryTest {
         val revisionBytes = wrongRevisionFile.readBytes()
         val session = open(wrongRevisionFile)
         val recovered = session.ready()
-        assertEquals(UserPreferences(restorePosition = false, screenShape = ScreenShape.ROUND), recovered.preferences)
+        assertEquals(UserPreferences(restorePosition = false, screenShape = ScreenShape.ROUND,
+            help = HelpPreferenceLimits.Legacy), recovered.preferences)
         assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, recovered.recovery?.reason)
         assertEquals(setOf(PreferencesField.REVISION), recovered.recovery?.fields)
         assertArrayEquals(revisionBytes, wrongRevisionFile.readBytes())
@@ -354,6 +455,186 @@ class UserPreferencesRepositoryTest {
     }
 
     @Test(timeout = 30000L)
+    fun allPlaybackPreferencesSurviveReopenAndAStaleEditorCannotOverwriteThem() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val draft = UserPreferencesDraft(
+            songTapPolicy = SongTapPolicy.INSERT_AND_PLAY,
+            mediaButtonsEnabled = false,
+            audioFocusManagement = false,
+            playbackBackend = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER,
+            playbackSpeedTenths = 17,
+            gaplessPlayback = false,
+        )
+        val saved = (first.repository.save(0L, draft) as PreferencesWriteResult.Saved).preferences
+        val bytes = file.readBytes()
+        assertEquals(draft, saved.asDraft())
+        assertTrue(first.repository.save(1L, draft) is PreferencesWriteResult.Unchanged)
+        assertEquals(saved, (first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict).current)
+        assertTrue(first.repository.reset(1L, ResetConfirmation.CANCELLED) is PreferencesWriteResult.Cancelled)
+        assertArrayEquals(bytes, file.readBytes())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved, reopened.ready().preferences)
+        val reset = reopened.repository.reset(1L, ResetConfirmation.CONFIRMED) as PreferencesWriteResult.Saved
+        assertEquals(UserPreferences(revision = 2L), reset.preferences)
+    }
+
+    @Test(timeout = 30000L)
+    fun schemaTwoPreservesItsLibraryValuesAndBytesUntilExplicitPlaybackMigration() = runBlocking {
+        val file = preferencesFile()
+        val sorts = UserPreferences().librarySorts.toMutableMap().apply {
+            this[LibraryListContext.ALL] = LibrarySort(LibrarySortField.FILENAME_NATURAL, true)
+        }.toMap()
+        val raw = completeFixture(schema = 2, revision = 9L, sorts = sorts).toMutablePreferences().apply {
+            remove(stringPreferencesKey("song_tap_policy"))
+            remove(booleanPreferencesKey("media_buttons_enabled"))
+            remove(booleanPreferencesKey("audio_focus_management"))
+            remove(stringPreferencesKey("playback_backend"))
+            remove(intPreferencesKey("playback_speed_tenths"))
+            remove(booleanPreferencesKey("gapless_playback"))
+        }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val first = open(file)
+        val loaded = first.ready()
+        assertEquals(UserPreferences(
+            revision = 9L, restorePosition = false, screenShape = ScreenShape.ROUND,
+            libraryLayout = LibraryLayout.GRID, artworkReadPath = ArtworkReadPath.LOCAL_EXTRACT, librarySorts = sorts,
+            help = HelpPreferenceLimits.Legacy,
+        ), loaded.preferences)
+        assertNull(loaded.recovery)
+        assertArrayEquals(bytes, file.readBytes())
+        val saved = first.repository.save(9L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+        assertEquals(10L, saved.preferences.revision)
+        assertEquals(loaded.preferences.asDraft(), saved.preferences.asDraft())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved.preferences, reopened.ready().preferences)
+        assertTrue(reopened.repository.save(10L, saved.preferences.asDraft()) is PreferencesWriteResult.Unchanged)
+    }
+
+    @Test(timeout = 30000L)
+    fun invalidPlaybackTypesAndRangesOnlyRecoverTheAffectedFieldsWithoutWriting() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(schema = UserPreferences.CURRENT_SCHEMA_VERSION, revision = 4L)
+            .toMutablePreferences().apply {
+                this[stringPreferencesKey("song_tap_policy")] = "UNKNOWN"
+                this[stringPreferencesKey("playback_backend")] = "UNKNOWN"
+                this[intPreferencesKey("playback_speed_tenths")] = 21
+                this[stringPreferencesKey("media_buttons_enabled")] = "not boolean"
+                this[stringPreferencesKey("audio_focus_management")] = "not boolean"
+                this[stringPreferencesKey("gapless_playback")] = "not boolean"
+            }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val loaded = open(file).ready()
+        assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, loaded.recovery?.reason)
+        assertEquals(setOf(
+            PreferencesField.SONG_TAP_POLICY, PreferencesField.PLAYBACK_BACKEND, PreferencesField.PLAYBACK_SPEED,
+            PreferencesField.MEDIA_BUTTONS, PreferencesField.AUDIO_FOCUS, PreferencesField.GAPLESS,
+        ), loaded.recovery?.fields)
+        assertEquals(SongTapPolicy.ASK, loaded.preferences.songTapPolicy)
+        assertEquals(PlaybackBackendKind.MEDIA3, loaded.preferences.playbackBackend)
+        assertEquals(10, loaded.preferences.playbackSpeedTenths)
+        assertTrue(loaded.preferences.mediaButtonsEnabled)
+        assertTrue(loaded.preferences.audioFocusManagement)
+        assertTrue(loaded.preferences.gaplessPlayback)
+        assertEquals(LibraryLayout.GRID, loaded.preferences.libraryLayout)
+        assertEquals(ArtworkReadPath.LOCAL_EXTRACT, loaded.preferences.artworkReadPath)
+        assertArrayEquals(bytes, file.readBytes())
+    }
+
+    @Test(timeout = 30000L)
+    fun schemaThreeKeepsNonDefaultPlaybackAndLibraryUntilExplicitControlsMigration() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(schema = 3, revision = 19L).toMutablePreferences().apply {
+            this[stringPreferencesKey("song_tap_policy")] = SongTapPolicy.INSERT_AND_PLAY.name
+            this[stringPreferencesKey("playback_backend")] = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER.name
+            this[intPreferencesKey("playback_speed_tenths")] = 17
+            this[booleanPreferencesKey("media_buttons_enabled")] = false
+            this[booleanPreferencesKey("audio_focus_management")] = false
+            this[booleanPreferencesKey("gapless_playback")] = false
+        }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val first = open(file)
+        val loaded = first.ready()
+        assertEquals(UserPreferences(
+            revision = 19L, restorePosition = false, screenShape = ScreenShape.ROUND,
+            libraryLayout = LibraryLayout.GRID, artworkReadPath = ArtworkReadPath.LOCAL_EXTRACT,
+            songTapPolicy = SongTapPolicy.INSERT_AND_PLAY, playbackBackend = PlaybackBackendKind.SYSTEM_MEDIA_PLAYER,
+            playbackSpeedTenths = 17, mediaButtonsEnabled = false, audioFocusManagement = false, gaplessPlayback = false,
+            controls = PlaybackControlsPreferences(),
+            help = HelpPreferenceLimits.Legacy,
+        ), loaded.preferences)
+        assertNull(loaded.recovery)
+        assertArrayEquals(bytes, file.readBytes())
+        val saved = first.repository.save(19L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
+        assertEquals(20L, saved.preferences.revision)
+        assertEquals(loaded.preferences.asDraft(), saved.preferences.asDraft())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved.preferences, reopened.ready().preferences)
+        assertTrue(reopened.repository.save(20L, saved.preferences.asDraft()) is PreferencesWriteResult.Unchanged)
+    }
+
+    @Test(timeout = 30000L)
+    fun controlsSurviveReopenAndStaleOrCancelledEditsCannotDiscardThem() = runBlocking {
+        val file = preferencesFile()
+        val first = open(file)
+        first.ready()
+        val controls = PlaybackControlsPreferences(
+            rotaryEnabled = true, rotaryAction = RotaryAction.SEEK, rotaryOrientation = RotaryOrientation.REVERSED,
+            rotaryHaptics = true, showMainProgress = false, progressGesture = ProgressGestureMode.TAP_TO_SEEK,
+            sleepTimerSummary = true,
+        )
+        val draft = UserPreferencesDraft(playbackSpeedTenths = 12, controls = controls)
+        val saved = (first.repository.save(0L, draft) as PreferencesWriteResult.Saved).preferences
+        val bytes = file.readBytes()
+        assertEquals(draft, saved.asDraft())
+        assertTrue(first.repository.save(1L, draft) is PreferencesWriteResult.Unchanged)
+        assertEquals(saved, (first.repository.save(0L, UserPreferencesDraft()) as PreferencesWriteResult.Conflict).current)
+        assertTrue(first.repository.reset(1L, ResetConfirmation.CANCELLED) is PreferencesWriteResult.Cancelled)
+        assertArrayEquals(bytes, file.readBytes())
+        first.close()
+        val reopened = open(file)
+        assertEquals(saved, reopened.ready().preferences)
+        assertEquals(UserPreferences(revision = 2L),
+            (reopened.repository.reset(1L, ResetConfirmation.CONFIRMED) as PreferencesWriteResult.Saved).preferences)
+    }
+
+    @Test(timeout = 30000L)
+    fun damagedControlFieldsRecoverSafelyWithoutChangingOtherPreferencesOrBytes() = runBlocking {
+        val file = preferencesFile()
+        val raw = completeFixture(schema = UserPreferences.CURRENT_SCHEMA_VERSION, revision = 7L)
+            .toMutablePreferences().apply {
+                this[stringPreferencesKey("rotary_enabled")] = "true"
+                this[stringPreferencesKey("rotary_action")] = "ANYTHING"
+                this[intPreferencesKey("rotary_orientation")] = 1
+                this[intPreferencesKey("rotary_haptics")] = 1
+                this[stringPreferencesKey("show_main_progress")] = "false"
+                this[stringPreferencesKey("progress_gesture")] = "IMMEDIATE_DRAG"
+                this[stringPreferencesKey("sleep_timer_summary")] = "true"
+                this[intPreferencesKey("playback_speed_tenths")] = 18
+            }
+        writeFixture(file, raw)
+        val bytes = file.readBytes()
+        val loaded = open(file).ready()
+        assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, loaded.recovery?.reason)
+        assertEquals(setOf(PreferencesField.ROTARY_CONTROL, PreferencesField.ROTARY_TARGET, PreferencesField.ROTARY_DIRECTION,
+            PreferencesField.ROTARY_HAPTICS, PreferencesField.MAIN_PROGRESS, PreferencesField.SEEK_GESTURE,
+            PreferencesField.SLEEP_SUMMARY), loaded.recovery?.fields)
+        assertEquals(PlaybackControlsPreferences(), loaded.preferences.controls)
+        assertEquals(18, loaded.preferences.playbackSpeedTenths)
+        assertEquals(LibraryLayout.GRID, loaded.preferences.libraryLayout)
+        assertEquals(ArtworkReadPath.LOCAL_EXTRACT, loaded.preferences.artworkReadPath)
+        assertFalse(loaded.preferences.restorePosition)
+        assertArrayEquals(bytes, file.readBytes())
+    }
+
+    @Test(timeout = 30000L)
     fun revisionOverflowCannotCommitANegativeRevision() = runBlocking {
         val file = preferencesFile()
         writeFixture(file, fixture(schema = 1, revision = Long.MAX_VALUE))
@@ -379,7 +660,8 @@ class UserPreferencesRepositoryTest {
         // 同一个真实 DataStore 内的 fixture 前进到 revision 2；观察回调保持滞后以验证权威读取。
         realStore.updateData { fixture(schema = 1, revision = 2L) }
         assertEquals(1L, session.ready().preferences.revision)
-        val committed = UserPreferences(revision = 2L, restorePosition = false, screenShape = ScreenShape.ROUND)
+        val committed = UserPreferences(revision = 2L, restorePosition = false, screenShape = ScreenShape.ROUND,
+            help = HelpPreferenceLimits.Legacy)
         val committedBytes = file.readBytes()
 
         // DataStore 1.1.7 使用该暂存名；非空目录制造真实写盘故障，不替换存储为假实现。
@@ -461,8 +743,12 @@ class UserPreferencesRepositoryTest {
         val committedBytes = file.readBytes()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        val session = open(file) { store -> GatedUpdateDataStore(store, entered, release) }
+        lateinit var gatedStore: GatedUpdateDataStore
+        val session = open(file) { store ->
+            GatedUpdateDataStore(store, entered, release).also { gatedStore = it }
+        }
         session.ready()
+        gatedStore.holdNextUpdate()
         var result: PreferencesWriteResult? = null
         val write = launch { result = session.repository.save(3L, UserPreferencesDraft(true, ScreenShape.RECTANGULAR)) }
         withTimeout(10000L) { entered.await() }
@@ -485,7 +771,9 @@ class UserPreferencesRepositoryTest {
         val job = SupervisorJob()
         val scope = CoroutineScope(job + Dispatchers.IO)
         val store = createUserPreferencesDataStore(scope) { file }
-        return StoreSession(job, DataStoreUserPreferencesRepository(wrap(store), scope)).also { session ->
+        val observerJob = SupervisorJob(job)
+        val observerScope = CoroutineScope(observerJob + Dispatchers.IO)
+        return StoreSession(job, observerJob, DataStoreUserPreferencesRepository(wrap(store), observerScope)).also { session ->
             sessions.add(session)
         }
     }
@@ -508,11 +796,59 @@ class UserPreferencesRepositoryTest {
         stringPreferencesKey("screen_shape") to ScreenShape.ROUND.name,
     )
 
+    private fun completeFixture(
+        schema: Int,
+        revision: Long,
+        sorts: Map<LibraryListContext, LibrarySort> = UserPreferences().librarySorts,
+    ): Preferences = mutablePreferencesOf(
+        intPreferencesKey("schema_version") to schema,
+        longPreferencesKey("revision") to revision,
+        booleanPreferencesKey("restore_position") to false,
+        stringPreferencesKey("screen_shape") to ScreenShape.ROUND.name,
+        stringPreferencesKey("library_layout") to LibraryLayout.GRID.name,
+        stringPreferencesKey("artwork_read_path") to ArtworkReadPath.LOCAL_EXTRACT.name,
+        stringPreferencesKey("song_tap_policy") to SongTapPolicy.ASK.name,
+        booleanPreferencesKey("media_buttons_enabled") to true,
+        booleanPreferencesKey("audio_focus_management") to true,
+        stringPreferencesKey("playback_backend") to PlaybackBackendKind.MEDIA3.name,
+        intPreferencesKey("playback_speed_tenths") to 10,
+        booleanPreferencesKey("gapless_playback") to true,
+    ).apply {
+        if (schema >= 4) {
+            this[booleanPreferencesKey("rotary_enabled")] = false
+            this[stringPreferencesKey("rotary_action")] = RotaryAction.MEDIA_VOLUME.name
+            this[stringPreferencesKey("rotary_orientation")] = RotaryOrientation.NORMAL.name
+            this[booleanPreferencesKey("rotary_haptics")] = false
+            this[booleanPreferencesKey("show_main_progress")] = true
+            this[stringPreferencesKey("progress_gesture")] = ProgressGestureMode.DRAG_TO_COMMIT.name
+            this[booleanPreferencesKey("sleep_timer_summary")] = false
+        }
+        if (schema >= 5) {
+            this[intPreferencesKey("guide_completed_version")] = 0
+            this[intPreferencesKey("guide_dismissed_version")] = 0
+            this[intPreferencesKey("guide_step")] = 0
+            this[booleanPreferencesKey("help_show_tips")] = true
+            this[intPreferencesKey("privacy_notice_version")] = 0
+            this[stringPreferencesKey("privacy_notice_choice")] = "UNANSWERED"
+        }
+        if (schema >= 6) this[booleanPreferencesKey("bluetooth_lyrics_enabled")] = false
+        sorts.forEach { (context, sort) ->
+            val suffix = context.name.lowercase(java.util.Locale.ROOT)
+            this[stringPreferencesKey("library_sort_" + suffix)] = sort.field.name
+            this[booleanPreferencesKey("library_descending_" + suffix)] = sort.descending
+        }
+    }
+
     private class StoreSession(
         private val job: Job,
+        private val observerJob: Job,
         val repository: DataStoreUserPreferencesRepository,
     ) {
-        suspend fun close() = job.cancelAndJoin()
+        suspend fun close() {
+            // 先让观察任务等待中的 identity read 收到 actor 回执，再取消 DataStore actor。
+            observerJob.cancelAndJoin()
+            job.cancelAndJoin()
+        }
 
         suspend fun ready(): PreferencesState.Ready = withTimeout(10000L) {
             repository.state.filterIsInstance<PreferencesState.Ready>().first()
@@ -577,12 +913,22 @@ class UserPreferencesRepositoryTest {
         private val entered: CompletableDeferred<Unit>,
         private val release: CompletableDeferred<Unit>,
     ) : DataStore<Preferences> by delegate {
+        private val holdNext = AtomicBoolean(false)
+
+        fun holdNextUpdate() { check(holdNext.compareAndSet(false, true)) }
+
         override suspend fun updateData(
             transform: suspend (Preferences) -> Preferences,
-        ): Preferences = delegate.updateData { stored ->
-            entered.complete(Unit)
-            release.await()
-            transform(stored)
+        ): Preferences {
+            // 初始观察读取与取消排空保持真实调用，不进入目标写入门。
+            val held = holdNext.getAndSet(false)
+            return delegate.updateData { stored ->
+                if (held) {
+                    entered.complete(Unit)
+                    release.await()
+                }
+                transform(stored)
+            }
         }
     }
 }

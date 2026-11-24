@@ -13,9 +13,11 @@ from ci_common import (ROOT, OWNER, OWNER_EMAIL, REPOSITORY, SHA_PATTERN, expect
                        git, no_signing_secrets, properties, require, sha256, trusted_context,
                        write_checksums, write_json)
 from version_policy import next_release, parse_version
+from package_contract import (artifact_files, exact_data, native_abis, package_identity, project_plan, validate_artifacts)
+from package_test_evidence import ARCHIVE_FILE, BINDING_KEYS, validate_archive as validate_debug
 
 SNAPSHOT_FILES = {'snapshot.bundle', 'snapshot-manifest.json', 'SHA256SUMS'}
-CANDIDATE_FILES = {'watch-release.apk', 'release-build-manifest.json', 'snapshot.bundle',
+CANDIDATE_FILES = {'watch-release.apk', 'phone-release.apk', ARCHIVE_FILE, 'release-build-manifest.json', 'snapshot.bundle',
                    'snapshot-manifest.json', 'candidate-manifest.json', 'SHA256SUMS'}
 
 
@@ -56,6 +58,10 @@ def validate_snapshot(descriptor, cwd=ROOT):
     require(identity == [OWNER, OWNER_EMAIL, OWNER, OWNER_EMAIL], 'Snapshot identity must use owner noreply')
     message = git('show', '-s', '--format=%B', snapshot, cwd=cwd)
     require(message == 'chore(release): v' + descriptor['version']['versionName'], 'Unexpected snapshot message')
+    if descriptor.get('schema_version') == 2:
+        plan = project_plan(cwd, source)
+        require(type(descriptor['schema_version']) is int and exact_data({key: descriptor.get(key) for key in plan}, plan),
+                'Snapshot package/protocol scope differs')
 
 
 def prepare():
@@ -64,7 +70,8 @@ def prepare():
     require(os.environ.get('CANDIDATE_OPERATION') == 'prepare-candidate', 'Candidate preparation operation required')
     # 工程缺失时在产生快照之前停止；规划检查成功不能生成伪候选。
     from check import check
-    check(require_android=True)
+    check(require_android=True, unit_checks=False)
+    plan = project_plan(ROOT)
     client = GitHub()
     source = os.environ['GITHUB_SHA']
     require(git('rev-parse', 'HEAD') == source, 'Preparation checkout differs from dispatched source')
@@ -85,7 +92,7 @@ def prepare():
     identity = dict(os.environ, GIT_AUTHOR_NAME=OWNER, GIT_AUTHOR_EMAIL=OWNER_EMAIL,
                     GIT_COMMITTER_NAME=OWNER, GIT_COMMITTER_EMAIL=OWNER_EMAIL)
     git('-c', 'commit.gpgsign=false', 'commit', '-m', 'chore(release): v' + requested, env=identity)
-    descriptor = {'schema_version': 1, 'repository': REPOSITORY, 'source_sha': source,
+    descriptor = {'schema_version': 2, 'repository': REPOSITORY, 'source_sha': source, **plan,
                   'snapshot_sha': git('rev-parse', 'HEAD'), 'main_commit_count': count,
                   'previous_max_code': max((code for _, code in history), default=0),
                   'version': {'versionName': requested, 'versionCode': str(code)}, 'prerelease': prerelease,
@@ -134,7 +141,11 @@ def import_snapshot(directory, descriptor):
 def fetch_signed(client, mode, artifact_id, descriptor, has_instrumentation=False):
     run_id, attempt = descriptor['run_id'], descriptor['run_attempt']
     allowed = {f'watch-{mode}.apk', 'build-manifest.json', 'SHA256SUMS'}
-    if has_instrumentation:
+    plan = None
+    if descriptor.get('schema_version') == 2:
+        plan = {key: descriptor[key] for key in ('application_roles', 'instrumentation_roles', 'protocol')}
+        allowed = artifact_files(mode, plan)
+    if has_instrumentation and plan is None:
         allowed.add('watch-diagnostic-test.apk')
     destination = ROOT / ('signed-' + mode)
     provenance = fetch_artifact(client, artifact_id, run_id=run_id, attempt=attempt,
@@ -145,22 +156,28 @@ def fetch_signed(client, mode, artifact_id, descriptor, has_instrumentation=Fals
     for key, value in {'source_sha': descriptor['source_sha'], 'build_sha': descriptor['snapshot_sha'],
                        'run_id': run_id, 'run_attempt': attempt, 'mode': mode, 'version': descriptor['version'],
                        'repository': REPOSITORY, 'event': 'workflow_dispatch', 'ref': 'refs/heads/main'}.items():
-        require(manifest.get(key) == value, 'Signed manifest mismatch: ' + key)
-    require(len(manifest['artifacts']) == (2 if has_instrumentation else 1), 'Signed APK inventory mismatch')
+        require(type(manifest.get(key)) is type(value) and manifest[key] == value, 'Signed manifest mismatch: ' + key)
+    if plan is None:
+        require(len(manifest['artifacts']) == (2 if has_instrumentation else 1), 'Signed APK inventory mismatch')
+    else:
+        validate_artifacts(manifest, mode, descriptor['version'], plan, signing='stable')
+        validate_debug(destination / ARCHIVE_FILE, {key: manifest[key] for key in BINDING_KEYS}, manifest['debug_test_evidence'])
     tools = build_tools(properties(ROOT / '.ci/toolchain.properties'))
     pins = json.loads((ROOT / '.ci/signing-certificates.json').read_text(encoding='utf-8'))
     for entry in manifest['artifacts']:
         require(entry['file'] in allowed and entry['file'].endswith('.apk'), 'Unexpected signed APK filename')
         apk = destination / entry['file']
         require(sha256(apk) == entry['sha256'] and entry['signing'] == 'stable', 'Signed APK hash/signing mismatch')
-        expected = expected_identity(mode, descriptor['version'])
-        if entry.get('role') == 'instrumentation':
+        expected = expected_identity(mode, descriptor['version'], entry['role'] if plan is not None else 'watch')
+        if entry.get('role') == 'instrumentation' or entry.get('kind') == 'instrumentation':
             actual = inspect_test_apk(apk, tools, expected['package'])
             require(all(entry.get(key) == value for key, value in actual.items()), 'Test APK metadata mismatch')
         else:
             inspect_apk(apk, tools, expected)
         digest = certificate(apk, tools, pins['release' if mode == 'release' else 'debug'])
         require(entry['certificate_sha256'] == digest, 'Manifest certificate mismatch')
+        if plan is not None:
+            require(native_abis(apk) == entry['abis'], 'Signed APK ABI inventory differs')
     return provenance, manifest
 
 
@@ -168,22 +185,30 @@ def seal(release_id, diagnostic_id):
     trusted_context('Owner release')
     no_signing_secrets()
     descriptor = json.loads((ROOT / 'snapshot-input/snapshot-manifest.json').read_text(encoding='utf-8'))
+    require(descriptor.get('schema_version') == 2, 'New candidates require the complete watch and phone snapshot')
     validate_snapshot(descriptor)
     client = GitHub()
     release_provenance, release_manifest = fetch_signed(client, 'release', release_id, descriptor)
     diagnostic_provenance, diagnostic_manifest = fetch_signed(client, 'diagnostic', diagnostic_id, descriptor,
         os.environ.get('HAS_INSTRUMENTATION') == 'true')
+    require(release_manifest.get('test_scope') == 'full-debug-once' and
+            release_manifest['source_input_hashes'] == diagnostic_manifest['source_input_hashes'] and
+            release_manifest['strict_input_hashes'] == diagnostic_manifest['strict_input_hashes'] and
+            exact_data(release_manifest['debug_test_evidence'], diagnostic_manifest['debug_test_evidence']),
+            'Candidate packages need one full Debug test scope on the same strict source inputs')
     output = ROOT / 'candidate-artifacts'
     output.mkdir()
-    shutil.copyfile(ROOT / 'signed-release/watch-release.apk', output / 'watch-release.apk')
+    for entry in release_manifest['artifacts']:
+        shutil.copyfile(ROOT / 'signed-release' / entry['file'], output / entry['file'])
     shutil.copyfile(ROOT / 'signed-release/build-manifest.json', output / 'release-build-manifest.json')
+    shutil.copyfile(ROOT / 'signed-release' / ARCHIVE_FILE, output / ARCHIVE_FILE)
     for name in ('snapshot.bundle', 'snapshot-manifest.json'):
         shutil.copyfile(ROOT / 'snapshot-input' / name, output / name)
     manifest = {
-        'schema_version': 1, 'kind': 'release-candidate', **descriptor,
+        'schema_version': 2, 'kind': 'release-candidate', **descriptor,
         # artifact ID 由上传完成后的 API/locator 确定，不能写入自身内容形成循环哈希。
         'artifact_name': f'candidate-{descriptor["run_id"]}-{descriptor["run_attempt"]}',
-        'apk': release_manifest['artifacts'][0],
+        'apks': release_manifest['artifacts'],
         'inputs': {'release': release_provenance, 'diagnostic': diagnostic_provenance,
                    'snapshot': json.loads((ROOT / 'snapshot-provenance.json').read_text(encoding='utf-8'))},
         'diagnostic': diagnostic_manifest['artifacts'],
@@ -192,6 +217,11 @@ def seal(release_id, diagnostic_id):
     }
     write_json(output / 'candidate-manifest.json', manifest)
     write_checksums(output)
+    accepted = package_identity(manifest['apks'], manifest['protocol'])
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+            summary.write('Candidate watch/phone package-set SHA-256: ' + accepted['package_set_sha256'] +
+                          '. Device acceptance and publication approval remain NOT RUN.\n')
 
 
 def fetch_candidate(client, run_id, attempt, artifact_id, destination):
@@ -201,12 +231,26 @@ def fetch_candidate(client, run_id, attempt, artifact_id, destination):
         name=f'candidate-{run_id}-{attempt}', destination=destination, allowed=CANDIDATE_FILES, require_success=True)
     manifest = json.loads((Path(destination) / 'candidate-manifest.json').read_text(encoding='utf-8'))
     descriptor = json.loads((Path(destination) / 'snapshot-manifest.json').read_text(encoding='utf-8'))
-    require(all(manifest.get(key) == value for key, value in descriptor.items()), 'Candidate snapshot descriptor mismatch')
+    require(type(manifest.get('schema_version')) is int and manifest['schema_version'] == 2,
+            'First-release candidate must contain the multi-package schema')
+    require(exact_data({key: manifest.get(key) for key in descriptor}, descriptor), 'Candidate snapshot descriptor mismatch')
     require(manifest['kind'] == 'release-candidate' and manifest['source_sha'] == run['head_sha'], 'Invalid candidate manifest')
-    require(manifest['run_id'] == run_id and manifest['run_attempt'] == attempt, 'Candidate attempt mismatch')
+    require(type(manifest['run_id']) is int and manifest['run_id'] == run_id and
+            type(manifest['run_attempt']) is int and manifest['run_attempt'] == attempt, 'Candidate attempt mismatch')
     require(set(manifest['files']) == CANDIDATE_FILES - {'candidate-manifest.json', 'SHA256SUMS'}, 'Candidate file inventory mismatch')
     for name, digest in manifest['files'].items():
         require(sha256(Path(destination) / name) == digest, 'Candidate file hash mismatch')
+    build_manifest = json.loads((Path(destination) / 'release-build-manifest.json').read_text(encoding='utf-8'))
+    for key, value in {'repository': REPOSITORY, 'source_sha': manifest['source_sha'], 'build_sha': manifest['snapshot_sha'],
+                       'run_id': run_id, 'run_attempt': attempt, 'event': 'workflow_dispatch', 'ref': 'refs/heads/main'}.items():
+        require(type(build_manifest.get(key)) is type(value) and build_manifest[key] == value,
+                'Candidate signed-build provenance differs: ' + key)
+    plan = {key: descriptor[key] for key in ('application_roles', 'instrumentation_roles', 'protocol')}
+    validate_artifacts(build_manifest, 'release', manifest['version'], plan, signing='stable')
+    validate_debug(Path(destination) / ARCHIVE_FILE, {key: build_manifest[key] for key in BINDING_KEYS}, build_manifest['debug_test_evidence'])
+    require(manifest.get('apks') == build_manifest['artifacts'] and build_manifest.get('test_scope') == 'full-debug-once',
+            'Candidate package inventory or full Debug test scope differs from the producing build')
+    package_identity(manifest['apks'], manifest['protocol'])
     return manifest, provenance
 
 

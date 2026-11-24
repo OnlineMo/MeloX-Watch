@@ -30,12 +30,19 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryTrack
 import io.github.onlinemo.meloxwatch.data.library.LibraryViewToken
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesState
 import io.github.onlinemo.meloxwatch.data.preferences.PreferencesWriteResult
+import io.github.onlinemo.meloxwatch.data.queue.QueueStoreException
+import io.github.onlinemo.meloxwatch.data.queue.QueueStoreIssue
 import io.github.onlinemo.meloxwatch.model.LibraryLayout
 import io.github.onlinemo.meloxwatch.model.LibraryListContext
 import io.github.onlinemo.meloxwatch.model.LibrarySort
 import io.github.onlinemo.meloxwatch.model.LibrarySortField
+import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.SongTapPolicy
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.model.UserPreferences
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueAction
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueCommand
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -48,6 +55,14 @@ import kotlinx.coroutines.launch
 enum class LibraryScreen { ALL, SEARCH, ALBUMS, ARTISTS, FOLDERS, RECENT, DETAIL, SOURCES, HISTORY, STATISTICS }
 
 data class LibrarySortEdit(val base: UserPreferences, val context: LibraryListContext, val sort: LibrarySort)
+
+/** Confirmation stays in memory; restoring navigation must never repeat a playback operation. */
+data class LibraryPlayDraft(
+    val command: LibraryQueueCommand,
+    val previousCount: Long,
+    val selectedTitle: String?,
+    val submittedAction: LibraryQueueAction? = null,
+)
 
 data class LibraryUiState(
     val screen: LibraryScreen = LibraryScreen.ALL,
@@ -78,8 +93,11 @@ data class LibraryUiState(
     val artworkRevision: Long = 0L,
     val visibleArtworkCount: Int = 0,
     val artworkSourceIssue: SourceReadIssue? = null,
+    val playPreparing: Boolean = false,
+    val playDraft: LibraryPlayDraft? = null,
+    val playIssue: LibraryIssue? = null,
 ) {
-    val canPlay: Boolean get() = !loading && !showingPreviousData && issue == null && page?.view?.totalCount?.let { it > 0L } == true
+    val canPlay: Boolean get() = !loading && !playPreparing && !showingPreviousData && issue == null && page?.view?.totalCount?.let { it > 0L } == true
     val hasPrevious: Boolean get() = !loading && !showingPreviousData && pageStart > 0L && page?.previousCursor != null
     val hasNext: Boolean get() = !loading && !showingPreviousData && page?.nextCursor != null
     val layout: LibraryLayout get() = preferences.libraryLayout
@@ -99,6 +117,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
     private var observers: Job? = null
     private var sortJob: Job? = null
     private var artworkJob: Job? = null
+    private var playJob: Job? = null
     private val refreshOwner = lazy { ArtworkRefreshController(app.artworks, app.localProviderIo, viewModelScope) }
     private val refresh get() = refreshOwner.value
     private var visibleArtwork = emptyList<LibraryTrack>()
@@ -113,6 +132,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
         refresh.onForeground()
         observers = viewModelScope.launch {
             try {
+                app.requireBackupStorageReady()
                 library.initialize()
                 val initial = app.preferences.state.first { it !is PreferencesState.Loading }
                 val initialPreferences = when (initial) {
@@ -179,6 +199,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
     }
 
     fun onHidden() {
+        cancelPlay()
         visible = false
         visibilityRevision += 1L
         generation += 1L
@@ -273,6 +294,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
 
     fun back(): Boolean {
         val state = mutableState.value
+        if (state.playDraft != null || state.playPreparing) { cancelPlay(); return true }
         if (state.sortEdit != null) { cancelSort(); return true }
         if (state.screen == LibraryScreen.DETAIL) {
             stopArtworkForNavigation()
@@ -319,6 +341,86 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
         val token = view ?: return
         val key = state.folderPage?.nextNodeId ?: return
         pageTask { generation -> val page = library.folders(token, state.folder?.nodeId, key); publish(generation) { it.copy(folderPage = page) } }
+    }
+
+    /**
+     * Freeze the visible source and observed queue once. Neither a later preference update nor a
+     * changed current item may silently change an already displayed confirmation.
+     */
+    fun preparePlay(
+        selected: TrackKey?,
+        explicitAction: LibraryQueueAction? = null,
+        onCommit: (LibraryQueueCommand) -> Unit,
+    ) {
+        val state = mutableState.value
+        val token = view ?: return
+        if (!visible || !state.canPlay || playJob?.isActive == true || state.page?.view != token) return
+        val requestGeneration = generation
+        mutableState.update { it.copy(playPreparing = true, playDraft = null, playIssue = null) }
+        playJob = viewModelScope.launch {
+            try {
+                val location = selected?.let { library.locate(token, it) ?: throw LibraryException(LibraryIssue.SOURCE_CHANGED) }
+                val queue = app.queues.snapshot()
+                if (!visible || requestGeneration != generation || view != token) return@launch
+                val action = explicitAction ?: if (selected == null) null else when (state.preferences.songTapPolicy) {
+                    SongTapPolicy.ASK -> null
+                    SongTapPolicy.INSERT_AND_PLAY -> LibraryQueueAction.INSERT_AND_PLAY
+                    SongTapPolicy.REPLACE_COMPLETE_LIST -> LibraryQueueAction.REPLACE_COMPLETE_LIST
+                }
+                val command = LibraryQueueCommand(
+                    viewId = token.viewId,
+                    operationId = "library:" + UUID.randomUUID(),
+                    expectedGenerationId = queue?.generationId,
+                    expectedQueueRevision = queue?.queueRevision ?: 0L,
+                    selected = selected,
+                    viewRevision = token.revision,
+                    viewCount = token.totalCount,
+                    selectedOriginalOrder = location?.ordinal,
+                    expectedCurrentEntryId = queue?.currentEntryId,
+                    mode = queue?.mode ?: QueueMode(),
+                    action = action ?: LibraryQueueAction.REPLACE_COMPLETE_LIST,
+                )
+                mutableState.update { it.copy(playPreparing = false, playDraft = LibraryPlayDraft(
+                    command, queue?.entryCount ?: 0L, location?.track?.title, action,
+                )) }
+                if (action != null) onCommit(command)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (visible && requestGeneration == generation) {
+                    val issue = when (error) {
+                        is LibraryException -> error.issue
+                        is QueueStoreException -> when (error.issue) {
+                            QueueStoreIssue.CONFLICT, QueueStoreIssue.SOURCE_CHANGED -> LibraryIssue.CONFLICT
+                            QueueStoreIssue.STORAGE_FULL -> LibraryIssue.STORAGE_FULL
+                            QueueStoreIssue.RECOVERY_REQUIRED, QueueStoreIssue.INCOMPLETE -> LibraryIssue.RECOVERY_REQUIRED
+                            else -> LibraryIssue.STORAGE_UNAVAILABLE
+                        }
+                        else -> LibraryIssue.STORAGE_UNAVAILABLE
+                    }
+                    mutableState.update { it.copy(playIssue = issue) }
+                }
+            } finally {
+                if (requestGeneration == generation) mutableState.update { it.copy(playPreparing = false) }
+            }
+        }
+    }
+
+    fun confirmPlay(action: LibraryQueueAction, onCommit: (LibraryQueueCommand) -> Unit) {
+        val draft = mutableState.value.playDraft ?: return
+        if (!visible || mutableState.value.playPreparing) return
+        val changesIntent = draft.submittedAction != null && draft.submittedAction != action
+        val command = draft.command.copy(
+            action = action,
+            operationId = if (changesIntent) "library:" + UUID.randomUUID() else draft.command.operationId,
+        )
+        mutableState.update { it.copy(playDraft = draft.copy(command = command, submittedAction = action), playIssue = null) }
+        onCommit(command)
+    }
+
+    fun cancelPlay() {
+        playJob?.cancel()
+        playJob = null
+        mutableState.update { it.copy(playPreparing = false, playDraft = null, playIssue = null) }
     }
 
     fun beginSort() {
@@ -421,6 +523,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
     }
 
     private fun stopArtworkForNavigation() {
+        cancelPlay()
         artworkJob?.cancel(); artworkJob = null
         visibleArtwork = emptyList()
         if (refreshOwner.isInitialized()) { refresh.onBackground(); if (visible) refresh.onForeground() }
@@ -428,6 +531,7 @@ class LibraryViewModel(application: Application, private val saved: SavedStateHa
     }
 
     private fun openView(anchor: TrackKey? = null) {
+        cancelPlay()
         generation += 1L
         val token = generation
         pageJob?.cancel(); pageJob = null

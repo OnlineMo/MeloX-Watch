@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lyrics_back">返回</string>
+    <string name="lyrics_settings">歌词设置</string>
+    <string name="lyrics_choose">选择歌词</string>
+    <string name="lyrics_retry">重新读取歌词</string>
+    <string name="lyrics_return_current">回到当前行</string>
+    <string name="lyrics_current_line">当前歌词行</string>
+    <string name="lyrics_loading">正在读取歌词…</string>
+    <string name="lyrics_missing">未找到歌词。</string>
+    <string name="lyrics_empty">此歌词来源没有可读文本。</string>
+    <string name="lyrics_plain_text">纯文本 · 可自由浏览，没有播放时间。</string>
+    <string name="lyrics_following">正在跟随播放</string>
+    <string name="lyrics_browsing">正在浏览歌词，可随时回到当前行。</string>
+    <string name="lyrics_permission_required">歌词读取权限已失效。</string>
+    <string name="lyrics_invalid_encoding">无法读取歌词编码。</string>
+    <string name="lyrics_input_limit">歌词超出安全读取上限，音频可继续播放。</string>
+    <string name="lyrics_unsupported">暂不支持此歌词格式。</string>
+    <string name="lyrics_read_failed">无法读取歌词，音频可继续播放。</string>
+    <string name="lyrics_play_at">从此处播放 · %1$s</string>
+    <string name="lyrics_line_play_unavailable">当前无法从此行开始播放。</string>
+    <string name="lyrics_play_warning">确认后会开始播放，即使当前音频已暂停。</string>
+    <string name="lyrics_ignored_markers">已忽略部分无效歌词标记，保留可读文本。</string>
+    <string name="lyrics_no_translation">此歌词没有可用的匹配译文。</string>
+    <string name="lyrics_partial_translation">部分歌词行没有匹配译文。</string>
+    <string name="lyrics_line_timing_only">此歌词仅提供行级时间。</string>
+</resources>

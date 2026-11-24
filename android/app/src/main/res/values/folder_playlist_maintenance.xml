@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="playlist_folder_maintenance_pending">Some folder playlists still need updating. Check their source and retry synchronization from the playlist.</string>
+</resources>

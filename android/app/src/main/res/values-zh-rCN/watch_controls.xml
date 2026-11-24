@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="watch_open_menu">打开菜单</string>
+    <string name="watch_swipe_queue">向右滑动查看队列。</string>
+    <string name="watch_playback_details">播放详情</string>
+    <string name="watch_device_checks">设备检查</string>
+</resources>

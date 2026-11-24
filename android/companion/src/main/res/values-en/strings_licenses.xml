@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="licenses">Open source licenses</string>
+    <string name="licenses_offline">Read the license and copyright text for the companion and its included components.</string>
+    <string name="license_entry">%1$s · %2$s</string>
+    <string name="license_details">Version %1$s · %2$s</string>
+    <string name="back_to_licenses">Back to license list</string>
+    <string name="licenses_loading">Reading local licenses…</string>
+    <string name="licenses_unavailable">The license text could not be read. Try again.</string>
+    <string name="licenses_cancelled">License reading cancelled.</string>
+    <string name="licenses_retry">Read again</string>
+</resources>

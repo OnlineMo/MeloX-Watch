@@ -15,12 +15,12 @@
     <string name="prefs_shape_auto">Automatic</string>
     <string name="prefs_shape_round">Round</string>
     <string name="prefs_shape_rectangle">Rectangular</string>
-    <string name="prefs_save_scope">Saving writes Resume position and Screen layout in the current format. Unrecognized old settings fields are replaced. Music and library are kept.</string>
+    <string name="prefs_save_scope">Save applies this settings draft, including playback, controls, appearance, artwork and library sorting. Unrecognized older settings are replaced. Music and library are kept.</string>
     <string name="prefs_save">Save</string>
     <string name="prefs_retry_save">Retry saving this draft</string>
     <string name="prefs_reset">Restore defaults</string>
     <string name="prefs_retry_reset">Retry restoring defaults</string>
-    <string name="prefs_reset_question">Restore Resume position to On and Screen layout to Automatic? Music, library and queue are kept.</string>
+    <string name="prefs_reset_question">Restore all playback, controls, appearance, artwork and library sorting settings to defaults? Changing the playback backend pauses audio. Music, playlists and queue are kept. Manage an active sleep timer separately.</string>
     <string name="prefs_reset_confirm">Confirm restore defaults</string>
     <string name="prefs_reset_cancel">Keep current settings</string>
     <string name="prefs_cancel_edit">Cancel editing</string>
@@ -46,7 +46,7 @@
     <string name="prefs_revision_exhausted">The settings history has reached its limit. Further changes cannot be saved; current values and your draft are kept.</string>
     <string name="prefs_saved">Settings saved.</string>
     <string name="prefs_unchanged">These settings were already saved. No new change was written.</string>
-    <string name="prefs_defaults_restored">Defaults restored for Resume position and Screen layout. Music, library and queue are kept.</string>
-    <string name="prefs_defaults_already_set">These settings already use their defaults. Music, library and queue are kept.</string>
+    <string name="prefs_defaults_restored">All app settings restored to defaults. Music, playlists and queue are kept.</string>
+    <string name="prefs_defaults_already_set">All app settings already use their defaults. Music, playlists and queue are kept.</string>
     <string name="prefs_defaults_cancelled">Restoring defaults was cancelled. Settings are unchanged.</string>
 </resources>

@@ -17,6 +17,12 @@ import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapLease
+import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapOwner
+import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapReservation
+import io.github.onlinemo.meloxwatch.data.themes.ThemeException
+import io.github.onlinemo.meloxwatch.data.themes.ThemeIssue
+import io.github.onlinemo.meloxwatch.data.storage.StorageCategory
 import java.io.EOFException
 import java.io.File
 import java.io.FileNotFoundException
@@ -34,9 +40,9 @@ class LocalArtworkRepository(
     context: Context,
     private val io: LocalProviderIo,
     private val validateRead: suspend (LocalReadDescriptor) -> LocalReadDescriptor,
+    private val bitmaps: ThemeBitmapOwner = ThemeBitmapOwner(),
 ) {
     private val sourceReader = AndroidArtworkReader(context)
-    private val memory = ArtworkMemoryCache()
     private val disk = ArtworkDiskCache(File(context.cacheDir, "artwork-v1"))
     private val gate = ArtworkRequestGate()
     private val session = UUID.randomUUID().toString()
@@ -50,6 +56,18 @@ class LocalArtworkRepository(
         priority: ArtworkPriority = ArtworkPriority.VISIBLE,
         refresh: Boolean = false,
     ): ArtworkLease? {
+        val owned = acquireOwned(descriptor, path, targetPx, priority, refresh) ?: return null
+        return ArtworkLease(owned.bitmap, owned.key, owned::close)
+    }
+
+    /** Background covers and foreground artwork retain leases from the same injected owner. */
+    suspend fun acquireOwned(
+        descriptor: LocalReadDescriptor,
+        path: ArtworkReadPath,
+        targetPx: Int = 96,
+        priority: ArtworkPriority = ArtworkPriority.CURRENT,
+        refresh: Boolean = false,
+    ): ThemeBitmapLease? {
         require(targetPx in 1..ArtworkLimits.OUTPUT_EDGE)
         currentCoroutineContext().ensureActive()
         val baseKey = artworkKey(descriptor, path, targetPx)
@@ -57,23 +75,23 @@ class LocalArtworkRepository(
         val key = if (descriptor.providerContentToken != null || descriptor.verifiedContentToken != null) baseKey else
             hashKey("$baseKey:$session:${SystemClock.elapsedRealtime() / UNKNOWN_CONTENT_MS}")
         if (!refresh) {
-            memory.acquire(key)?.let { return it }
+            bitmaps.acquire(key)?.let { return it }
             if (isMissing(key)) return null
         }
         val ticket = gate.enter(priority)
-        var decoded: Bitmap? = null
+        var decoded: PendingArtwork? = null
         try {
             currentCoroutineContext().ensureActive()
             if (!refresh) {
-                memory.acquire(key)?.let { return it }
+                bitmaps.acquire(key)?.let { return it }
                 if (isMissing(key)) return null
             }
             if (!refresh) decoded = provider {
-                io.read(abandoned = { it?.recycle() }) { signal ->
+                io.read(abandoned = { it?.close() }) { signal ->
                     val cached = try { disk.load(key, signal) } catch (error: android.os.OperationCanceledException) { throw error }
                         catch (_: Exception) { null }
                     if (cached == null) return@read null
-                    try { BoundedArtworkDecoder.decode(cached, targetPx, signal) }
+                    try { decodeOwned(cached, targetPx, signal) }
                     catch (error: ArtworkException) {
                         if (error.issue == ArtworkIssue.LOW_MEMORY) throw error
                         try { disk.discard(key, signal) } catch (_: Exception) { }
@@ -84,13 +102,13 @@ class LocalArtworkRepository(
             if (decoded == null) {
                 val verified = validate(descriptor)
                 decoded = provider {
-                    io.read(abandoned = { it?.recycle() }) { signal ->
+                    io.read(abandoned = { it?.close() }) { signal ->
                         val encoded = when (path) {
                             ArtworkReadPath.SYSTEM_THUMBNAIL -> sourceReader.thumbnail(verified, targetPx, signal)
                                 ?: sourceReader.embedded(verified, signal)
                             ArtworkReadPath.LOCAL_EXTRACT -> sourceReader.embedded(verified, signal)
                         } ?: return@read null
-                        BoundedArtworkDecoder.decode(encoded.bytes, targetPx, signal, encoded.orientation)
+                        decodeOwned(encoded.bytes, targetPx, signal, encoded.orientation)
                     }
                 }
                 // Validation acquires the shared channel after extraction, never recursively inside io.read.
@@ -99,14 +117,16 @@ class LocalArtworkRepository(
                 currentCoroutineContext().ensureActive()
                 val fresh = decoded
                 if (fresh == null) { rememberMissing(key); return null }
-                persist(key, fresh)
+                persist(key, fresh.bitmap)
             }
             currentCoroutineContext().ensureActive()
-            val bitmap = requireNotNull(decoded)
-            val lease = memory.putAndAcquire(key, bitmap)
+            val ready = requireNotNull(decoded)
+            val lease = ready.publish(bitmaps, key)
             decoded = null
             synchronized(missingLock) { noArtwork.remove(key) }
             return lease
+        } catch (error: ThemeException) {
+            throw ArtworkException(if (error.issue == ThemeIssue.BUSY) ArtworkIssue.BUSY else ArtworkIssue.INVALID_IMAGE, error)
         } catch (error: SourceReadException) {
             throw ArtworkException(when (error.issue) {
                 SourceReadIssue.BUSY -> ArtworkIssue.BUSY
@@ -115,13 +135,97 @@ class LocalArtworkRepository(
                 else -> ArtworkIssue.SOURCE_UNAVAILABLE
             }, error)
         } finally {
-            decoded?.recycle()
+            decoded?.close()
             try { withContext(NonCancellable) { io.awaitIdle() } }
             finally { gate.exit(ticket) }
         }
     }
 
-    fun trimUnused() { memory.trimUnused() }
+    fun trimUnused() { bitmaps.trimUnused() }
+
+    suspend fun measureDiskCache(): StorageCategory = diskCommand { disk.measure(it) }
+    suspend fun clearDiskCache(): StorageCategory = diskCommand { signal ->
+        disk.clear(signal).also { synchronized(missingLock) { noArtwork.clear() } }
+    }
+
+    private suspend fun diskCommand(action: (CancellationSignal) -> StorageCategory): StorageCategory {
+        val ticket = gate.enter(ArtworkPriority.VISIBLE)
+        try { return provider { io.read(action = action) } }
+        finally { try { withContext(NonCancellable) { io.awaitIdle() } } finally { gate.exit(ticket) } }
+    }
+
+    /** Online thumbnails share the existing gate, bitmap owner and 32 MiB disk LRU; this method never accesses HTTP. */
+    internal suspend fun derived(key: String, targetPx: Int, encoded: ByteArray? = null): ThemeBitmapLease? {
+        require(key.matches(Regex("[0-9a-f]{64}")) && targetPx in 1..ArtworkLimits.OUTPUT_EDGE)
+        val ticket = gate.enter(ArtworkPriority.VISIBLE)
+        var decoded: PendingArtwork? = null
+        try {
+            currentCoroutineContext().ensureActive()
+            bitmaps.acquire(key)?.let { return it }
+            decoded = provider {
+                io.read(abandoned = { it?.close() }) { signal ->
+                    val bytes = encoded ?: try { disk.load(key, signal) }
+                        catch (cancelled: android.os.OperationCanceledException) { throw cancelled }
+                        catch (_: Exception) { null }
+                    bytes?.let {
+                        try { decodeOwned(it, targetPx, signal) }
+                        catch (error: ArtworkException) {
+                            if (encoded != null || error.issue == ArtworkIssue.LOW_MEMORY) throw error
+                            try { disk.discard(key, signal) }
+                            catch (cancelled: android.os.OperationCanceledException) { throw cancelled }
+                            catch (_: Exception) { }
+                            null
+                        }
+                    }
+                }
+            }
+            val ready = decoded ?: return null
+            if (encoded != null) persist(key, ready.bitmap)
+            currentCoroutineContext().ensureActive()
+            return ready.publish(bitmaps, key).also { decoded = null }
+        } finally {
+            decoded?.close()
+            try { withContext(NonCancellable) { io.awaitIdle() } }
+            finally { gate.exit(ticket) }
+        }
+    }
+
+    private fun decodeOwned(bytes: ByteArray, targetPx: Int, signal: CancellationSignal, orientation: Int = 0): PendingArtwork {
+        // Rotation can briefly own both source and output. Reserve before BitmapFactory/Matrix.
+        val reservation = bitmaps.reserve(2L * ArtworkLimits.BITMAP_BYTES)
+        var decoded: Bitmap? = null
+        try {
+            val bitmap = BoundedArtworkDecoder.decode(bytes, targetPx, signal, orientation)
+            decoded = bitmap
+            signal.throwIfCanceled()
+            reservation.resize(bitmap.allocationByteCount.toLong())
+            val result = PendingArtwork(bitmap, reservation)
+            decoded = null
+            return result
+        } catch (error: Throwable) {
+            decoded?.recycle()
+            reservation.close()
+            throw error
+        }
+    }
+
+    private class PendingArtwork(
+        bitmap: Bitmap,
+        private val reservation: ThemeBitmapReservation,
+    ) : AutoCloseable {
+        private var held: Bitmap? = bitmap
+        val bitmap: Bitmap get() = checkNotNull(held)
+        fun publish(owner: ThemeBitmapOwner, key: String): ThemeBitmapLease {
+            val result = owner.publish(key, bitmap, reservation)
+            held = null
+            return result
+        }
+        override fun close() {
+            // A late resume cancellation may close on Main; retire memory without native work.
+            held = null
+            reservation.close()
+        }
+    }
 
     private suspend fun validate(descriptor: LocalReadDescriptor): LocalReadDescriptor {
         val verified = provider { validateRead(descriptor) }

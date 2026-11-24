@@ -82,14 +82,12 @@ internal object LibraryCodec {
         put("album", value.album); put("albumArtist", value.albumArtist); put("durationMs", value.durationMs)
         put("discNumber", value.discNumber); put("trackNumber", value.trackNumber); put("compilation", value.compilation)
         put("mimeType", value.mimeType); put("parserVersion", value.parserVersion)
+        value.codecParameters?.let { put("codecParameters", codecParameters(it)) }
     }.toString()
 
-    fun metadata(value: String): LocalAudioMetadata = JSONObject(value).let {
-        require(it.getInt("schema") == 1)
-        LocalAudioMetadata(it.nullString("title"), it.nullString("artist"), strings(it.getJSONArray("artists").toString()),
-            it.nullString("album"), it.nullString("albumArtist"), it.nullLong("durationMs"), it.nullInt("discNumber"),
-            it.nullInt("trackNumber"), it.getBoolean("compilation"), it.nullString("mimeType"), it.getInt("parserVersion"))
-    }
+    fun metadata(value: String): LocalAudioMetadata = LibraryMetadataJson.metadata(value)
+
+    private fun codecParameters(value: LocalCodecParameters) = JSONObject(LocalCodecParametersCodec.encode(value))
 
     fun outcome(value: MetadataOutcome): String = JSONObject().apply {
         put("schema", 1); put("objectId", value.objectId); put("metadata", value.metadata?.let(::metadata))
@@ -97,17 +95,12 @@ internal object LibraryCodec {
         put("verifiedContentToken", value.verifiedContentToken)
     }.toString()
 
-    fun outcome(value: String): MetadataOutcome = JSONObject(value).let {
-        require(it.getInt("schema") == 1)
-        MetadataOutcome(it.getString("objectId"), it.nullString("metadata")?.let(::metadata),
-            it.nullString("issue")?.let(SourceReadIssue::valueOf), it.nullString("verifiedContentToken"))
-    }
+    fun outcome(value: String): MetadataOutcome = LibraryMetadataJson.outcome(value)
 
     fun strings(value: List<String>): String = JSONArray(value).toString()
     fun strings(value: String): List<String> = JSONArray(value).let { j -> List(j.length()) { j.getString(it) } }
     private fun JSONObject.nullString(name: String): String? = if (!has(name) || isNull(name)) null else getString(name)
     private fun JSONObject.nullLong(name: String): Long? = if (!has(name) || isNull(name)) null else getLong(name)
-    private fun JSONObject.nullInt(name: String): Int? = if (!has(name) || isNull(name)) null else getInt(name)
     private fun JSONObject.nullBoolean(name: String): Boolean? = if (!has(name) || isNull(name)) null else getBoolean(name)
 }
 
@@ -177,7 +170,8 @@ internal fun LibraryScanEntity.withCoverage(value: ScanCoverage) = copy(enumerat
     excludedSubtrees = value.excludedSubtrees)
 
 internal fun LibraryTrackVersionEntity.metadata() = LocalAudioMetadata(title, artist, LibraryCodec.strings(artists), album, albumArtist,
-    durationMs, discNumber, trackNumber, compilation, mimeType, parserVersion)
+    durationMs, discNumber, trackNumber, compilation, mimeType, parserVersion,
+    codecParameters?.let(LocalCodecParametersCodec::decode))
 
 internal fun LibraryRowRecord.reference(): LocalLocationReference? {
     val locationId = selectedLocationId ?: return null
@@ -195,8 +189,8 @@ internal fun LibraryRowRecord.reference(): LocalLocationReference? {
 
 internal fun LibraryRowRecord.model() = LibraryTrack(TrackKey(track.providerId, track.trackId), track.displayTitle, track.filename,
     track.metadata(), LibraryAvailability.entries.getOrNull(availabilityRank) ?: throw LibraryException(LibraryIssue.RECOVERY_REQUIRED),
-    track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, track.albumKey, reference(), selectedSourceId,
-    selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs)
+    track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, displayAlbumKey, reference(), selectedSourceId,
+    selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs, displayArtist, displayAlbum)
 
 internal fun LibraryRowRecord.cursor(view: LibraryViewToken) = LibraryCursor(view.viewId, view.revision, view.sortRuleVersion,
     missingRank, nullRank, sortKey, track.providerId, track.trackId)

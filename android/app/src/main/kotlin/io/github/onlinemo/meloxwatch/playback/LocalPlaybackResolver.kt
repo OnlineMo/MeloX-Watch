@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.playback
 
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
+import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
@@ -15,9 +17,15 @@ class LocalPlaybackResolver(private val app: MeloXApplication) {
     suspend fun resolve(entry: QueueEntry): QueueEntry {
         val location = entry.location ?: throw failure(QueuePlaybackIssue.LOCATION_MISSING, entry)
         try {
-            // Preview observations are not transported as durable content proof by this command.
-            val descriptor = if (location.contentRevision == 0L) null else
+            app.fileOperations.assertPlaybackReadable()
+            // 预览观察不能由普通播放命令升级为持久内容证明。
+            val descriptor = if (location.contentRevision == 0L) null else try {
                 app.library.resolveLocalRead(entry.trackKey, location.locationId, location.contentRevision)
+            } catch (error: LibraryException) {
+                if (error.issue != LibraryIssue.SOURCE_CHANGED) throw error
+                // 持久队列实例可以保留已忽略曲目；仍须校验确切位置、内容代次、来源及授权。
+                app.fileOperations.retainedRead(entry.trackKey, location.locationId, location.contentRevision) ?: throw error
+            }
             repeat(3) { attempt ->
                 currentCoroutineContext().ensureActive()
                 try {
@@ -34,7 +42,18 @@ class LocalPlaybackResolver(private val app: MeloXApplication) {
             }
             throw failure(QueuePlaybackIssue.SOURCE_UNAVAILABLE, entry)
         } catch (error: CancellationException) { throw error }
-        catch (error: LibraryException) {
+        catch (error: FileOperationException) {
+            val issue = when (error.issue) {
+                FileOperationIssue.BUSY -> QueuePlaybackIssue.BUSY
+                FileOperationIssue.PERMISSION_DENIED, FileOperationIssue.PERMISSION_REVOKED -> QueuePlaybackIssue.PERMISSION_DENIED
+                FileOperationIssue.FILE_MISSING -> QueuePlaybackIssue.FILE_MISSING
+                FileOperationIssue.SOURCE_CHANGED, FileOperationIssue.INCOMPLETE_SCOPE -> QueuePlaybackIssue.SOURCE_CHANGED
+                FileOperationIssue.STORAGE_FULL -> QueuePlaybackIssue.STORAGE_FULL
+                FileOperationIssue.RECOVERY_REQUIRED, FileOperationIssue.PLAYBACK_RELEASE_UNCONFIRMED -> QueuePlaybackIssue.RECOVERY_REQUIRED
+                else -> QueuePlaybackIssue.SOURCE_UNAVAILABLE
+            }
+            throw failure(issue, entry)
+        } catch (error: LibraryException) {
             val issue = when (error.issue) {
                 LibraryIssue.PERMISSION_REVOKED -> QueuePlaybackIssue.PERMISSION_DENIED
                 LibraryIssue.FILE_MISSING -> QueuePlaybackIssue.FILE_MISSING

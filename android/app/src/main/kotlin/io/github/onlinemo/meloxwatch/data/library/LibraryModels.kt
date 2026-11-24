@@ -9,6 +9,7 @@ object LibraryLimits {
     const val PAGE_SIZE = 100
     const val UI_VIEWS = 3
     const val QUEUE_VIEWS = 1
+    const val TRANSFER_VIEWS = 4
     const val VIEW_LEASE_MS = 10 * 60 * 1000L
     const val SORT_RULE_VERSION = 1
     const val SHORT_AUDIO_MS = 60_000L
@@ -27,6 +28,7 @@ data class LocalAudioMetadata(
     val compilation: Boolean = false,
     val mimeType: String? = null,
     val parserVersion: Int = 1,
+    val codecParameters: LocalCodecParameters? = null,
 ) {
     init {
         require(durationMs == null || durationMs > 0L)
@@ -39,9 +41,28 @@ data class LocalAudioMetadata(
     }
 }
 
+/** Observed input and converted PCM parameters; this does not declare a verified device/backend. */
+data class LocalCodecParameters(
+    val container: String,
+    val encoding: String,
+    val inputSampleRateHz: Int,
+    val inputBitsPerSample: Int,
+    val channels: Int,
+    val pcmSampleRateHz: Int,
+    val pcmBitsPerSample: Int,
+    val version: Int? = null,
+    val compressionLevel: Int? = null,
+) {
+    init {
+        require(container.isNotBlank() && container.length <= 64 && encoding.isNotBlank() && encoding.length <= 64)
+        require(inputSampleRateHz > 0 && pcmSampleRateHz > 0 && inputBitsPerSample in 1..64 && pcmBitsPerSample in 1..64)
+        require(channels in 1..8 && (version == null || version > 0) && (compressionLevel == null || compressionLevel > 0))
+    }
+}
+
 enum class LibrarySourceState { ACTIVE, NEEDS_AUTHORIZATION, UNAVAILABLE, REMOVED }
 enum class LibraryAvailability { AVAILABLE, UNKNOWN, NEEDS_AUTHORIZATION, UNAVAILABLE, MISSING, REMOVED }
-enum class LibraryViewOwner { UI, QUEUE }
+enum class LibraryViewOwner { UI, QUEUE, TRANSFER }
 typealias LibrarySortField = io.github.onlinemo.meloxwatch.model.LibrarySortField
 typealias LibrarySort = io.github.onlinemo.meloxwatch.model.LibrarySort
 enum class LibraryGroupKind { ALBUM, ARTIST }
@@ -78,10 +99,15 @@ data class LibraryQuery(
     val artistKey: String? = null,
     val addedSinceEpochMs: Long? = null,
     val includeHidden: Boolean = false,
+    val folderSubtree: Boolean = false,
+    val relativePathKeyword: String? = null,
+    val readableOnly: Boolean = false,
 ) {
     init {
         require(search.length <= 4096)
         require(folderNodeId == null || sourceId != null)
+        require(!folderSubtree || folderNodeId != null)
+        require(relativePathKeyword == null || relativePathKeyword.isNotBlank() && relativePathKeyword.length <= 4096)
     }
 }
 
@@ -126,6 +152,8 @@ data class LibraryTrack(
     val nodeId: String?,
     val playCount: Long,
     val listeningMs: Long,
+    val displayArtist: String? = metadata.artists.firstOrNull() ?: metadata.artist,
+    val displayAlbum: String? = metadata.album,
 )
 
 data class LibraryPage(
