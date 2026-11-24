@@ -206,9 +206,9 @@ class RoomCompanionTransferBackend(
             TransferCatalogKind.TRACKS, TransferCatalogKind.ALBUM_TRACKS, TransferCatalogKind.ARTIST_TRACKS -> {
                 val after = (checkpoint.position as? Position.Tracks)?.cursor
                 if (checkpoint.position != null && after == null) fail(TransferIssue.CONFLICT)
-                val records = dao.rows(LibrarySql.rows(view, after, limit))
+                val records = library.readOrderedRowsUnlocked(view, after, limit)
                 val last = records.lastOrNull()?.cursor(view)
-                val next = last?.takeIf { dao.scalar(LibrarySql.hasBeyond(view, it, before = false)) != 0L }
+                val next = last?.takeIf { library.hasRowsBeyondUnlocked(view, it, before = false) }
                 PageSlice(records.map(::trackRow), next?.let { Position.Tracks(it) })
             }
             TransferCatalogKind.ALBUMS, TransferCatalogKind.ARTISTS -> {

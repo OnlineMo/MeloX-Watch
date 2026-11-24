@@ -228,7 +228,7 @@ class DataStoreUserPreferencesRepository internal constructor(
     private suspend fun completedUpdate(transform: (Preferences) -> Preferences): Preferences {
         val caller = currentCoroutineContext()
         caller.ensureActive()
-        // The transform keeps the caller Job so cancellation before COMMIT can abort it.
+        // 变换保留原caller Job，COMMIT之前的取消仍能中止写入。
         val attempt = runCatching {
             dataStore.updateData { stored ->
                 caller.ensureActive()
@@ -236,8 +236,8 @@ class DataStoreUserPreferencesRepository internal constructor(
             }
         }
         val drainFailure = if (attempt.exceptionOrNull() is CancellationException || !caller.isActive) {
-            // A cancelled ack can precede actor-owned disk IO. A later identity update is the
-            // same actor's serial completion fence; retain the mutex/backup admission until then.
+            // 取消ack可能早于actor的实际写盘退出；同一actor后续identity更新形成串行fence。
+            // 该边界前继续持有mutex与备份admission。
             withContext(NonCancellable) { runCatching { dataStore.updateData { it } }.exceptionOrNull() }
         } else null
         try { caller.ensureActive() }

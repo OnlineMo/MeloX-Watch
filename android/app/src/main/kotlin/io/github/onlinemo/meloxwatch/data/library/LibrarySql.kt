@@ -149,18 +149,24 @@ internal object LibrarySql {
     }
 
     private fun cte(view: LibraryViewToken, includeArtists: Boolean = true,
-        selectedKeys: List<TrackKey>? = null): Pair<String, MutableList<Any?>> {
+        selectedKeys: List<TrackKey>? = null, trackCursor: LibraryCursor? = null,
+        beforeCursor: Boolean = false): Pair<String, MutableList<Any?>> {
+        require(selectedKeys == null || trackCursor == null)
         val revision = view.revision
         val args = mutableListOf<Any?>()
         if (view.query.relativePathKeyword != null && view.query.sourceId != null) args += view.query.sourceId
-        val selectedTracks = selectedKeys?.joinToString(" OR ") { key ->
-            args += key.providerId
-            args += key.trackId
-            "(t.providerId = ? AND t.trackId = ?)"
-        }?.ifEmpty { "0" }
+        val selectedTracks = when {
+            selectedKeys != null -> selectedKeys.joinToString(" OR ") { key ->
+                args += key.providerId
+                args += key.trackId
+                "(t.providerId = ? AND t.trackId = ?)"
+            }.ifEmpty { "0" }
+            trackCursor != null -> checkNotNull(trackCursorSelection(view, trackCursor, beforeCursor, args))
+            else -> null
+        }
         val aliases = mutableListOf(valid("av", revision))
-        if (selectedKeys != null) {
-            // 精确标识页只需这些曲目的全部有效位置；授权、排除和最优别名仍在原关系中决定。
+        if (selectedKeys != null || trackCursor != null) {
+            // 候选标识保留全部有效位置；授权、排除和最优别名仍在原关系中决定。
             aliases += """av.locationId IN (SELECT relation.locationId FROM local_track_locations relation
                 WHERE ${valid("relation", revision)}
                     AND relation.trackId IN (SELECT trackId FROM scanned_tracks))""".trimIndent()
@@ -263,6 +269,42 @@ internal object LibrarySql {
         LibrarySortField.LISTENING_TIME -> Triple("printf('%019d', effectiveListeningMs)", "0", "''")
     }
 
+    /** 显示覆盖不会改变这些排序列；艺人和专辑排序继续使用完整查询。 */
+    private fun trackCursorColumns(view: LibraryViewToken): Pair<String, String>? = when (view.sort.field) {
+        LibrarySortField.TITLE -> "boundaryTrack.titleKey" to "0"
+        LibrarySortField.FILENAME_NATURAL -> "boundaryTrack.filenameKey" to "0"
+        LibrarySortField.DURATION -> "printf('%019d', COALESCE(boundaryTrack.durationMs, 0))" to
+            "CASE WHEN boundaryTrack.durationMs IS NULL THEN 1 ELSE 0 END"
+        LibrarySortField.ADDED -> "printf('%019d', boundaryTrack.firstAddedSequence)" to "0"
+        LibrarySortField.ALBUM_TRACK -> "printf('%010d:%010d', COALESCE(boundaryTrack.discNumber, 0), " +
+            "COALESCE(boundaryTrack.trackNumber, 0))" to
+            "CASE WHEN boundaryTrack.trackNumber IS NULL THEN 1 ELSE 0 END"
+        LibrarySortField.PLAY_COUNT -> "printf('%019d', CASE WHEN boundaryTrack.statisticsEpoch = ${view.statisticsEpoch} " +
+            "THEN boundaryTrack.playCount ELSE 0 END)" to "0"
+        LibrarySortField.LISTENING_TIME -> "printf('%019d', CASE WHEN boundaryTrack.statisticsEpoch = ${view.statisticsEpoch} " +
+            "THEN boundaryTrack.listeningMs ELSE 0 END)" to "0"
+        LibrarySortField.ARTIST, LibrarySortField.ALBUM -> null
+    }
+
+    /**
+     * 原始元组只选候选标识，不判断可用性。外层按 trackId 保留全部有效版本，
+     * 让旧有效版本的艺人、显示覆盖和搜索关系继续参与；完整边界仍在 ordered 上应用。
+     */
+    private fun trackCursorSelection(view: LibraryViewToken, cursor: LibraryCursor, before: Boolean,
+        args: MutableList<Any?>): String? {
+        val (sortKey, nullRank) = trackCursorColumns(view) ?: return null
+        val fixed = if (before) "<" else ">"
+        val primary = if (view.sort.descending xor before) "<" else ">"
+        args.addAll(listOf(cursor.nullRank, cursor.nullRank, cursor.sortKey, cursor.sortKey,
+            cursor.providerId, cursor.providerId, cursor.trackId))
+        return """t.trackId IN (SELECT boundaryTrack.trackId FROM local_track_versions boundaryTrack
+            WHERE ${valid("boundaryTrack", view.revision)} AND boundaryTrack.member = 1 AND
+                ($nullRank $fixed ? OR ($nullRank = ? AND
+                    ($sortKey $primary ? OR ($sortKey = ? AND
+                        (boundaryTrack.providerId $fixed ? OR
+                            (boundaryTrack.providerId = ? AND boundaryTrack.trackId $fixed ?)))))))""".trimIndent()
+    }
+
     private fun ordering(view: LibraryViewToken, reverse: Boolean = false): String {
         val fixed = if (reverse) "DESC" else "ASC"
         val primary = if (view.sort.descending xor reverse) "DESC" else "ASC"
@@ -303,6 +345,19 @@ internal object LibrarySql {
         args += limit
         return raw("$sql SELECT * FROM ordered $where ORDER BY ${ordering(view, before)} LIMIT ?", args.toTypedArray())
     }
+    /** 结果是原查询的子集；跨可用性分区的完整前缀由仓库核验。 */
+    fun rowsForTrackCursor(view: LibraryViewToken, cursor: LibraryCursor, limit: Int,
+        before: Boolean = false): RoomRawQuery? {
+        require(limit in 1..LibraryLimits.PAGE_SIZE)
+        if (trackCursorColumns(view) == null) return null
+        val full = artistsBeforeWindow(view)
+        val (sql, args) = cte(view, includeArtists = full, trackCursor = cursor, beforeCursor = before)
+        val where = "WHERE ${boundary(view, cursor, before, args)}"
+        if (!full) return projectedWindow(view, sql, args, where, "ORDER BY ${ordering(view, before)}", limit)
+        args += limit
+        return raw("$sql SELECT * FROM ordered $where ORDER BY ${ordering(view, before)} LIMIT ?", args.toTypedArray())
+    }
+
     fun row(view: LibraryViewToken, providerId: String, trackId: String): RoomRawQuery {
         val full = artistsBeforeWindow(view)
         val selectedKeys = if (providerId.isNotBlank() && trackId.isNotBlank()) {
@@ -359,6 +414,15 @@ internal object LibrarySql {
         val (sql, args) = cte(view, includeArtists = artistsBeforeWindow(view))
         return raw("$sql SELECT EXISTS (SELECT 1 FROM ordered WHERE ${boundary(view, cursor, before, args)} LIMIT 1)", args.toTypedArray())
     }
+    /** 候选存在即可证明原结果存在；候选为空不能代替原存在性查询。 */
+    fun hasBeyondForTrackCursor(view: LibraryViewToken, cursor: LibraryCursor, before: Boolean): RoomRawQuery? {
+        if (trackCursorColumns(view) == null) return null
+        val (sql, args) = cte(view, includeArtists = artistsBeforeWindow(view),
+            trackCursor = cursor, beforeCursor = before)
+        return raw("$sql SELECT EXISTS (SELECT 1 FROM ordered WHERE ${boundary(view, cursor, before, args)} LIMIT 1)",
+            args.toTypedArray())
+    }
+
     fun groups(view: LibraryViewToken, kind: LibraryGroupKind, after: String?, limit: Int): RoomRawQuery {
         val (sql, args) = cte(view)
         val group = groupSelection(view, kind, args)

@@ -119,6 +119,8 @@ class ProbeFontPickerReturnHostTest {
                 shown.value = true
                 pageEpoch.value = Any()
             }
+            // PAUSED 主循环须在可见性恢复后排空消息。waitUntil 只推进 Compose 时钟。
+            compose.waitForIdle()
             compose.waitUntil(5_000L) { entered.isCompleted && last.get()?.editorState?.working == true }
             compose.waitForIdle()
             assertNotSame(oldHost, last.get())

@@ -146,7 +146,7 @@ class RoomLocalLibraryRepository(
         database.withPreservedTransaction {
             checkPageInput(view, after, limit)
             // 合法 after 已在同一事务中核验，它证明上一页存在；查询窗口仍保持原 limit。
-            val rows = dao.rows(LibrarySql.rows(view, after, limit))
+            val rows = readOrderedRowsUnlocked(view, after, limit)
             pageResult(view, rows, moreBefore = after != null, moreAfter = null)
         }
     }
@@ -154,7 +154,7 @@ class RoomLocalLibraryRepository(
     override suspend fun previousPage(view: LibraryViewToken, before: LibraryCursor, limit: Int): LibraryPage = access {
         database.withPreservedTransaction {
             checkPageInput(view, before, limit)
-            val rows = dao.rows(LibrarySql.rows(view, before, limit, before = true)).asReversed()
+            val rows = readOrderedRowsUnlocked(view, before, limit, before = true).asReversed()
             pageResult(view, rows, moreBefore = null, moreAfter = true)
         }
     }
@@ -752,6 +752,51 @@ class RoomLocalLibraryRepository(
         }
     }
 
+    /**
+     * 调用方已持有库锁、核验视图并进入真实 writer。候选和完整回退共用该事务，
+     * 中途不释放连接、不缓存失败候选；曲目窗口始终不超过原 limit。
+     */
+    internal suspend fun readOrderedRowsUnlocked(view: LibraryViewToken, cursor: LibraryCursor?,
+        limit: Int, before: Boolean = false): List<LibraryRowRecord> {
+        currentCoroutineContext().ensureActive()
+        if (!database.hasCurrentWriterTransaction()) fail(LibraryIssue.RECOVERY_REQUIRED)
+        pageLimit(limit)
+        if (cursor != null) {
+            val candidate = readTrackCursorWindowUnlocked(view, cursor, limit, before)
+            if (candidate != null) return candidate
+        }
+        currentCoroutineContext().ensureActive()
+        return dao.rows(LibrarySql.rows(view, cursor, limit, before))
+    }
+
+    private suspend fun readTrackCursorWindowUnlocked(view: LibraryViewToken, cursor: LibraryCursor,
+        limit: Int, before: Boolean): List<LibraryRowRecord>? {
+        val query = LibrarySql.rowsForTrackCursor(view, cursor, limit, before) ?: return null
+        val rows = dao.rows(query)
+        currentCoroutineContext().ensureActive()
+        // after 不可用行或 before 可用行时，原始元组边界是所有原结果的必要条件。
+        val onePartition = if (before) cursor.missingRank == 0 else cursor.missingRank == 1
+        if (onePartition) return rows
+        // 跨分区时，满窗且同分区证明完整原前缀；不足或夹带另一分区必须回退。
+        if (rows.size == limit && rows.all { it.missingRank == cursor.missingRank }) return rows
+        return null
+    }
+
+    /** 与读窗共用已核 writer；只有候选为真可以省去完整存在性查询。 */
+    internal suspend fun hasRowsBeyondUnlocked(view: LibraryViewToken, cursor: LibraryCursor,
+        before: Boolean): Boolean {
+        currentCoroutineContext().ensureActive()
+        if (!database.hasCurrentWriterTransaction()) fail(LibraryIssue.RECOVERY_REQUIRED)
+        val query = LibrarySql.hasBeyondForTrackCursor(view, cursor, before)
+        if (query != null) {
+            val found = dao.scalar(query) != 0L
+            currentCoroutineContext().ensureActive()
+            if (found) return true
+        }
+        currentCoroutineContext().ensureActive()
+        return dao.scalar(LibrarySql.hasBeyond(view, cursor, before)) != 0L
+    }
+
     /** Called only by transferTransaction; it must not reacquire the library mutex. */
     internal suspend fun openTransferViewUnlocked(query: LibraryQuery = LibraryQuery(),
         sort: LibrarySort = LibrarySort()): LibraryViewToken {
@@ -939,10 +984,10 @@ class RoomLocalLibraryRepository(
         moreBefore: Boolean?, moreAfter: Boolean?): LibraryPage {
         val first = rows.firstOrNull()?.cursor(view)
         val last = rows.lastOrNull()?.cursor(view)
-        // 未知方向仍用原存在性查询；真实已核验的游标只省去相反方向的重复探测。
+        // 未知方向保留完整存在性回退；真实已核验的游标省去相反方向的重复探测。
         return LibraryPage(view, rows.map { it.model() },
-            last?.takeIf { moreAfter ?: (dao.scalar(LibrarySql.hasBeyond(view, it, before = false)) != 0L) },
-            first?.takeIf { moreBefore ?: (dao.scalar(LibrarySql.hasBeyond(view, it, before = true)) != 0L) })
+            last?.takeIf { moreAfter ?: hasRowsBeyondUnlocked(view, it, before = false) },
+            first?.takeIf { moreBefore ?: hasRowsBeyondUnlocked(view, it, before = true) })
     }
     private suspend fun cursorBefore(view: LibraryViewToken, cursor: LibraryCursor): LibraryCursor? = dao.rows(LibrarySql.rows(view, cursor, 1, before = true)).firstOrNull()?.cursor(view)
     private suspend fun folderUnlocked(view: LibraryViewToken, nodeId: String): LibraryFolder? = dao.nodeRows(LibrarySql.folders(view, null, null, 1, nodeId)).firstOrNull()?.let { LibraryFolder(it.nodeId, it.sourceId, it.name, it.parentNodeId) }
@@ -1109,7 +1154,7 @@ class RoomLocalLibraryRepository(
         dao.insertArtists(projections)
     }
     private suspend fun <T> access(action: suspend () -> T): T = withContext(Dispatchers.IO) {
-        // Throw domain failures after the IO boundary has returned the retired writer result.
+        // IO边界返回已退出写入者的结果后再抛领域错误，保留原异常身份。
         runCatching {
             mutex.withLock {
                 try { action() }

@@ -251,9 +251,13 @@ class ProbePlaybackStartupRecoveryTest {
         val initialization = service?.let { field<Job?>(it, "initialization") }
         val command = service?.let { field<Job?>(it, "activeCommand") }
         val completed = service?.let { field<Boolean>(it, "initializationComplete") }
+        val preferences = application.preferences
+        val preferencesBarrierMatches = field<Any?>(preferences, "backupBarrier") === application.backupMutationBarrier
         val nextMainTaskMs = Shadows.shadowOf(Looper.getMainLooper()).nextScheduledTaskTime.toMillis()
         "stage=${initializationStage()} initialization=${jobState(initialization)} command=${jobState(command)} " +
-            "complete=$completed backup=${application.backups.startup.value.javaClass.simpleName} " +
+            "complete=$completed preferences=${preferences.state.value.javaClass.simpleName} " +
+            "preferencesBarrierMatches=$preferencesBarrierMatches " +
+            "backup=${application.backups.startup.value.javaClass.simpleName} " +
             "barrier=${application.backupMutationBarrier.state.value.name} " +
             "files=${application.fileOperations.state.value.javaClass.simpleName} " +
             "readBlocked=${application.filePlaybackHost.isReadBlocked()} " +

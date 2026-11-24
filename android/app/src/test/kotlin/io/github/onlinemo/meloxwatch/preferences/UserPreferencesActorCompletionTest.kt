@@ -43,7 +43,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
-/** The real DataStore actor owns a gated file write after the cancellable transform has returned. */
+/** 可取消变换返回后，真实DataStore actor继续持有门控文件写入。 */
 class UserPreferencesActorCompletionTest {
     @get:Rule val temporary = TemporaryFolder()
 
@@ -98,7 +98,7 @@ class UserPreferencesActorCompletionTest {
             } else {
                 assertEquals(expected, session.ready(expected.revision).preferences)
             }
-            // Inspect the committed file independently of DataStore's notification/cache path.
+            // 直接读取提交后的文件，不以DataStore通知或缓存代替磁盘观察。
             DataInputStream(file.inputStream()).use { actual ->
                 assertEquals(expected.revision, actual.readLong())
                 assertEquals(expected.screenShape.name, actual.readUTF())
@@ -112,7 +112,10 @@ class UserPreferencesActorCompletionTest {
         } finally {
             serializer.release.complete(Unit)
             withContext(NonCancellable) {
-                withTimeout(10_000L) { writing?.cancelAndJoin(); session.close() }
+                withTimeout(10_000L) {
+                    writing?.cancelAndJoin()
+                    session.close()
+                }
             }
         }
     }
@@ -138,10 +141,13 @@ class UserPreferencesActorCompletionTest {
         suspend fun ready(revision: Long): PreferencesState.Ready = withTimeout(10_000L) {
             repository.state.filterIsInstance<PreferencesState.Ready>().first { it.preferences.revision == revision }
         }
-        suspend fun close() { observer.cancelAndJoin(); actor.cancelAndJoin() }
+        suspend fun close() {
+            observer.cancelAndJoin()
+            actor.cancelAndJoin()
+        }
     }
 
-    /** A compact fixture format keeps the disk observations separate from the Preferences codec. */
+    /** 夹具独立格式使磁盘观察不依赖Preferences编解码器。 */
     private class HeldFileSerializer(private val failHeldWrite: Boolean) : Serializer<Preferences> {
         private val held = AtomicBoolean(false)
         val entered = CompletableDeferred<Unit>()

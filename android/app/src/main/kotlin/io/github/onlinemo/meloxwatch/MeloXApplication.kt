@@ -376,8 +376,9 @@ class MeloXApplication : Application() {
     val artworks get() = artworkOwner.value
     private val recoveryLock = Mutex()
     private var localRecovered = false
+    private val preferencesOwner = lazy { UserPreferencesRepositoryFactory.create(this, applicationScopeOwner.value) }
     val preferences: UserPreferencesRepository
-        get() = UserPreferencesRepositoryFactory.get(this)
+        get() = preferencesOwner.value
 
     private val backupFontOwner = object : BackupFontOwner {
         override suspend fun <T> withSettings(action: suspend (LyricsFontBackupAccess) -> T): T =

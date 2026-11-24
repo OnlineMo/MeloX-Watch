@@ -510,7 +510,12 @@ class PlaybackBackgroundControllerTest {
 
     @Test(timeout = 30_000L) fun aSuccessfulOldSourceSurvivesTheRealMaskSaveBeforeItsDerivativeCompletes() = runBlocking {
         withTimeout(15_000) {
-            val fixture = ManagedControllerBackgroundFixture(temporary.newFolder())
+            val sourceReturned = CompletableDeferred<Unit>()
+            val continueDerivative = CompletableDeferred<Unit>()
+            val fixture = ManagedControllerBackgroundFixture(temporary.newFolder(), afterLoad = {
+                sourceReturned.complete(Unit)
+                continueDerivative.await()
+            })
             try {
                 val preview = fixture.store.prepareImage(backgroundImportRequest())
                 val options = PlaybackBackgroundOptions(mode = ThemeBackgroundMode.CUSTOM_IMAGE,
@@ -522,6 +527,9 @@ class PlaybackBackgroundControllerTest {
                 val source = fixture.gateNext()
                 fixture.scheduler.runCurrent()
                 finishControllerWorker(source)
+                // 物理返回之后仍须推进源协程，释放真实store占用；衍生请求尚未接纳。
+                fixture.scheduler.runCurrent()
+                sourceReturned.await()
                 assertEquals(listOf(firstRequest.image), fixture.loadedKeys.toList())
                 assertEquals(1, fixture.owner.usage().leases)
 
@@ -531,6 +539,7 @@ class PlaybackBackgroundControllerTest {
                 fixture.controller.update(current)
                 val beforeDerivative = fixture.dispatcher.submitted.get()
                 val derivative = fixture.gateNext()
+                continueDerivative.complete(Unit)
                 fixture.scheduler.runCurrent()
                 finishControllerWorker(derivative)
                 fixture.scheduler.runCurrent()
@@ -554,7 +563,10 @@ class PlaybackBackgroundControllerTest {
                 assertEquals(1, fixture.renderRequests.size)
                 assertEquals(1, fixture.loadedKeys.size)
                 assertEquals(beforeDerivative + 1, fixture.dispatcher.submitted.get())
-            } finally { fixture.close() }
+            } finally {
+                continueDerivative.complete(Unit)
+                fixture.close()
+            }
         }
     }
 
@@ -668,6 +680,7 @@ private fun savedControllerBackgroundRequest(settings: PlaybackBackgroundSetting
 /** 共用真实私有图像/CAS/native renderer；调度 gate 只决定交付次序，不代替源校验。 */
 private class ManagedControllerBackgroundFixture(
     directory: File,
+    afterLoad: suspend (PlaybackBackgroundImageKey.Custom) -> Unit = {},
     beforeLoad: suspend (PlaybackBackgroundImageKey.Custom) -> Unit = {},
 ) {
     val dispatcher = BackgroundPhysicalDispatcher()
@@ -681,7 +694,18 @@ private class ManagedControllerBackgroundFixture(
         val key = input.key as PlaybackBackgroundImageKey.Custom
         loadedKeys += key
         beforeLoad(key)
-        store.loadImage(key, input.targetPx)
+        val lease = store.loadImage(key, input.targetPx)
+        try {
+            // 该钩子只延迟已完成源读取的交付，不能占用物理IO或模拟读取成功。
+            afterLoad(key)
+            lease
+        } catch (failure: Throwable) {
+            try { lease.close() }
+            catch (closing: Throwable) {
+                if (closing !== failure) failure.addSuppressed(closing)
+            }
+            throw failure
+        }
     }, owner)
     val scheduler = TestCoroutineScheduler()
     val scope = CoroutineScope(Job() + StandardTestDispatcher(scheduler))

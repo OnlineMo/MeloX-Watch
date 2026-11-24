@@ -49,7 +49,7 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     }
     val context: Context = PrivateContext(base, root)
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    // Stop observers while their single DataStore actor can still acknowledge the last read.
+    // 单一DataStore actor仍可回执最后一次读取时，先关闭观察任务。
     private val observationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val barrier = BackupMutationBarrier()
@@ -81,7 +81,7 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     val fontFiles = AndroidLyricsFontFiles(context, io, sharedBudget, bitmaps, barrier)
     val themes = LocalThemeRepository(context, io, sharedBudget, bitmaps, barrier)
     val background = LocalBackgroundImages(context, io, bitmaps, barrier)
-    // Measure the fixture's real host directory; an unconfigured StatFs shadow reports zero.
+    // 测量真实host目录可用空间；未配置的StatFs shadow会返回零。
     val copies = LyricsDocumentCopies(context, io, freeBytes = { it.usableSpace }, backupBarrier = barrier)
     private val fontEditor = LyricsFontEditor(fontSettings, fontFiles, LyricsFontPresentationOwner(), barrier)
     val fonts: BackupFontOwner = object : BackupFontOwner {

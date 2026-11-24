@@ -42,7 +42,11 @@ class LocalProviderIo(
                 busy.value = true
                 // Acceptance and the owner's fence are one synchronous admission decision.
                 try { admitted() }
-                catch (failure: Throwable) { occupied = false; busy.value = false; throw failure }
+                catch (failure: Throwable) {
+                    occupied = false
+                    busy.value = false
+                    throw failure
+                }
                 true
             }
         } } catch (failure: Throwable) {
@@ -74,7 +78,7 @@ class LocalProviderIo(
             }
             // A resumed sequential caller must observe the channel as available.
             outcome?.fold(
-                // A failure crosses the continuation as a value, preserving its domain identity.
+                // 失败以值跨过continuation，保留原领域异常身份。
                 onSuccess = { continuation.resume(Result.success(it)) { _, result, _ ->
                     if (result.isSuccess) abandoned(result.getOrThrow())
                 } },

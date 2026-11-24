@@ -160,8 +160,11 @@ class OnlineLyricsEntryViewModelTest {
             repository.openNative()
             val port = object : OnlineLyricsPort {
                 override val changes = repository.repository.changes.drop(1)
-                override suspend fun load(request: OnlineLyricsRequest, isCurrent: () -> Boolean) = repository.repository.load(request, isCurrent)
-                override suspend fun validate(loaded: OnlineLyricsResult.Loaded) = repository.repository.validate(loaded)
+                // 真实磁盘/解析边界使用真实IO时钟；runTest只推进Entry的合成时钟。
+                override suspend fun load(request: OnlineLyricsRequest, isCurrent: () -> Boolean) =
+                    withContext(Dispatchers.IO) { repository.repository.load(request, isCurrent) }
+                override suspend fun validate(loaded: OnlineLyricsResult.Loaded) =
+                    withContext(Dispatchers.IO) { repository.repository.validate(loaded) }
             }
             val fixture = fixture(port = port, first = repository.entry)
             try {

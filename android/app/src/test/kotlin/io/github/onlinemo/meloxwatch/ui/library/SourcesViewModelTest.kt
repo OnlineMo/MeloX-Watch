@@ -6,6 +6,7 @@ import android.os.Looper
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelStore
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.backup.BackupStartupState
 import io.github.onlinemo.meloxwatch.data.local.FixtureAudioProvider
 import io.github.onlinemo.meloxwatch.data.local.LocalInputLimits
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -52,8 +53,17 @@ class SourcesViewModelTest {
     private val releases = mutableListOf<CountDownLatch>()
 
     @Before
-    fun createViewModel() {
+    fun createViewModel() = runBlocking {
         app = RuntimeEnvironment.getApplication() as MeloXApplication
+        // 正常预览用例须先等真实恢复退出共享IO通道，不能把启动占用当成选择结果。
+        withTimeout(10_000L) {
+            while (app.backups.startup.value is BackupStartupState.Loading) {
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+                delay(1L)
+            }
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+        }
+        assertTrue(app.backups.startup.value is BackupStartupState.Ready)
         store = ViewModelStore()
         viewModel = ViewModelProvider(store, ViewModelProvider.AndroidViewModelFactory(app))[SourcesViewModel::class.java]
         // Only the platform decoder is controlled; source identity, file bytes and proof use production code.

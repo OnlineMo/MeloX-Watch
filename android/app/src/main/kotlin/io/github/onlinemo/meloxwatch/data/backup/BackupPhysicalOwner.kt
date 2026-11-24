@@ -46,7 +46,7 @@ internal suspend fun <T : AutoCloseable> openBackupPhysicalOwner(
         throw original
     } finally {
         if (retained.get() != null) withContext(NonCancellable) {
-            // The IO return stays inside protected cleanup, retaining failed-close evidence.
+            // IO返回仍位于受保护收尾内，保留原关闭失败证据。
             withContext(Dispatchers.IO) {
                 io.awaitIdle()
                 val owner = checkNotNull(retained.get())

@@ -147,7 +147,10 @@ class UserPreferencesRepositoryTest {
             assertArrayEquals(bytes, file.readBytes())
             val migrated = first.repository.save(9L, loaded.preferences.asDraft()) as PreferencesWriteResult.Saved
             first.close()
-            assertEquals(migrated.preferences, open(file).ready().preferences)
+            val reopened = open(file)
+            assertEquals(migrated.preferences, reopened.ready().preferences)
+            // 每个历史版本完成真实重开后关闭同一路径 actor，下一轮才可写入夹具。
+            reopened.close()
         }
     }
 
@@ -307,7 +310,8 @@ class UserPreferencesRepositoryTest {
         val originalBytes = file.readBytes()
         val session = open(file)
         val recovered = session.ready()
-        assertEquals(UserPreferences(revision = 8L), recovered.preferences)
+        // schema1沿用旧引导选择；坏字段恢复只重置对应字段，不能伪造新安装。
+        assertEquals(UserPreferences(revision = 8L, help = HelpPreferenceLimits.Legacy), recovered.preferences)
         assertEquals(PreferencesRecoveryReason.INVALID_FIELDS, recovered.recovery?.reason)
         assertEquals(
             setOf(PreferencesField.RESTORE_POSITION, PreferencesField.SCREEN_SHAPE),
@@ -916,7 +920,7 @@ class UserPreferencesRepositoryTest {
         override suspend fun updateData(
             transform: suspend (Preferences) -> Preferences,
         ): Preferences {
-            // Initial observer reads and the cancellation drain remain real, ungated calls.
+            // 初始观察读取与取消排空保持真实调用，不进入目标写入门。
             val held = holdNext.getAndSet(false)
             return delegate.updateData { stored ->
                 if (held) {
