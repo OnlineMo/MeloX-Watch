@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.playback
 
 import android.os.Bundle
 import android.os.Looper
+import android.os.SystemClock
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
@@ -17,6 +18,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -59,7 +61,7 @@ class ProbePlaybackStartupRecoveryTest {
         Shadows.shadowOf(application).grantPermissions(
             application.packageName + ".DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",
         )
-        pumpUntil { application.backups.startup.value !is BackupStartupState.Loading }
+        pumpUntil("application.backups.ready") { application.backups.startup.value !is BackupStartupState.Loading }
         assertTrue(application.backups.startup.value is BackupStartupState.Ready)
     }
 
@@ -70,11 +72,11 @@ class ProbePlaybackStartupRecoveryTest {
                 val service = controller.get()
                 controller.destroy()
                 val closing = field<Deferred<Unit>>(service, "closing")
-                pumpUntil { closing.isCompleted }
+                pumpUntil("cleanup.service") { closing.isCompleted }
                 closing.await()
             }
-            fromIo { application.backups.closeForOwner() }
-            fromIo { application.fileOperations.closeForOwner() }
+            fromIo("cleanup.backups") { application.backups.closeForOwner() }
+            fromIo("cleanup.fileJournal") { application.fileOperations.closeForOwner() }
         } finally {
             application.onTerminate()
             ioScope.cancel()
@@ -100,18 +102,18 @@ class ProbePlaybackStartupRecoveryTest {
         assertFalse(session.player.playWhenReady)
 
         // 无 pending run 的显式恢复不关闭或重建既有 MediaSession。
-        val recovered = fromIo { application.backups.initializeStorage() }
+        val recovered = fromIo("backup.retry") { application.backups.initializeStorage() }
         assertTrue(recovered is BackupStartupState.Ready && !recovered.recoveredPendingRun)
         assertSame(session, field<MediaSession>(service, "mediaSession"))
         assertTrue("file journal 尚未 loaded，恢复命令仍须能进入自己的读围栏",
             application.filePlaybackHost.isReadBlocked())
-        val result = awaitFuture(controller.sendCustomCommand(PlaybackCommands.retryRestore, Bundle.EMPTY))
+        val result = awaitFuture("retryRestore.first", controller.sendCustomCommand(PlaybackCommands.retryRestore, Bundle.EMPTY))
         assertEquals(SessionResult.RESULT_SUCCESS, result.resultCode)
         assertTrue(field<Boolean>(service, "initializationComplete"))
         assertTrue(field<Boolean>(owner, "preferencesInitialized"))
         assertTrue(timer.state.value.initialized)
         assertFalse(application.filePlaybackHost.isReadBlocked())
-        pumpUntil { controller.availableCommands.contains(Player.COMMAND_PLAY_PAUSE) }
+        pumpUntil("controller.playCommands") { controller.availableCommands.contains(Player.COMMAND_PLAY_PAUSE) }
         assertSame(owner, field<ServicePlaybackOwner>(service, "playbackOwner"))
         assertSame(session, field<MediaSession>(service, "mediaSession"))
         assertFalse(session.player.playWhenReady)
@@ -125,7 +127,7 @@ class ProbePlaybackStartupRecoveryTest {
         val generation = owner.state.value.generation
         assertTrue(field<Boolean>(startup, "bootIdentityRead"))
         assertEquals(SessionResult.RESULT_SUCCESS,
-            awaitFuture(controller.sendCustomCommand(PlaybackCommands.retryRestore, Bundle.EMPTY)).resultCode)
+            awaitFuture("retryRestore.idempotent", controller.sendCustomCommand(PlaybackCommands.retryRestore, Bundle.EMPTY)).resultCode)
         assertSame(timerLease, field<Any?>(timer, "lease"))
         assertSame(dspObserver, field<Job>(dsp, "observer"))
         assertSame(preferencesObserver, field<Job>(owner, "preferenceObserver"))
@@ -139,7 +141,7 @@ class ProbePlaybackStartupRecoveryTest {
     @Test
     fun aReservedStartupAllocatesNothingAndTheSameServiceRebuildsOnlyAfterTheHostAllowsReads() = runBlocking {
         val controllerInfo = connectedControllerInfo()
-        fromIo { application.fileOperations.assertPlaybackReadable() }
+        fromIo("fileJournal.prime") { application.fileOperations.assertPlaybackReadable() }
         val host = application.filePlaybackHost
         host.reserve()
         try {
@@ -176,12 +178,12 @@ class ProbePlaybackStartupRecoveryTest {
 
     private suspend fun awaitInitialization(service: ProbePlaybackService) {
         val initialization = field<Job>(service, "initialization")
-        pumpUntil { initialization.isCompleted }
+        pumpUntil("service.initialization") { initialization.isCompleted }
         initialization.join()
     }
 
     private suspend fun connect(session: MediaSession): MediaController =
-        awaitFuture(MediaController.Builder(application, session.token).buildAsync()).also(controllers::add)
+        awaitFuture("controller.connect", MediaController.Builder(application, session.token).buildAsync()).also(controllers::add)
 
     /** 获取实际连接身份使用无原生资源的暂停门面，随后退出该 fixture 会话。 */
     private suspend fun connectedControllerInfo(): MediaSession.ControllerInfo {
@@ -189,7 +191,7 @@ class ProbePlaybackStartupRecoveryTest {
         val session = MediaSession.Builder(application, player).build()
         try {
             val controller = connect(session)
-            pumpUntil { session.connectedControllers.isNotEmpty() }
+            pumpUntil("fixture.controllerIdentity") { session.connectedControllers.isNotEmpty() }
             return session.connectedControllers.single().also { controller.release() }
         } finally {
             session.release()
@@ -197,23 +199,69 @@ class ProbePlaybackStartupRecoveryTest {
         }
     }
 
-    private suspend fun <T> fromIo(action: suspend () -> T): T {
+    private suspend fun <T> fromIo(stage: String, action: suspend () -> T): T {
         val work = ioScope.async { action() }
-        pumpUntil { work.isCompleted }
+        pumpUntil(stage) { work.isCompleted }
         return work.await()
     }
 
-    private suspend fun <T> awaitFuture(future: ListenableFuture<T>): T {
-        pumpUntil { future.isDone }
+    private suspend fun <T> awaitFuture(stage: String, future: ListenableFuture<T>): T {
+        pumpUntil(stage) { future.isDone }
         return future.get()
     }
 
-    private suspend fun pumpUntil(complete: () -> Boolean) = withTimeout(20_000L) {
-        while (!complete()) {
-            Shadows.shadowOf(Looper.getMainLooper()).idle()
-            delay(1L)
+    /** 原等待驱动和期限保持；完整输出标记区分控制器回执与实际初始化停点。 */
+    private suspend fun pumpUntil(stage: String, complete: () -> Boolean) {
+        reportWait(stage, "start")
+        var observedInitialization = initializationStage()
+        try {
+            withTimeout(20_000L) {
+                while (!complete()) {
+                    Shadows.shadowOf(Looper.getMainLooper()).idle()
+                    val currentInitialization = initializationStage()
+                    if (currentInitialization != observedInitialization) {
+                        observedInitialization = currentInitialization
+                        reportWait(stage, "initialization")
+                    }
+                    delay(1L)
+                }
+                Shadows.shadowOf(Looper.getMainLooper()).idle()
+            }
+            reportWait(stage, "end")
+        } catch (timeout: TimeoutCancellationException) {
+            val diagnostic = "MELOX_PROBE_TIMEOUT wait=$stage " + waitSnapshot()
+            println(diagnostic)
+            timeout.addSuppressed(IllegalStateException(diagnostic))
+            throw timeout
         }
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private fun initializationStage(): String {
+        val service = serviceController?.get() ?: return "NO_SERVICE"
+        val startup = field<Any?>(service, "playbackStartup") ?: return "NO_OWNER"
+        return field(startup, "stage")
+    }
+
+    private fun jobState(job: Job?): String = if (job == null) "none" else
+        "active:${job.isActive},completed:${job.isCompleted},cancelled:${job.isCancelled}"
+
+    /** 只记录固定阶段、布尔状态与调度时间；诊断读取失败继续保留原等待异常。 */
+    private fun waitSnapshot(): String = runCatching {
+        val service = serviceController?.get()
+        val initialization = service?.let { field<Job?>(it, "initialization") }
+        val command = service?.let { field<Job?>(it, "activeCommand") }
+        val completed = service?.let { field<Boolean>(it, "initializationComplete") }
+        val nextMainTaskMs = Shadows.shadowOf(Looper.getMainLooper()).nextScheduledTaskTime.toMillis()
+        "stage=${initializationStage()} initialization=${jobState(initialization)} command=${jobState(command)} " +
+            "complete=$completed backup=${application.backups.startup.value.javaClass.simpleName} " +
+            "barrier=${application.backupMutationBarrier.state.value.name} " +
+            "files=${application.fileOperations.state.value.javaClass.simpleName} " +
+            "readBlocked=${application.filePlaybackHost.isReadBlocked()} " +
+            "uptimeMs=${SystemClock.uptimeMillis()} nextMainTaskMs=$nextMainTaskMs"
+    }.getOrElse { "snapshotUnavailable=${it.javaClass.simpleName}" }
+
+    private fun reportWait(stage: String, event: String) {
+        println("MELOX_PROBE_STAGE wait=$stage event=$event " + waitSnapshot())
     }
 
     private fun <T> field(owner: Any, name: String): T = ReflectionHelpers.getField(owner, name)

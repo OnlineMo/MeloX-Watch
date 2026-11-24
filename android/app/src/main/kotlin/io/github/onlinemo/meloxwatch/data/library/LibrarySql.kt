@@ -116,7 +116,8 @@ internal object LibrarySql {
         view.sort.field == LibrarySortField.ARTIST || view.query.artistKey != null || view.query.search.isNotBlank()
 
     /** 只在选窗不依赖艺人时延后显示投影，扫描元数据保持原值。 */
-    private fun displayCtes(revision: Long, includeArtists: Boolean = true): String {
+    private fun displayCtes(revision: Long, includeArtists: Boolean = true, selectedTracks: String? = null): String {
+        val trackSelection = selectedTracks?.let { " AND ($it)" }.orEmpty()
         val artistColumns = if (includeArtists) """,
                 primaryArtist.displayName AS displayArtist, primaryArtist.sortKey AS displayArtistSortKey,
                 primaryArtist.sectionKey AS displayArtistSection""" else ""
@@ -126,7 +127,7 @@ internal object LibrarySql {
                     WHERE candidate.trackId = t.trackId ORDER BY ordinal, artistKey LIMIT 1)""" else ""
         return """
         scanned_tracks AS (
-            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1
+            SELECT * FROM local_track_versions t WHERE ${valid("t", revision)} AND t.member = 1$trackSelection
         ), ${if (includeArtists) artistCtes(revision, "scanned_tracks") + ", " else ""}display_tracks AS (
             SELECT t.*, COALESCE(assigned.groupKey, t.albumKey) AS displayAlbumKey,
                 COALESCE(albumName.displayName, CASE WHEN albumLink.versionId IS NULL THEN t.album
@@ -147,11 +148,23 @@ internal object LibrarySql {
         """.trimIndent()
     }
 
-    private fun cte(view: LibraryViewToken, includeArtists: Boolean = true): Pair<String, MutableList<Any?>> {
+    private fun cte(view: LibraryViewToken, includeArtists: Boolean = true,
+        selectedKeys: List<TrackKey>? = null): Pair<String, MutableList<Any?>> {
         val revision = view.revision
         val args = mutableListOf<Any?>()
         if (view.query.relativePathKeyword != null && view.query.sourceId != null) args += view.query.sourceId
+        val selectedTracks = selectedKeys?.joinToString(" OR ") { key ->
+            args += key.providerId
+            args += key.trackId
+            "(t.providerId = ? AND t.trackId = ?)"
+        }?.ifEmpty { "0" }
         val aliases = mutableListOf(valid("av", revision))
+        if (selectedKeys != null) {
+            // 精确标识页只需这些曲目的全部有效位置；授权、排除和最优别名仍在原关系中决定。
+            aliases += """av.locationId IN (SELECT relation.locationId FROM local_track_locations relation
+                WHERE ${valid("relation", revision)}
+                    AND relation.trackId IN (SELECT trackId FROM scanned_tracks))""".trimIndent()
+        }
         view.query.sourceId?.let { aliases += "av.sourceId = ?"; args += it }
         view.query.folderNodeId?.let {
             aliases += if (view.query.folderSubtree) """
@@ -191,7 +204,7 @@ internal object LibrarySql {
         // relation; permission and exclusion resolution must not be rebuilt for each track.
         val sql = """
             WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""}
-            ${displayCtes(revision, includeArtists)}, alias_rows AS MATERIALIZED (
+            ${displayCtes(revision, includeArtists, selectedTracks)}, alias_rows AS MATERIALIZED (
                 SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
                     lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
@@ -292,7 +305,10 @@ internal object LibrarySql {
     }
     fun row(view: LibraryViewToken, providerId: String, trackId: String): RoomRawQuery {
         val full = artistsBeforeWindow(view)
-        val (sql, args) = cte(view, includeArtists = full)
+        val selectedKeys = if (providerId.isNotBlank() && trackId.isNotBlank()) {
+            listOf(TrackKey(providerId, trackId))
+        } else null
+        val (sql, args) = cte(view, includeArtists = full, selectedKeys = selectedKeys)
         args += providerId; args += trackId
         if (!full) return projectedWindow(view, sql, args, "WHERE providerId = ? AND trackId = ?", "", 1)
         return raw("$sql SELECT * FROM ordered WHERE providerId = ? AND trackId = ? LIMIT 1", args.toTypedArray())
@@ -300,7 +316,7 @@ internal object LibrarySql {
     fun rowsForKeys(view: LibraryViewToken, keys: List<TrackKey>): RoomRawQuery {
         require(keys.size <= LibraryLimits.PAGE_SIZE)
         val full = artistsBeforeWindow(view)
-        val (sql, args) = cte(view, includeArtists = full)
+        val (sql, args) = cte(view, includeArtists = full, selectedKeys = keys)
         val predicate = keys.joinToString(" OR ") {
             args += it.providerId; args += it.trackId
             "(providerId = ? AND trackId = ?)"

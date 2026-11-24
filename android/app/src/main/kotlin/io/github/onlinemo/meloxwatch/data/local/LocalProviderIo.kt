@@ -4,7 +4,6 @@ import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import java.io.FileNotFoundException
 import java.io.IOException
-import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -33,7 +32,10 @@ class LocalProviderIo(
         failed: (Exception) -> Unit = {},
         admitted: () -> Unit = {},
         action: (CancellationSignal) -> T,
-    ): T = suspendCancellableCoroutine { continuation ->
+    ): T = suspendCancellableCoroutine<Result<T>> { continuation ->
+        fun resumeFailure(failure: Throwable) {
+            if (continuation.isActive) continuation.resumeWith(Result.success(Result.failure(failure)))
+        }
         val accepted = try { synchronized(lock) {
             if (occupied) false else {
                 occupied = true
@@ -44,13 +46,13 @@ class LocalProviderIo(
                 true
             }
         } } catch (failure: Throwable) {
-            if (continuation.isActive) continuation.resumeWithException(if (failure is Exception) map(failure) else failure)
+            resumeFailure(if (failure is Exception) map(failure) else failure)
             return@suspendCancellableCoroutine
         }
         if (!accepted) {
             val failure = SourceReadException(SourceReadIssue.BUSY)
             notifyFailure(failure, failed)
-            continuation.resumeWithException(failure)
+            resumeFailure(failure)
             return@suspendCancellableCoroutine
         }
         continuation.invokeOnCancellation { signal.cancel() }
@@ -72,8 +74,11 @@ class LocalProviderIo(
             }
             // A resumed sequential caller must observe the channel as available.
             outcome?.fold(
-                onSuccess = { continuation.resume(it) { _, result, _ -> abandoned(result) } },
-                onFailure = { if (continuation.isActive) continuation.resumeWithException(it) },
+                // A failure crosses the continuation as a value, preserving its domain identity.
+                onSuccess = { continuation.resume(Result.success(it)) { _, result, _ ->
+                    if (result.isSuccess) abandoned(result.getOrThrow())
+                } },
+                onFailure = { resumeFailure(it) },
             )
         }
         try {
@@ -81,9 +86,9 @@ class LocalProviderIo(
         } catch (error: RuntimeException) {
             notifyFailure(error, failed)
             drainAndRelease()
-            if (continuation.isActive) continuation.resumeWithException(map(error))
+            resumeFailure(map(error))
         }
-    }
+    }.getOrThrow()
 
     /** Reporting a failure cannot strand the caller or the accepted physical slot. */
     private fun notifyFailure(error: Exception, report: (Exception) -> Unit) {

@@ -34,6 +34,7 @@ import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -738,8 +739,12 @@ class UserPreferencesRepositoryTest {
         val committedBytes = file.readBytes()
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        val session = open(file) { store -> GatedUpdateDataStore(store, entered, release) }
+        lateinit var gatedStore: GatedUpdateDataStore
+        val session = open(file) { store ->
+            GatedUpdateDataStore(store, entered, release).also { gatedStore = it }
+        }
         session.ready()
+        gatedStore.holdNextUpdate()
         var result: PreferencesWriteResult? = null
         val write = launch { result = session.repository.save(3L, UserPreferencesDraft(true, ScreenShape.RECTANGULAR)) }
         withTimeout(10000L) { entered.await() }
@@ -904,12 +909,22 @@ class UserPreferencesRepositoryTest {
         private val entered: CompletableDeferred<Unit>,
         private val release: CompletableDeferred<Unit>,
     ) : DataStore<Preferences> by delegate {
+        private val holdNext = AtomicBoolean(false)
+
+        fun holdNextUpdate() { check(holdNext.compareAndSet(false, true)) }
+
         override suspend fun updateData(
             transform: suspend (Preferences) -> Preferences,
-        ): Preferences = delegate.updateData { stored ->
-            entered.complete(Unit)
-            release.await()
-            transform(stored)
+        ): Preferences {
+            // Initial observer reads and the cancellation drain remain real, ungated calls.
+            val held = holdNext.getAndSet(false)
+            return delegate.updateData { stored ->
+                if (held) {
+                    entered.complete(Unit)
+                    release.await()
+                }
+                transform(stored)
+            }
         }
     }
 }

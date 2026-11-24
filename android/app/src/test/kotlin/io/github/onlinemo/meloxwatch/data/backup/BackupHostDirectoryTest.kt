@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.backup
 
+import android.app.Application
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
@@ -8,6 +9,7 @@ import io.github.onlinemo.meloxwatch.testhost.HostIsolationMarkerShadow
 import io.github.onlinemo.meloxwatch.testhost.HostLinuxDirectoryShadow
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -20,11 +22,16 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26, 30], manifest = Config.NONE)
+@Config(sdk = [26, 30], application = Application::class, manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class BackupHostDirectoryTest {
     @get:Rule val temporary = TemporaryFolder()
     private val flags get() = OsConstants.O_RDONLY or OsConstants.O_NOFOLLOW or OsConstants.O_NONBLOCK
+
+    // Config.NONE在Build System API下不隔离Application；目录故障hook只属于本套件。
+    @After fun retireHostDirectoryHooks() {
+        HostLinuxDirectoryShadow.reset()
+    }
 
     @Test(timeout = 30_000L)
     fun realDirectoryDescriptorSyncsAndClosesWithAllProductionFlags() {

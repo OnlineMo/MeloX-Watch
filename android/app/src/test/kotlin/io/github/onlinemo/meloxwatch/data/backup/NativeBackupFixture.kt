@@ -49,6 +49,8 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     }
     val context: Context = PrivateContext(base, root)
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Stop observers while their single DataStore actor can still acknowledge the last read.
+    private val observationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val barrier = BackupMutationBarrier()
     val io = LocalProviderIo()
@@ -69,9 +71,9 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     private fun store(name: String) = PreferenceDataStoreFactory.create(scope = scope) {
         File(root, "preferences/$name.preferences_pb").apply { checkNotNull(parentFile).mkdirs() }
     }
-    val preferences = DataStoreUserPreferencesRepository(store("player"), scope, barrier)
+    val preferences = DataStoreUserPreferencesRepository(store("player"), observationScope, barrier)
     val appearance = DataStoreAppearancePreferencesStore(store("appearance"), barrier)
-    val display = DataStoreLyricsDisplayStore(store("lyrics-display"), scope, barrier)
+    val display = DataStoreLyricsDisplayStore(store("lyrics-display"), observationScope, barrier)
     val fontSettings = DataStoreLyricsFontSettingsStore(store("lyrics-fonts"), barrier)
     val dsp = DataStoreDspSettingsStore(store("dsp"), barrier)
     val bitmaps = ThemeBitmapOwner()
@@ -79,7 +81,8 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     val fontFiles = AndroidLyricsFontFiles(context, io, sharedBudget, bitmaps, barrier)
     val themes = LocalThemeRepository(context, io, sharedBudget, bitmaps, barrier)
     val background = LocalBackgroundImages(context, io, bitmaps, barrier)
-    val copies = LyricsDocumentCopies(context, io, backupBarrier = barrier)
+    // Measure the fixture's real host directory; an unconfigured StatFs shadow reports zero.
+    val copies = LyricsDocumentCopies(context, io, freeBytes = { it.usableSpace }, backupBarrier = barrier)
     private val fontEditor = LyricsFontEditor(fontSettings, fontFiles, LyricsFontPresentationOwner(), barrier)
     val fonts: BackupFontOwner = object : BackupFontOwner {
         override suspend fun <T> withSettings(action: suspend (LyricsFontBackupAccess) -> T): T = fontEditor.withBackupSettings(action)
@@ -124,6 +127,7 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     suspend fun close() {
         coordinator.closeForOwner()
         fileOperations.closeForOwner()
+        observationScope.coroutineContext[Job]?.cancelAndJoin()
         scope.coroutineContext[Job]?.cancelAndJoin()
         progressScope.coroutineContext[Job]?.cancelAndJoin()
         io.awaitIdle()

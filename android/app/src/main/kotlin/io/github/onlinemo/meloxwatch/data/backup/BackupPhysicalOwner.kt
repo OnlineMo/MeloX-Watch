@@ -45,18 +45,21 @@ internal suspend fun <T : AutoCloseable> openBackupPhysicalOwner(
         outgoing = original
         throw original
     } finally {
-        if (retained.get() != null) withContext(NonCancellable + Dispatchers.IO) {
-            io.awaitIdle()
-            val owner = checkNotNull(retained.get())
-            try {
-                owner.close()
-                check(retained.compareAndSet(owner, null))
-            } catch (closing: Throwable) {
-                try { onCloseFailure(owner, closing) }
-                catch (reporting: Throwable) { if (reporting !== closing) closing.addSuppressed(reporting) }
-                val original = outgoing
-                if (original == null) throw closing
-                if (closing !== original) original.addSuppressed(closing)
+        if (retained.get() != null) withContext(NonCancellable) {
+            // The IO return stays inside protected cleanup, retaining failed-close evidence.
+            withContext(Dispatchers.IO) {
+                io.awaitIdle()
+                val owner = checkNotNull(retained.get())
+                try {
+                    owner.close()
+                    check(retained.compareAndSet(owner, null))
+                } catch (closing: Throwable) {
+                    try { onCloseFailure(owner, closing) }
+                    catch (reporting: Throwable) { if (reporting !== closing) closing.addSuppressed(reporting) }
+                    val original = outgoing
+                    if (original == null) throw closing
+                    if (closing !== original) original.addSuppressed(closing)
+                }
             }
         }
     }

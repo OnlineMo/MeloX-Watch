@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.data.fileoperations
 import androidx.room.Room
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.library.LibraryCursor
 import io.github.onlinemo.meloxwatch.data.library.LibraryQuery
 import io.github.onlinemo.meloxwatch.data.library.LibrarySource
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
@@ -102,8 +103,17 @@ abstract class FileOperationRoomTestFixture : FileOperationPhysicalTestFixture()
         val alias = checkNotNull(database.libraryDao().alias(source.spec.sourceId, id))
         val view = library.openView(LibraryQuery(includeHidden = true))
         try {
-            val track = library.page(view).tracks.single { it.aliasId == alias.aliasId }
-            return FileSelectedTrack(track.trackKey, track.location?.locationId, track.location?.contentRevision)
+            var cursor: LibraryCursor? = null
+            var selected: FileSelectedTrack? = null
+            do {
+                val page = library.page(view, cursor)
+                for (track in page.tracks) if (track.aliasId == alias.aliasId) {
+                    check(selected == null) { "The selected alias must resolve to one complete-view track" }
+                    selected = FileSelectedTrack(track.trackKey, track.location?.locationId, track.location?.contentRevision)
+                }
+                cursor = page.nextCursor
+            } while (cursor != null)
+            return checkNotNull(selected) { "The selected alias must exist in the complete frozen view" }
         } finally { library.closeView(view.viewId) }
     }
 

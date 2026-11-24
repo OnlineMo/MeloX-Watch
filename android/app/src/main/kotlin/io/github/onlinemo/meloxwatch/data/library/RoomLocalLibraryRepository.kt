@@ -145,14 +145,17 @@ class RoomLocalLibraryRepository(
     override suspend fun page(view: LibraryViewToken, after: LibraryCursor?, limit: Int): LibraryPage = access {
         database.withPreservedTransaction {
             checkPageInput(view, after, limit)
-            pageResult(view, dao.rows(LibrarySql.rows(view, after, limit)))
+            // 合法 after 已在同一事务中核验，它证明上一页存在；查询窗口仍保持原 limit。
+            val rows = dao.rows(LibrarySql.rows(view, after, limit))
+            pageResult(view, rows, moreBefore = after != null, moreAfter = null)
         }
     }
 
     override suspend fun previousPage(view: LibraryViewToken, before: LibraryCursor, limit: Int): LibraryPage = access {
         database.withPreservedTransaction {
             checkPageInput(view, before, limit)
-            pageResult(view, dao.rows(LibrarySql.rows(view, before, limit, before = true)).asReversed())
+            val rows = dao.rows(LibrarySql.rows(view, before, limit, before = true)).asReversed()
+            pageResult(view, rows, moreBefore = null, moreAfter = true)
         }
     }
 
@@ -932,11 +935,14 @@ class RoomLocalLibraryRepository(
             if (row.cursor(view) != cursor) fail(LibraryIssue.INVALID_INPUT)
         }
     }
-    private suspend fun pageResult(view: LibraryViewToken, rows: List<LibraryRowRecord>): LibraryPage {
+    private suspend fun pageResult(view: LibraryViewToken, rows: List<LibraryRowRecord>,
+        moreBefore: Boolean?, moreAfter: Boolean?): LibraryPage {
         val first = rows.firstOrNull()?.cursor(view)
         val last = rows.lastOrNull()?.cursor(view)
-        return LibraryPage(view, rows.map { it.model() }, last?.takeIf { dao.scalar(LibrarySql.hasBeyond(view, it, before = false)) != 0L },
-            first?.takeIf { dao.scalar(LibrarySql.hasBeyond(view, it, before = true)) != 0L })
+        // 未知方向仍用原存在性查询；真实已核验的游标只省去相反方向的重复探测。
+        return LibraryPage(view, rows.map { it.model() },
+            last?.takeIf { moreAfter ?: (dao.scalar(LibrarySql.hasBeyond(view, it, before = false)) != 0L) },
+            first?.takeIf { moreBefore ?: (dao.scalar(LibrarySql.hasBeyond(view, it, before = true)) != 0L) })
     }
     private suspend fun cursorBefore(view: LibraryViewToken, cursor: LibraryCursor): LibraryCursor? = dao.rows(LibrarySql.rows(view, cursor, 1, before = true)).firstOrNull()?.cursor(view)
     private suspend fun folderUnlocked(view: LibraryViewToken, nodeId: String): LibraryFolder? = dao.nodeRows(LibrarySql.folders(view, null, null, 1, nodeId)).firstOrNull()?.let { LibraryFolder(it.nodeId, it.sourceId, it.name, it.parentNodeId) }
@@ -1103,24 +1109,27 @@ class RoomLocalLibraryRepository(
         dao.insertArtists(projections)
     }
     private suspend fun <T> access(action: suspend () -> T): T = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            try { action() }
-            catch (error: CancellationException) { throw error }
-            catch (error: LibraryException) { throw error }
-            catch (error: SQLiteException) {
-                val failure = error.toPlatformSQLiteException()
-                val issue = when (failure) {
-                    is SQLiteFullException -> LibraryIssue.STORAGE_FULL
-                    is SQLiteConstraintException -> LibraryIssue.INVALID_INPUT
-                    else -> LibraryIssue.STORAGE_UNAVAILABLE
+        // Throw domain failures after the IO boundary has returned the retired writer result.
+        runCatching {
+            mutex.withLock {
+                try { action() }
+                catch (error: CancellationException) { throw error }
+                catch (error: LibraryException) { throw error }
+                catch (error: SQLiteException) {
+                    val failure = error.toPlatformSQLiteException()
+                    val issue = when (failure) {
+                        is SQLiteFullException -> LibraryIssue.STORAGE_FULL
+                        is SQLiteConstraintException -> LibraryIssue.INVALID_INPUT
+                        else -> LibraryIssue.STORAGE_UNAVAILABLE
+                    }
+                    throw LibraryException(issue, failure)
                 }
-                throw LibraryException(issue, failure)
+                catch (error: IllegalStateException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
+                catch (error: JSONException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
+                catch (error: IllegalArgumentException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
             }
-            catch (error: IllegalStateException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
-            catch (error: JSONException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
-            catch (error: IllegalArgumentException) { throw LibraryException(LibraryIssue.RECOVERY_REQUIRED, error) }
         }
-    }
+    }.getOrThrow()
     private fun pageLimit(size: Int) { if (size !in 1..LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT) }
     private fun batch(size: Int) { if (size !in 1..LibraryLimits.PAGE_SIZE) fail(LibraryIssue.INVALID_INPUT) }
     private fun validateCandidate(sourceId: String, candidate: ObservedCandidate) {

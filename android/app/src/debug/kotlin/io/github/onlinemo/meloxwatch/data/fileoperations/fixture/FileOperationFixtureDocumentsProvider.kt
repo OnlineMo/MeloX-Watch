@@ -15,7 +15,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 
 /** 只编入 Debug；文档操作落到独立测试目录，release 不包含提供方或测试入口。 */
-class FileOperationFixtureDocumentsProvider : DocumentsProvider() {
+open class FileOperationFixtureDocumentsProvider : DocumentsProvider() {
     lateinit var authority: String
         private set
     var installedTree: FixtureDocumentTree? = null

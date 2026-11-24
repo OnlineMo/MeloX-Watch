@@ -70,10 +70,27 @@ class LibraryWindowProjectionTest {
                 }
                 verifyProbes(view, records)
                 val keys = records.map { TrackKey(it.track.providerId, it.track.trackId) }
+                val forward = mutableListOf<TrackKey>()
+                var cursor: LibraryCursor? = null
+                var previous: LibraryPage? = null
+                do {
+                    val page = fixture.library.page(view, cursor, 1)
+                    assertTrue(page.tracks.size <= 1)
+                    previous?.let { prior ->
+                        assertEquals(prior.tracks, fixture.library.previousPage(view,
+                            checkNotNull(page.previousCursor), 1).tracks)
+                    }
+                    forward += page.tracks.map { it.trackKey }
+                    previous = page
+                    cursor = page.nextCursor
+                } while (cursor != null)
+                assertEquals(keys, forward)
                 assertEquals(records.toSet(), compareRows(LibrarySql.rowsForKeys(view, keys)).toSet())
                 assertTrue(compareRows(LibrarySql.rowsForKeys(view, emptyList())).isEmpty())
                 for (record in records) {
                     assertEquals(record, compareRows(LibrarySql.row(view, record.track.providerId, record.track.trackId)).single())
+                    assertEquals(listOf(record), compareRows(LibrarySql.rowsForKeys(view,
+                        listOf(TrackKey(record.track.providerId, record.track.trackId)))))
                 }
             } finally { fixture.library.closeView(view.viewId) }
         }
@@ -84,6 +101,7 @@ class LibraryWindowProjectionTest {
         val frozen = fixture.library.openView()
         try {
             val before = compareRows(LibrarySql.rows(frozen, null, 100))
+            val keys = before.map { TrackKey(it.track.providerId, it.track.trackId) }
             val alpha = fixture.group(TransferDisplayKind.ARTIST, "Alpha")
             fixture.apply(fixture.preview(fixture.state(TransferDisplayKind.ARTIST, alpha.entityId),
                 TransferDisplayPatch.Rename("Zulu")))
@@ -102,6 +120,7 @@ class LibraryWindowProjectionTest {
                     val records = compareRows(LibrarySql.rows(view, null, 100))
                     assertEquals(listOf("One"), records.map { it.track.displayTitle })
                     assertEquals("Zulu", records.single().displayArtist)
+                    assertEquals(records.toSet(), compareRows(LibrarySql.rowsForKeys(view, keys)).toSet())
                     verifyProbes(view, records)
                 } finally { fixture.library.closeView(view.viewId) }
             }
@@ -112,12 +131,17 @@ class LibraryWindowProjectionTest {
                 val records = compareRows(LibrarySql.rows(revoked, null, 100))
                 assertEquals(3, records.size)
                 assertTrue(records.all { it.availabilityRank == 2 })
+                assertEquals(records.toSet(), compareRows(LibrarySql.rowsForKeys(revoked, keys)).toSet())
                 verifyProbes(revoked, records)
             } finally { fixture.library.closeView(revoked.viewId) }
             val readable = fixture.library.openView(LibraryQuery(readableOnly = true))
-            try { assertTrue(compareRows(LibrarySql.rows(readable, null, 100)).isEmpty()) }
+            try {
+                assertTrue(compareRows(LibrarySql.rows(readable, null, 100)).isEmpty())
+                assertTrue(compareRows(LibrarySql.rowsForKeys(readable, keys)).isEmpty())
+            }
             finally { fixture.library.closeView(readable.viewId) }
             assertEquals(before, compareRows(LibrarySql.rows(frozen, null, 100)))
+            assertEquals(before.toSet(), compareRows(LibrarySql.rowsForKeys(frozen, keys)).toSet())
         } finally { fixture.library.closeView(frozen.viewId) }
     }
 

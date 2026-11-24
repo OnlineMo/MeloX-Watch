@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.transfer
 
+import android.os.Looper
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.data.imports.ImportPhase
 import io.github.onlinemo.meloxwatch.data.imports.OwnedAudioProvider
@@ -7,12 +8,17 @@ import io.github.onlinemo.meloxwatch.data.imports.TransferImportSelection
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import io.github.onlinemo.meloxwatch.data.library.RoomImportLedger
 import java.net.InetAddress
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,21 +28,35 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.LooperMode
 import org.robolectric.annotation.SQLiteMode
 
 /** 实际 Application prepare 和同一 Room/配额/后端；只替换本测试的 TLS 身份。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], application = MeloXApplication::class, manifest = Config.NONE)
+@LooperMode(LooperMode.Mode.PAUSED)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class LocalTransferApplicationTest {
     private val application: MeloXApplication get() = RuntimeEnvironment.getApplication() as MeloXApplication
     private var receiver: LocalTransferReceiver? = null
 
+    @Before fun awaitActualStorageStartup() = runBlocking {
+        withTimeout(5000L) { awaitWithMainPump { application.requireBackupStorageReady() } }
+    }
+
     @After fun close() {
         runBlocking {
-            try { withTimeout(5000L) { receiver?.retryClose()?.await() } }
-            finally { application.library.database.close() }
+            try {
+                withTimeout(5000L) {
+                    awaitWithMainPump {
+                        receiver?.retryClose()?.await()
+                        application.backups.closeForOwner()
+                        application.fileOperations.closeForOwner()
+                    }
+                }
+            } finally { application.library.database.close() }
         }
     }
 
@@ -45,7 +65,7 @@ class LocalTransferApplicationTest {
         val watch = TransferTestFixtures.identity()
         val phone = TransferTestFixtures.identity()
         val owner = receiver(watch)
-        val first = withTimeout(5000L) { owner.open(loopback()).await() }
+        val first = withTimeout(5000L) { awaitWithMainPump { owner.open(loopback()).await() } }
         val bytes = TransferTestFixtures.wav()
         val declaration = TransferTestFixtures.declaration(bytes)
         val operationId = TransferTestFixtures.id()
@@ -67,11 +87,11 @@ class LocalTransferApplicationTest {
         }
         ledger.installedTransferred(selection)
         ledger.unfinishedTransferred(selection, ImportPhase.INSTALLED, TransferIssue.RECOVERY_REQUIRED)
-        withTimeout(5000L) { owner.close().await() }
+        withTimeout(5000L) { awaitWithMainPump { owner.close().await() } }
         assertEquals(0L, application.library.overview().totalTracks)
 
         // Production prepare validates and retains these bytes before starting this new authenticated session.
-        val fresh = withTimeout(5000L) { owner.open(loopback()).await() }
+        val fresh = withTimeout(5000L) { awaitWithMainPump { owner.open(loopback()).await() } }
         assertNotEquals(first.opening.sessionId, fresh.opening.sessionId)
         assertEquals(0L, application.library.overview().totalTracks)
         val result = withContext(Dispatchers.IO) {
@@ -95,7 +115,7 @@ class LocalTransferApplicationTest {
             assertArrayEquals(bytes, OwnedAudioProvider.finalFile(application, operationId).readBytes())
             assertFalse(OwnedAudioProvider.stagingFile(application, operationId).exists())
         }
-        withTimeout(5000L) { owner.close().await() }
+        withTimeout(5000L) { awaitWithMainPump { owner.close().await() } }
         assertEquals(TransferServerPhase.OFF, owner.server.phase.value)
     }
 
@@ -135,10 +155,10 @@ class LocalTransferApplicationTest {
         }
         val owner = receiver(TransferTestFixtures.identity())
         try {
-            withTimeout(5000L) { owner.open(loopback()).await() }
+            withTimeout(5000L) { awaitWithMainPump { owner.open(loopback()).await() } }
             throw AssertionError("Expected recovery rejection")
         } catch (error: TransferException) { assertEquals(TransferIssue.RECOVERY_REQUIRED, error.issue) }
-        withContext(NonCancellable) { withTimeout(5000L) { owner.close().await() } }
+        withContext(NonCancellable) { withTimeout(5000L) { awaitWithMainPump { owner.close().await() } } }
         assertEquals(TransferServerPhase.OFF, owner.server.phase.value)
         assertFalse(owner.server.sessionState.value.active)
         assertEquals(0L, application.library.overview().totalTracks)
@@ -156,6 +176,17 @@ class LocalTransferApplicationTest {
         retireUploads = application::retireTransferUploads,
         identity = { identity },
     ).also { receiver = it }
+
+    /** 等待真实 IO/资源票据时仍处理服务主线程回执；既有五秒预算围住整个等待。 */
+    private suspend fun <T> awaitWithMainPump(action: suspend () -> T): T = coroutineScope {
+        val pending = async(Dispatchers.IO) { runCatching { action() } }
+        while (!pending.isCompleted) {
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(1L, TimeUnit.MILLISECONDS)
+            delay(1L)
+        }
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        pending.await().getOrThrow()
+    }
 
     private fun loopback(): LocalTransferAddress = LocalTransferAddress(InetAddress.getLoopbackAddress())
 }

@@ -83,7 +83,7 @@ internal class OnlineLyricsRepositoryFixture(directory: File, scope: CoroutineSc
         opened = resources.register(entry, MediaHttpTarget.https("https://audio.invalid/fixture"),
             PlaybackResolutionBudget(), null, status(resolver), { sessions.isCurrent(token) })
         // Models transport acceptance only; no decoder, time advancement or sound is claimed.
-        resources.notifyOpened(checkNotNull(opened?.online))
+        acceptOpened()
     }
 
     suspend fun openMeting() {
@@ -97,11 +97,21 @@ internal class OnlineLyricsRepositoryFixture(directory: File, scope: CoroutineSc
         opened = resources.register(entry, audio, PlaybackResolutionBudget(), null,
             status("meting-custom", use.generation), { sessions.isCurrent(token) }, use::isCurrent,
             PlaybackAssociatedResources(null, lyrics))
-        resources.notifyOpened(checkNotNull(opened?.online))
+        acceptOpened()
+    }
+
+    private fun acceptOpened() {
+        val state = checkNotNull(opened?.online)
+        val pending = state.target.ownPending {}
+        try {
+            state.target.commitOpened(pending) { state.opened.set(true) }
+            resources.notifyOpened(state)
+        } finally { pending?.close() }
     }
 
     fun closeOpened() {
         val old = opened ?: return
+        checkNotNull(old.online).opened.set(false)
         resources.notifyClosed(checkNotNull(old.online))
         old.close()
         opened = null

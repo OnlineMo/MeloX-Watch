@@ -83,6 +83,8 @@ class ProbePlaybackService : MediaSessionService() {
         var bootIdentityRead = false
         var dspInitialized = false
         var preferencesInitialized = false
+        // Main 顺序推进本轮初始化停点；新 owner 从 NOT_STARTED 重建。
+        var stage = "NOT_STARTED"
     }
 
     private var mediaSession: MediaSession? = null
@@ -313,35 +315,49 @@ class ProbePlaybackService : MediaSessionService() {
         initializing = true
         initializationComplete = false
         try {
+            startup.stage = "BACKUP_STORAGE"
             application.requireBackupStorageReady()
+            startup.stage = "FILE_JOURNAL"
             application.fileOperations.assertPlaybackReadable()
             currentCoroutineContext().ensureActive()
             if (!startup.bootIdentityRead) {
+                startup.stage = "BOOT_IDENTITY"
                 startup.bootId = readSleepTimerBootId(this)
                 startup.bootIdentityRead = true
             }
             // Timer.initialize 自身保留已恢复的 lease；再次重试不能重新启用磁盘旧定时。
+            startup.stage = "SLEEP_TIMER"
             timer.initialize()
             if (!startup.dspInitialized) {
+                startup.stage = "DSP_SETTINGS"
                 dsp.initialize()
                 startup.dspInitialized = true
             }
             if (!startup.preferencesInitialized) {
+                startup.stage = "PREFERENCES"
                 owner.initializePreferences()
                 startup.preferencesInitialized = true
             }
+            startup.stage = "BACKEND_RETRY"
             val restoredBackend = retryBackend && owner.retryBackendIfNeeded()
-            if (!restoredBackend) queues.initialize()
+            if (!restoredBackend) {
+                startup.stage = "QUEUE_RESTORE"
+                queues.initialize()
+            }
+            startup.stage = "OWNER_CHECK"
             currentCoroutineContext().ensureActive()
             if (destroyed || quiescing || playbackOwner !== owner) {
                 throw CancellationException("Playback service owner retired")
             }
             initializationComplete = true
+            startup.stage = "LYRICS_BINDING"
             if (lyricsPlaybackBinding == null) {
                 lyricsPlaybackBinding = application.lyricsEntryOwner.playback.bindService(queues.sessionPlayer)
             }
+            startup.stage = "OBSERVERS"
             dsp.observe()
             owner.observePreferences()
+            startup.stage = "COMPLETE"
         } finally {
             if (!destroyed && !quiescing && playbackOwner === owner) {
                 initializing = false

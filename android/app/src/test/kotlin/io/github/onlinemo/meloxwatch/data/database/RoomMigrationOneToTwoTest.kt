@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.data.database
 
+import android.app.Application
 import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
@@ -43,7 +44,8 @@ import org.robolectric.annotation.SQLiteMode
 
 /** Frozen 1→2, historical-v3 observations and production-v7 repository behavior stay separate. */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [26], manifest = Config.NONE)
+// 迁移夹具独占其生产文件名，避免 Application 异步恢复初始化抢先打开同一库。
+@Config(sdk = [26], application = Application::class, manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class RoomMigrationOneToTwoTest {
     @Test(timeout = 30000L)

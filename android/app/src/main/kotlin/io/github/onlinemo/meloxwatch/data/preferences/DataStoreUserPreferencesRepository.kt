@@ -228,19 +228,29 @@ class DataStoreUserPreferencesRepository internal constructor(
     private suspend fun completedUpdate(transform: (Preferences) -> Preferences): Preferences {
         val caller = currentCoroutineContext()
         caller.ensureActive()
-        // Retain the mutex/admission until the Application DataStore actor has truly exited.
-        val attempt = withContext(NonCancellable) {
-            runCatching {
-                dataStore.updateData { stored ->
-                    caller.ensureActive()
-                    transform(stored).also { caller.ensureActive() }
-                }
+        // The transform keeps the caller Job so cancellation before COMMIT can abort it.
+        val attempt = runCatching {
+            dataStore.updateData { stored ->
+                caller.ensureActive()
+                transform(stored).also { caller.ensureActive() }
             }
         }
+        val drainFailure = if (attempt.exceptionOrNull() is CancellationException || !caller.isActive) {
+            // A cancelled ack can precede actor-owned disk IO. A later identity update is the
+            // same actor's serial completion fence; retain the mutex/backup admission until then.
+            withContext(NonCancellable) { runCatching { dataStore.updateData { it } }.exceptionOrNull() }
+        } else null
         try { caller.ensureActive() }
         catch (cancelled: CancellationException) {
-            attempt.exceptionOrNull()?.takeUnless { it is CancellationException }?.let { cancelled.addSuppressed(it) }
+            listOfNotNull(attempt.exceptionOrNull(), drainFailure)
+                .filterNot { it is CancellationException }
+                .forEach { if (cancelled.suppressed.none { known -> known === it }) cancelled.addSuppressed(it) }
             throw cancelled
+        }
+        attempt.exceptionOrNull()?.let { failure ->
+            if (drainFailure != null && drainFailure !== failure && drainFailure !is CancellationException) {
+                failure.addSuppressed(drainFailure)
+            }
         }
         return attempt.getOrThrow()
     }
