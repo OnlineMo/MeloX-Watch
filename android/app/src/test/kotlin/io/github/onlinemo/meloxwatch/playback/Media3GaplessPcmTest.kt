@@ -20,6 +20,7 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.ForwardingAudioSink
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.room.Room
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
@@ -47,6 +48,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.ArrayDeque
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -75,6 +77,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import org.robolectric.annotation.SQLiteMode
+import org.robolectric.shadows.ShadowSystemClock
 
 /**
  * 固定 Media3 的真实 WAVE/PCM 与处理链回归。AudioTrack 只记录写入字节和受控播放头，
@@ -94,7 +97,8 @@ class Media3GaplessPcmTest {
             File(temporaryFolder.root, "gapless-pcm.db").absolutePath).build()
         val store = RoomQueueStore(database, shuffleIndex = { it })
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-        val provider = RecordingTrackProvider(realtime = true)
+        val diagnostics = PcmDiagnostics()
+        val provider = RecordingTrackProvider(realtime = true, diagnostics = diagnostics)
         val runtime = DspRuntime()
         val sinkErrors = AtomicInteger()
         val rounds = mutableListOf<String>()
@@ -105,7 +109,7 @@ class Media3GaplessPcmTest {
         val data = pcm.mapIndexed { index, samples -> "content://fixture/gapless/$index" to wave(samples, SAMPLE_RATE) }.toMap()
         val renderers = object : DefaultRenderersFactory(application) {
             override fun buildAudioSink(context: Context, enableFloatOutput: Boolean,
-                enableAudioTrackPlaybackParams: Boolean): AudioSink = sink(context, provider, runtime, sinkErrors)
+                enableAudioTrackPlaybackParams: Boolean): AudioSink = sink(context, provider, runtime, sinkErrors, diagnostics)
         }.setEnableAudioFloatOutput(false).setEnableAudioTrackPlaybackParams(false)
         val player = ExoPlayer.Builder(application).setLooper(Looper.getMainLooper())
             .setUsePlatformDiagnostics(false).setRenderersFactory(renderers)
@@ -116,14 +120,27 @@ class Media3GaplessPcmTest {
                 ByteArrayDataSource(ByteArrayDataSource.UriResolver { uri -> checkNotNull(data[uri.toString()]) { "UNKNOWN_WAVE_FIXTURE" } })
             }, BoundedExtractorsFactory()))
             .setReleaseTimeoutMs(1500L).build()
-        val coordinator = QueuePlaybackCoordinator(player, store, FixedPreferences(), scope,
+        val actualOperations = Media3PlaybackOperations(player)
+        val observedOperations = object : PlaybackBackendOperations by actualOperations {
+            override fun setPauseAtBoundary(pause: Boolean) {
+                diagnostics.captureMain(player)
+                diagnostics.record(PcmEvent.GATE, if (pause) 1 else 0)
+                actualOperations.setPauseAtBoundary(pause)
+            }
+        }
+        val coordinator = QueuePlaybackCoordinator(player, store, FixedPreferences(), scope, operations = observedOperations,
             onRoundChanged = { rounds += it.queueEntryId },
             onContinuousRoundChanged = { entry, _ -> rounds += entry.queueEntryId }, onFailure = failures::add)
         var peakWindow = 0
         player.addListener(object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
+                diagnostics.captureMain(player)
                 peakWindow = maxOf(peakWindow, player.mediaItemCount)
                 assertTrue(player.mediaItemCount <= 3)
+            }
+            override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                diagnostics.captureMain(player)
+                diagnostics.record(PcmEvent.POSITION, reason)
             }
         })
         try {
@@ -145,6 +162,8 @@ class Media3GaplessPcmTest {
             }
             await(scope.async { coordinator.flush() })
             val played = provider.tracks.filter { it.hasPlayed }
+            // 固定类型与数值区分内部 flush 和终流；不输出 URI、元数据或原调用栈。
+            println("MELOX_GAPLESS_DIAGNOSTICS " + diagnostics.report(provider.tracks))
             assertEquals(1, played.size)
             val actual = played.single().bytes()
             val expected = join(pcm)
@@ -231,9 +250,9 @@ class Media3GaplessPcmTest {
     }
 
     private fun sink(context: Context, provider: RecordingTrackProvider, runtime: DspRuntime,
-        errors: AtomicInteger): AudioSink {
+        errors: AtomicInteger, diagnostics: PcmDiagnostics? = null): AudioSink {
         val chain = DspAudioProcessorChain(runtime)
-        return DspAudioSink(DefaultAudioSink.Builder(context).setAudioProcessorChain(chain)
+        val output = DspAudioSink(DefaultAudioSink.Builder(context).setAudioProcessorChain(chain)
             .setEnableFloatOutput(false).setEnableAudioTrackPlaybackParams(false).setAudioTrackProvider(provider).build(), chain).apply {
             setOffloadMode(AudioSink.OFFLOAD_MODE_DISABLED)
             setListener(object : AudioSink.Listener {
@@ -242,6 +261,21 @@ class Media3GaplessPcmTest {
                 override fun onSkipSilenceEnabledChanged(skipSilenceEnabled: Boolean) = Unit
                 override fun onAudioSinkError(audioSinkError: Exception) { errors.incrementAndGet() }
             })
+        }
+        if (diagnostics == null) return output
+        return object : ForwardingAudioSink(output) {
+            override fun flush() {
+                diagnostics.record(PcmEvent.SINK_FLUSH, origin = diagnostics.sinkOriginFlags())
+                super.flush()
+            }
+            override fun reset() {
+                diagnostics.record(PcmEvent.SINK_RESET, origin = diagnostics.sinkOriginFlags())
+                super.reset()
+            }
+            override fun playToEndOfStream() {
+                diagnostics.record(PcmEvent.SINK_END, origin = diagnostics.sinkOriginFlags())
+                super.playToEndOfStream()
+            }
         }
     }
 
@@ -260,6 +294,8 @@ class Media3GaplessPcmTest {
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
             while (!output.handleBuffer(buffer, presentationUs, 1)) {
                 check(System.nanoTime() < deadline) { "PCM_BUFFER_DEADLINE" }
+                // PAUSED 的播放头采样需要虚拟时钟前进，墙钟等待不会推进它。
+                ShadowSystemClock.advanceBy(1L, TimeUnit.MILLISECONDS)
                 Thread.sleep(1L)
             }
             assertEquals(count, buffer.position())
@@ -272,7 +308,11 @@ class Media3GaplessPcmTest {
         do {
             output.playToEndOfStream()
             check(System.nanoTime() < deadline) { "PCM_DRAIN_DEADLINE" }
-            if (!output.isEnded) Thread.sleep(1L)
+            if (!output.isEnded) {
+                // stop 后的尾帧由同一虚拟时钟估算，保留真实等待及原期限。
+                ShadowSystemClock.advanceBy(1L, TimeUnit.MILLISECONDS)
+                Thread.sleep(1L)
+            }
         } while (!output.isEnded)
     }
 
@@ -343,10 +383,14 @@ class Media3GaplessPcmTest {
     }
 
     private class RecordingTrackProvider(private val realtime: Boolean, private val maxWriteFrames: Int = 512,
-        private val blockedWriteEvery: Int = 0) : DefaultAudioSink.AudioTrackProvider {
+        private val blockedWriteEvery: Int = 0, private val diagnostics: PcmDiagnostics? = null) : DefaultAudioSink.AudioTrackProvider {
         val tracks = CopyOnWriteArrayList<RecordingTrack>()
         override fun getAudioTrack(audioTrackConfig: AudioSink.AudioTrackConfig, audioAttributes: AudioAttributes,
-            audioSessionId: Int, context: Context?): AudioTrack = RecordingTrack(audioTrackConfig, realtime, maxWriteFrames, blockedWriteEvery).also(tracks::add)
+            audioSessionId: Int, context: Context?): AudioTrack = RecordingTrack(audioTrackConfig, realtime, maxWriteFrames,
+                blockedWriteEvery, tracks.size, diagnostics).also {
+                tracks.add(it)
+                diagnostics?.record(PcmEvent.TRACK_CREATE, tracks.lastIndex)
+            }
         override fun getAudioTrackChannelConfig(channelCount: Int): Int {
             assertEquals(2, channelCount)
             return AudioFormat.CHANNEL_OUT_STEREO
@@ -355,7 +399,8 @@ class Media3GaplessPcmTest {
     }
 
     private class RecordingTrack(private val configuration: AudioSink.AudioTrackConfig, private val realtime: Boolean,
-        private val maxWriteFrames: Int, private val blockedWriteEvery: Int) : AudioTrack(
+        private val maxWriteFrames: Int, private val blockedWriteEvery: Int, private val traceIndex: Int,
+        private val diagnostics: PcmDiagnostics?) : AudioTrack(
         android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA)
             .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build(),
         AudioFormat.Builder().setEncoding(configuration.encoding).setSampleRate(configuration.sampleRate)
@@ -389,6 +434,7 @@ class Media3GaplessPcmTest {
             startedMs = SystemClock.elapsedRealtime()
             playingState = AudioTrack.PLAYSTATE_PLAYING
             hasPlayed = true
+            diagnostics?.record(PcmEvent.TRACK_PLAY, traceIndex)
         }
         @Synchronized override fun pause() {
             consumedFrames = playbackHeadPosition.toLong()
@@ -401,6 +447,7 @@ class Media3GaplessPcmTest {
         @Synchronized override fun flush() {
             flushCalls++
             consumedFrames = 0L
+            diagnostics?.record(PcmEvent.TRACK_FLUSH, traceIndex, diagnostics.sinkOriginFlags())
         }
         @Synchronized override fun write(audioData: ByteBuffer, sizeInBytes: Int, writeMode: Int): Int {
             check(!closed)
@@ -413,16 +460,89 @@ class Media3GaplessPcmTest {
             return count
         }
         @Synchronized fun bytes(): ByteArray = output.toByteArray()
+        @Synchronized fun diagnostic(): String = """{"index":$traceIndex,"rate":${configuration.sampleRate},"encoding":${configuration.encoding},"channels":${configuration.channelConfig},"buffer":${configuration.bufferSize},"frames":${output.size() / FRAME_BYTES},"played":$hasPlayed,"flushes":$flushCalls,"releases":$releaseCalls}"""
         @Synchronized override fun release() {
             if (!closed) {
                 closed = true
                 releaseCalls++
+                diagnostics?.record(PcmEvent.TRACK_RELEASE, traceIndex, diagnostics.sinkOriginFlags())
                 super.release()
             }
         }
     }
 
+    private enum class PcmEvent {
+        GATE, POSITION, TRACK_CREATE, TRACK_PLAY, TRACK_FLUSH, TRACK_RELEASE, SINK_FLUSH, SINK_RESET, SINK_END,
+    }
+
+    private data class MainObservation(val ordinal: Int = -1, val positionMs: Long = -1L,
+        val state: Int = -1, val playWhenReady: Int = -1)
+
+    private data class PcmRecord(val event: PcmEvent, val clockMs: Long, val main: MainObservation,
+        val value: Int, val origin: Int)
+
+    /** 只保存最近64条固定字段；播放线程不访问 Player，Main快照允许有已知采样延迟。 */
+    private class PcmDiagnostics {
+        @Volatile private var main = MainObservation()
+        private val events = ArrayDeque<PcmRecord>()
+        private var dropped = 0L
+
+        fun captureMain(player: Player) {
+            val id = player.currentMediaItem?.mediaId
+            val ordinal = if (id?.startsWith("entry-") == true) id.substring(6).toIntOrNull()?.takeIf { it in 0..3 } ?: -1 else -1
+            main = MainObservation(ordinal, player.currentPosition, player.playbackState, if (player.playWhenReady) 1 else 0)
+        }
+
+        @Synchronized fun record(event: PcmEvent, value: Int = 0, origin: Int = 0) {
+            val observation = main
+            val previous = events.peekLast()
+            // EOS可能反复排尾；同一已观察曲目与来源只留一次，保留开门/flush事件的预算。
+            if (event == PcmEvent.SINK_END && previous?.event == event && previous.main.ordinal == observation.ordinal &&
+                previous.value == value && previous.origin == origin) return
+            if (events.size == MAX_DIAGNOSTIC_EVENTS) {
+                events.removeFirst()
+                dropped++
+            }
+            events.addLast(PcmRecord(event, SystemClock.elapsedRealtime(), observation, value, origin))
+        }
+
+        fun sinkOriginFlags(): Int {
+            var flags = 0
+            // 只匹配固定Media3方法，原Frame、文件名、行号和调用栈均不保留或输出。
+            for (frame in Thread.currentThread().stackTrace) {
+                if (frame.className == "androidx.media3.exoplayer.audio.MediaCodecAudioRenderer") {
+                    flags = flags or when (frame.methodName) {
+                        "onPositionReset" -> 1
+                        "onDisabled" -> 2
+                        "onReset" -> 4
+                        "renderToEndOfStream" -> 8
+                        else -> 0
+                    }
+                } else if (frame.className == "androidx.media3.exoplayer.ExoPlayerImplInternal") {
+                    flags = flags or when (frame.methodName) {
+                        "seekToCurrentPosition" -> 16
+                        "setPauseAtEndOfWindowInternal" -> 32
+                        else -> 0
+                    }
+                }
+            }
+            return flags
+        }
+
+        fun report(tracks: List<RecordingTrack>): String {
+            val captured = synchronized(this) { events.toList() to dropped }
+            val rows = captured.first.joinToString(",") {
+                "[\"${it.event.name}\",${it.clockMs},${it.main.ordinal},${it.main.positionMs},${it.main.state},${it.main.playWhenReady},${it.value},${it.origin}]"
+            }
+            // Track锁与ledger锁不嵌套；输出只含配置数值、帧数和实际生命周期计数。
+            val details = tracks.take(MAX_DIAGNOSTIC_TRACKS).joinToString(",") { it.diagnostic() }
+            return """{"schema":1,"eventColumns":["type","clockMs","mainOrdinal","mainPositionMs","mainState","playWhenReadyFlag","value","originFlags"],"events":[$rows],"eventsDropped":${captured.second},"trackCount":${tracks.size},"playedTrackCount":${tracks.count { it.hasPlayed }},"trackDetailsOmitted":${(tracks.size - MAX_DIAGNOSTIC_TRACKS).coerceAtLeast(0)},"tracks":[$details]}"""
+        }
+    }
+
     companion object {
+        private const val MAX_DIAGNOSTIC_EVENTS = 64
+        private const val MAX_DIAGNOSTIC_TRACKS = 8
         private const val SAMPLE_RATE = 48_000
         private const val FRAME_BYTES = 4
     }
