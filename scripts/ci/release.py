@@ -8,7 +8,7 @@ from pathlib import Path
 import urllib.parse
 
 from apk_verify import build_tools, certificate, inspect_apk
-from artifact_io import GitHub
+from artifact_io import GitHub, validate_run
 from candidate import CANDIDATE_FILES, fetch_candidate, import_snapshot, release_history
 from ci_common import (ROOT, OWNER, OWNER_EMAIL, REPOSITORY, expected_identity, git,
                        no_signing_secrets, properties, require, sha256, trusted_context, write_json)
@@ -33,7 +33,7 @@ def verify_existing_assets(client, release_id, files):
     require(len({asset['name'] for asset in existing}) == len(existing), 'Duplicate release asset names')
     require({asset['name'] for asset in existing} <= set(files), 'Unexpected existing asset; owner recovery review required')
     for asset in existing:
-        content = client.download(f'/repos/{REPOSITORY}/releases/assets/{asset["id"]}')
+        content = client.download_release_asset(asset['id'])
         require(hashlib.sha256(content).hexdigest() == sha256(files[asset['name']]),
                 'Existing asset has different bytes; never overwrite it')
     return {asset['name'] for asset in existing}
@@ -81,6 +81,12 @@ def publish(run_id, attempt, artifact_id, approval):
     require(os.environ.get('CANDIDATE_OPERATION') == 'publish-candidate', 'Explicit publish-candidate operation required')
     require(approval == os.environ['GITHUB_SHA'] == git('rev-parse', 'HEAD'), 'Publication must use the selected approval main SHA')
     client = GitHub()
+    current_run_id, current_attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
+    # 当前发布尝试和原候选分别绑定各自的触发者数字 ID。
+    current_run = client.get(f'/actions/runs/{current_run_id}/attempts/{current_attempt}')
+    require(type(current_run.get('id')) is int and current_run['id'] == current_run_id, 'Publication run identity mismatch')
+    validate_run(current_run, current_attempt, approval, '.github/workflows/release.yml',
+                 'workflow_dispatch', 'main', require_success=False)
     require(client.get('/git/ref/heads/main')['object']['sha'] == approval, 'main advanced after dispatch')
     directory = ROOT / 'accepted-candidate'
     manifest, provenance = fetch_candidate(client, run_id, attempt, artifact_id, directory)

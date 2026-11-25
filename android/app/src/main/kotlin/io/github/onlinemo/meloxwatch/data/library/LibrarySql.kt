@@ -33,6 +33,12 @@ internal object LibrarySql {
     private fun pathSegment(alias: String) = "$alias.pathName != '' AND $alias.pathName NOT IN ('.', '..') " +
         "AND instr($alias.pathName, '/') = 0 AND instr($alias.pathName, char(92)) = 0 AND instr($alias.pathName, char(0)) = 0"
 
+    /** 与类型化观测使用同一验证入口门槛；UNKNOWN的展示排名继续保留。 */
+    private fun fileReadValidation(source: String, grant: String): String =
+        "($grant.readCapability IS 'AVAILABLE' OR ($grant.readCapability IS 'UNKNOWN' " +
+            "AND json_extract($source.spec, '$.kind') IS 'TREE' " +
+            "AND json_extract($grant.observation, '$.enumerate') IS 'AVAILABLE'))"
+
     /** Only indexed enumeration edges below an authorized root contribute to a relative path. */
     private fun relativePaths(revision: Long, sourceFiltered: Boolean = false): String = """
         relative_paths(sourceId, nodeId, relativePath, directory) AS (
@@ -43,7 +49,7 @@ internal object LibrarySql {
             JOIN local_grants g ON g.grantId = sv.grantId
             WHERE n.parentNodeId IS NULL AND ${valid("n", revision)}
                 AND identity.objectId = sv.rootObjectId ${if (sourceFiltered) "AND n.sourceId = ?" else ""}
-                AND sv.state = 'ACTIVE' AND g.readCapability = 'AVAILABLE'
+                AND sv.state = 'ACTIVE' AND ${fileReadValidation("sv", "g")}
                 AND (n.directory = 1 OR (${pathSegment("n")}))
             UNION ALL
             SELECT n.sourceId, n.nodeId,
@@ -232,7 +238,7 @@ internal object LibrarySql {
                 identity.aliasId IS NULL OR access.versionId IS NULL OR content.versionId IS NULL OR source.sourceId IS NULL
                 OR identity.sourceId IS NOT ${audio("sourceId")} OR identity.objectId IS NOT ${audio("objectId")}
                 OR identity.locationId IS NOT ${audio("location.locationId")} OR access.uri IS NOT ${audio("location.uri")}
-                OR source.state != 'ACTIVE' OR grant.readCapability != 'AVAILABLE' OR grant.grantId IS NOT ${audio("grantId")}
+                OR source.state != 'ACTIVE' OR NOT ${fileReadValidation("source", "grant")} OR grant.grantId IS NOT ${audio("grantId")}
                 OR grant.uri IS NOT ${audio("location.grantUri")}
                 OR (source.validTo IS NULL AND (currentSource.revision IS NOT ${audio("sourceRevision")} OR currentSource.authEpoch IS NOT ${audio("authEpoch")}))
                 OR content.contentRevision IS NOT ${audio("location.contentRevision")} OR content.contentToken IS NOT ${audio("providerContentToken")}
@@ -306,7 +312,11 @@ internal object LibrarySql {
         val availability = cueAvailability(revision)
         if (view.query.sourceId != null || view.query.folderNodeId != null || view.query.relativePathKeyword != null) filters += "a.aliasVersionId IS NOT NULL"
         else if (!view.query.includeHidden) filters += "(a.aliasVersionId IS NOT NULL OR (t.cueReference IS NOT NULL AND json_extract(t.cueReference, '$.state') = 'PENDING'))"
-        if (view.query.readableOnly) filters += "($availability) = 0"
+        if (view.query.readableOnly) filters += if (view.query.allowUnknownTreeReadValidation) {
+            // 复用已选别名的source/grant联接；仅rank1进入验证，不增加逐项数据库查询。
+            "(($availability) = 0 OR (($availability) = 1 AND payloadSource.state = 'ACTIVE' " +
+                "AND payloadGrant.readCapability IS 'UNKNOWN' AND ${fileReadValidation("payloadSource", "payloadGrant")}))"
+        } else "($availability) = 0"
         if (!view.query.includeHidden) filters += "($availability) != 5"
         if (!view.query.includeHidden && view.shortAudioFilter) filters += "(t.durationMs IS NULL OR t.durationMs >= ${LibraryLimits.SHORT_AUDIO_MS})"
         view.query.albumKey?.let { filters += "t.displayAlbumKey = ?"; args += it }
@@ -729,7 +739,7 @@ internal object LibrarySql {
                 JOIN local_cue_documents document ON document.aliasId = av.aliasId AND document.sourceId = av.sourceId
                 JOIN local_source_versions sv ON sv.sourceId = av.sourceId AND ${valid("sv", revision)}
                 JOIN local_grants grantAccess ON grantAccess.grantId = sv.grantId
-                WHERE p.depth = ${components.size} AND p.directory = 0 AND sv.state = 'ACTIVE' AND grantAccess.readCapability = 'AVAILABLE'
+                WHERE p.depth = ${components.size} AND p.directory = 0 AND sv.state = 'ACTIVE' AND ${fileReadValidation("sv", "grantAccess")}
                     AND (av.readIssue IS NULL OR av.readIssue = 'METADATA_UNREADABLE')
                     AND NOT ${excluded("av.sourceId", "av.nodeId", revision)}
                     AND NOT (sv.absenceScanId IS NOT NULL AND av.lastSeenSequence < sv.absenceScanSequence

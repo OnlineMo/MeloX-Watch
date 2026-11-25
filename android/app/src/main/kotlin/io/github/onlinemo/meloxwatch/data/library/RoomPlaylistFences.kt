@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.data.library
 
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistCatalogFence
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
@@ -28,7 +29,8 @@ class RoomPlaylistFences(private val database: MeloXDatabase) :
         verify(PlaylistLibraryRevision(fence.catalogRevision, fence.rulesRevision))
         val source = dao.source(fence.sourceId) ?: fail(PlaylistIssue.SOURCE_UNAVAILABLE)
         val grant = dao.grant(source.grantId) ?: fail(PlaylistIssue.SOURCE_UNAVAILABLE)
-        if (source.state != LibrarySourceState.ACTIVE.name || grant.readCapability != "AVAILABLE") {
+        val observed = source.model(grant)
+        if (observed.state != LibrarySourceState.ACTIVE || !observed.grant.allowsFileReadValidation(observed.spec.kind)) {
             fail(PlaylistIssue.SOURCE_UNAVAILABLE)
         }
         if (source.revision != fence.sourceRevision || source.authEpoch != fence.authEpoch ||

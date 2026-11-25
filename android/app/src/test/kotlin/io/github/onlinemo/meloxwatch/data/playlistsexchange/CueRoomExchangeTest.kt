@@ -398,7 +398,8 @@ class CueRoomExchangeTest {
 
     private suspend fun exportMembers(snapshot: PlaylistSnapshot, format: PlaylistTransferFormat): Pair<ByteArray, List<ExchangeMember>> {
         val view = playlists.openView(snapshot.playlistId)
-        try {
+        // 结果离开解析作用域后再返回，避免挂起清理保留已失活的局部变量。
+        val result = try {
             prepareDocument(format)
             documentFile.writeBytes(byteArrayOf())
             val operation = "cue-hint-export-${format.name.lowercase()}"
@@ -420,13 +421,14 @@ class CueRoomExchangeTest {
                 assertFalse(bytes.toString(Charsets.UTF_8).contains("content://"))
                 assertFalse(bytes.toString(Charsets.UTF_8).contains("http://"))
                 assertFalse(bytes.toString(Charsets.UTF_8).contains("https://"))
-                return bytes to parsed
+                bytes to parsed
             } finally {
                 discard(document)
             }
         } finally {
             playlists.closeView(view.viewId)
         }
+        return result
     }
 
     private suspend fun grantCount(): Long = fixture.database.libraryDao().scalar(RoomRawQuery("SELECT COUNT(*) FROM local_grants"))

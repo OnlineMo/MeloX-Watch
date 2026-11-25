@@ -30,6 +30,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceSpec
 import io.github.onlinemo.meloxwatch.data.local.ObservedCandidate
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.scan.MetadataOutcome
 import io.github.onlinemo.meloxwatch.data.scan.ScanCounters
 import io.github.onlinemo.meloxwatch.data.scan.ScanCoverage
@@ -257,8 +258,18 @@ class RoomLocalLibraryRepository(
     internal suspend fun playlistRelativePath(view: LibraryViewToken, track: LibraryTrack): String? = access {
         database.withPreservedTransaction {
             checkView(view)
-            if (track.sourceId == null || track.nodeId == null || track.availability != LibraryAvailability.AVAILABLE) null
-            else dao.text(LibrarySql.relativePath(view.revision, track.sourceId, track.nodeId))
+            if (track.sourceId == null || track.nodeId == null) return@withPreservedTransaction null
+            if (track.availability == LibraryAvailability.UNKNOWN) {
+                val location = track.location ?: return@withPreservedTransaction null
+                // 共用当前alias/source/content核验；已持有writer，不能重入库锁。
+                val read = resolveLocalReadUnlocked(track.trackKey, location.locationId, location.contentRevision)
+                if (read.source.spec.sourceId != track.sourceId || read.location != location || read.cueReference != track.cueReference) {
+                    fail(LibraryIssue.SOURCE_CHANGED)
+                }
+                if (read.source.spec.kind != LocalSourceKind.TREE || read.source.grant.read != ObservedCapability.UNKNOWN ||
+                    !read.source.grant.allowsFileReadValidation(read.source.spec.kind)) return@withPreservedTransaction null
+            } else if (track.availability != LibraryAvailability.AVAILABLE) return@withPreservedTransaction null
+            dao.text(LibrarySql.relativePath(view.revision, track.sourceId, track.nodeId))
         }
     }
 
@@ -285,7 +296,7 @@ class RoomLocalLibraryRepository(
     internal suspend fun playlistAvailableScopeCount(view: LibraryViewToken): Long = access {
         database.withPreservedTransaction {
             checkView(view)
-            dao.scalar(LibrarySql.count(view.copy(query = LibraryQuery(readableOnly = true))))
+            dao.scalar(LibrarySql.count(view.copy(query = LibraryQuery(readableOnly = true, allowUnknownTreeReadValidation = view.query.allowUnknownTreeReadValidation))))
         }
     }
 
@@ -377,29 +388,34 @@ class RoomLocalLibraryRepository(
 
     override suspend fun resolveLocalRead(trackKey: TrackKey, expectedLocationId: String?, expectedContentRevision: Long?): LocalReadDescriptor = access {
         database.withPreservedTransaction {
-            val current = meta()
-            if (dao.currentTrack(trackKey.trackId)?.cueReference != null) {
-                val read = cues.resolve(trackKey, null).audio
-                if (expectedLocationId != null && expectedLocationId != read.location.locationId ||
-                    expectedContentRevision != null && expectedContentRevision != read.location.contentRevision) fail(LibraryIssue.SOURCE_CHANGED)
-                return@withPreservedTransaction read
-            }
-            val view = internalView(current, LibraryQuery(includeHidden = true))
-            val row = dao.rows(LibrarySql.row(view, trackKey.providerId, trackKey.trackId)).firstOrNull() ?: fail(LibraryIssue.SOURCE_UNAVAILABLE)
-            when (row.model().availability) {
-                LibraryAvailability.NEEDS_AUTHORIZATION -> fail(LibraryIssue.PERMISSION_REVOKED)
-                LibraryAvailability.MISSING -> fail(LibraryIssue.FILE_MISSING)
-                LibraryAvailability.UNAVAILABLE, LibraryAvailability.REMOVED -> fail(LibraryIssue.SOURCE_UNAVAILABLE)
-                else -> Unit
-            }
-            val reference = row.reference() ?: fail(LibraryIssue.SOURCE_UNAVAILABLE)
-            if (expectedLocationId != null && expectedLocationId != reference.locationId) fail(LibraryIssue.SOURCE_CHANGED)
-            if (expectedContentRevision != null && expectedContentRevision != reference.contentRevision) fail(LibraryIssue.SOURCE_CHANGED)
-            val source = dao.source(row.selectedSourceId ?: fail(LibraryIssue.RECOVERY_REQUIRED)) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
-            LocalReadDescriptor(trackKey, sourceModel(source), row.selectedAliasId ?: fail(LibraryIssue.RECOVERY_REQUIRED), reference,
-                row.selectedObjectId ?: fail(LibraryIssue.RECOVERY_REQUIRED), row.selectedProviderContentToken, row.selectedSizeBytes,
-                verifiedContentToken = row.selectedVerifiedContentToken)
+            resolveLocalReadUnlocked(trackKey, expectedLocationId, expectedContentRevision)
         }
+    }
+
+    private suspend fun resolveLocalReadUnlocked(trackKey: TrackKey, expectedLocationId: String?,
+        expectedContentRevision: Long?): LocalReadDescriptor {
+        val current = meta()
+        if (dao.currentTrack(trackKey.trackId)?.cueReference != null) {
+            val read = cues.resolve(trackKey, null).audio
+            if (expectedLocationId != null && expectedLocationId != read.location.locationId ||
+                expectedContentRevision != null && expectedContentRevision != read.location.contentRevision) fail(LibraryIssue.SOURCE_CHANGED)
+            return read
+        }
+        val view = internalView(current, LibraryQuery(includeHidden = true))
+        val row = dao.rows(LibrarySql.row(view, trackKey.providerId, trackKey.trackId)).firstOrNull() ?: fail(LibraryIssue.SOURCE_UNAVAILABLE)
+        when (row.model().availability) {
+            LibraryAvailability.NEEDS_AUTHORIZATION -> fail(LibraryIssue.PERMISSION_REVOKED)
+            LibraryAvailability.MISSING -> fail(LibraryIssue.FILE_MISSING)
+            LibraryAvailability.UNAVAILABLE, LibraryAvailability.REMOVED -> fail(LibraryIssue.SOURCE_UNAVAILABLE)
+            else -> Unit
+        }
+        val reference = row.reference() ?: fail(LibraryIssue.SOURCE_UNAVAILABLE)
+        if (expectedLocationId != null && expectedLocationId != reference.locationId) fail(LibraryIssue.SOURCE_CHANGED)
+        if (expectedContentRevision != null && expectedContentRevision != reference.contentRevision) fail(LibraryIssue.SOURCE_CHANGED)
+        val source = dao.source(row.selectedSourceId ?: fail(LibraryIssue.RECOVERY_REQUIRED)) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+        return LocalReadDescriptor(trackKey, sourceModel(source), row.selectedAliasId ?: fail(LibraryIssue.RECOVERY_REQUIRED), reference,
+            row.selectedObjectId ?: fail(LibraryIssue.RECOVERY_REQUIRED), row.selectedProviderContentToken, row.selectedSizeBytes,
+            verifiedContentToken = row.selectedVerifiedContentToken)
     }
 
     override suspend fun nextCueDocument(token: ScanToken): ObservedCandidate? = access {
@@ -467,7 +483,7 @@ class RoomLocalLibraryRepository(
             }
             val current = meta()
             val revision = increment(current.revision)
-            val source = LibrarySourceEntity(spec.sourceId, LibraryCodec.source(spec), id(), 1L, 1L, sourceState(grant).name, null, null, null, null, null)
+            val source = LibrarySourceEntity(spec.sourceId, LibraryCodec.source(spec), id(), 1L, 1L, sourceState(spec.kind, grant).name, null, null, null, null, null)
             dao.putSource(source)
             dao.insertGrant(grantRecord(source.grantId, spec, grant))
             dao.insertSourceVersion(sourceVersion(source, revision))
@@ -481,7 +497,7 @@ class RoomLocalLibraryRepository(
             val old = checkedSource(sourceId, expectedAuthEpoch)
             val original = LibraryCodec.source(old.spec)
             validateSource(selectedSpec, grant)
-            if (!sameSourceIdentity(original, selectedSpec) || grant.read != ObservedCapability.AVAILABLE) fail(LibraryIssue.SOURCE_CHANGED)
+            if (!sameSourceIdentity(original, selectedSpec) || !grant.allowsFileReadValidation(selectedSpec.kind)) fail(LibraryIssue.SOURCE_CHANGED)
             val selected = selectedSpec.copy(sourceId = sourceId)
             if (old.spec == LibraryCodec.source(selected) && sourceModel(old).grant == grant && old.state == LibrarySourceState.ACTIVE.name) return@withPreservedTransaction sourceModel(old)
             invalidateScan(old, ScanPhase.CANCELLED, SourceReadIssue.SOURCE_CHANGED)
@@ -986,7 +1002,12 @@ class RoomLocalLibraryRepository(
         rootObjectId = LibraryCodec.source(value.spec).rootObjectId,
     )
     private fun grantRecord(id: String, spec: LocalSourceSpec, value: LocalGrantObservation) = LibraryGrantEntity(id, spec.sourceId, spec.uri, LibraryCodec.grant(value), value.read.name, value.acceptedPersistedFlags, value.appOwned)
-    private fun sourceState(grant: LocalGrantObservation) = if (grant.read == ObservedCapability.AVAILABLE) LibrarySourceState.ACTIVE else if (grant.read == ObservedCapability.UNAVAILABLE) LibrarySourceState.NEEDS_AUTHORIZATION else LibrarySourceState.UNAVAILABLE
+    // ACTIVE准许扫描和逐文件验证；原始grant中的UNKNOWN继续原样持久化。
+    private fun sourceState(kind: LocalSourceKind, grant: LocalGrantObservation) = when {
+        grant.allowsFileReadValidation(kind) -> LibrarySourceState.ACTIVE
+        grant.read == ObservedCapability.UNAVAILABLE -> LibrarySourceState.NEEDS_AUTHORIZATION
+        else -> LibrarySourceState.UNAVAILABLE
+    }
     private fun validateSource(spec: LocalSourceSpec, grant: LocalGrantObservation) {
         val uri = spec.uri.toUri()
         if (uri.scheme != "content" || uri.authority.isNullOrBlank() || (spec.authority != null && uri.authority != spec.authority) ||
@@ -1040,7 +1061,9 @@ class RoomLocalLibraryRepository(
     private fun fingerprint(view: LibraryViewToken): String = LibrarySortKeys.fingerprint(LibrarySortKeys.identity(view.revision.toString(), view.rulesRevision.toString(), view.totalCount.toString(),
         view.query.search, view.query.sourceId.orEmpty(), view.query.folderNodeId.orEmpty(), view.query.albumKey.orEmpty(), view.query.artistKey.orEmpty(), view.query.addedSinceEpochMs?.toString().orEmpty(),
         view.query.includeHidden.toString(), view.query.folderSubtree.toString(), view.query.relativePathKeyword.orEmpty(),
-        view.query.readableOnly.toString(), view.sort.field.name, view.sort.descending.toString(), view.shortAudioFilter.toString(), view.owner.name,
+        // 验证入口必须进入lease指纹；默认筛选继续沿用原编码。
+        if (view.query.allowUnknownTreeReadValidation) "true:UNKNOWN_TREE" else view.query.readableOnly.toString(),
+        view.sort.field.name, view.sort.descending.toString(), view.shortAudioFilter.toString(), view.owner.name,
         view.sortRuleVersion.toString(), view.statisticsEpoch.toString()))
     private suspend fun storeView(token: LibraryViewToken) {
         expireViews()

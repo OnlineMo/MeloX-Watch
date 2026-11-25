@@ -8,6 +8,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceObservation
 import io.github.onlinemo.meloxwatch.data.local.ObservedCandidate
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import java.net.URI
 import java.net.URISyntaxException
 import kotlinx.coroutines.NonCancellable
@@ -171,7 +172,7 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
             observation.root.uri != scope.directories.first().uri || !observation.root.directory) {
             throw CueException(CueIssue.SOURCE_CHANGED)
         }
-        if (observation.access.read != ObservedCapability.AVAILABLE || observation.access.enumerate != ObservedCapability.AVAILABLE ||
+        if (!observation.access.allowsFileReadValidation(observation.source.kind) || observation.access.enumerate != ObservedCapability.AVAILABLE ||
             scope.source.grant.persistedRead == ObservedCapability.AVAILABLE && observation.access.persistedRead != ObservedCapability.AVAILABLE) {
             throw CueException(CueIssue.AUTHORIZATION_REQUIRED)
         }
@@ -188,7 +189,7 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
 internal fun validateCueScope(scope: CueDirectoryScope) {
     val source = scope.source
     if (source.state != LibrarySourceState.ACTIVE || source.spec.kind != LocalSourceKind.TREE ||
-        source.grant.read != ObservedCapability.AVAILABLE || source.grant.enumerate != ObservedCapability.AVAILABLE) {
+        !source.grant.allowsFileReadValidation(source.spec.kind) || source.grant.enumerate != ObservedCapability.AVAILABLE) {
         throw CueException(CueIssue.AUTHORIZATION_REQUIRED)
     }
     if (source.authEpoch < 0L || source.revision < 0L || scope.directories.isEmpty()) throw CueException(CueIssue.INVALID_INPUT)

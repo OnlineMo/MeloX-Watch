@@ -171,7 +171,7 @@ class RoomCueAdoptionTest {
     }
 
     @Test(timeout = 30_000L)
-    fun unknownAudioHintCannotBeTreatedAsAnIdenticalFile() = runBlocking {
+    fun unknownAudioHintCannotBeTreatedAsAnIdenticalFile(): Unit = runBlocking {
         val setup = setup()
         fixture.library.libraryTransaction {
             val meta = checkNotNull(fixture.database.libraryDao().meta())

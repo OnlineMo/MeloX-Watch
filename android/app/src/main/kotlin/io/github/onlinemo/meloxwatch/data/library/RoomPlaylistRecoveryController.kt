@@ -77,7 +77,16 @@ class RoomPlaylistRecoveryController(
                 val located = library.locate(view, replacement) ?: fail(PlaylistIssue.NOT_FOUND)
                 currentCoroutineContext().ensureActive()
                 if (located.track.trackKey != replacement) fail(PlaylistIssue.SOURCE_CHANGED)
-                if (located.track.availability != LibraryAvailability.AVAILABLE) fail(PlaylistIssue.SOURCE_UNAVAILABLE)
+                if (located.track.availability != LibraryAvailability.AVAILABLE && located.track.availability != LibraryAvailability.UNKNOWN) {
+                    fail(PlaylistIssue.SOURCE_UNAVAILABLE)
+                }
+                if (located.track.availability == LibraryAvailability.UNKNOWN && located.track.cueReference != null) {
+                    val location = located.track.location ?: fail(PlaylistIssue.SOURCE_UNAVAILABLE)
+                    val read = playlistControllerAccess {
+                        library.resolveLocalRead(replacement, location.locationId, location.contentRevision)
+                    }
+                    if (read.location != location || read.cueReference != located.track.cueReference) fail(PlaylistIssue.SOURCE_CHANGED)
+                }
                 val selected = indexedReplacement(view, located.track)
                 currentCoroutineContext().ensureActive()
                 val now = elapsedMs()

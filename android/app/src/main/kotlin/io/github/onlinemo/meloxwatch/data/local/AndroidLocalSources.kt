@@ -19,6 +19,7 @@ import androidx.core.net.toUri
 import io.github.onlinemo.meloxwatch.data.imports.OwnedAudioProvider
 import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
+import io.github.onlinemo.meloxwatch.data.library.LibrarySourceState
 import io.github.onlinemo.meloxwatch.model.LocalAccess
 import io.github.onlinemo.meloxwatch.model.LocalLocationReference
 import io.github.onlinemo.meloxwatch.data.cue.AndroidCueCompleteReads
@@ -67,6 +68,7 @@ class AndroidLocalSources(
         cueReads.parse(descriptor, encoding, expected)
 
     private fun cueFence(descriptor: LocalReadDescriptor, signal: CancellationSignal, owner: CuePhysicalReadOwner): ObservedCandidate {
+        requireFileReadValidation(descriptor)
         val source = descriptor.source.spec
         val uri = contentUri(descriptor.location.uri)
         if (source.uri != descriptor.location.grantUri || source.authority != null && source.authority != uri.authority ||
@@ -189,6 +191,7 @@ class AndroidLocalSources(
 
     /** Validate one registered access snapshot, never a query of the whole library or a URI guess. */
     suspend fun validateRead(descriptor: LocalReadDescriptor): LocalReadDescriptor = io.read { signal ->
+        requireFileReadValidation(descriptor)
         val source = descriptor.source.spec
         val uri = contentUri(descriptor.location.uri)
         if (source.authority != null && source.authority != uri.authority) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
@@ -241,6 +244,17 @@ class AndroidLocalSources(
         }
         signal.throwIfCanceled()
         descriptor.copy(contentValidation = LocalContentValidation.VERIFIED)
+    }
+
+    private fun requireFileReadValidation(descriptor: LocalReadDescriptor) {
+        val source = descriptor.source
+        // 已失效或明确被拒绝的读取不能借TREE枚举结果打开文件。
+        if (source.state == LibrarySourceState.NEEDS_AUTHORIZATION || source.grant.read == ObservedCapability.UNAVAILABLE) {
+            throw SourceReadException(SourceReadIssue.PERMISSION_REVOKED)
+        }
+        if (source.state != LibrarySourceState.ACTIVE || !source.grant.allowsFileReadValidation(source.spec.kind)) {
+            throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
+        }
     }
 
     private fun readCandidate(source: LocalSourceSpec, uri: Uri, signal: CancellationSignal,
@@ -416,8 +430,9 @@ class AndroidLocalSources(
             ?.use { it.moveToFirst() } ?: throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
         val flags = documentFlags(document, signal)
         val actual = source.copy(authority = uri.authority, rootObjectId = rootId)
+        // 根与子项查询只证明枚举，文件读取仍须独立打开FD并核对内容。
         return LocalSourceObservation(actual, sourceIdentity(actual), grantFacts(actual).copy(
-            read = ObservedCapability.AVAILABLE,
+            read = ObservedCapability.UNKNOWN,
             enumerate = ObservedCapability.AVAILABLE,
             declaredWrite = flags?.let { it and DocumentsContract.Document.FLAG_SUPPORTS_WRITE != 0 },
             declaredDelete = flags?.let { it and DocumentsContract.Document.FLAG_SUPPORTS_DELETE != 0 },

@@ -44,6 +44,12 @@ data class LocalGrantObservation(
     val persistenceRejected: Boolean = false,
 )
 
+/** TREE的真实枚举只准许逐文件内容验证，不证明文件已可读，也不改写UNKNOWN观测。 */
+fun LocalGrantObservation.allowsFileReadValidation(kind: LocalSourceKind): Boolean =
+    read == ObservedCapability.AVAILABLE ||
+        (kind == LocalSourceKind.TREE && read == ObservedCapability.UNKNOWN &&
+            enumerate == ObservedCapability.AVAILABLE)
+
 enum class SourceReadIssue {
     BUSY,
     PERMISSION_DENIED,

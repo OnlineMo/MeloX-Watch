@@ -8,7 +8,7 @@ import re
 import shutil
 
 from apk_verify import build_tools, certificate, inspect_apk, inspect_test_apk
-from artifact_io import GitHub, fetch_artifact
+from artifact_io import GitHub, fetch_artifact, validate_run
 from ci_common import (ROOT, OWNER, OWNER_EMAIL, REPOSITORY, SHA_PATTERN, expected_identity,
                        git, no_signing_secrets, properties, require, sha256, trusted_context,
                        write_checksums, write_json)
@@ -74,6 +74,11 @@ def prepare():
     plan = project_plan(ROOT)
     client = GitHub()
     source = os.environ['GITHUB_SHA']
+    run_id, attempt = int(os.environ['GITHUB_RUN_ID']), int(os.environ['GITHUB_RUN_ATTEMPT'])
+    # 重跑仅暴露触发者登录名；其数字 ID 必须从本次尝试的元数据核验。
+    run = client.get(f'/actions/runs/{run_id}/attempts/{attempt}')
+    require(type(run.get('id')) is int and run['id'] == run_id, 'Preparation run identity mismatch')
+    validate_run(run, attempt, source, '.github/workflows/release.yml', 'workflow_dispatch', 'main')
     require(git('rev-parse', 'HEAD') == source, 'Preparation checkout differs from dispatched source')
     require(client.get('/git/ref/heads/main')['object']['sha'] == source, 'main advanced after dispatch')
     require(git('rev-parse', '--is-shallow-repository') == 'false', 'Preparation requires complete history')
@@ -96,7 +101,7 @@ def prepare():
                   'snapshot_sha': git('rev-parse', 'HEAD'), 'main_commit_count': count,
                   'previous_max_code': max((code for _, code in history), default=0),
                   'version': {'versionName': requested, 'versionCode': str(code)}, 'prerelease': prerelease,
-                  'run_id': int(os.environ['GITHUB_RUN_ID']), 'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                  'run_id': run_id, 'run_attempt': attempt,
                   'toolchain_sha256': sha256(ROOT / '.ci/toolchain.properties'),
                   'upstream_lock_sha256': sha256(ROOT / '.ci/upstream-lock.json'),
                   'certificate_pins_sha256': sha256(ROOT / '.ci/signing-certificates.json')}

@@ -103,11 +103,14 @@ data class LibraryQuery(
     val folderSubtree: Boolean = false,
     val relativePathKeyword: String? = null,
     val readableOnly: Boolean = false,
+    // 内部歌单输入可纳入待逐文件验证的TREE；默认只读筛选仍只含AVAILABLE。
+    internal val allowUnknownTreeReadValidation: Boolean = false,
 ) {
     init {
         require(search.length <= 4096)
         require(folderNodeId == null || sourceId != null)
         require(!folderSubtree || folderNodeId != null)
+        require(!allowUnknownTreeReadValidation || readableOnly)
         require(relativePathKeyword == null || relativePathKeyword.isNotBlank() && relativePathKeyword.length <= 4096)
     }
 }

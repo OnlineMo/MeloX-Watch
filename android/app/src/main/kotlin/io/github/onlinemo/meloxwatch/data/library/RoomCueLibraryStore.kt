@@ -22,6 +22,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.ObservedCandidate
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.scan.ScanState
 import io.github.onlinemo.meloxwatch.data.scan.ScanToken
 import io.github.onlinemo.meloxwatch.model.CueFileBinding
@@ -99,7 +100,7 @@ internal class RoomCueLibraryStore(private val library: RoomLocalLibraryReposito
         library.checkedScan(token, allowStaging = false)
         checkedFrontier(token, candidate)
         val source = source(token.sourceId)
-        if (source.spec.kind != LocalSourceKind.TREE || source.grant.read != ObservedCapability.AVAILABLE ||
+        if (source.spec.kind != LocalSourceKind.TREE || !source.grant.allowsFileReadValidation(source.spec.kind) ||
             source.grant.enumerate != ObservedCapability.AVAILABLE) throw CueException(CueIssue.AUTHORIZATION_REQUIRED)
         val document = cues.document(token.sourceId, candidate.objectId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
         val seen = dao.seen(token.scanId, candidate.objectId) ?: fail(LibraryIssue.INVALID_INPUT)
@@ -341,8 +342,11 @@ internal class RoomCueLibraryStore(private val library: RoomLocalLibraryReposito
         val key = io.github.onlinemo.meloxwatch.model.cueTrackKey(document.sourceId, document.cueId, number)
         val row = dao.rows(LibrarySql.row(view, key.providerId, key.trackId)).singleOrNull() ?: return emptyList()
         val reference = row.cueReference() ?: return emptyList()
-        return if (reference.isBound && reference.identity.trackNumber == number && reference.actualDocument.cueId == document.cueId &&
-            reference.actualDocument.sourceId == document.sourceId && row.availabilityRank == 0) listOf(key) else emptyList()
+        if (!reference.isBound || reference.identity.trackNumber != number || reference.actualDocument.cueId != document.cueId ||
+            reference.actualDocument.sourceId != document.sourceId || row.availabilityRank !in 0..1) return emptyList()
+        // UNKNOWN只进入已绑定候选的整组数据库核验；扫描或播放才显式读取实际文件。
+        resolve(key, reference)
+        return listOf(key)
     }
 
     suspend fun relativePath(view: LibraryViewToken, track: LibraryTrack): String? {
@@ -444,7 +448,7 @@ internal class RoomCueLibraryStore(private val library: RoomLocalLibraryReposito
     private suspend fun checkedDescriptor(read: LocalReadDescriptor) {
         val current = source(read.source.spec.sourceId)
         requireCue(current.spec == read.source.spec && current.revision == read.source.revision && current.authEpoch == read.source.authEpoch &&
-            current.grantId == read.source.grantId && current.state == LibrarySourceState.ACTIVE && current.grant.read == ObservedCapability.AVAILABLE,
+            current.grantId == read.source.grantId && current.state == LibrarySourceState.ACTIVE && current.grant.allowsFileReadValidation(current.spec.kind),
             CueIssue.SOURCE_CHANGED)
         val identity = dao.aliasById(read.aliasId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
         val alias = dao.currentAlias(read.aliasId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
@@ -460,7 +464,7 @@ internal class RoomCueLibraryStore(private val library: RoomLocalLibraryReposito
     private suspend fun checkedBinding(binding: CueFileBinding): LibrarySource {
         val current = source(binding.sourceId)
         if (current.state == LibrarySourceState.NEEDS_AUTHORIZATION || current.grant.read == ObservedCapability.UNAVAILABLE) fail(LibraryIssue.PERMISSION_REVOKED)
-        if (current.state != LibrarySourceState.ACTIVE || current.grant.read != ObservedCapability.AVAILABLE) fail(LibraryIssue.SOURCE_UNAVAILABLE)
+        if (current.state != LibrarySourceState.ACTIVE || !current.grant.allowsFileReadValidation(current.spec.kind)) fail(LibraryIssue.SOURCE_UNAVAILABLE)
         if (current.revision != binding.sourceRevision || current.authEpoch != binding.authEpoch || current.grantId != binding.grantId ||
             current.spec.uri != binding.location.grantUri) fail(LibraryIssue.SOURCE_CHANGED)
         val identity = dao.aliasById(binding.aliasId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)

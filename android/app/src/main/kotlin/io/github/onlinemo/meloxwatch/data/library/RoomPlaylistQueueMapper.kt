@@ -25,9 +25,14 @@ class RoomPlaylistQueueMapper(private val library: RoomLocalLibraryRepository) :
             val key = reference.trackKey ?: reference.cueReference?.trackKey
             val track = if (key == null) null else tracks[keyIndex++]
             val hint = reference.cueReference
-            val cue = if (hint == null) track?.cueReference else track?.cueReference?.takeIf {
-                currentCueMatchesPortableHint(it, hint) && track?.availability == LibraryAvailability.AVAILABLE
+            val selectedCue = if (hint == null) track?.cueReference else track?.cueReference?.takeIf {
+                currentCueMatchesPortableHint(it, hint) &&
+                    (track?.availability == LibraryAvailability.AVAILABLE || track?.availability == LibraryAvailability.UNKNOWN)
             } ?: hint
+            // UNKNOWN绑定须重核当前完整组围栏；实际文件验证保留在显式播放中。
+            val cue = if (track?.availability == LibraryAvailability.UNKNOWN && selectedCue?.isBound == true) {
+                library.resolveCueRead(selectedCue.trackKey, selectedCue).reference
+            } else selectedCue
             val pendingCue = cue != null && !cue.isBound
             val availability = if (key == null) PlaylistQueueAvailability.UNRESOLVED else if (pendingCue) PlaylistQueueAvailability.UNAVAILABLE else when (track?.availability) {
                 LibraryAvailability.AVAILABLE -> PlaylistQueueAvailability.AVAILABLE
