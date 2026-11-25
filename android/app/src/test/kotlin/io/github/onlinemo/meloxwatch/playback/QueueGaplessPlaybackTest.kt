@@ -44,13 +44,16 @@ import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -60,6 +63,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -388,6 +392,144 @@ class QueueGaplessPlaybackTest {
         assertEquals("entry-1", store.snapshot()?.currentEntryId)
         assertEquals(listOf("entry-0", "entry-1"), rounds)
         assertTrue(checked.player.playWhenReady)
+    }
+
+    @Test fun aBoundarySetterFailureBeforeAdmissionKeepsTheQueueAndAllowsAnExplicitRetry() = onMain {
+        seed(4)
+        val failure = IllegalStateException("BOUNDARY_SETTER_FIXTURE_FAILURE")
+        assertAdmissionFailureKeepsQueueAndAllowsRetry(failure) {
+            operations.onNextPause = { throw failure }
+        }
+    }
+
+    @Test fun aRollingTailUpdateFailureBeforeAdmissionKeepsTheCurrentSourceAndAllowsRetry() = onMain {
+        operations.rolling = true
+        seed(4)
+        assertRollingTail("entry-1", pending = true)
+        val failure = UnsupportedOperationException("ROLLING_QUEUE_TAIL_UPDATE_UNSUPPORTED")
+        assertAdmissionFailureKeepsQueueAndAllowsRetry(failure) {
+            checked.onNextReplace = { throw failure }
+        }
+    }
+
+    @Test fun cancellationInsideTheAdmissionGateReleasesTheLockBeforeTheNextCommand() = onMain {
+        seed(4)
+        val base = requireNotNull(store.snapshot())
+        val view = FrozenQueueView("cancelled-admission", 2L, 2L)
+        val request = QueueReplacementRequest("cancelled-admission", base.generationId, base.queueRevision, view)
+        var producerReads = 0
+        val delegate = newEntries(view)
+        val producer = QueuePageSource { offset, limit ->
+            producerReads += 1
+            delegate.read(offset, limit)
+        }
+        val failure = CancellationException("ADMISSION_CANCELLED_FIXTURE")
+        var observed: Throwable? = null
+        val command = scope.async(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
+            val context = currentCoroutineContext()
+            operations.onNextPause = {
+                context.cancel(failure)
+                throw failure
+            }
+            try { coordinator.replace(request, producer, explicitPlay = false) }
+            catch (error: Throwable) { observed = error; throw error }
+        }
+        command.start()
+        command.join()
+        assertTrue(command.isCompleted)
+        assertTrue(command.isCancelled)
+        assertSame(failure, observed)
+        assertEquals(0, producerReads)
+        assertEquals(base, store.snapshot())
+        assertFalse(coordinator.state.value.preparing)
+        assertEquals("entry-0", checked.player.currentMediaItem?.mediaId)
+        val committed = coordinator.replace(request, producer, explicitPlay = false)
+        idle()
+        assertFalse(committed.wasReplay)
+        assertTrue(producerReads > 0)
+        assertEquals("new-0", store.snapshot()?.currentEntryId)
+        assertFalse(checked.player.playWhenReady)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun anAutomaticHandoverBeforeAGateFailureStillSettlesItsOriginalReceipt() = onMain {
+        seed(4)
+        val base = requireNotNull(store.snapshot())
+        val view = FrozenQueueView("failed-gate-auto", 2L, 2L)
+        val failure = IllegalStateException("GATE_FAILURE_AFTER_AUTO")
+        val gate = gated.blockNext()
+        val before = checked.calls.toMap()
+        operations.onNextPause = {
+            raw.completeNaturally(pause = false)
+            throw failure
+        }
+        var observed: Throwable? = null
+        try {
+            coordinator.replace(QueueReplacementRequest("failed-gate-auto", base.generationId, base.queueRevision, view),
+                QueuePageSource { _, _ -> throw AssertionError("Failed admission consumed its producer") }, false)
+        } catch (error: Throwable) { observed = error }
+        assertSame(failure, observed)
+        awaitReceipt(gate)
+        assertEquals(base, store.snapshot())
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        gate.release.complete(Unit)
+        idle()
+        assertEquals(base.generationId, store.snapshot()?.generationId)
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(checked.player.playWhenReady)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aPersistentGateFailureAfterAutoPausesOnceAndRequiresAnExplicitReceiptRetry() = onMain {
+        seed(4)
+        val base = requireNotNull(store.snapshot())
+        val view = FrozenQueueView("persistent-gate-auto", 2L, 2L)
+        val failure = IllegalStateException("PERSISTENT_GATE_FIXTURE_FAILURE")
+        val before = checked.calls.toMap()
+        val writerStart = gated.checkpointAttempts.size
+        var setterFailures = 0
+        lateinit var rejectSetter: () -> Unit
+        rejectSetter = {
+            setterFailures += 1
+            operations.onNextPause = rejectSetter
+            throw failure
+        }
+        operations.onNextPause = {
+            raw.completeNaturally(pause = false)
+            operations.onNextPause = rejectSetter
+            throw failure
+        }
+        var observed: Throwable? = null
+        try {
+            coordinator.replace(QueueReplacementRequest("persistent-gate-auto", base.generationId, base.queueRevision, view),
+                QueuePageSource { _, _ -> throw AssertionError("Failed admission consumed its producer") }, false)
+        } catch (error: Throwable) { observed = error }
+        assertSame(failure, observed)
+        idle()
+        assertTrue(setterFailures in 1..4)
+        assertEquals(base, store.snapshot())
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertFalse(checked.player.playWhenReady)
+        assertEquals(requireNotNull(before["pause"]) + 1, checked.calls["pause"])
+        assertFalse(coordinator.state.value.preparing)
+        assertEquals(QueuePlaybackIssue.OUTPUT_ERROR, coordinator.state.value.failure?.issue)
+        assertTrue(gated.checkpointAttempts.drop(writerStart).isEmpty())
+        val settledFailures = setterFailures
+        repeat(4) { yield() }
+        assertEquals(settledFailures, setterFailures)
+        operations.onNextPause = null
+        coordinator.sessionPlayer.play()
+        idle()
+        assertEquals(base.generationId, store.snapshot()?.generationId)
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(checked.player.playWhenReady)
+        assertNull(coordinator.state.value.failure)
     }
 
     @Test fun aLateOldAutomaticEventAfterReplacementCommitCannotBlockTheNewPointerOrLaterCommands() = onMain {
@@ -1206,6 +1348,43 @@ class QueueGaplessPlaybackTest {
         }
     }
 
+    private suspend fun assertAdmissionFailureKeepsQueueAndAllowsRetry(failure: Exception, arm: () -> Unit) {
+        val base = requireNotNull(store.snapshot())
+        val view = FrozenQueueView("admission-retry", 2L, 2L)
+        val request = QueueReplacementRequest("admission-retry", base.generationId, base.queueRevision, view)
+        val before = checked.calls.toMap()
+        val uid = currentUid()
+        val uri = checked.player.currentMediaItem?.localConfiguration?.uri
+        var producerReads = 0
+        val delegate = newEntries(view)
+        val producer = QueuePageSource { offset, limit ->
+            producerReads += 1
+            delegate.read(offset, limit)
+        }
+        arm()
+        var observed: Throwable? = null
+        try { coordinator.replace(request, producer, explicitPlay = false) }
+        catch (error: Throwable) { observed = error }
+        assertSame(failure, observed)
+        assertEquals(0, producerReads)
+        assertEquals(base, store.snapshot())
+        assertEquals("entry-0", checked.player.currentMediaItem?.mediaId)
+        assertEquals(uid, currentUid())
+        assertEquals(uri, checked.player.currentMediaItem?.localConfiguration?.uri)
+        assertEquals(before["pause"], checked.calls["pause"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(checked.player.playWhenReady)
+        assertFalse(coordinator.state.value.preparing)
+        val committed = coordinator.replace(request, producer, explicitPlay = false)
+        idle()
+        assertFalse(committed.wasReplay)
+        assertTrue(producerReads > 0)
+        assertEquals("new-0", store.snapshot()?.currentEntryId)
+        assertFalse(checked.player.playWhenReady)
+        assertTrue(failures.isEmpty())
+    }
+
     private suspend fun seed(count: Int, mode: QueueMode = QueueMode()) {
         val view = FrozenQueueView("fixture-view", 1L, count.toLong())
         coordinator.replace(QueueReplacementRequest("seed", null, 0L, view, mode = mode),
@@ -1346,6 +1525,7 @@ class QueueGaplessPlaybackTest {
         var lateCalls = 0
         var onNextPause: (() -> Unit)? = null
         var onNextAdd: (() -> Unit)? = null
+        var onNextReplace: (() -> Unit)? = null
         val calls = mutableMapOf<String, Int>()
         val player = Proxy.newProxyInstance(Player::class.java.classLoader, arrayOf(Player::class.java)) { proxy, method, args ->
             when (method.name) {
@@ -1359,6 +1539,9 @@ class QueueGaplessPlaybackTest {
                     }
                     if (method.name in listOf("pause", "prepare", "seekTo")) calls[method.name] = (calls[method.name] ?: 0) + 1
                     if (method.name == "pause") onNextPause?.also { onNextPause = null }?.invoke()
+                    if (method.name == "replaceMediaItem" || method.name == "replaceMediaItems") {
+                        onNextReplace?.also { onNextReplace = null }?.invoke()
+                    }
                     try {
                         method.invoke(raw, *(args ?: emptyArray())).also {
                             if (method.name == "release") released = true

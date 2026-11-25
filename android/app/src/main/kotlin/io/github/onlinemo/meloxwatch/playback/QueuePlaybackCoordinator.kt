@@ -2792,6 +2792,30 @@ class QueuePlaybackCoordinator(
                     pauseForWindowChange()
                     requestCheckpoint()
                 }
+            } catch (error: Exception) {
+                // 准入 gate 的原平台异常不经过 action 正文映射；先围栏，避免 finally 重复失败命令。
+                if (pendingRecovery === recovery) pendingRecovery = null
+                if (pendingNatural === natural) pendingNatural = null
+                if (pendingContinuous === continuous) continuousWriteFailed = true
+                if (continuous != null) {
+                    resumeIntent = false
+                    try { pauseForWindowChange() }
+                    catch (cleanup: Exception) {
+                        if (cleanup !== error) error.addSuppressed(cleanup)
+                        // 关门失败仍要尝试实际暂停；隔离 pause 回调，不废弃已发生的后继 CAS。
+                        val wasApplying = applyingWindow
+                        applyingWindow = true
+                        try { if (!isDetached && backendBound) backend.pause() }
+                        catch (pauseError: Exception) { if (pauseError !== error) error.addSuppressed(pauseError) }
+                        finally { applyingWindow = wasApplying }
+                        try { captureIncomingPosition(continuous) }
+                        catch (captureError: Exception) { if (captureError !== error) error.addSuppressed(captureError) }
+                    }
+                    try { requestCheckpoint() }
+                    catch (cleanup: Exception) { if (cleanup !== error) error.addSuppressed(cleanup) }
+                }
+                try { report(playbackFailure(error, _state.value.snapshot?.currentEntryId)) }
+                catch (cleanup: Exception) { if (cleanup !== error) error.addSuppressed(cleanup) }
             } finally {
                 commandJob = null
                 startPendingCommands()
@@ -2825,10 +2849,18 @@ class QueuePlaybackCoordinator(
             actions.unlock()
             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY))
         }
-        pauseContinuousBoundary(
-            issue = if (continuousHandover) GaplessPlaybackIssue.HANDOVER_PENDING else GaplessPlaybackIssue.PREPARING,
-            retainTailHold = continuousHandover,
-        )
+        try {
+            pauseContinuousBoundary(
+                issue = if (continuousHandover) GaplessPlaybackIssue.HANDOVER_PENDING else GaplessPlaybackIssue.PREPARING,
+                retainTailHold = continuousHandover,
+            )
+        } catch (error: Throwable) {
+            // gate 尚未取得操作 owner；setter/尾更新失败也必须归还锁，并让真实 AUTO 有机会结清。
+            actions.unlock()
+            try { startPendingCommands() }
+            catch (cleanup: Throwable) { if (cleanup !== error) error.addSuppressed(cleanup) }
+            throw error
+        }
         if (!continuousHandover && pendingContinuous != null) {
             // setter 可同步 flush 真实 AUTO；准入须在它返回后重核，再开始任何 IO/意图修改。
             actions.unlock()
