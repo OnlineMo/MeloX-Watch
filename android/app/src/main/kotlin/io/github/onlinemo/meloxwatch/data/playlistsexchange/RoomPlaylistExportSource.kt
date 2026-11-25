@@ -91,7 +91,7 @@ internal class RoomPlaylistExportSource(
             val cue = storedCue ?: currentCue
             val cueAvailable = currentCue != null && currentCue.isBound &&
                 (storedCue == null || currentCueMatchesPortableHint(currentCue, storedCue)) &&
-                track != null && canUseRelativeTrack(track)
+                canUseRelativeTrack(track)
             val path = if ((cue == null || cueAvailable) &&
                 track?.sourceId != null && track.sourceId == relativeSourceId) {
                 (if (cue != null) library.cueRelativePath(libraryView, track)
