@@ -236,7 +236,12 @@ class Media3GaplessPcmTest {
         return DspAudioSink(DefaultAudioSink.Builder(context).setAudioProcessorChain(chain)
             .setEnableFloatOutput(false).setEnableAudioTrackPlaybackParams(false).setAudioTrackProvider(provider).build(), chain).apply {
             setOffloadMode(AudioSink.OFFLOAD_MODE_DISABLED)
-            setListener(object : AudioSink.Listener { override fun onAudioSinkError(audioSinkError: Exception) { errors.incrementAndGet() } })
+            setListener(object : AudioSink.Listener {
+                override fun onPositionDiscontinuity() = Unit
+                override fun onUnderrun(bufferSize: Int, bufferSizeMs: Long, elapsedSinceLastFeedMs: Long) = Unit
+                override fun onSkipSilenceEnabledChanged(skipSilenceEnabled: Boolean) = Unit
+                override fun onAudioSinkError(audioSinkError: Exception) { errors.incrementAndGet() }
+            })
         }
     }
 
