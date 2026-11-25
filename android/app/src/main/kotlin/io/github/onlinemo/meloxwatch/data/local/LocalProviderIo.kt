@@ -4,6 +4,8 @@ import android.os.CancellationSignal
 import android.os.OperationCanceledException
 import java.io.FileNotFoundException
 import java.io.IOException
+import kotlin.coroutines.AbstractCoroutineContextElement
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
@@ -34,6 +36,7 @@ class LocalProviderIo(
     private var deferredClose: CursorRetirement? = null
     private var retainedReadOwner: LocalProviderReadOwner? = null
     private var readTicket: Any? = null
+    private var trackedReadRetirement: CompletableDeferred<Unit>? = null
     private var draining = false
     private val busy = MutableStateFlow(false)
     private var activeReadReceipt: LocalProviderFailureReceipt? = null
@@ -44,6 +47,29 @@ class LocalProviderIo(
     private var retiredFailureReporter: ((LocalProviderFailureStage) -> Unit)? = reportRetiredFailure
 
     suspend fun awaitIdle() { busy.first { !it } }
+
+    /** 只标识本通道尚未准入的占用；已准入动作传播的同类原错不能重试。 */
+    internal fun isAdmissionBusy(error: SourceReadException): Boolean {
+        val admission = error.cause as? ReadAdmissionBusy ?: return false
+        return error.issue == SourceReadIssue.BUSY && admission.io === this && admission.retryable
+    }
+
+    private class ReadAdmissionBusy(val io: LocalProviderIo) : Exception() {
+        @Volatile var retryable = true
+    }
+
+    /** 只跟踪同一顺序调用的实际读；不等待或关闭后来占槽的其它操作。 */
+    internal fun trackReads(): ReadRetirement = ReadRetirement(this)
+
+    internal class ReadRetirement(val io: LocalProviderIo) : AbstractCoroutineContextElement(Key) {
+        @Volatile private var latest: CompletableDeferred<Unit>? = null
+
+        internal fun admitted(): CompletableDeferred<Unit> = CompletableDeferred<Unit>().also { latest = it }
+
+        suspend fun awaitRetired() { latest?.await() }
+
+        companion object Key : CoroutineContext.Key<ReadRetirement>
+    }
 
     /** 扫描可能已消费返回异常；迟到的退休原错仍须登记到这份回执。 */
     internal fun peekReadFailure(): LocalProviderFailureSnapshot? = synchronized(lock) {
@@ -81,6 +107,7 @@ class LocalProviderIo(
             if (continuation.isActive) continuation.resumeWith(Result.success(Result.failure(failure)))
         }
         val ticket = Any()
+        val tracking = continuation.context[ReadRetirement]?.takeIf { it.io === this }
         var receipt: LocalProviderFailureReceipt? = null
         val accepted = try { synchronized(lock) {
             if (occupied) false else {
@@ -95,6 +122,8 @@ class LocalProviderIo(
                         receipt = LocalProviderFailureReceipt(ticket, receiptSequence)
                         activeReadReceipt = receipt
                     }
+                    // 失败的准入回调尚无实际worker；成功准入才绑定本次退休回执。
+                    trackedReadRetirement = tracking?.admitted()
                 }
                 catch (failure: Throwable) {
                     occupied = false;
@@ -109,7 +138,7 @@ class LocalProviderIo(
             return@suspendCancellableCoroutine
         }
         if (!accepted) {
-            val failure = SourceReadException(SourceReadIssue.BUSY)
+            val failure = SourceReadException(SourceReadIssue.BUSY, ReadAdmissionBusy(this))
             notifyFailure(failure, failed)
             resumeFailure(failure)
             return@suspendCancellableCoroutine
@@ -258,6 +287,7 @@ class LocalProviderIo(
         var completed: CompletableDeferred<Unit>? = null
         var outcome: Result<Unit>? = null
         var settledReadReceipt: LocalProviderFailureReceipt? = null
+        var settledTrackedRead: CompletableDeferred<Unit>? = null
         while (true) {
             retirement?.let { pending ->
                 // The single enumeration cursor owns the sole bounded retirement/ack slot.
@@ -275,6 +305,8 @@ class LocalProviderIo(
                     if (retainedReadOwner == null) {
                         occupied = false
                         readTicket = null
+                        settledTrackedRead = trackedReadRetirement
+                        trackedReadRetirement = null
                         settledReadReceipt = activeReadReceipt
                         activeReadReceipt?.retire()
                         activeReadReceipt = null
@@ -286,12 +318,15 @@ class LocalProviderIo(
             if (retirement == null) break
         }
         // CompletableDeferred may resume an unconfined sequential reader inline. Release first.
+        settledTrackedRead?.complete(Unit)
         completed?.let { receipt -> checkNotNull(outcome).fold(receipt::complete, receipt::completeExceptionally) }
         settledReadReceipt?.let(::reportFailure)
     }
 
     private fun map(error: Exception): Exception = when (error) {
-        is SourceReadException, is CancellationException -> error
+        // 嵌套拒绝可能穿透已准入action或admitted回调；保留原异常/cause，撤销重试资格。
+        is SourceReadException -> error.also { (it.cause as? ReadAdmissionBusy)?.retryable = false }
+        is CancellationException -> error
         is OperationCanceledException -> CancellationException("Provider operation cancelled", error)
         is SecurityException -> SourceReadException(SourceReadIssue.PERMISSION_DENIED, error)
         // A missing descriptor can also mean an unavailable document provider.

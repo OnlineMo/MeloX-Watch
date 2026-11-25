@@ -157,9 +157,23 @@ internal object LibrarySortKeys {
         .joinToString("") { "%02x".format(Locale.ROOT, it.toInt() and 0xff) }
 }
 
+/** 当前授权行的平面事实与SQL门槛一致；旧JSON不能恢复已拒绝的读权或持久标记。 */
+internal fun LibraryGrantEntity.model(): LocalGrantObservation {
+    val read = ObservedCapability.entries.firstOrNull { it.name == readCapability }
+        ?: ObservedCapability.UNAVAILABLE
+    val persistedMask = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    val persistedFlags = acceptedPersistedFlags.takeIf { it >= 0 && (it and persistedMask.inv()) == 0 } ?: 0
+    // 未列出的枚举、写删、声明能力和持久化结果仍保留JSON观测；UNKNOWN只准许进入验证。
+    return LibraryCodec.grant(observation).copy(
+        read = read,
+        acceptedPersistedFlags = persistedFlags,
+        appOwned = appOwned,
+    )
+}
+
 internal fun LibrarySourceEntity.model(grant: LibraryGrantEntity): LibrarySource {
     require(grant.grantId == grantId && grant.sourceId == sourceId)
-    return LibrarySource(LibraryCodec.source(spec), LibraryCodec.grant(grant.observation), grantId, revision, authEpoch,
+    return LibrarySource(LibraryCodec.source(spec), grant.model(), grantId, revision, authEpoch,
         LibrarySourceState.valueOf(state), activeScanId, latestScanId)
 }
 

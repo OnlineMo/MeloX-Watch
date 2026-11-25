@@ -11,9 +11,9 @@ import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.themes.ThemeSnapshot
 import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontPresentationKind
 import io.github.onlinemo.meloxwatch.ui.fonts.ThemeUiFontText
-import io.github.onlinemo.meloxwatch.ui.fonts.WatchFontHost
 import io.github.onlinemo.meloxwatch.ui.fonts.WatchFontHostValue
 import io.github.onlinemo.meloxwatch.ui.fonts.WatchFontRequest
+import io.github.onlinemo.meloxwatch.ui.fonts.rememberWatchFontHost
 import io.github.onlinemo.meloxwatch.ui.lyrics.LyricsPageContent
 import io.github.onlinemo.meloxwatch.ui.themes.AppearanceEditorState
 import io.github.onlinemo.meloxwatch.ui.themes.AppearanceViewModel
@@ -32,6 +32,16 @@ internal fun ProbePageFontHost(
     retry: Any = Unit,
     content: @Composable (WatchFontHostValue) -> Unit,
 ) {
+    content(rememberProbePageFontHost(app, page, request, retry))
+}
+
+@Composable
+private fun rememberProbePageFontHost(
+    app: MeloXApplication,
+    page: ProbePageRuntime.PageBinding,
+    request: WatchFontRequest,
+    retry: Any = Unit,
+): WatchFontHostValue {
     val visibleNow = remember(page) { { page.visibleNow } }
     val install = remember(page) {
         { kind: LyricsFontPresentationKind, memory: () -> Unit, cancel: () -> Unit ->
@@ -44,8 +54,8 @@ internal fun ProbePageFontHost(
             page.installFont(slot, memory, cancel)
         }
     }
-    WatchFontHost(app.lyricsFontRuntime, app.lyricsFontPresentationOwner, app.lyricsFontEditor,
-        request, page.epoch, visibleNow, install, retry, content)
+    return rememberWatchFontHost(app.lyricsFontRuntime, app.lyricsFontPresentationOwner, app.lyricsFontEditor,
+        request, page.epoch, visibleNow, install, retry)
 }
 
 /** 只捕获实际显示的动态文字；曲库大小、媒体位置和滚动 tick 不进入字体覆盖身份。 */
@@ -57,19 +67,18 @@ internal fun ProbeThemeUiFonts(
     visibleText: List<String>,
     content: @Composable () -> Unit,
 ) {
-    if (page == null || !page.visibleNow) {
-        content()
-        return
-    }
-    val resources = LocalResources.current
-    val localeKey = LocalConfiguration.current.locales.toLanguageTags()
-    val captured = remember(visibleText, localeKey) { ThemeUiFontText.capture(visibleText) }
-    val request = remember(snapshot, resources, localeKey, captured) {
-        WatchFontRequest.ThemeUi(snapshot, resources, localeKey, captured)
-    }
-    ProbePageFontHost(app, page, request) { host ->
-        CompositionLocalProvider(LocalWatchThemeFonts provides host.fonts) { ProbeTheme(content) }
-    }
+    val host = if (page != null && page.visibleNow) {
+        val resources = LocalResources.current
+        val localeKey = LocalConfiguration.current.locales.toLanguageTags()
+        val captured = remember(visibleText, localeKey) { ThemeUiFontText.capture(visibleText) }
+        val request = remember(snapshot, resources, localeKey, captured) {
+            WatchFontRequest.ThemeUi(snapshot, resources, localeKey, captured)
+        }
+        rememberProbePageFontHost(app, page, request)
+    } else null
+    val fonts = host?.fonts ?: LocalWatchThemeFonts.current
+    // State within the page stays at one call site while its hidden font host is disposed.
+    CompositionLocalProvider(LocalWatchThemeFonts provides fonts) { ProbeTheme(content) }
 }
 
 /** 个性歌词字体按完整原文和精确匹配译文覆盖，始终显式传给实际歌词文本。 */

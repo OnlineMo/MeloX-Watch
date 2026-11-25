@@ -1,9 +1,13 @@
 package io.github.onlinemo.meloxwatch.data.library
 
+import android.content.Intent
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.withPreservedTransaction
 import io.github.onlinemo.meloxwatch.data.database.withTestWriterSql
+import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
+import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistDao
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistKind
@@ -449,6 +453,123 @@ class RoomPlaylistRecoveryControllerTest : PlaylistRecoveryRoomFixture() {
         assertEquals(accepted.snapshot, playlists.snapshot(target.view.snapshot.playlistId))
         controller.closePreview(newPreview.previewId)
         assertEquals(0, database.libraryDao().views().size)
+        integrity()
+    }
+
+    @Test(timeout = 30_000L)
+    fun aLiveReadDenialBeforePreviewCannotUseAnOlderAvailableGrantObservation() = runBlocking {
+        val target = target()
+        val old = target.view.snapshot
+        val before = members(old)
+        val dao = database.libraryDao()
+        val grant = checkNotNull(dao.grant(source.grantId))
+        database.withPreservedTransaction {
+            database.withTestWriterSql {
+                execute("UPDATE local_grants SET readCapability = ? WHERE grantId = ?",
+                    ObservedCapability.UNAVAILABLE.name, grant.grantId)
+            }
+        }
+        val observed = checkNotNull(library.source(source.spec.sourceId))
+        assertEquals(ObservedCapability.UNAVAILABLE, observed.grant.read)
+        assertFalse(observed.grant.allowsFileReadValidation(observed.spec.kind))
+        assertEquals(grant.observation, checkNotNull(dao.grant(grant.grantId)).observation)
+        expectIssue(PlaylistIssue.SOURCE_UNAVAILABLE) { controller.preview(target, replacement) }
+        assertEquals(old, playlists.snapshot(old.playlistId))
+        assertEquals(before, members(old))
+        assertEquals(0, dao.views().size)
+        assertEquals(1L, scalar("SELECT COUNT(*) FROM playlist_receipts"))
+        integrity()
+    }
+
+    @Test(timeout = 30_000L)
+    fun liveUnknownTreeReadRemainsUnknownOnTheValidationDescriptorAndExplicitRecovery() = runBlocking {
+        val target = target()
+        val old = target.view.snapshot
+        val before = members(old)
+        val dao = database.libraryDao()
+        val grant = checkNotNull(dao.grant(source.grantId))
+        database.withPreservedTransaction {
+            database.withTestWriterSql {
+                execute("UPDATE local_grants SET readCapability = ? WHERE grantId = ?",
+                    ObservedCapability.UNKNOWN.name, grant.grantId)
+            }
+        }
+        val observed = checkNotNull(library.source(source.spec.sourceId))
+        assertEquals(ObservedCapability.UNKNOWN, observed.grant.read)
+        assertEquals(ObservedCapability.AVAILABLE, observed.grant.enumerate)
+        assertTrue(observed.grant.allowsFileReadValidation(observed.spec.kind))
+        val descriptor = library.resolveLocalRead(replacement)
+        assertEquals(observed.spec, descriptor.source.spec)
+        assertEquals(ObservedCapability.UNKNOWN, descriptor.source.grant.read)
+        assertTrue(descriptor.source.grant.allowsFileReadValidation(descriptor.source.spec.kind))
+        val libraryBefore = library.overview()
+        val preview = controller.preview(target, replacement)
+        val accepted = controller.confirm("unknown-live-repair", preview.previewId, true)
+        val repaired = checkNotNull(accepted.snapshot)
+        val after = members(repaired)
+        assertEquals(PlaylistOperationResult.REFERENCE_REPLACED, accepted.result)
+        assertFalse(accepted.wasReplay)
+        assertEquals(before.map { it.memberId }, after.map { it.memberId })
+        assertEquals(before.map { it.ordinal }, after.map { it.ordinal })
+        assertEquals(replacement, after[1].reference.trackKey)
+        assertEquals(libraryBefore, library.overview())
+        assertEquals(grant.observation, checkNotNull(dao.grant(grant.grantId)).observation)
+        assertEquals(ObservedCapability.UNKNOWN, checkNotNull(library.source(source.spec.sourceId)).grant.read)
+        assertEquals(0, dao.views().size)
+        integrity()
+    }
+
+    @Test(timeout = 30_000L)
+    fun liveGrantFieldsKeepUnflattenedFactsAndInvalidReadOrFlagsCannotUpgradeCapabilities() = runBlocking {
+        val target = target()
+        val old = target.view.snapshot
+        val before = members(old)
+        val dao = database.libraryDao()
+        val grant = checkNotNull(dao.grant(source.grantId))
+        val jsonFacts = LocalGrantObservation(
+            read = ObservedCapability.AVAILABLE,
+            enumerate = ObservedCapability.AVAILABLE,
+            persistedRead = ObservedCapability.UNKNOWN,
+            persistedWrite = ObservedCapability.UNAVAILABLE,
+            offlineRead = ObservedCapability.UNKNOWN,
+            write = ObservedCapability.UNAVAILABLE,
+            delete = ObservedCapability.UNKNOWN,
+            rename = ObservedCapability.UNAVAILABLE,
+            move = ObservedCapability.UNKNOWN,
+            declaredWrite = true,
+            declaredDelete = false,
+            declaredRename = null,
+            declaredMove = false,
+            appOwned = true,
+            returnedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            acceptedPersistedFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            persistenceAttempted = true,
+            persistenceRejected = true,
+        )
+        val json = LibraryCodec.grant(jsonFacts)
+        for (read in listOf(ObservedCapability.UNAVAILABLE.name, "INVALID_READ_CAPABILITY")) {
+            database.withPreservedTransaction {
+                database.withTestWriterSql {
+                    execute("UPDATE local_grants SET observation = ?, readCapability = ?, " +
+                        "acceptedPersistedFlags = ?, appOwned = ? WHERE grantId = ?",
+                        json, read, -1, false, grant.grantId)
+                }
+            }
+            val observed = checkNotNull(library.source(source.spec.sourceId))
+            assertEquals(jsonFacts.copy(read = ObservedCapability.UNAVAILABLE,
+                acceptedPersistedFlags = 0, appOwned = false), observed.grant)
+            assertEquals(source.spec, observed.spec)
+            assertEquals(source.grantId, observed.grantId)
+            assertEquals(source.revision, observed.revision)
+            assertEquals(source.authEpoch, observed.authEpoch)
+            assertFalse(observed.grant.allowsFileReadValidation(observed.spec.kind))
+            assertEquals(json, checkNotNull(dao.grant(grant.grantId)).observation)
+            expectIssue(PlaylistIssue.SOURCE_UNAVAILABLE) { controller.preview(target, replacement) }
+            assertEquals(old, playlists.snapshot(old.playlistId))
+            assertEquals(before, members(old))
+            assertEquals(0, dao.views().size)
+            assertEquals(1L, scalar("SELECT COUNT(*) FROM playlist_receipts"))
+        }
         integrity()
     }
 

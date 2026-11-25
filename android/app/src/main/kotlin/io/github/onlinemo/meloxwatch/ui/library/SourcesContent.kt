@@ -32,7 +32,14 @@ internal fun LazyListScope.sourcesContent(
 ) {
     item(key = "sources:status") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.working) LibraryText(stringResource(if (state.stopping) R.string.library_stopping else R.string.library_reading))
+            if (state.working) {
+                val progressText = when {
+                    state.stopping -> R.string.library_stopping
+                    state.waitingForFileOperation -> R.string.library_busy
+                    else -> R.string.library_reading
+                }
+                LibraryText(stringResource(progressText))
+            }
             state.sourceIssue?.let { LibraryText(stringResource(sourceIssueText(it)), error = true) }
             if (state.sourceIssue in setOf(SourceReadIssue.PERMISSION_DENIED, SourceReadIssue.PERMISSION_REVOKED)) {
                 LibraryButton(stringResource(R.string.probe_permission_settings), true, onPermissionSettings)

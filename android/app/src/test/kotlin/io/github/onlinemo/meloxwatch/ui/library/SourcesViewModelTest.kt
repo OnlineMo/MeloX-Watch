@@ -11,6 +11,7 @@ import io.github.onlinemo.meloxwatch.data.local.FixtureAudioProvider
 import io.github.onlinemo.meloxwatch.data.local.LocalInputLimits
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
+import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.local.fixtureAudioProvider
 import io.github.onlinemo.meloxwatch.data.local.fixtureDescriptor
@@ -18,9 +19,18 @@ import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.playback.LocalQueueCommand
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
 import java.io.File
+import java.io.FileInputStream
 import java.io.RandomAccessFile
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -29,6 +39,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -271,6 +282,236 @@ class SourcesViewModelTest {
         assertEquals(preview.entry?.queueEntryId, retained.entry?.queueEntryId)
         assertEquals(preview.verifiedContentToken, retained.verifiedContentToken)
     }
+
+    @Test
+    fun aSharedApplicationReaderDelaysOnlyTheLatestSelectionAndHidingRetiresItsUnadmittedWait() = runBlocking {
+        val first = fixture("shared-first")
+        val intermediate = fixture("shared-intermediate")
+        val latest = fixture("shared-latest")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val shared = sharedReader(scope, "foreground-journal")
+        try {
+            assertTrue(shared.entered.await(5L, TimeUnit.SECONDS))
+            select(first)
+            val waiting = awaitState { it.waitingForFileOperation }
+            assertTrue(waiting.working)
+            assertNull(waiting.sourceIssue)
+            assertNull(waiting.selected)
+            assertEquals(0, first.provider.queryReads)
+
+            // 只推进主Looper的虚拟时间，不让外部真实文件读提前关闭。
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(4_000L, TimeUnit.MILLISECONDS)
+            assertTrue(viewModel.uiState.value.working)
+            assertTrue(viewModel.uiState.value.waitingForFileOperation)
+            assertFalse(shared.closed.get())
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(4_000L, TimeUnit.MILLISECONDS)
+            val expired = awaitState { !it.working && it.sourceIssue == SourceReadIssue.BUSY }
+            assertFalse(expired.waitingForFileOperation)
+            assertNull(expired.selected)
+            assertEquals(0, first.provider.queryReads)
+            assertFalse(shared.job.isCompleted)
+            assertFalse(shared.closed.get())
+
+            select(first)
+            awaitState { it.waitingForFileOperation }
+            viewModel.onHidden()
+            val hidden = awaitState { !it.working }
+            assertFalse(hidden.waitingForFileOperation)
+            assertNull(hidden.selected)
+            assertFalse(shared.job.isCompleted)
+            assertFalse(shared.closed.get())
+
+            select(intermediate)
+            awaitState { it.waitingForFileOperation }
+            select(latest)
+            awaitState { it.waitingForFileOperation }
+            assertEquals(0, intermediate.provider.queryReads)
+            assertEquals(0, latest.provider.queryReads)
+
+            shared.release.countDown()
+            shared.job.await()
+            val selected = awaitState { !it.working && it.selected != null }
+            assertEquals(latest.uri.toString(), selected.selected?.observation?.source?.uri)
+            assertEquals(0, first.provider.queryReads)
+            assertEquals(0, intermediate.provider.queryReads)
+            assertTrue(latest.provider.queryReads > 0)
+            assertNull(selected.sourceIssue)
+            assertFalse(selected.waitingForFileOperation)
+            assertNotNull(selected.selected?.verifiedContentToken)
+            assertTrue(shared.closed.get())
+        } finally {
+            shared.release.countDown()
+            shared.job.await()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun aReaderInsertedAfterMetadataCannotConsumeTheSelectionOrReplaceItsCompleteProof() = runBlocking {
+        val selectedFile = fixture("shared-after-metadata")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val shared = sharedReader(scope, "resumed-journal", startImmediately = false)
+        val enteredMetadata = CountDownLatch(1)
+        val releaseMetadata = CountDownLatch(1)
+        releases += releaseMetadata
+        val injected = AtomicBoolean(false)
+        beforeMetadata = {
+            if (injected.compareAndSet(false, true)) {
+                shared.job.start()
+                enteredMetadata.countDown()
+                check(releaseMetadata.await(5L, TimeUnit.SECONDS)) { "METADATA_RELEASE_DEADLINE" }
+            }
+        }
+        try {
+            select(selectedFile)
+            awaitState { enteredMetadata.count == 0L }
+            assertTrue(enteredMetadata.await(1L, TimeUnit.SECONDS))
+            // 暂停 main Looper 后释放 metadata，确定另一真实文件读先占槽，再继续后置核验。
+            releaseMetadata.countDown()
+            assertTrue(shared.entered.await(5L, TimeUnit.SECONDS))
+            val waiting = awaitState { it.waitingForFileOperation }
+            assertTrue(waiting.working)
+            assertNull(waiting.selected)
+            assertNull(waiting.sourceIssue)
+            assertFalse(shared.closed.get())
+
+            shared.release.countDown()
+            shared.job.await()
+            val ready = awaitState { !it.working && it.selected != null }
+            assertEquals(selectedFile.uri.toString(), ready.selected?.observation?.source?.uri)
+            assertEquals(selectedFile.file.name, ready.selected?.entry?.displayName)
+            assertNotNull(ready.selected?.verifiedContentToken)
+            assertNull(ready.sourceIssue)
+            assertFalse(ready.waitingForFileOperation)
+            assertTrue(injected.get())
+            assertTrue(shared.closed.get())
+        } finally {
+            releaseMetadata.countDown()
+            shared.release.countDown()
+            shared.job.start()
+            shared.job.await()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun hidingAfterMetadataHasDrainedDoesNotWaitForTheForeignReaderBeforeTheNextRead() = runBlocking {
+        val selectedFile = fixture("shared-after-metadata-hidden")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val shared = sharedReader(scope, "resumed-journal-hidden", startImmediately = false)
+        val enteredMetadata = CountDownLatch(1)
+        val releaseMetadata = CountDownLatch(1)
+        releases += releaseMetadata
+        val injected = AtomicBoolean(false)
+        beforeMetadata = {
+            if (injected.compareAndSet(false, true)) {
+                shared.job.start()
+                enteredMetadata.countDown()
+                check(releaseMetadata.await(5L, TimeUnit.SECONDS)) { "METADATA_RELEASE_DEADLINE" }
+            }
+        }
+        try {
+            select(selectedFile)
+            awaitState { enteredMetadata.count == 0L }
+            releaseMetadata.countDown()
+            // Main仍暂停：本次metadata已正常drain，另一读先占槽，选择尚未进入下一读。
+            assertTrue(shared.entered.await(5L, TimeUnit.SECONDS))
+            viewModel.onHidden()
+            val hidden = awaitState { !it.working }
+            assertNull(hidden.selected)
+            assertFalse(hidden.stopping)
+            assertFalse(hidden.waitingForFileOperation)
+            assertFalse(shared.job.isCompleted)
+            assertFalse(shared.closed.get())
+            assertTrue(injected.get())
+        } finally {
+            releaseMetadata.countDown()
+            shared.release.countDown()
+            shared.job.start()
+            shared.job.await()
+            scope.cancel()
+        }
+    }
+
+    @Test
+    fun onlyARejectionBeforeAdmissionCanRetryAndNestedBusyRetainsItsOriginalException() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val shared = sharedReader(scope, "busy-origin")
+        try {
+            assertTrue(shared.entered.await(5L, TimeUnit.SECONDS))
+            val unadmitted = runCatching { app.localProviderIo.read { error("UNADMITTED_ACTION_RAN") } }.exceptionOrNull()
+            assertTrue(unadmitted is SourceReadException)
+            assertTrue(app.localProviderIo.isAdmissionBusy(unadmitted as SourceReadException))
+            assertFalse(shared.closed.get())
+            shared.release.countDown()
+            shared.job.await()
+
+            val domain = SourceReadException(SourceReadIssue.BUSY)
+            val returnedDomain = runCatching { app.localProviderIo.read<Unit> { throw domain } }.exceptionOrNull()
+            assertSame(domain, returnedDomain)
+            assertFalse(app.localProviderIo.isAdmissionBusy(domain))
+
+            var nested: SourceReadException? = null
+            val returnedNested = runCatching {
+                app.localProviderIo.read {
+                    runBlocking {
+                        try { app.localProviderIo.read { Unit } }
+                        catch (failure: SourceReadException) { nested = failure; throw failure }
+                    }
+                }
+            }.exceptionOrNull()
+            assertNotNull(nested)
+            assertSame(nested, returnedNested)
+            assertFalse(app.localProviderIo.isAdmissionBusy(requireNotNull(nested)))
+
+            var callback: SourceReadException? = null
+            val returnedCallback = runCatching {
+                app.localProviderIo.read(admitted = {
+                    runBlocking {
+                        try { app.localProviderIo.read { Unit } }
+                        catch (failure: SourceReadException) { callback = failure; throw failure }
+                    }
+                }) { Unit }
+            }.exceptionOrNull()
+            assertNotNull(callback)
+            assertSame(callback, returnedCallback)
+            assertFalse(app.localProviderIo.isAdmissionBusy(requireNotNull(callback)))
+        } finally {
+            shared.release.countDown()
+            shared.job.await()
+            scope.cancel()
+        }
+    }
+
+    private fun sharedReader(scope: CoroutineScope, name: String, startImmediately: Boolean = true): SharedRead {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val closed = AtomicBoolean(false)
+        releases += release
+        val file = File(app.cacheDir, "$name.bin").apply { writeBytes(byteArrayOf(37)) }
+        val job = scope.async(start = CoroutineStart.LAZY) {
+            app.localProviderIo.awaitIdle()
+            app.localProviderIo.read { signal ->
+                FileInputStream(file).use { input ->
+                    assertEquals(37, input.read())
+                    entered.countDown()
+                    check(release.await(10L, TimeUnit.SECONDS)) { "SHARED_READ_RELEASE_DEADLINE" }
+                    signal.throwIfCanceled()
+                }
+                // close 已正常返回，才报告这份实际文件读取退休。
+                closed.set(true)
+            }
+        }
+        if (startImmediately) job.start()
+        return SharedRead(entered, release, closed, job)
+    }
+
+    private data class SharedRead(
+        val entered: CountDownLatch,
+        val release: CountDownLatch,
+        val closed: AtomicBoolean,
+        val job: Deferred<Unit>,
+    )
 
     private fun select(fixture: AudioFixture) {
         viewModel.selected(LocalSourceKind.DOCUMENT, fixture.uri, 0)

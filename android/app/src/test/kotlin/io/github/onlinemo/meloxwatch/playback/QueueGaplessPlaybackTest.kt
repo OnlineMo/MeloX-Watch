@@ -145,6 +145,59 @@ class QueueGaplessPlaybackTest {
         assertTrue(failures.isEmpty())
     }
 
+    @Test fun anAutomaticEventFlushedWhileOpeningTheBoundaryKeepsThePendingReceiptVisible() = onMain {
+        preferences.state.value = PreferencesState.Ready(UserPreferences(gaplessPlayback = false))
+        seed(3)
+        val gate = gated.blockNext()
+        operations.onNextResume = { raw.completeNaturally(pause = false) }
+        preferences.state.value = PreferencesState.Ready(UserPreferences())
+        coordinator.refreshContinuousBoundary()
+        gate.entered.await()
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(GaplessPlaybackIssue.HANDOVER_PENDING, coordinator.state.value.gapless.issue)
+        assertTrue(operations.boundaryPauseEnabled)
+        gate.release.complete(Unit)
+        idle()
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertTrue(coordinator.state.value.gapless.available)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aPauseFlushedWhileOpeningTheBoundaryCannotResurrectItsPermission() = onMain {
+        preferences.state.value = PreferencesState.Ready(UserPreferences(gaplessPlayback = false))
+        seed(2)
+        val before = checked.calls.toMap()
+        operations.onNextResume = { coordinator.sessionPlayer.pause() }
+        preferences.state.value = PreferencesState.Ready(UserPreferences())
+        coordinator.refreshContinuousBoundary()
+        idle()
+        assertFalse(checked.player.playWhenReady)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(GaplessPlaybackIssue.PREPARING, coordinator.state.value.gapless.issue)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+    }
+
+    @Test fun disablingGaplessInsideTheOpeningSetterKeepsTheCurrentTrackPlayingWithTheGateClosed() = onMain {
+        preferences.state.value = PreferencesState.Ready(UserPreferences(gaplessPlayback = false))
+        seed(2)
+        operations.onNextResume = {
+            preferences.state.value = PreferencesState.Ready(UserPreferences(gaplessPlayback = false))
+            coordinator.refreshContinuousBoundary()
+        }
+        preferences.state.value = PreferencesState.Ready(UserPreferences())
+        coordinator.refreshContinuousBoundary()
+        assertTrue(checked.player.playWhenReady)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(GaplessPlaybackIssue.PREFERENCE_DISABLED, coordinator.state.value.gapless.issue)
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+    }
+
     @Test fun aShortSuccessorCanEndBeforeTheFirstNonCancellableReceiptReturns() = onMain {
         seed(2)
         val before = checked.calls.toMap()
@@ -474,9 +527,11 @@ class QueueGaplessPlaybackTest {
         override val supportsContinuousPlayback: Boolean get() = supports
         var boundaryPauseEnabled = true
         var onNextPause: (() -> Unit)? = null
+        var onNextResume: (() -> Unit)? = null
         override fun setPauseAtBoundary(pause: Boolean) {
             boundaryPauseEnabled = pause
             if (pause) onNextPause?.also { onNextPause = null }?.invoke()
+            else onNextResume?.also { onNextResume = null }?.invoke()
         }
         override suspend fun prepareAndAwait(expectedMediaId: String) {
             assertEquals(expectedMediaId, player.currentMediaItem?.mediaId)

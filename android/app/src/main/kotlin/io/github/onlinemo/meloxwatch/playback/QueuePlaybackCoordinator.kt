@@ -1634,14 +1634,18 @@ class QueuePlaybackCoordinator(
             return
         }
         // 许可只包含一个真实相邻实例；逻辑单曲重复/尾回绕仍由完整队列普通结清。
-        continuousBoundary = ContinuousBoundary(currentWindow, successor, playbackCycle, backendGeneration,
+        val authorizedBoundary = ContinuousBoundary(currentWindow, successor, playbackCycle, backendGeneration,
             requireNotNull(saved).checkpoint.completedCycles,
             requireNotNull(loadedResources[currentWindow.current.queueEntryId]).mediaUri.toString(),
             requireNotNull(loadedResources[successor.queueEntryId]).mediaUri.toString())
+        continuousBoundary = authorizedBoundary
         if (boundaryPaused) {
             boundaryPaused = false
             operations.setPauseAtBoundary(false)
         }
+        // setter 可同步送达 AUTO、暂停或偏好回调；旧栈不能把已收回的许可重新显示为可用。
+        if (isDetached || !backendBound || boundaryPaused || pendingContinuous != null ||
+            continuousBoundary !== authorizedBoundary || backendGeneration != authorizedBoundary.backendGeneration) return
         _state.value = _state.value.copy(gapless = GaplessPlaybackState(available = true, issue = null))
     }
 
