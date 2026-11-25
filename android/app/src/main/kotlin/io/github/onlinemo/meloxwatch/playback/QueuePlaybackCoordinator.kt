@@ -1915,6 +1915,8 @@ class QueuePlaybackCoordinator(
     /** 仅主线程读取已核验窗口；睡眠/设置变化直接收回下一个边界，不访问provider。 */
     internal fun refreshContinuousBoundary() {
         if (isDetached || !backendBound) return
+        // 已失败且实际暂停的后继只由显式命令重试；listener 不能再次调用仍失败的 native gate。
+        if (continuousWriteFailed && pendingContinuous != null && !resumeIntent && !backend.playWhenReady) return
         continuousTailHold?.let { hold ->
             val issue = tailHoldIssue(hold)
             if (issue == null) {

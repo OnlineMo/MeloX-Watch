@@ -46,6 +46,8 @@ import java.lang.reflect.Proxy
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CopyableThrowable
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -396,7 +398,7 @@ class QueueGaplessPlaybackTest {
 
     @Test fun aBoundarySetterFailureBeforeAdmissionKeepsTheQueueAndAllowsAnExplicitRetry() = onMain {
         seed(4)
-        val failure = IllegalStateException("BOUNDARY_SETTER_FIXTURE_FAILURE")
+        val failure = ControlledAdmissionFailure("BOUNDARY_SETTER_FIXTURE_FAILURE")
         assertAdmissionFailureKeepsQueueAndAllowsRetry(failure) {
             operations.onNextPause = { throw failure }
         }
@@ -406,7 +408,7 @@ class QueueGaplessPlaybackTest {
         operations.rolling = true
         seed(4)
         assertRollingTail("entry-1", pending = true)
-        val failure = UnsupportedOperationException("ROLLING_QUEUE_TAIL_UPDATE_UNSUPPORTED")
+        val failure = ControlledTailUpdateFailure("ROLLING_QUEUE_TAIL_UPDATE_UNSUPPORTED")
         assertAdmissionFailureKeepsQueueAndAllowsRetry(failure) {
             checked.onNextReplace = { throw failure }
         }
@@ -423,7 +425,7 @@ class QueueGaplessPlaybackTest {
             producerReads += 1
             delegate.read(offset, limit)
         }
-        val failure = CancellationException("ADMISSION_CANCELLED_FIXTURE")
+        val failure = ControlledAdmissionCancellation("ADMISSION_CANCELLED_FIXTURE")
         var observed: Throwable? = null
         val command = scope.async(Dispatchers.Main.immediate, start = CoroutineStart.LAZY) {
             val context = currentCoroutineContext()
@@ -456,7 +458,7 @@ class QueueGaplessPlaybackTest {
         seed(4)
         val base = requireNotNull(store.snapshot())
         val view = FrozenQueueView("failed-gate-auto", 2L, 2L)
-        val failure = IllegalStateException("GATE_FAILURE_AFTER_AUTO")
+        val failure = ControlledAdmissionFailure("GATE_FAILURE_AFTER_AUTO")
         val gate = gated.blockNext()
         val before = checked.calls.toMap()
         operations.onNextPause = {
@@ -487,7 +489,7 @@ class QueueGaplessPlaybackTest {
         seed(4)
         val base = requireNotNull(store.snapshot())
         val view = FrozenQueueView("persistent-gate-auto", 2L, 2L)
-        val failure = IllegalStateException("PERSISTENT_GATE_FIXTURE_FAILURE")
+        val failure = ControlledAdmissionFailure("PERSISTENT_GATE_FIXTURE_FAILURE")
         val before = checked.calls.toMap()
         val writerStart = gated.checkpointAttempts.size
         var setterFailures = 0
@@ -1346,6 +1348,25 @@ class QueueGaplessPlaybackTest {
         } finally {
             checked.player.removeListener(listener)
         }
+    }
+
+    // 受控错误保留原对象；身份断言不能被协程调试栈的异常复制替代。
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class ControlledAdmissionFailure(message: String) : IllegalStateException(message),
+        CopyableThrowable<ControlledAdmissionFailure> {
+        override fun createCopy(): ControlledAdmissionFailure? = null
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class ControlledTailUpdateFailure(message: String) : UnsupportedOperationException(message),
+        CopyableThrowable<ControlledTailUpdateFailure> {
+        override fun createCopy(): ControlledTailUpdateFailure? = null
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private class ControlledAdmissionCancellation(message: String) : CancellationException(message),
+        CopyableThrowable<ControlledAdmissionCancellation> {
+        override fun createCopy(): ControlledAdmissionCancellation? = null
     }
 
     private suspend fun assertAdmissionFailureKeepsQueueAndAllowsRetry(failure: Exception, arm: () -> Unit) {
