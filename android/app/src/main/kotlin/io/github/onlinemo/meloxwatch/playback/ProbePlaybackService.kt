@@ -198,6 +198,7 @@ class ProbePlaybackService : MediaSessionService() {
                 sleepTimer?.state?.value?.let { it.initialized && it.timer.active == null } == true
             },
             mayBeginContinuousRound = statistics::canBeginContinuousRound,
+            mayKeepContinuousTail = statistics::canKeepContinuousTail,
             onContinuousRoundChanged = statistics::beginContinuousRound,
             sourceResolver = SourcePlaybackResolver(LocalPlaybackResolver(application)::resolve,
                 resources = application.runtimePlaybackResources) { application.onlineMusic().playbackResolver },

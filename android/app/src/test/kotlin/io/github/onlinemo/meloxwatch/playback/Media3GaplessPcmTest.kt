@@ -116,11 +116,11 @@ class Media3GaplessPcmTest {
             .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(5_000, 15_000, 1_000, 2_000)
                 .setTargetBufferBytes(4 * 1024 * 1024).setPrioritizeTimeOverSizeThresholds(false)
                 .setBackBuffer(0, false).build())
-            .setMediaSourceFactory(DefaultMediaSourceFactory(DataSource.Factory {
+            .setMediaSourceFactory(RollingQueueMediaSourceFactory(DefaultMediaSourceFactory(DataSource.Factory {
                 ByteArrayDataSource(ByteArrayDataSource.UriResolver { uri -> checkNotNull(data[uri.toString()]) { "UNKNOWN_WAVE_FIXTURE" } })
-            }, BoundedExtractorsFactory()))
+            }, BoundedExtractorsFactory())))
             .setReleaseTimeoutMs(1500L).build()
-        val actualOperations = Media3PlaybackOperations(player)
+        val actualOperations = Media3PlaybackOperations(player, rollingQueueTailsEnabled = true)
         val observedOperations = object : PlaybackBackendOperations by actualOperations {
             override fun setPauseAtBoundary(pause: Boolean) {
                 diagnostics.captureMain(player)

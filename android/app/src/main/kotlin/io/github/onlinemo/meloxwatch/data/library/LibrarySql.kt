@@ -282,12 +282,34 @@ internal object LibrarySql {
             trackCursor != null -> "t.trackId IN (SELECT trackId FROM track_cursor_window)"
             else -> null
         }
-        val aliases = mutableListOf(valid("av", revision))
-        if (selectedKeys != null || trackCursor != null) {
-            // 候选标识保留全部有效位置；授权、排除和最优别名仍在原关系中决定。
-            aliases += """av.locationId IN (SELECT relation.locationId FROM local_track_locations relation
+        // IN 的位置集合须去重，但每个位置的全部来源、别名和有效版本仍保留。
+        val selectedAliasLocations = if (selectedKeys != null || trackCursor != null) """
+            selected_alias_locations(locationId) AS MATERIALIZED (
+                SELECT DISTINCT relation.locationId FROM local_track_locations relation
                 WHERE ${valid("relation", revision)}
-                    AND relation.trackId IN (SELECT trackId FROM scanned_tracks))""".trimIndent()
+                    AND relation.trackId IN (SELECT trackId FROM scanned_tracks)
+            )
+        """.trimIndent() else null
+        // 来源与位置在版本表前驱动现有组合索引；不把访问身份假定为唯一别名。
+        val aliasFrom = if (selectedAliasLocations != null) """
+            FROM local_source_versions sv
+            JOIN local_grants g ON g.grantId = sv.grantId
+            CROSS JOIN selected_alias_locations wanted
+            CROSS JOIN local_alias_versions av
+            JOIN local_access_aliases aa ON aa.aliasId = av.aliasId
+            JOIN local_location_versions lv ON lv.locationId = av.locationId AND ${valid("lv", revision)}
+        """.trimIndent() else """
+            FROM local_alias_versions av
+            JOIN local_access_aliases aa ON aa.aliasId = av.aliasId
+            JOIN local_location_versions lv ON lv.locationId = av.locationId AND ${valid("lv", revision)}
+            JOIN local_source_versions sv ON sv.sourceId = av.sourceId AND ${valid("sv", revision)}
+            JOIN local_grants g ON g.grantId = sv.grantId
+        """.trimIndent()
+        val aliases = mutableListOf(valid("av", revision))
+        if (selectedAliasLocations != null) {
+            aliases += valid("sv", revision)
+            aliases += "av.sourceId = sv.sourceId"
+            aliases += "av.locationId = wanted.locationId"
         }
         view.query.sourceId?.let { aliases += "av.sourceId = ?"; args += it }
         view.query.folderNodeId?.let {
@@ -335,7 +357,8 @@ internal object LibrarySql {
         val sql = """
             WITH RECURSIVE ${if (view.query.relativePathKeyword != null) relativePaths(revision, view.query.sourceId != null) + "," else ""}
             ${selectedKeySql?.let { "$it,\n" }.orEmpty()}
-            ${cursorWindowSql?.let { "$it,\n" }.orEmpty()}${displayCtes(revision, includeArtists = includeArtists, selectedTracks = selectedTracks, retainedCue = retainedCue)}, alias_rows AS MATERIALIZED (
+            ${cursorWindowSql?.let { "$it,\n" }.orEmpty()}${displayCtes(revision, includeArtists = includeArtists, selectedTracks = selectedTracks, retainedCue = retainedCue)},
+            ${selectedAliasLocations?.let { "$it,\n" }.orEmpty()}alias_rows AS MATERIALIZED (
                 SELECT av.versionId AS aliasVersionId, av.aliasId, av.sourceId, av.locationId, av.nodeId,
                     lv.versionId AS locationVersionId, sv.validFrom AS sourceVersionFrom,
                     CASE
@@ -346,11 +369,7 @@ internal object LibrarySql {
                             AND av.lastSeenSequence < sv.absenceScanSequence
                             AND EXISTS (SELECT 1 FROM scan_absence_candidates absent WHERE absent.scanId = sv.absenceScanId AND absent.aliasId = av.aliasId)) THEN 4
                         WHEN g.readCapability = 'AVAILABLE' THEN 0 ELSE 1 END AS availabilityRank
-                FROM local_alias_versions av
-                JOIN local_access_aliases aa ON aa.aliasId = av.aliasId
-                JOIN local_location_versions lv ON lv.locationId = av.locationId AND ${valid("lv", revision)}
-                JOIN local_source_versions sv ON sv.sourceId = av.sourceId AND ${valid("sv", revision)}
-                JOIN local_grants g ON g.grantId = sv.grantId
+                $aliasFrom
                 WHERE ${aliases.joinToString(" AND ")}
             ), base AS (
                 SELECT t.*, $availability AS availabilityRank,

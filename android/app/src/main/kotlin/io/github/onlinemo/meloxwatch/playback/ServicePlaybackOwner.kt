@@ -648,11 +648,11 @@ internal class ServicePlaybackOwner(
                     .setTargetBufferBytes(4 * 1024 * 1024)
                     .setPrioritizeTimeOverSizeThresholds(false)
                     .setBackBuffer(0, false).build())
-                .setMediaSourceFactory(DefaultMediaSourceFactory(dataSources, BoundedExtractorsFactory())
-                    .setLoadErrorHandlingPolicy(NoAutomaticPlaybackLoadRetry()))
+                .setMediaSourceFactory(RollingQueueMediaSourceFactory(DefaultMediaSourceFactory(dataSources, BoundedExtractorsFactory())
+                    .setLoadErrorHandlingPolicy(NoAutomaticPlaybackLoadRetry())))
                 .setReleaseTimeoutMs(1500L).build()
             val routedPlayer = RoutingPlaybackPlayer(player, route)
-            val operations = Media3PlaybackOperations(routedPlayer)
+            val operations = Media3PlaybackOperations(routedPlayer, rollingQueueTailsEnabled = true)
             val backend = Backend(kind, routedPlayer, operations, releaseGuard, lease, route, media3 = operations,
                 awaitCueResources = { withTimeout(5000L) { dataSources.awaitCueRetirement() } })
             try {

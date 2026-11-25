@@ -5,6 +5,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.SimpleBasePlayer
+import androidx.media3.common.Timeline
 import androidx.media3.common.util.UnstableApi
 import androidx.room.Room
 import com.google.common.util.concurrent.Futures
@@ -32,6 +33,10 @@ import io.github.onlinemo.meloxwatch.model.QueueMutationCandidate
 import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
 import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
 import io.github.onlinemo.meloxwatch.model.QueueSnapshot
+import io.github.onlinemo.meloxwatch.model.QueueSeekRequest
+import io.github.onlinemo.meloxwatch.playback.input.SeekGestureContext
+import io.github.onlinemo.meloxwatch.playback.input.SeekGestureSurface
+import io.github.onlinemo.meloxwatch.playback.input.SeekGestures
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.model.UserPreferences
 import io.github.onlinemo.meloxwatch.model.UserPreferencesDraft
@@ -91,6 +96,7 @@ class QueueGaplessPlaybackTest {
     private val failures = mutableListOf<QueuePlaybackFailure>()
     private var timerActive = false
     private var timerBlocksEnd = false
+    private var epochReady = true
 
     @Before fun open() {
         databaseFile = File(temporaryFolder.root, "gapless.db")
@@ -104,7 +110,8 @@ class QueueGaplessPlaybackTest {
         coordinator = QueuePlaybackCoordinator(checked.player, gated, preferences, scope,
             operations = operations, onRoundChanged = { rounds += it.queueEntryId },
             onContinuousRoundChanged = { entry, _ -> rounds += entry.queueEntryId },
-            mayContinuousPlayback = { !timerActive }, beforeNaturalAdvance = { binding ->
+            mayContinuousPlayback = { !timerActive }, mayBeginContinuousRound = { epochReady },
+            beforeNaturalAdvance = { binding ->
                 naturalEndings += binding.queueEntryId
                 timerBlocksEnd
             },
@@ -443,11 +450,783 @@ class QueueGaplessPlaybackTest {
         assertTrue(checked.player.playWhenReady)
     }
 
+    @Test fun aRollingTailKeepsTheIncomingWindowLiveUntilItsRoomReceiptAllowsTheNextAppend() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertRollingTail("entry-1", pending = true)
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        val incomingUid = currentUid()
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(checked.player.mediaItemCount - 1, checked.player.currentMediaItemIndex)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertEquals(GaplessPlaybackIssue.HANDOVER_PENDING, coordinator.state.value.gapless.issue)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertTrue(checked.player.isPlaying)
+        assertRollingTail("entry-1", pending = true)
+        assertEquals(before["pause"], checked.calls["pause"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        gate.release.complete(Unit)
+        idle()
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertTrue(physicalIds().contains("entry-2"))
+        assertRollingTail("entry-2", pending = true)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertTrue(coordinator.state.value.gapless.available)
+        assertTrue(checked.player.isPlaying)
+        assertEquals(before["pause"], checked.calls["pause"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aManualPauseHardClosesTheRollingHoldWithoutAppendingOrLosingTheIncomingClock() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val seeksStart = operations.seekRequests.size
+        val receiptAndSeekOrder = mutableListOf<String>()
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        val incomingUid = currentUid()
+        val incomingUri = checked.player.currentMediaItem?.localConfiguration?.uri
+        assertFalse(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = true)
+        raw.position(200L)
+        coordinator.sessionPlayer.pause()
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(Player.STATE_READY, checked.player.playbackState)
+        assertEquals(200L, checked.player.currentPosition)
+        assertFalse(checked.player.playWhenReady)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        gated.onCheckpointAccepted = { saved ->
+            if (saved.currentEntryId == "entry-1" && saved.positionMs == 200L) receiptAndSeekOrder += "cas"
+        }
+        gate.release.complete(Unit)
+        idle()
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(200L, store.snapshot()?.positionMs)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(200L, checked.player.currentPosition)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertFalse(checked.player.playWhenReady)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+        assertEquals(listOf("cas"), receiptAndSeekOrder)
+        gated.onCheckpointAccepted = null
+        operations.onNextSeek = { expectedMediaId, positionMs ->
+            assertEquals("entry-1", expectedMediaId)
+            assertEquals(200L, positionMs)
+            assertEquals(incomingUid, currentUid())
+            assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+            assertFalse(operations.boundaryPauseEnabled)
+            assertRollingTail(physicalIds().last(), pending = true)
+            assertEquals(listOf("cas"), receiptAndSeekOrder)
+            receiptAndSeekOrder += "seek"
+        }
+        coordinator.sessionPlayer.play()
+        idle()
+        assertEquals(listOf("cas", "seek"), receiptAndSeekOrder)
+        assertEquals(listOf("entry-1" to 200L), operations.seekRequests.drop(seeksStart))
+        assertEquals((before["seekTo"] ?: 0) + 1, checked.calls["seekTo"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(200L, store.snapshot()?.positionMs)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(200L, checked.player.currentPosition)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertTrue(checked.player.playWhenReady)
+        assertTrue(coordinator.state.value.gapless.available)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-2", pending = true)
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun timerInvalidationHardClosesTheRollingHoldAndFencesItsDeferredAppend() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        val incomingUid = currentUid()
+        assertRollingTail("entry-1", pending = true)
+        assertFalse(operations.boundaryPauseEnabled)
+        raw.position(240L)
+        timerActive = true
+        coordinator.refreshContinuousBoundary()
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertEquals(incomingUid, currentUid())
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(240L, checked.player.currentPosition)
+        assertEquals(Player.STATE_READY, checked.player.playbackState)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        gate.release.complete(Unit)
+        idle()
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(240L, store.snapshot()?.positionMs)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(240L, checked.player.currentPosition)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertRollingTail("entry-1", pending = false)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun epochInvalidationHardClosesTheRollingHoldWithoutRebindingItsActualIncomingSource() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        val incomingUid = currentUid()
+        assertRollingTail("entry-1", pending = true)
+        assertFalse(operations.boundaryPauseEnabled)
+        raw.position(280L)
+        epochReady = false
+        coordinator.refreshContinuousBoundary()
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertEquals(incomingUid, currentUid())
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(280L, checked.player.currentPosition)
+        assertEquals(Player.STATE_READY, checked.player.playbackState)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        gate.release.complete(Unit)
+        idle()
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(280L, store.snapshot()?.positionMs)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(280L, checked.player.currentPosition)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertRollingTail("entry-1", pending = false)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aTerminalRollingSuccessorCanReallyEndBeforeTheFirstRoomReceiptReturns() = onMain {
+        operations.rolling = true
+        seed(2)
+        val before = checked.calls.toMap()
+        assertRollingTail("entry-1", pending = false)
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(Player.STATE_READY, checked.player.playbackState)
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        assertEquals(Player.STATE_ENDED, checked.player.playbackState)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(DURATION_MS, checked.player.currentPosition)
+        assertFalse(checked.player.playWhenReady)
+        gate.release.complete(Unit)
+        idle()
+        val saved = requireNotNull(store.snapshot())
+        assertEquals("entry-1", saved.currentEntryId)
+        assertEquals(DURATION_MS, saved.positionMs)
+        assertEquals(0, saved.checkpoint.completedCycles)
+        assertEquals(listOf("entry-1"), naturalEndings)
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals(Player.STATE_ENDED, checked.player.playbackState)
+        assertFalse(checked.player.playWhenReady)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        val reopened = openDatabase()
+        try { assertEquals(saved, RoomQueueStore(reopened).snapshot()) }
+        finally { reopened.close() }
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aDynamicRollingTailClockOnlyFinalizesUntilTheRealEndedEventArrives() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val accepted = mutableListOf<QueueCheckpoint>()
+        gated.onCheckpointAccepted = { accepted += it.checkpoint }
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        assertRollingTail("entry-1", pending = true)
+        assertFalse(operations.boundaryPauseEnabled)
+        raw.position(DURATION_MS)
+        assertEquals(Player.STATE_READY, checked.player.playbackState)
+        coordinator.refreshContinuousBoundary()
+        assertEquals(Player.STATE_READY, checked.player.playbackState)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(DURATION_MS, checked.player.currentPosition)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertTrue(naturalEndings.isEmpty())
+        assertTrue(accepted.isEmpty())
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        raw.completeNaturally(pause = true)
+        assertEquals(Player.STATE_ENDED, checked.player.playbackState)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(DURATION_MS, checked.player.currentPosition)
+        assertTrue(naturalEndings.isEmpty())
+        gate.release.complete(Unit)
+        idle()
+        assertTrue(accepted.any { it.queueEntryId == "entry-1" && it.positionMs == DURATION_MS })
+        assertTrue(naturalEndings.isNotEmpty())
+        assertTrue(naturalEndings.all { it == "entry-1" })
+        assertEquals("entry-2", store.snapshot()?.currentEntryId)
+        assertEquals("entry-2", checked.player.currentMediaItem?.mediaId)
+        assertEquals(listOf("entry-0", "entry-1", "entry-2"), rounds)
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aFailedRollingReceiptHardClosesItsTailAndExplicitlyRetriesTheSameCAS() = onMain {
+        operations.rolling = true
+        seed(4)
+        val base = requireNotNull(store.snapshot())
+        val before = checked.calls.toMap()
+        val seeksStart = operations.seekRequests.size
+        val receiptAndSeekOrder = mutableListOf<String>()
+        val attemptsStart = gated.checkpointAttempts.size
+        gated.onCheckpointAccepted = { saved ->
+            if (saved.currentEntryId == "entry-1" && saved.positionMs == 205L) receiptAndSeekOrder += "cas"
+        }
+        gated.failNext = true
+        raw.completeNaturally(operations.boundaryPauseEnabled, incomingPositionMs = 205L)
+        assertEquals(205L, checked.player.currentPosition)
+        val incomingUid = currentUid()
+        val incomingUri = checked.player.currentMediaItem?.localConfiguration?.uri
+        idle()
+        val failed = gated.checkpointAttempts.drop(attemptsStart)
+            .filter { it.checkpoint.queueEntryId == "entry-1" }.single()
+        assertEquals(base.generationId, failed.generationId)
+        assertEquals(base.checkpointRevision, failed.expectedCheckpointRevision)
+        assertEquals(QueueCheckpoint("entry-1", 205L, 0), failed.checkpoint)
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(205L, checked.player.currentPosition)
+        assertFalse(checked.player.playWhenReady)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertFalse(coordinator.state.value.gapless.available)
+        assertTrue(receiptAndSeekOrder.isEmpty())
+        operations.onNextSeek = { expectedMediaId, positionMs ->
+            assertEquals("entry-1", expectedMediaId)
+            assertEquals(205L, positionMs)
+            assertEquals(incomingUid, currentUid())
+            assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+            assertEquals("entry-1", coordinator.state.value.snapshot?.currentEntryId)
+            assertFalse(operations.boundaryPauseEnabled)
+            assertRollingTail(physicalIds().last(), pending = true)
+            assertEquals(listOf("cas"), receiptAndSeekOrder)
+            receiptAndSeekOrder += "seek"
+        }
+        coordinator.sessionPlayer.play()
+        idle()
+        val attempts = gated.checkpointAttempts.drop(attemptsStart)
+            .filter { it.checkpoint.queueEntryId == "entry-1" }
+        assertEquals(2, attempts.size)
+        assertEquals(failed, attempts[1])
+        assertEquals(listOf("cas", "seek"), receiptAndSeekOrder)
+        assertEquals(listOf("entry-1" to 205L), operations.seekRequests.drop(seeksStart))
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(205L, store.snapshot()?.positionMs)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertEquals(205L, checked.player.currentPosition)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertTrue(physicalIds().contains("entry-2"))
+        assertRollingTail("entry-2", pending = true)
+        assertTrue(checked.player.playWhenReady)
+        assertTrue(coordinator.state.value.gapless.available)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals((before["seekTo"] ?: 0) + 1, checked.calls["seekTo"])
+        assertNull(coordinator.state.value.failure)
+        assertTrue(raw.peakWindow <= 3)
+    }
+
+    @Test fun anAutomaticEventInsideTheRollingAppendUsesTheNewPermitWithoutAnOldStackOverwrite() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val firstGate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(firstGate)
+        var secondGate: Gate? = null
+        checked.onNextAdd = {
+            assertFalse(operations.boundaryPauseEnabled)
+            assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+            assertRollingTail("entry-2", pending = true)
+            secondGate = gated.blockNext()
+            raw.completeNaturally(pause = false)
+            assertEquals("entry-2", checked.player.currentMediaItem?.mediaId)
+            assertEquals(GaplessPlaybackIssue.HANDOVER_PENDING, coordinator.state.value.gapless.issue)
+            assertFalse(coordinator.state.value.gapless.available)
+            assertFalse(operations.boundaryPauseEnabled)
+            assertRollingTail("entry-2", pending = true)
+        }
+        firstGate.release.complete(Unit)
+        withTimeout(10_000L) {
+            while (secondGate == null) yield()
+            requireNotNull(secondGate).entered.await()
+        }
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals("entry-2", checked.player.currentMediaItem?.mediaId)
+        assertEquals(GaplessPlaybackIssue.HANDOVER_PENDING, coordinator.state.value.gapless.issue)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-2", pending = true)
+        assertFalse(physicalIds().contains("entry-3"))
+        assertEquals(listOf("entry-0", "entry-1", "entry-2"), rounds)
+        assertEquals(before["pause"], checked.calls["pause"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        requireNotNull(secondGate).release.complete(Unit)
+        idle()
+        assertEquals("entry-2", store.snapshot()?.currentEntryId)
+        assertEquals("entry-2", checked.player.currentMediaItem?.mediaId)
+        assertEquals(listOf("entry-0", "entry-1", "entry-2"), rounds)
+        assertTrue(physicalIds().contains("entry-3"))
+        assertRollingTail("entry-3", pending = false)
+        assertTrue(coordinator.state.value.gapless.available)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertTrue(checked.player.isPlaying)
+        assertEquals(before["pause"], checked.calls["pause"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun theInitialRollingPrepareAlreadyHasItsGateAndMarkerAndCannotUndoAManualPause() = onMain {
+        operations.rolling = true
+        val before = checked.calls.toMap()
+        var prepareObserved = false
+        operations.onNextPrepare = {
+            prepareObserved = true
+            assertFalse(operations.boundaryPauseEnabled)
+            assertEquals("entry-0", checked.player.currentMediaItem?.mediaId)
+            assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+            assertRollingTail("entry-1", pending = true)
+            coordinator.sessionPlayer.pause()
+        }
+        val preparing = scope.async { seed(4) }
+        preparing.join()
+        idle()
+        assertTrue(prepareObserved)
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertEquals("entry-0", checked.player.currentMediaItem?.mediaId)
+        assertEquals(0L, checked.player.currentPosition)
+        assertEquals(listOf("entry-0"), rounds)
+        assertFalse(checked.player.playWhenReady)
+        assertFalse(checked.player.isPlaying)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        coordinator.refreshContinuousBoundary()
+        assertTrue(operations.boundaryPauseEnabled)
+        assertFalse(checked.player.playWhenReady)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun reconfirmingEpochBeforeTheReceiptReturnsCannotReopenAnAlreadyFinalizedRollingTail() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        raw.position(280L)
+        epochReady = false
+        coordinator.refreshContinuousBoundary()
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        epochReady = true
+        coordinator.refreshContinuousBoundary()
+        assertTrue(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = false)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        gate.release.complete(Unit)
+        idle()
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(280L, store.snapshot()?.positionMs)
+        assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+        assertTrue(operations.boundaryPauseEnabled)
+        assertFalse(coordinator.state.value.gapless.available)
+        assertRollingTail("entry-1", pending = false)
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals(before["seekTo"], checked.calls["seekTo"])
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aConfirmedPausedRollingSeekAndCancelledPreviewResumeTheAcceptedPosition() = onMain {
+        operations.rolling = true
+        seed(4)
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        raw.position(200L)
+        coordinator.sessionPlayer.pause()
+        gate.release.complete(Unit)
+        idle()
+        val incomingUid = currentUid()
+        val incomingUri = checked.player.currentMediaItem?.localConfiguration?.uri
+        val before = checked.calls.toMap()
+        val seeksStart = operations.seekRequests.size
+        val binding = requireNotNull(coordinator.seekBinding())
+        val saved = coordinator.seek(QueueSeekRequest(binding, 420L))
+        idle()
+        assertEquals(420L, saved.positionMs)
+        assertEquals(420L, store.snapshot()?.positionMs)
+        assertEquals(420L, checked.player.currentPosition)
+        assertFalse(checked.player.playWhenReady)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+        val previewBinding = requireNotNull(coordinator.seekBinding())
+        val context = SeekGestureContext(previewBinding, coordinator.seekState.value.ownerId, foreground = true, canSeek = coordinator.canSeekFromSession())
+        val draft = requireNotNull(SeekGestures.begin(context, SeekGestureSurface.MAIN_PROGRESS, 420L))
+        val moved = SeekGestures.drag(draft, draft.gestureId, context, 0.7)
+        assertEquals(700L, requireNotNull(moved.draft).previewPositionMs)
+        assertNull(moved.request)
+        val cancelled = SeekGestures.cancel(moved.draft, draft.gestureId)
+        assertNull(cancelled.draft)
+        assertNull(cancelled.request)
+        assertNull(SeekGestures.release(cancelled.draft, draft.gestureId, context).request)
+        assertEquals(420L, checked.player.currentPosition)
+        assertEquals(listOf("entry-1" to 420L), operations.seekRequests.drop(seeksStart))
+        operations.onNextSeek = { mediaId, position ->
+            assertEquals("entry-1", mediaId)
+            assertEquals(420L, position)
+            assertEquals(incomingUid, currentUid())
+            assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+        }
+        coordinator.sessionPlayer.play()
+        idle()
+        assertEquals(listOf("entry-1" to 420L, "entry-1" to 420L), operations.seekRequests.drop(seeksStart))
+        assertEquals((before["seekTo"] ?: 0) + 2, checked.calls["seekTo"])
+        assertEquals(before["prepare"], checked.calls["prepare"])
+        assertEquals("entry-1", store.snapshot()?.currentEntryId)
+        assertEquals(420L, store.snapshot()?.positionMs)
+        assertEquals(420L, checked.player.currentPosition)
+        assertEquals(incomingUid, currentUid())
+        assertEquals(incomingUri, checked.player.currentMediaItem?.localConfiguration?.uri)
+        assertEquals(listOf("entry-0", "entry-1"), rounds)
+        assertTrue(checked.player.playWhenReady)
+        assertTrue(coordinator.state.value.gapless.available)
+        assertTrue(raw.peakWindow <= 3)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test fun aReadyEndOnAnOrdinaryRollingBoundarySettlesItsEndClockInsteadOfThePausedCapture() = onMain {
+        operations.rolling = true
+        preferences.state.value = PreferencesState.Ready(UserPreferences(gaplessPlayback = false))
+        seed(4)
+        raw.position(200L)
+        coordinator.sessionPlayer.pause()
+        idle()
+        assertEquals(200L, store.snapshot()?.positionMs)
+        coordinator.sessionPlayer.play()
+        idle()
+        assertEquals("entry-0", checked.player.currentMediaItem?.mediaId)
+        assertEquals(200L, checked.player.currentPosition)
+        assertTrue(checked.player.playWhenReady)
+        assertTrue(operations.boundaryPauseEnabled)
+        assertTrue(checked.player.currentMediaItemIndex + 1 < checked.player.mediaItemCount)
+        val before = checked.calls.toMap()
+        val current = requireNotNull(store.snapshot())
+        val uid = currentUid()
+        val uri = checked.player.currentMediaItem?.localConfiguration?.uri
+        val endEvents = mutableListOf<Triple<Boolean, Int, Long>>()
+        val listener = object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+                    endEvents += Triple(playWhenReady, checked.player.playbackState, checked.player.currentPosition)
+                }
+            }
+        }
+        checked.player.addListener(listener)
+        try {
+            timerActive = true
+            timerBlocksEnd = true
+            coordinator.refreshContinuousBoundary()
+            val gate = gated.blockNext()
+            raw.completeReadyBoundary()
+            awaitReceipt(gate)
+            assertTrue(endEvents.contains(Triple(false, Player.STATE_READY, DURATION_MS)))
+            assertEquals(Player.STATE_READY, checked.player.playbackState)
+            assertEquals("entry-0", checked.player.currentMediaItem?.mediaId)
+            assertEquals(DURATION_MS, checked.player.currentPosition)
+            assertFalse(checked.player.playWhenReady)
+            gate.release.complete(Unit)
+            idle()
+            val saved = requireNotNull(store.snapshot())
+            assertEquals(current.generationId, saved.generationId)
+            assertEquals(current.queueRevision, saved.queueRevision)
+            assertEquals("entry-0", saved.currentEntryId)
+            assertEquals(DURATION_MS, saved.positionMs)
+            assertEquals(1, saved.checkpoint.completedCycles)
+            assertEquals(Player.STATE_READY, checked.player.playbackState)
+            assertEquals(DURATION_MS, checked.player.currentPosition)
+            assertFalse(checked.player.playWhenReady)
+            assertTrue(operations.boundaryPauseEnabled)
+            assertEquals(uid, currentUid())
+            assertEquals(uri, checked.player.currentMediaItem?.localConfiguration?.uri)
+            assertEquals(listOf("entry-0"), rounds)
+            assertEquals(listOf("entry-0"), naturalEndings)
+            assertEquals(before["prepare"], checked.calls["prepare"])
+            assertEquals(before["seekTo"], checked.calls["seekTo"])
+            coordinator.requestCheckpoint()
+            coordinator.flush()
+            idle()
+            assertEquals(saved, store.snapshot())
+            assertEquals(DURATION_MS, store.snapshot()?.positionMs)
+            assertEquals(1, store.snapshot()?.checkpoint?.completedCycles)
+            val reopened = openDatabase()
+            try { assertEquals(saved, RoomQueueStore(reopened).snapshot()) }
+            finally { reopened.close() }
+            assertTrue(raw.peakWindow <= 3)
+            assertTrue(failures.isEmpty())
+        } finally {
+            checked.player.removeListener(listener)
+        }
+    }
+
+    @Test fun aReadyEndFlushedByTheOrdinaryGateSettlesTheIncomingTailBeforeItsPendingReceipt() = onMain {
+        operations.rolling = true
+        seed(4)
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        raw.position(200L)
+        assertEquals("entry-0", store.snapshot()?.currentEntryId)
+        assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+        assertFalse(operations.boundaryPauseEnabled)
+        assertRollingTail("entry-1", pending = true)
+        val before = checked.calls.toMap()
+        val uid = currentUid()
+        val uri = checked.player.currentMediaItem?.localConfiguration?.uri
+        val endEvents = mutableListOf<Triple<Boolean, Int, Long>>()
+        val listener = object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+                    endEvents += Triple(playWhenReady, checked.player.playbackState, checked.player.currentPosition)
+                }
+            }
+        }
+        checked.player.addListener(listener)
+        try {
+            var ordinarySetterEndCount = 0
+            operations.onNextPause = {
+                ordinarySetterEndCount += 1
+                assertTrue(operations.boundaryPauseEnabled)
+                assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+                assertEquals(200L, checked.player.currentPosition)
+                assertRollingTail("entry-1", pending = true)
+                raw.completeReadyBoundary()
+            }
+            timerActive = true
+            timerBlocksEnd = true
+            coordinator.refreshContinuousBoundary()
+            assertEquals(1, ordinarySetterEndCount)
+            assertTrue(endEvents.contains(Triple(false, Player.STATE_READY, DURATION_MS)))
+            assertEquals(Player.STATE_READY, checked.player.playbackState)
+            assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+            assertEquals(DURATION_MS, checked.player.currentPosition)
+            assertFalse(checked.player.playWhenReady)
+            assertTrue(operations.boundaryPauseEnabled)
+            assertRollingTail("entry-1", pending = false)
+            assertEquals("entry-0", store.snapshot()?.currentEntryId)
+            assertFalse(physicalIds().contains("entry-2"))
+            gate.release.complete(Unit)
+            idle()
+            val saved = requireNotNull(store.snapshot())
+            assertEquals("entry-1", saved.currentEntryId)
+            assertEquals(DURATION_MS, saved.positionMs)
+            assertEquals(1, saved.checkpoint.completedCycles)
+            assertEquals(Player.STATE_READY, checked.player.playbackState)
+            assertEquals(DURATION_MS, checked.player.currentPosition)
+            assertFalse(checked.player.playWhenReady)
+            assertEquals(uid, currentUid())
+            assertEquals(uri, checked.player.currentMediaItem?.localConfiguration?.uri)
+            assertEquals(listOf("entry-0", "entry-1"), rounds)
+            assertEquals(listOf("entry-1"), naturalEndings)
+            assertEquals(listOf("entry-0", "entry-1"), physicalIds())
+            assertEquals(before["prepare"], checked.calls["prepare"])
+            assertEquals(before["seekTo"], checked.calls["seekTo"])
+            val writerStart = gated.checkpointAttempts.size
+            coordinator.requestCheckpoint()
+            coordinator.flush()
+            idle()
+            assertEquals(saved, store.snapshot())
+            assertEquals(DURATION_MS, store.snapshot()?.positionMs)
+            assertEquals(1, store.snapshot()?.checkpoint?.completedCycles)
+            assertFalse(gated.checkpointAttempts.drop(writerStart).any {
+                it.checkpoint.queueEntryId == "entry-1" && it.checkpoint.positionMs == 200L
+            })
+            val reopened = openDatabase()
+            try { assertEquals(saved, RoomQueueStore(reopened).snapshot()) }
+            finally { reopened.close() }
+            assertTrue(raw.peakWindow <= 3)
+            assertTrue(failures.isEmpty())
+        } finally {
+            checked.player.removeListener(listener)
+        }
+    }
+
+    @Test fun aReadyEndDuringTheRetainedAppendSettlesAfterItsOwnedWindowFinishesApplying() = onMain {
+        operations.rolling = true
+        seed(4)
+        val before = checked.calls.toMap()
+        val accepted = mutableListOf<QueueCheckpoint>()
+        gated.onCheckpointAccepted = { accepted += it.checkpoint }
+        val gate = gated.blockNext()
+        raw.completeNaturally(operations.boundaryPauseEnabled)
+        awaitReceipt(gate)
+        raw.position(200L)
+        coordinator.requestCheckpoint()
+        val uid = currentUid()
+        val uri = checked.player.currentMediaItem?.localConfiguration?.uri
+        val endEntries = mutableListOf<String?>()
+        val endStates = mutableListOf<Triple<Boolean, Int, Long>>()
+        val listener = object : Player.Listener {
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM) {
+                    endEntries += checked.player.currentMediaItem?.mediaId
+                    endStates += Triple(playWhenReady, checked.player.playbackState, checked.player.currentPosition)
+                }
+            }
+        }
+        checked.player.addListener(listener)
+        try {
+            var appendEndCount = 0
+            checked.onNextAdd = {
+                appendEndCount += 1
+                assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+                assertEquals(200L, checked.player.currentPosition)
+                assertEquals("entry-1", coordinator.state.value.snapshot?.currentEntryId)
+                assertEquals(200L, coordinator.state.value.snapshot?.positionMs)
+                assertTrue(accepted.any { it.queueEntryId == "entry-1" && it.positionMs == 200L })
+                assertTrue(checked.player.currentMediaItemIndex + 1 < checked.player.mediaItemCount)
+                assertTrue(physicalIds().contains("entry-2"))
+                assertFalse(operations.boundaryPauseEnabled)
+                timerActive = true
+                timerBlocksEnd = true
+                raw.completeReadyBoundary()
+            }
+            gate.release.complete(Unit)
+            idle()
+            assertEquals(1, appendEndCount)
+            assertTrue(endEntries.isNotEmpty())
+            assertTrue(endEntries.all { it == "entry-1" })
+            assertTrue(endStates.contains(Triple(false, Player.STATE_READY, DURATION_MS)))
+            val saved = requireNotNull(store.snapshot())
+            assertEquals("entry-1", saved.currentEntryId)
+            assertEquals(DURATION_MS, saved.positionMs)
+            assertEquals(1, saved.checkpoint.completedCycles)
+            assertEquals("entry-1", checked.player.currentMediaItem?.mediaId)
+            assertEquals(Player.STATE_READY, checked.player.playbackState)
+            assertEquals(DURATION_MS, checked.player.currentPosition)
+            assertFalse(checked.player.playWhenReady)
+            assertTrue(operations.boundaryPauseEnabled)
+            assertEquals(uid, currentUid())
+            assertEquals(uri, checked.player.currentMediaItem?.localConfiguration?.uri)
+            assertEquals(listOf("entry-0", "entry-1"), rounds)
+            assertEquals(listOf("entry-1"), naturalEndings)
+            assertEquals(before["prepare"], checked.calls["prepare"])
+            assertEquals(before["seekTo"], checked.calls["seekTo"])
+            val writerStart = gated.checkpointAttempts.size
+            coordinator.requestCheckpoint()
+            coordinator.flush()
+            idle()
+            assertEquals(saved, store.snapshot())
+            assertFalse(gated.checkpointAttempts.drop(writerStart).any {
+                it.checkpoint.queueEntryId == "entry-1" && it.checkpoint.positionMs in listOf(0L, 200L)
+            })
+            val reopened = openDatabase()
+            try { assertEquals(saved, RoomQueueStore(reopened).snapshot()) }
+            finally { reopened.close() }
+            assertEquals(before["prepare"], checked.calls["prepare"])
+            assertEquals(before["seekTo"], checked.calls["seekTo"])
+            assertEquals(listOf("entry-0", "entry-1"), rounds)
+            assertTrue(raw.peakWindow <= 3)
+            assertTrue(failures.isEmpty())
+        } finally {
+            checked.player.removeListener(listener)
+        }
+    }
+
     private suspend fun seed(count: Int, mode: QueueMode = QueueMode()) {
         val view = FrozenQueueView("fixture-view", 1L, count.toLong())
         coordinator.replace(QueueReplacementRequest("seed", null, 0L, view, mode = mode),
             QueuePageSource { offset, limit -> QueueInputPage(view, offset,
                 List(minOf(limit.toLong(), view.totalCount - offset).toInt()) { entry(offset + it) }) }, explicitPlay = true)
+    }
+
+    private suspend fun awaitReceipt(gate: Gate) = withTimeout(10_000L) { gate.entered.await() }
+
+    private fun physicalIds(): List<String> =
+        (0 until checked.player.mediaItemCount).map { checked.player.getMediaItemAt(it).mediaId }
+
+    private fun currentUid(): Any =
+        checked.player.currentTimeline.getUidOfPeriod(checked.player.currentPeriodIndex)
+
+    private fun assertRollingTail(expectedEntryId: String, pending: Boolean) {
+        val index = checked.player.mediaItemCount - 1
+        val item = checked.player.getMediaItemAt(index)
+        assertEquals(expectedEntryId, item.mediaId)
+        assertEquals(pending, (item.localConfiguration?.tag as? QueueTailMarker)?.pendingContinuation)
+        assertEquals(pending, checked.player.currentTimeline.getWindow(index, Timeline.Window()).isDynamic)
     }
 
     private suspend fun idle() = withTimeout(10_000L) {
@@ -497,12 +1276,21 @@ class QueueGaplessPlaybackTest {
         val release = CompletableDeferred<Unit>()
     }
 
+    private data class CheckpointAttempt(
+        val generationId: String,
+        val expectedCheckpointRevision: Long,
+        val checkpoint: QueueCheckpoint,
+    )
+
     private class GatedStore(private val actual: RoomQueueStore) : QueueStore by actual {
+        val checkpointAttempts = mutableListOf<CheckpointAttempt>()
+        var onCheckpointAccepted: ((QueueSnapshot) -> Unit)? = null
         var gate: Gate? = null
         var failNext = false
         var onMutationCommitted: (() -> Unit)? = null
         fun blockNext() = Gate().also { gate = it }
         override suspend fun saveCheckpoint(generationId: String, expectedCheckpointRevision: Long, checkpoint: QueueCheckpoint): QueueSnapshot {
+            checkpointAttempts += CheckpointAttempt(generationId, expectedCheckpointRevision, checkpoint)
             if (failNext) {
                 failNext = false
                 throw QueueStoreException(QueueStoreIssue.STORAGE_UNAVAILABLE)
@@ -512,7 +1300,9 @@ class QueueGaplessPlaybackTest {
                 it.release.await()
                 gate = null
             }
-            return actual.saveCheckpoint(generationId, expectedCheckpointRevision, checkpoint)
+            return actual.saveCheckpoint(generationId, expectedCheckpointRevision, checkpoint).also {
+                onCheckpointAccepted?.invoke(it)
+            }
         }
         override suspend fun mutate(request: QueueMutationRequest, source: QueuePageSource?,
             beforePublish: suspend (QueueMutationCandidate) -> QueueCheckpoint?): QueueCommit = withContext(NonCancellable) {
@@ -524,10 +1314,15 @@ class QueueGaplessPlaybackTest {
 
     private class WindowOperations(override val player: Player) : PlaybackBackendOperations {
         var supports = true
+        var rolling = false
         override val supportsContinuousPlayback: Boolean get() = supports
+        override val supportsRollingQueueTail: Boolean get() = rolling
         var boundaryPauseEnabled = true
         var onNextPause: (() -> Unit)? = null
         var onNextResume: (() -> Unit)? = null
+        var onNextPrepare: (() -> Unit)? = null
+        var onNextSeek: ((String, Long) -> Unit)? = null
+        val seekRequests = mutableListOf<Pair<String, Long>>()
         override fun setPauseAtBoundary(pause: Boolean) {
             boundaryPauseEnabled = pause
             if (pause) onNextPause?.also { onNextPause = null }?.invoke()
@@ -535,10 +1330,13 @@ class QueueGaplessPlaybackTest {
         }
         override suspend fun prepareAndAwait(expectedMediaId: String) {
             assertEquals(expectedMediaId, player.currentMediaItem?.mediaId)
+            onNextPrepare?.also { onNextPrepare = null }?.invoke()
             player.prepare()
         }
         override suspend fun seekAndAwait(expectedMediaId: String, positionMs: Long) {
             assertEquals(expectedMediaId, player.currentMediaItem?.mediaId)
+            seekRequests += expectedMediaId to positionMs
+            onNextSeek?.also { onNextSeek = null }?.invoke(expectedMediaId, positionMs)
             player.seekTo(positionMs)
         }
     }
@@ -547,6 +1345,7 @@ class QueueGaplessPlaybackTest {
         var released = false
         var lateCalls = 0
         var onNextPause: (() -> Unit)? = null
+        var onNextAdd: (() -> Unit)? = null
         val calls = mutableMapOf<String, Int>()
         val player = Proxy.newProxyInstance(Player::class.java.classLoader, arrayOf(Player::class.java)) { proxy, method, args ->
             when (method.name) {
@@ -561,7 +1360,12 @@ class QueueGaplessPlaybackTest {
                     if (method.name in listOf("pause", "prepare", "seekTo")) calls[method.name] = (calls[method.name] ?: 0) + 1
                     if (method.name == "pause") onNextPause?.also { onNextPause = null }?.invoke()
                     try {
-                        method.invoke(raw, *(args ?: emptyArray())).also { if (method.name == "release") released = true }
+                        method.invoke(raw, *(args ?: emptyArray())).also {
+                            if (method.name == "release") released = true
+                            if (method.name == "addMediaItem" || method.name == "addMediaItems") {
+                                onNextAdd?.also { onNextAdd = null }?.invoke()
+                            }
+                        }
                     } catch (error: InvocationTargetException) { throw error.targetException }
                 }
             }
@@ -586,6 +1390,7 @@ class QueueGaplessPlaybackTest {
             val value = positionMs
             val builder = State.Builder().setAvailableCommands(COMMANDS)
                 .setPlaylist(items.map { MediaItemData.Builder(it.uid).setMediaItem(it.media)
+                    .setIsDynamic((it.media.localConfiguration?.tag as? QueueTailMarker)?.pendingContinuation == true)
                     .setDurationUs(DURATION_MS * 1000L).setIsSeekable(true).build() })
                 .setCurrentMediaItemIndex(index).setPlaybackState(when {
                     items.isEmpty() -> Player.STATE_IDLE
@@ -631,6 +1436,28 @@ class QueueGaplessPlaybackTest {
             recordWindow()
             return done()
         }
+        override fun handleReplaceMediaItems(fromIndex: Int, toIndex: Int, mediaItems: List<MediaItem>): ListenableFuture<*> {
+            val current = items.getOrNull(index)?.uid
+            val previous = items.subList(fromIndex, toIndex).toList()
+            val replacement = mediaItems.mapIndexed { offset, media ->
+                val old = previous.getOrNull(offset)
+                if (old != null && old.media.mediaId == media.mediaId &&
+                    old.media.localConfiguration?.uri == media.localConfiguration?.uri &&
+                    old.media.clippingConfiguration == media.clippingConfiguration) old.copy(media = media)
+                else Item(nextUid++, media)
+            }
+            items.subList(fromIndex, toIndex).clear()
+            items.addAll(fromIndex, replacement)
+            index = items.indexOfFirst { it.uid == current }
+            if (current != null && index == C.INDEX_UNSET) {
+                index = minOf(fromIndex, items.lastIndex)
+                positionMs = 0L
+                ready = false
+                ended = false
+            }
+            recordWindow()
+            return done()
+        }
         override fun handleRemoveMediaItems(fromIndex: Int, toIndex: Int): ListenableFuture<*> {
             val current = items.getOrNull(index)?.uid
             items.subList(fromIndex, toIndex).clear()
@@ -655,10 +1482,21 @@ class QueueGaplessPlaybackTest {
             positionMs = value
             invalidateState()
         }
-        fun completeNaturally(pause: Boolean) {
+        fun completeReadyBoundary() {
+            val current = requireNotNull(items.getOrNull(index))
+            val pending = (current.media.localConfiguration?.tag as? QueueTailMarker)?.pendingContinuation == true
+            check(index + 1 < items.size || pending) { "READY_END_REQUIRES_NONFINAL_FRONTIER" }
+            ready = true
+            ended = false
+            playing = false
+            positionMs = DURATION_MS
+            reason = Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM
+            invalidateState()
+        }
+        fun completeNaturally(pause: Boolean, incomingPositionMs: Long = 0L) {
             if (!pause && index + 1 < items.size) {
                 index += 1
-                positionMs = 0L
+                positionMs = incomingPositionMs
                 discontinuity = Player.DISCONTINUITY_REASON_AUTO_TRANSITION
             } else {
                 positionMs = DURATION_MS
