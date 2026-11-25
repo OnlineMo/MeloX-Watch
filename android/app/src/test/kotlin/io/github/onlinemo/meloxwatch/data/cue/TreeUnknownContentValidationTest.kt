@@ -3,6 +3,20 @@ package io.github.onlinemo.meloxwatch.data.cue
 import android.content.Context
 import android.content.Intent
 import io.github.onlinemo.meloxwatch.MeloXApplication
+import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
+import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
+import io.github.onlinemo.meloxwatch.data.queue.QueueReplacementRequest
+import io.github.onlinemo.meloxwatch.model.FrozenQueueView
+import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
+import io.github.onlinemo.meloxwatch.model.QueueEntry
+import io.github.onlinemo.meloxwatch.model.QueueLimits
+import io.github.onlinemo.meloxwatch.model.QueueMode
+import io.github.onlinemo.meloxwatch.model.QueueMutation
+import io.github.onlinemo.meloxwatch.model.QueueMutationRequest
+import io.github.onlinemo.meloxwatch.model.QueueRepeatMode
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueAction
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueCommand
+import io.github.onlinemo.meloxwatch.playback.LibraryQueueProducer
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrack
 import io.github.onlinemo.meloxwatch.data.library.LibraryFolder
 import io.github.onlinemo.meloxwatch.data.library.RoomFolderPlaylistMaintainer
@@ -413,6 +427,86 @@ class TreeUnknownContentValidationTest {
                         assertEquals(beforeRecovery, fixture.provider.opened.size)
                     } finally { app.playlists.closeView(recoveryView.viewId) }
                 }
+                // 单项来源只读一次；持久实例重新编号时仍须保留完整CUE绑定。
+                val queues = app.queues
+                queues.initialize()
+                val insertionView = app.library.openView(LibraryQuery(includeHidden = true))
+                try {
+                    val selectedCue = checkNotNull(app.library.locate(insertionView, tracks.first { it.cueReference != null }.trackKey))
+                    val expectedCue = checkNotNull(selectedCue.track.cueReference)
+                    assertTrue(expectedCue.isBound)
+                    val wholeTrack = tracks.single { it.cueReference == null }
+                    val insertionResolver = LocalPlaybackResolver(app)
+                    for ((index, action) in listOf(LibraryQueueAction.INSERT_NEXT, LibraryQueueAction.INSERT_AND_PLAY).withIndex()) {
+                        val previous = queues.snapshot()
+                        val baseEntry = QueueEntry("cue-insert-base-$index", wholeTrack.trackKey, 0L, 0L,
+                            wholeTrack.title, wholeTrack.metadata.durationMs, wholeTrack.location)
+                        val baseView = FrozenQueueView("cue-insert-base-view-$index", insertionView.revision, 1L)
+                        val base = queues.replace(QueueReplacementRequest("cue-insert-base-operation-$index",
+                            previous?.generationId, previous?.queueRevision ?: 0L, baseView,
+                            mode = QueueMode(repeat = QueueRepeatMode.SINGLE, cycleLimit = 2)),
+                            QueuePageSource { offset, limit ->
+                                assertEquals(0L, offset)
+                                assertEquals(1, limit)
+                                QueueInputPage(baseView, offset, listOf(baseEntry))
+                            }, beforePublish = { window -> insertionResolver.resolve(checkNotNull(window).current); Unit }).snapshot
+                        val checkpoint = queues.saveCheckpoint(base.generationId, base.checkpointRevision,
+                            QueueCheckpoint(baseEntry.queueEntryId, 321L, 1))
+                        val command = LibraryQueueCommand(viewId = insertionView.viewId,
+                            operationId = "cue-insert-operation-$index", expectedGenerationId = checkpoint.generationId,
+                            expectedQueueRevision = checkpoint.queueRevision, selected = selectedCue.track.trackKey,
+                            viewRevision = insertionView.revision, viewCount = insertionView.totalCount,
+                            selectedOriginalOrder = selectedCue.ordinal, expectedCurrentEntryId = checkpoint.currentEntryId,
+                            mode = checkpoint.mode, action = action)
+                        val producer = LibraryQueueProducer(app.library, command)
+                        try {
+                            val input = producer.source.read(0L, 1)
+                            val supplied = input.entries.single()
+                            assertEquals(1L, input.view.totalCount)
+                            assertEquals(expectedCue, supplied.cueReference)
+                            assertEquals(expectedCue.binding?.audio?.location, supplied.location)
+                            var insertedId: String? = null
+                            var sourceReads = 0
+                            val startsInserted = action == LibraryQueueAction.INSERT_AND_PLAY
+                            val commit = queues.mutate(QueueMutationRequest(command.operationId, checkpoint.generationId,
+                                checkpoint.queueRevision, checkpoint.currentEntryId,
+                                QueueMutation.InsertNext(input.view, checkpoint.currentEntryId, startsInserted)),
+                                QueuePageSource { offset, limit ->
+                                    assertEquals(0L, offset)
+                                    assertEquals(1, limit)
+                                    sourceReads++
+                                    input
+                                }, beforePublish = { candidate ->
+                                    insertedId = checkNotNull(candidate.firstInsertedEntryId)
+                                    val window = checkNotNull(candidate.window)
+                                    assertTrue(window.entries.size <= QueueLimits.PLAYER_WINDOW_SIZE)
+                                    assertEquals(if (startsInserted) insertedId else checkpoint.currentEntryId, window.current.queueEntryId)
+                                    insertionResolver.resolve(window.current)
+                                    null
+                                })
+                            assertEquals(1, sourceReads)
+                            assertEquals(2L, commit.snapshot.entryCount)
+                            assertEquals(checkpoint.mode, commit.snapshot.mode)
+                            val persisted = queues.page(commit.snapshot.generationId, 0L, QueueLimits.PAGE_SIZE)
+                            assertEquals(2, persisted.size)
+                            val inserted = persisted.single { it.queueEntryId == checkNotNull(insertedId) }
+                            assertNotEquals(supplied.queueEntryId, inserted.queueEntryId)
+                            assertEquals(1L, inserted.originalOrder)
+                            assertEquals(1L, inserted.playbackOrder)
+                            assertEquals(expectedCue.trackKey, inserted.trackKey)
+                            assertEquals(expectedCue, inserted.cueReference)
+                            if (startsInserted) {
+                                assertEquals(QueueCheckpoint(inserted.queueEntryId, 0L, 0), commit.snapshot.checkpoint)
+                            } else assertEquals(checkpoint.checkpoint, commit.snapshot.checkpoint)
+                            assertEquals(commit.snapshot, queues.snapshot())
+                            val beforeRead = fixture.provider.opened.size
+                            val resolved = insertionResolver.resolve(inserted)
+                            assertEquals(inserted.location, resolved.location)
+                            assertEquals(expectedCue, resolved.cueReference)
+                            assertTrue(fixture.provider.opened.size > beforeRead)
+                        } finally { producer.close() }
+                    }
+                } finally { app.library.closeView(insertionView.viewId) }
                 assertEquals(ObservedCapability.UNKNOWN, checkNotNull(app.library.source(fixture.spec.sourceId)).grant.read)
                 assertRetired(fixture.provider)
             }
