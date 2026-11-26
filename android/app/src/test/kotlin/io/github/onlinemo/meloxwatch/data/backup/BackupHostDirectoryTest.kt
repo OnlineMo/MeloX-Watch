@@ -7,6 +7,9 @@ import android.system.OsConstants
 import io.github.onlinemo.meloxwatch.testhost.HostIsolationMarker
 import io.github.onlinemo.meloxwatch.testhost.HostIsolationMarkerShadow
 import io.github.onlinemo.meloxwatch.testhost.HostLinuxDirectoryShadow
+import java.io.FileDescriptor
+import java.io.RandomAccessFile
+import java.lang.ref.Cleaner
 import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.After
@@ -38,6 +41,41 @@ class BackupHostDirectoryTest {
         syncBackupDirectory(temporary.newFolder())
         assertEquals(flags, HostLinuxDirectoryShadow.lastOpenFlags.get())
         assertEquals(0, HostLinuxDirectoryShadow.activeDescriptors)
+    }
+
+    @Test(timeout = 30_000L)
+    fun closingAnExternalJdkDescriptorRetiresItsRegisteredCleanup() {
+        RandomAccessFile(temporary.newFile(), "rw").use { owner ->
+            val descriptor = owner.fd
+            val cleanup = checkNotNull(registeredCleanup(descriptor))
+            assertEquals(0, HostLinuxDirectoryShadow.activeDescriptors)
+            Os.close(descriptor)
+            assertFalse(descriptor.valid())
+            assertTrue(registeredCleanup(descriptor) == null)
+            cleanup.clean()
+            assertEquals(0, HostLinuxDirectoryShadow.activeDescriptors)
+        }
+    }
+
+    @Test(timeout = 30_000L)
+    fun aRetiredCleanupCannotAffectAnotherLiveFileDescriptor() {
+        RandomAccessFile(temporary.newFile(), "rw").use { original ->
+            val descriptor = original.fd
+            val cleanup = checkNotNull(registeredCleanup(descriptor))
+            Os.close(descriptor)
+            assertFalse(descriptor.valid())
+            assertTrue(registeredCleanup(descriptor) == null)
+            RandomAccessFile(temporary.newFile(), "rw").use { replacement ->
+                val before = Os.fstat(replacement.fd)
+                cleanup.clean()
+                val after = Os.fstat(replacement.fd)
+                assertTrue(before.st_dev == after.st_dev && before.st_ino == after.st_ino)
+                replacement.write(93)
+                replacement.seek(0)
+                assertEquals(93, replacement.read())
+            }
+            assertEquals(0, HostLinuxDirectoryShadow.activeDescriptors)
+        }
     }
 
     @Test(timeout = 30_000L)
@@ -127,4 +165,7 @@ class BackupHostDirectoryTest {
         }
         assertEquals(0, HostLinuxDirectoryShadow.activeDescriptors)
     }
+
+    private fun registeredCleanup(descriptor: FileDescriptor): Cleaner.Cleanable? = FileDescriptor::class.java
+        .getDeclaredField("cleanup").apply { isAccessible = true }.get(descriptor) as Cleaner.Cleanable?
 }

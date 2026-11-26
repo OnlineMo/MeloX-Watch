@@ -1,6 +1,6 @@
 # LP-07 本地曲目歌词与封面查找
 
-根据[本地合同](../17-本地音乐功能与实施计划.md)和[完整原需求](../requirements/local-player-F001-F128.md)的 F-070/F-071，采用固定网易云 EAPI 通路，实现独立于账号的显式查找、预览、确认关联与清除。云端输入采集的 Debug 编译、lint 和独立 schema 9 导出已通过原件审阅；其后普通完整双端 Debug 实际运行3238项、24项失败，恢复与夹具后继待验证，APK、设备及原 AC 仍未完成。
+根据[本地合同](../17-本地音乐功能与实施计划.md)和[完整原需求](../requirements/local-player-F001-F128.md)的 F-070/F-071，采用固定网易云 EAPI 通路，实现独立于账号的显式查找、预览、确认关联与清除。云端输入采集的 Debug 编译、lint 和独立 schema 9 导出已通过原件审阅；最新普通完整双端 Debug 实际运行3243项、2项失败；旧24项中23项成功，新5项磁盘前像定义全部成功。对象身份与主机关闭后继仍待完整云验，APK、设备及原 AC 仍未完成。
 
 ## 请求与界面
 
@@ -53,3 +53,9 @@ LP-11 逻辑 ZIP v1 增加 METADATA_LYRICS 与 METADATA_ARTWORK 类型，分别�
 [run45827813881](https://github.com/OnlineMo/MeloX-Watch/actions/runs/45827813881)/attempt1 的原件绑定 source `d81447f1ecf5a601d0e98b85732d3cee6bed922d`、实际 build `73186bf880700b07459a248882410429c3c507e3`及 Git/云端请求 SHA-256 `5a4656b291d6783a28e513ed6f89398dc694fa6cec2f846ba01d8388b702c4fb`。acquire 和 fresh strict-inputs 分别实际成功结束，schema 9 的四份原件逐字相同：181,184 字节，SHA-256 `56ab1aa4f163a15af3a8ae4d37933209b0053bdd957f25dd651d4c56f4e33136`。54 张旧表和十份既有输入保留，仅新增素材关联表和对应导出。
 
 47 个原成员、1,351 份实际源码 blob、消费者/锁/Room 声明、两个成功进程与唯一报告型 seal 拒绝均经非作者独立核验，审查收据 SHA-256 为 `29b9b65f4fa8d932370e286e8474c3bed85f02aeb26172ca1493bbca634e7e56`。准入仅复制真实云端 9.json 的原字节并移除显式采集请求。报告仍为 `generated-unreviewed`、`accepted=false`、`apk_exported=false`，应用测试和组装均为 `NOT_RUN`；普通完整双端 Debug 另行执行。
+
+## 普通 Debug 后继（2026-11-27）
+
+run45865146383/1绑定source607f22c1和实际build `deb7efcf62df08747b41fa5523fdb07fc1dbcd84`。354份原XML实际记录3243项、2failure、0error/skip；原24项中的23项、新5项磁盘前像定义均成功。剩余为晚取消对象身份断言与封存前capture的SQLITE_IOERR_READ/code266，lint、组装及签名没有完成，尚无新APK。
+
+后继保留原断言和期限，取消标记采用既有不可复制模式；主机FD测试桥通过JDK原生关闭退休已注册FileCleanable，新增两个双SDK关闭回归定义尚未执行。实际故障FD和SQL页不由源码风险猜定。此差量不改生产请求、素材关联、Room9、Stage/ZIP版本、依赖、固定上游或默认关闭行为，须新的普通完整双端Debug与精确APK设备验收。

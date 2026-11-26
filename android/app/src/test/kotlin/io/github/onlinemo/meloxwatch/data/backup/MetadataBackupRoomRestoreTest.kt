@@ -50,6 +50,7 @@ import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CopyableThrowable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -94,6 +95,12 @@ class MetadataBackupRoomRestoreTest {
     private val source = MetadataProvenance("1024", "Fixture song", "Fixture artist", "Fixture album")
     private val lyricBytes = "[00:01.00]Fixture line\n[00:02.00]Second line\n".toByteArray()
 
+    /** The rollback marker declines coroutine stack copies so identity assertions retain the original fault. */
+    private class RestoreCancellation : CancellationException("Cancelled after prospective native digest"),
+        CopyableThrowable<RestoreCancellation> {
+        override fun createCopy(): RestoreCancellation? = null
+    }
+
     @Before fun open() = runBlocking {
         Dispatchers.setMain(UnconfinedTestDispatcher())
         fixture = NativeBackupFixture(RuntimeEnvironment.getApplication() as Context, temporary.newFolder("app"))
@@ -128,10 +135,19 @@ class MetadataBackupRoomRestoreTest {
                 SqliteBackupStage.create(directory) {}.use { stage ->
                     stage.begin(BackupHeader(scopes = setOf(scope), createdEpochMs = BackupTestFixtures.EPOCH_MS,
                         sourceDatabaseVersion = RoomBackupCapture(fixture.database).sourceDatabaseVersion()))
-                    RoomBackupCapture(fixture.database).captureMain(stage, includeResourceReferences = false)
-                    stage.sealSnapshot()
                     val selected = if (scope == BackupScope.LYRICS) BackupRecordKind.METADATA_LYRICS else BackupRecordKind.METADATA_ARTWORK
                     val other = if (scope == BackupScope.LYRICS) BackupRecordKind.METADATA_ARTWORK else BackupRecordKind.METADATA_LYRICS
+                    try { RoomBackupCapture(fixture.database).captureMain(stage, includeResourceReferences = false) }
+                    catch (failure: Exception) {
+                        val accepted = try { stage.count(selected) }
+                        catch (diagnostic: Exception) { failure.addSuppressed(diagnostic); -1L }
+                        val acceptedRowGroups = if (accepted >= 0L) (accepted + 99L) / 100L else -1L
+                        // Row groups describe accepted data; the byte window may end an SQL page sooner.
+                        System.err.println("BACKUP_CAPTURE_FAILURE scope=${scope.name} selectedKind=${selected.name} " +
+                            "phase=CAPTURE_BEFORE_SEAL acceptedRows=$accepted acceptedRowGroups=$acceptedRowGroups")
+                        throw failure
+                    }
+                    stage.sealSnapshot()
                     assertEquals(257L, stage.count(selected)); assertEquals(0L, stage.count(other))
                     var after: String? = null
                     var count = 0L
@@ -359,7 +375,7 @@ class MetadataBackupRoomRestoreTest {
                 "WHEN EXISTS(SELECT 1 FROM local_metadata_associations WHERE trackId=NEW.trackId AND purpose='ARTWORK') " +
                 "BEGIN SELECT RAISE(ABORT,'metadata-dependants-were-not-cleared'); END")
         }
-        val cancellation = CancellationException("Cancelled after prospective native digest")
+        val cancellation = RestoreCancellation()
         var reachedCommit = false
         try {
             try { restoreZip(fixture, resources, archive, beforeCommit = {

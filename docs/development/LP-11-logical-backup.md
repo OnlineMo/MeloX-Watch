@@ -1,6 +1,6 @@
 # LP-11 完整逻辑备份与恢复合同
 
-本文件冻结 F-068/F-069 的 v1 实现合同。源码、云编译/测试、APK、设备正常/错误验收、性能/视觉和发布批准分别记账；本包仅为源码提案，新增测试定义未编译或执行，原 AC 均未通过。系统 Auto Backup 的排除继续保留，显式本地导出不构成云备份许可。
+本文件冻结 F-068/F-069 的 v1 实现合同。源码、云编译/测试、APK、设备正常/错误验收、性能/视觉和发布批准分别记账；最新普通run45865146383/1实际运行3243项、2项失败，新5项磁盘前像定义成功；后继修复尚未完整云验，原 AC 均未通过。系统 Auto Backup 的排除继续保留，显式本地导出不构成云备份许可。
 
 ## 1. 格式、范围与本地边界
 
@@ -63,3 +63,9 @@ run 先绑定来包、before 代次、范围/模式和真实 before 主摘要；
 `BackupDocuments` 只做格式 wrapper，和诊断共用同一个 `LocalArtifactDocuments`。目的地为 tree，新建随机 `.part`，完整写入/读回/校验后对同一实体重命名；取消只清本次精确原件，不认选择器返回的已有空文件为本次暂存。外部输出 cleanup/recovery 是独立域，失败用 `OUTPUT_CLEANUP_REQUIRED` 阻当前导出，不阻 Core READY。设备完整验收、实际 provider/FD/rename、低空间、撤权和丢 ack 场景仍须逐项实测。
 
 本包定义了原生 Room/归档/设置 owner/文档与 UI 的回归源码，包括跨预览 caller、启动三个 hook、损坏/半包/逃逸/摘要、完整大队列/列表、真实歌词文件、cancel-before-worker、确认发布、COMMIT 前取消、独立历史/统计清空及重关联。文本/hash/XML/patch 检查不等于编译、测试执行、APK、设备或原 AC。最终合成须保留 Root Room 7/codec、six-field Help、DSP 新修及 LP-10 既有实现；本包的共享前像/hunk 不可 whole-file 覆盖较新代码。
+
+## 6. 原生宿主回归后继（2026-11-27）
+
+source607f22c1的普通run45865146383/1实际执行3243项、2failure；原24项中23项成功，新5项普通磁盘前像定义全部成功。剩余MetadataBackupRoomRestoreTest的原assertSame和分页capture读取code266均保持真实失败，没有新APK或原AC信用。
+
+测试取消标记拒绝协程堆栈副本，原整事务回滚/主writer配置/原生trigger及20/60秒期限保持。锁定JDK17的FileDescriptor.close会先注销FileCleanable再关闭native FD；测试桥非自有FD由此完整退休，避免raw close后注册清理仍持有旧数字的源码风险。新增两个SDK26/30、30秒关闭/重放回归定义未执行，不以源码解释代替code266具体故障FD证据。原生产Android IO、自有channel、异常原因链、完整关系与队列、主库/私有stage/ZIP版本和空间预算均保持，完整云验、设备及两项原AC继续未完成。

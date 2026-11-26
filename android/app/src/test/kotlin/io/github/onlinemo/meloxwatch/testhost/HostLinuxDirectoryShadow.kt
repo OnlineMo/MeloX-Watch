@@ -74,11 +74,11 @@ class HostLinuxDirectoryShadow : ShadowLinux() {
 
     @Implementation
     protected fun close(fd: FileDescriptor) = HostDirectoryPosix.call("close") {
-        val number = HostDirectoryPosix.number(fd, "close")
+        HostDirectoryPosix.number(fd, "close")
         val channel = synchronized(handles) { handles[fd] }
         if (channel == null) {
-            HostDirectoryPosix.nativeClose.invoke(null, number)
-            HostDirectoryPosix.descriptorNumber.setInt(fd, -1)
+            // JDK-owned descriptors must retire their registered cleaner before the native number is freed.
+            HostDirectoryPosix.descriptorClose.invoke(fd)
         } else {
             channel.close()
             synchronized(handles) { handles.remove(fd) }
@@ -122,6 +122,7 @@ private object HostDirectoryPosix {
     private val dispatcher = Class.forName("sun.nio.fs.UnixNativeDispatcher")
     private val unixException = Class.forName("sun.nio.fs.UnixException")
     val descriptorNumber = FileDescriptor::class.java.getDeclaredField("fd").apply { setAccessible(true) }
+    val descriptorClose = FileDescriptor::class.java.accessibleMethod("close")
     val nativeOpen = dispatcher.accessibleMethod("open", unixPath, Integer.TYPE, Integer.TYPE)
     val nativeClose = dispatcher.accessibleMethod("close", Integer.TYPE)
     val nativeMknod = dispatcher.accessibleMethod("mknod", unixPath, Integer.TYPE, java.lang.Long.TYPE)
