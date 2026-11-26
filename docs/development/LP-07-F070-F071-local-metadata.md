@@ -1,6 +1,6 @@
 # LP-07 本地曲目歌词与封面查找
 
-根据[本地合同](../17-本地音乐功能与实施计划.md)和[完整原需求](../requirements/local-player-F001-F128.md)的 F-070/F-071，采用固定网易云 EAPI 通路，实现独立于账号的显式查找、预览、确认关联与清除。当前是源码及回归定义；新的云端编译、测试、lint、schema 9 导出、双端 APK、设备及原 AC 尚未完成，不继承旧产物的验证结果。
+根据[本地合同](../17-本地音乐功能与实施计划.md)和[完整原需求](../requirements/local-player-F001-F128.md)的 F-070/F-071，采用固定网易云 EAPI 通路，实现独立于账号的显式查找、预览、确认关联与清除。云端输入采集的 Debug 编译、lint 和独立 schema 9 导出已通过原件审阅；普通完整双端 Debug 测试、APK、设备及原 AC 仍未完成。
 
 ## 请求与界面
 
@@ -47,3 +47,9 @@ LP-11 逻辑 ZIP v1 增加 METADATA_LYRICS 与 METADATA_ARTWORK 类型，分别�
 新定义覆盖匿名真实 EAPI 解析/凭据隔离，字段拒绝与完整 Unicode 分页，默认关闭及旧偏好迁移，预览未确认零写入、取消实际退休、切歌/重复实例、未知确认结果重读，真实 Room 关联/primary 同事务与晚取消回滚，私有图片解码/配额/链接拒绝/缓存清理，来源撤权清除，以及资源备份往返、关系保留、CUE 冲突、旧 journal 迁移和损坏保守回收。原迁移回归按新的当前 destination 延伸至 9，历史 Support 目标、全部旧 cell/索引及失败回滚基线保留。
 
 文本/XML/摘要和非作者静审只验证源码。云端以冻结源码编译、测试、lint 并取得真实 schema/双包后，设备验证绑定精确 APK 与来源；虚拟机先验证功能和圆方布局，交付前仍需真实手表、手机与全部原 AC。性能、真实接口/素材使用权、设备正常路径和最终发布批准继续分别记账。
+
+## 云端输入准入（2026-11-26）
+
+[run45827813881](https://github.com/OnlineMo/MeloX-Watch/actions/runs/45827813881)/attempt1 的原件绑定 source `d81447f1ecf5a601d0e98b85732d3cee6bed922d`、实际 build `73186bf880700b07459a248882410429c3c507e3`及 Git/云端请求 SHA-256 `5a4656b291d6783a28e513ed6f89398dc694fa6cec2f846ba01d8388b702c4fb`。acquire 和 fresh strict-inputs 分别实际成功结束，schema 9 的四份原件逐字相同：181,184 字节，SHA-256 `56ab1aa4f163a15af3a8ae4d37933209b0053bdd957f25dd651d4c56f4e33136`。54 张旧表和十份既有输入保留，仅新增素材关联表和对应导出。
+
+47 个原成员、1,351 份实际源码 blob、消费者/锁/Room 声明、两个成功进程与唯一报告型 seal 拒绝均经非作者独立核验，审查收据 SHA-256 为 `29b9b65f4fa8d932370e286e8474c3bed85f02aeb26172ca1493bbca634e7e56`。准入仅复制真实云端 9.json 的原字节并移除显式采集请求。报告仍为 `generated-unreviewed`、`accepted=false`、`apk_exported=false`，应用测试和组装均为 `NOT_RUN`；普通完整双端 Debug 另行执行。
