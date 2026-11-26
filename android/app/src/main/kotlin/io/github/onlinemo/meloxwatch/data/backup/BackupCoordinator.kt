@@ -2,6 +2,8 @@ package io.github.onlinemo.meloxwatch.data.backup
 
 import io.github.onlinemo.meloxwatch.data.storage.StorageArea
 import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
+import io.github.onlinemo.meloxwatch.data.storage.StorageException
+import io.github.onlinemo.meloxwatch.data.storage.StorageIssue
 
 import android.content.Context
 import android.os.CancellationSignal
@@ -90,14 +92,55 @@ class BackupCoordinator internal constructor(
     private val writer = BackupArchiveWriter()
     private var directory: BackupPrivateDirectory? = null
 
-    /** The initialized owner supplies its exact root; capacity reads do not open or repair SQLite. */
-    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+    /** Waiting here would invert the existing backup actions -> original-mutation guard order. */
+    internal suspend fun <T> withStorageInventory(action: suspend (() -> StorageDirectorySpec) -> T): T {
+        val owner = Any()
+        if (!actions.tryLock(owner)) throw StorageException(StorageIssue.BUSY)
+        try {
+            val retirement = io.trackReads()
+            return withContext(retirement) {
+                var failure: Throwable? = null
+                try {
+                    requireReady()
+                    val result = action { storageDirectorySpecOnWorker(owner) }
+                    requireReady()
+                    result
+                } catch (error: Throwable) { failure = error; throw error }
+                finally {
+                    try { withContext(NonCancellable) { retirement.awaitRetired() } }
+                    catch (retired: Throwable) {
+                        val original = failure
+                        if (original == null) throw retired
+                        if (original !== retired) original.addSuppressed(retired)
+                    }
+                }
+            }
+        } finally { actions.unlock(owner) }
+    }
+
+    /** The action lease seals known files without parsing SQLite or granting cleanup authority. */
+    private fun storageDirectorySpecOnWorker(owner: Any): StorageDirectorySpec {
         check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        check(actions.holdsLock(owner))
         requireReady()
         val owned = directory ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
-        owned.ownership()
+        if (journal == null) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+        JOURNAL_STORAGE_FILES.forEach { BackupFileIdentity.capture(owned.child(it)) }
+        val previewId = heldPreview?.generation?.ownership()?.id
         return StorageDirectorySpec(owned.root, StorageArea.RECOVERY, BackupLimits.JSON_DEPTH,
-            null, classify = { _, _ -> StorageArea.RECOVERY })
+            null, classify = { _, _ -> StorageArea.RECOVERY }, mutableFile = { parts ->
+                val name = parts.last()
+                when {
+                    parts.size == 1 -> name !in JOURNAL_STORAGE_FILES
+                    parts.first() != previewId || parts.size != 2 -> true
+                    name == "input.zip" || name == "rows.db" -> false
+                    PREVIEW_RESOURCE_NAME.matches(name) -> false
+                    else -> true
+                }
+            }, requireNonEmpty = { parts ->
+                val name = parts.last()
+                name == "restore.db" || name == "rows.db" || name.endsWith(".zip") || name.endsWith(".bin")
+            }, sentinels = JOURNAL_STORAGE_FILES + listOfNotNull(previewId))
     }
     private var journal: BackupRestoreJournal? = null
     private var heldPreview: HeldPreview? = null
@@ -841,5 +884,9 @@ class BackupCoordinator internal constructor(
         else -> BackupIssue.IO
         }
     }
-    companion object { private const val PREVIEW_MS = 10L * 60 * 1000 }
+    companion object {
+        private const val PREVIEW_MS = 10L * 60 * 1000
+        private val JOURNAL_STORAGE_FILES = listOf("restore-owner.lock", "restore.db")
+        private val PREVIEW_RESOURCE_NAME = Regex("[0-9a-f]{64}\\.bin")
+    }
 }

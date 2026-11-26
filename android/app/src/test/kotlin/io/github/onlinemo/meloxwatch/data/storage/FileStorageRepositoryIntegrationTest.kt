@@ -2,11 +2,22 @@ package io.github.onlinemo.meloxwatch.data.storage
 
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.net.Uri
 import io.github.onlinemo.meloxwatch.data.artwork.LocalArtworkRepository
+import io.github.onlinemo.meloxwatch.data.backup.BackupArchiveWriter
+import io.github.onlinemo.meloxwatch.data.backup.BackupDocumentInput
+import io.github.onlinemo.meloxwatch.data.backup.BackupException
+import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
+import io.github.onlinemo.meloxwatch.data.backup.BackupMergeMode
+import io.github.onlinemo.meloxwatch.data.backup.BackupPrivateDirectory
+import io.github.onlinemo.meloxwatch.data.backup.BackupScope
 import io.github.onlinemo.meloxwatch.data.backup.BackupStartupState
+import io.github.onlinemo.meloxwatch.data.backup.BackupTestFixtures
 import io.github.onlinemo.meloxwatch.data.backup.NativeBackupFixture
+import io.github.onlinemo.meloxwatch.data.backup.SqliteBackupStage
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.online.DiskOnlineLyricsCache
@@ -18,10 +29,16 @@ import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMutation
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMutationRequest
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.nio.file.DirectoryStream
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -35,6 +52,7 @@ import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -74,7 +92,11 @@ class FileStorageRepositoryIntegrationTest {
         val lyric = fixture.copies.createConfirmedMetadata(lyricBytes, metadataSha256(lyricBytes))
         val imageBytes = png()
         val image = metadataFiles.installConfirmed(imageBytes, metadataSha256(imageBytes))
-        val specs = fixture.io.read { signal -> signal.throwIfCanceled(); specifications(metadataFiles) }
+        val specs = fixture.barrier.mutation({ StorageException(StorageIssue.BUSY) }) {
+            fixture.coordinator.withStorageInventory { backupSpecification ->
+                fixture.io.read { signal -> signal.throwIfCanceled(); specifications(metadataFiles, backupSpecification) }
+            }
+        }
         val audio = specs.single { it.area == StorageArea.AUDIO }.directory
         val incoming = specs.first { it.area == StorageArea.RECOVERY }.directory
         val lyrics = specs.single { it.area == StorageArea.LYRICS }.directory
@@ -120,7 +142,9 @@ class FileStorageRepositoryIntegrationTest {
             privateMeasure = {
                 fixture.coordinator.requireReady()
                 fixture.barrier.mutation({ StorageException(StorageIssue.BUSY) }) {
-                    inventory.measure { specifications(metadataFiles) }
+                    fixture.coordinator.withStorageInventory { backupSpecification ->
+                        inventory.measure { specifications(metadataFiles, backupSpecification) }
+                    }
                 }
             })
         try {
@@ -170,13 +194,17 @@ class FileStorageRepositoryIntegrationTest {
         val repository = FileStorageRepository(fixture.context, fixture.io, fixture.fileOperations,
             artworkMeasure = { zero }, artworkClear = { zero }, lyricsMeasure = { zero }, lyricsClear = { zero },
             privateMeasure = {
-                fixture.io.read {
-                    if (blockNext.getAndSet(false)) {
-                        entered.countDown()
-                        try { check(release.await(10, TimeUnit.SECONDS)) }
-                        finally { exited.set(true) }
+                fixture.barrier.mutation({ StorageException(StorageIssue.BUSY) }) {
+                    fixture.coordinator.withStorageInventory {
+                        fixture.io.read {
+                            if (blockNext.getAndSet(false)) {
+                                entered.countDown()
+                                try { check(release.await(10, TimeUnit.SECONDS)) }
+                                finally { exited.set(true) }
+                            }
+                            StoragePrivateReport(zero, zero, zero, zero, zero, zero, zero, null)
+                        }
                     }
-                    StoragePrivateReport(zero, zero, zero, zero, zero, zero, zero, null)
                 }
             })
         val reading = async(Dispatchers.Default) { repository.measure() }
@@ -187,6 +215,10 @@ class FileStorageRepositoryIntegrationTest {
             assertFalse(exited.get())
             try { repository.measure(); throw AssertionError("Cancelled command was released before its actual read") }
             catch (failure: StorageException) { assertEquals(StorageIssue.BUSY, failure.issue) }
+            try {
+                fixture.coordinator.discardRestorePreview("unissued-preview")
+                throw AssertionError("Backup action lease was released before its actual read")
+            } catch (failure: BackupException) { assertEquals(BackupIssue.BUSY, failure.issue) }
             try {
                 fixture.fileOperations.withExclusiveLibraryMutation(requireNoPending = false) {
                     throw AssertionError("Original mutation guard was released before its actual read")
@@ -199,8 +231,103 @@ class FileStorageRepositoryIntegrationTest {
             var admitted = false
             fixture.fileOperations.withExclusiveLibraryMutation(requireNoPending = false) { admitted = true }
             assertTrue(admitted)
+            fixture.coordinator.discardRestorePreview("unissued-preview")
             assertEquals(zero, repository.measure().audioCopies)
         } finally { release.countDown(); reading.cancel(); reading.join() }
+    }
+
+    @Test(timeout = 60_000L)
+    fun copiedNativeArchiveRemainsUnsealedUntilPreviewCompletesAndBusyMeasurementPreservesItsOwners() = runBlocking {
+        ready()
+        val archive = historyArchive()
+        val archiveBytes = archive.readBytes()
+        val copied = CompletableDeferred<File>()
+        val finishCopy = CompletableDeferred<Unit>()
+        fixture.afterArchiveInputCopy = { file -> copied.complete(file); finishCopy.await() }
+        val previewing = async(Dispatchers.IO) { fixture.coordinator.previewRestore(input(), BackupMergeMode.MERGE_KEEP_CURRENT) }
+        try {
+            val inputCopy = withTimeout(15_000L) { copied.await() }
+            val privateRoot = backupRoot()
+            val before = snapshot(listOf(privateRoot))
+            try {
+                withTimeout(5_000L) { measureBackups() }
+                throw AssertionError("A running backup action returned a complete measurement")
+            } catch (failure: StorageException) { assertEquals(StorageIssue.BUSY, failure.issue) }
+            assertArrayEquals(archiveBytes, inputCopy.readBytes())
+            assertArrayEquals(archiveBytes, archive.readBytes())
+            assertSnapshot(before, listOf(privateRoot))
+            finishCopy.complete(Unit)
+            val preview = withTimeout(20_000L) { previewing.await() }
+            val sealed = measureBackups().staging
+            assertTrue(sealed.complete)
+            assertEquals(snapshot(listOf(privateRoot)).values.sumOf { it.size.toLong() }, sealed.bytes)
+            fixture.coordinator.discardRestorePreview(preview.token)
+            assertArrayEquals(archiveBytes, archive.readBytes())
+        } finally {
+            finishCopy.complete(Unit)
+            previewing.cancel()
+            withTimeout(15_000L) { previewing.join() }
+        }
+    }
+
+    @Test(timeout = 60_000L)
+    fun verifiedClosedPreviewCanBeCompleteWhileAnEmptyStageAndUnknownJournalRemainPreservedSubtotals() = runBlocking {
+        ready()
+        val archive = historyArchive()
+        val archiveBytes = archive.readBytes()
+        val preview = fixture.coordinator.previewRestore(input(), BackupMergeMode.MERGE_KEEP_CURRENT)
+        val privateRoot = backupRoot()
+        val complete = measureBackups().staging
+        assertTrue(complete.complete)
+        assertEquals(snapshot(listOf(privateRoot)).values.sumOf { it.size.toLong() }, complete.bytes)
+        val unsealed = BackupPrivateDirectory.open(privateRoot).newGeneration()
+        SqliteBackupStage.create(unsealed) {}.use { }
+        val unknownJournal = write(privateRoot, "restore-unknown.partial", byteArrayOf(42, 43, 44))
+        val before = snapshot(listOf(privateRoot))
+        val measured = measureBackups().staging
+        assertFalse(measured.complete)
+        assertEquals(StorageIssue.INCOMPLETE, measured.issue)
+        assertEquals(before.values.sumOf { it.size.toLong() }, measured.observedBytes)
+        assertSnapshot(before, listOf(privateRoot))
+        assertArrayEquals(archiveBytes, archive.readBytes())
+        fixture.coordinator.discardRestorePreview(preview.token)
+        assertTrue(unsealed.child("rows.db").isFile)
+        assertArrayEquals(byteArrayOf(42, 43, 44), unknownJournal.readBytes())
+        assertArrayEquals(archiveBytes, archive.readBytes())
+    }
+
+    @Test(timeout = 60_000L)
+    fun aClosedPreviewChangingAfterItsDirectoryWasMeasuredInvalidatesTheFinalSubtotal() = runBlocking {
+        ready()
+        val archive = historyArchive()
+        val archiveBytes = archive.readBytes()
+        fixture.coordinator.previewRestore(input(), BackupMergeMode.MERGE_KEEP_CURRENT)
+        val privateRoot = backupRoot()
+        val previewDirectory = checkNotNull(privateRoot.listFiles()).single { it.isDirectory && File(it, "input.zip").isFile }
+        val opaqueDirectory = File(privateRoot, "zzz-opaque").apply { mkdirs() }
+        repeat(110) { File(opaqueDirectory, "${it.toString().padStart(3, '0')}.bin").writeBytes(byteArrayOf(1)) }
+        val rootTime = Files.getLastModifiedTime(privateRoot.toPath())
+        val previewTime = Files.getLastModifiedTime(previewDirectory.toPath())
+        val changed = AtomicBoolean(false)
+        val nexts = AtomicInteger()
+        val renamed = File(previewDirectory, "input-renamed.zip")
+        val inventory = StoragePrivateInventory(fixture.context, fixture.io, openDirectory = { path ->
+            orderedStream(path, previewDirectory.toPath()) {
+                if (path == opaqueDirectory.toPath() && nexts.incrementAndGet() == 101 && changed.compareAndSet(false, true)) {
+                    Files.move(File(previewDirectory, "input.zip").toPath(), renamed.toPath())
+                    Files.setLastModifiedTime(previewDirectory.toPath(), FileTime.fromMillis(previewTime.toMillis() + 2_000L))
+                }
+            }
+        })
+        val report = measureBackups(inventory).staging
+        assertTrue(changed.get())
+        assertEquals(rootTime, Files.getLastModifiedTime(privateRoot.toPath()))
+        assertFalse(report.complete)
+        assertNull(report.bytes)
+        assertTrue(report.unknownFiles > 0L)
+        assertArrayEquals(archiveBytes, renamed.readBytes())
+        assertArrayEquals(archiveBytes, archive.readBytes())
+        assertArrayEquals(byteArrayOf(1), File(opaqueDirectory, "000.bin").readBytes())
     }
 
     private suspend fun ready() {
@@ -208,11 +335,52 @@ class FileStorageRepositoryIntegrationTest {
         fixture.fileOperations.initialize()
     }
 
-    private fun specifications(metadataFiles: LocalMetadataArtworkFiles): List<StorageDirectorySpec> =
+    private fun specifications(metadataFiles: LocalMetadataArtworkFiles,
+        backupSpecification: () -> StorageDirectorySpec): List<StorageDirectorySpec> =
         FileStoragePhysical.privateAudioSpecifications(fixture.context) + listOf(
             fixture.copies.storageDirectorySpecOnWorker(), metadataFiles.storageDirectorySpecOnWorker(),
             fixture.fontFiles.storageDirectorySpecOnWorker(), fixture.themes.storageDirectorySpecOnWorker(),
-            fixture.background.storageDirectorySpecOnWorker(), fixture.coordinator.storageDirectorySpecOnWorker())
+            fixture.background.storageDirectorySpecOnWorker(), backupSpecification())
+
+    private suspend fun measureBackups(inventory: StoragePrivateInventory = StoragePrivateInventory(fixture.context, fixture.io)): StoragePrivateReport =
+        fixture.barrier.mutation({ StorageException(StorageIssue.BUSY) }) {
+            fixture.coordinator.withStorageInventory { backupSpecification ->
+                inventory.measure { listOf(backupSpecification()) }
+            }
+        }
+
+    private fun backupRoot(): File = File(fixture.context.noBackupFilesDir, "logical-backups-v1")
+
+    private fun input() = BackupDocumentInput(Uri.parse("content://fixture.documents/backup"), Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+    private fun historyArchive(): File {
+        val source = BackupPrivateDirectory.open(temporary.newFolder("history-source"))
+        return SqliteBackupStage.create(source) {}.use { stage ->
+            stage.begin(BackupTestFixtures.header(BackupScope.HISTORY))
+            stage.record(BackupTestFixtures.historyMeta(0L, 0L))
+            stage.sealSnapshot()
+            source.child("export.zip").also { archive ->
+                BackupArchiveWriter().write(stage, archive) {}
+                fixture.archiveInput = archive
+            }
+        }
+    }
+
+    private fun orderedStream(path: Path, first: Path, beforeNext: () -> Unit): DirectoryStream<Path> {
+        val actual = Files.newDirectoryStream(path)
+        val paths = actual.toList().sortedWith(compareBy<Path> { if (it == first) 0 else 1 }.thenBy { it.fileName.toString() })
+        return object : DirectoryStream<Path> {
+            override fun iterator(): MutableIterator<Path> {
+                val iterator = paths.iterator()
+                return object : MutableIterator<Path> {
+                    override fun hasNext() = iterator.hasNext()
+                    override fun next(): Path { beforeNext(); return iterator.next() }
+                    override fun remove() = throw UnsupportedOperationException()
+                }
+            }
+            override fun close() = actual.close()
+        }
+    }
 
     private fun write(root: File, name: String, bytes: ByteArray): File = File(root, name).apply {
         checkNotNull(parentFile).mkdirs(); writeBytes(bytes)

@@ -115,8 +115,9 @@ internal class StoragePrivateInventory(private val context: Context, private val
     private class Cursor(private val openDirectory: (Path) -> DirectoryStream<Path>) : AutoCloseable {
         private data class Fence(val spec: StorageDirectorySpec, val facts: BasicFileAttributes?,
             val sentinels: Map<String, BasicFileAttributes?>)
-        private class Frame(val path: Path, val stream: DirectoryStream<Path>) {
+        private class Frame(val path: Path, val stream: DirectoryStream<Path>, val facts: BasicFileAttributes) {
             val iterator = stream.iterator()
+            var checkedBatch: Any? = null
         }
         private val totals = EnumMap<StorageArea, StorageCategory>(StorageArea::class.java).apply {
             StorageArea.entries.forEach { put(it, StorageCategory(0L, 0L)) }
@@ -162,6 +163,7 @@ internal class StoragePrivateInventory(private val context: Context, private val
         fun advance(signal: CancellationSignal): Boolean = withReadLocks(signal) { advanceUnlocked(signal) }
 
         private fun advanceUnlocked(signal: CancellationSignal): Boolean {
+            val batch = Any()
             var nodes = 0
             while (index < fences.size && nodes < 100) {
                 signal.throwIfCanceled()
@@ -174,7 +176,12 @@ internal class StoragePrivateInventory(private val context: Context, private val
                         pushFrame(spec.directory.toPath())
                     }
                     val frame = frames.last()
+                    if (frame.checkedBatch !== batch) {
+                        requireSameFrame(frame)
+                        frame.checkedBatch = batch
+                    }
                     if (!frame.iterator.hasNext()) {
+                        requireSameFrame(frame)
                         frame.stream.close()
                         frames.removeLast()
                         if (frames.isEmpty()) index++
@@ -217,8 +224,11 @@ internal class StoragePrivateInventory(private val context: Context, private val
                 } catch (cancelled: OperationCanceledException) { throw cancelled }
                 catch (cancelled: CancellationException) { throw cancelled }
                 catch (failure: Exception) {
-                    markUnknown(spec.area, storageIssue(failure))
-                    markIncompleteRecovery(spec.area, storageIssue(failure))
+                    if (failure is StorageException && failure.issue == StorageIssue.SOURCE_CHANGED) invalidateScope(spec.area)
+                    else {
+                        markUnknown(spec.area, storageIssue(failure))
+                        markIncompleteRecovery(spec.area, storageIssue(failure))
+                    }
                     try { closeFrames() }
                     catch (closing: Throwable) {
                         if (failure !== closing) failure.addSuppressed(closing)
@@ -245,13 +255,7 @@ internal class StoragePrivateInventory(private val context: Context, private val
                         sameFacts(original, optionalFacts(fence.spec.directory.resolve(name).toPath()))
                     }
                 } catch (_: Exception) { false }
-                if (!same) {
-                    val area = fence.spec.area
-                    totals[area] = value(area).copy(bytes = null, unknownFiles = Math.addExact(value(area).unknownFiles, 1L),
-                        issue = value(area).issue ?: StorageIssue.SOURCE_CHANGED)
-                    totals[StorageArea.RECOVERY] = value(StorageArea.RECOVERY).copy(bytes = null,
-                        issue = value(StorageArea.RECOVERY).issue ?: StorageIssue.SOURCE_CHANGED)
-                }
+                if (!same) invalidateScope(fence.spec.area)
             }
             return StoragePrivateReport(value(StorageArea.AUDIO), value(StorageArea.LYRICS), value(StorageArea.ARTWORK),
                 value(StorageArea.FONTS), value(StorageArea.THEMES), value(StorageArea.BACKGROUNDS), value(StorageArea.RECOVERY),
@@ -308,6 +312,13 @@ internal class StoragePrivateInventory(private val context: Context, private val
             totals[area] = combineStorage(value(area), StorageCategory(null, 0L, 1L, issue))
         }
 
+        private fun invalidateScope(area: StorageArea) {
+            totals[area] = value(area).copy(bytes = null, unknownFiles = Math.addExact(value(area).unknownFiles, 1L),
+                issue = value(area).issue ?: StorageIssue.SOURCE_CHANGED)
+            if (area != StorageArea.RECOVERY) totals[StorageArea.RECOVERY] = value(StorageArea.RECOVERY).copy(bytes = null,
+                issue = value(StorageArea.RECOVERY).issue ?: StorageIssue.SOURCE_CHANGED)
+        }
+
         private fun markIncompleteRecovery(area: StorageArea, issue: StorageIssue) {
             if (area != StorageArea.RECOVERY) {
                 val old = value(StorageArea.RECOVERY)
@@ -330,10 +341,18 @@ internal class StoragePrivateInventory(private val context: Context, private val
 
         private fun pushFrame(path: Path) {
             check(openingStream == null)
+            val facts = Files.readAttributes(path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            if (!facts.isDirectory || facts.isSymbolicLink) throw StorageException(StorageIssue.SOURCE_CHANGED)
             val stream = openDirectory(path)
             openingStream = stream
-            frames.addLast(Frame(path, stream))
+            frames.addLast(Frame(path, stream, facts))
             openingStream = null
+        }
+
+        /** Only open frames retain facts; the owner lease and finite sentinels fence retired frames. */
+        private fun requireSameFrame(frame: Frame) {
+            val after = Files.readAttributes(frame.path, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
+            if (!sameFacts(frame.facts, after)) throw StorageException(StorageIssue.SOURCE_CHANGED)
         }
 
         private fun closeOpeningChannel() {

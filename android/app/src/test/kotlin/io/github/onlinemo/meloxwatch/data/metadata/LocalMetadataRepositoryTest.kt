@@ -13,6 +13,7 @@ import io.github.onlinemo.meloxwatch.data.artwork.embeddedPng
 import io.github.onlinemo.meloxwatch.data.artwork.png
 import io.github.onlinemo.meloxwatch.data.backup.BackupMutationBarrier
 import io.github.onlinemo.meloxwatch.data.database.withTestWriterTransaction
+import io.github.onlinemo.meloxwatch.data.library.LibraryLocationVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryTrackVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LocalContentValidation
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
@@ -43,12 +44,14 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.SQLiteMode
 import org.robolectric.shadows.ShadowContentResolver
 
 /** Real Room/native files and association CAS; the original-audio proof is a controlled boundary. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 internal class LocalMetadataRepositoryTest : LyricsRoomPlaybackFixture() {
     private lateinit var appContext: Context
@@ -76,6 +79,16 @@ internal class LocalMetadataRepositoryTest : LyricsRoomPlaybackFixture() {
         }
         ShadowContentResolver.registerProviderInternal(OwnedLyricsProvider.authority(appContext), provider)
         database.withTestWriterTransaction {
+            // 实际查找联接 MVCC 位置版本；裸位置行不能替代快照中的内容。
+            for (locationId in listOf(LyricsRoomRows.LOCATION_ID, LyricsRoomRows.OTHER_LOCATION_ID)) {
+                val location = checkNotNull(database.libraryDao().location(locationId))
+                database.libraryDao().insertLocationVersion(LibraryLocationVersionEntity(
+                    versionId = "metadata-native-$locationId-version", locationId = location.locationId,
+                    contentRevision = location.contentRevision, contentToken = location.contentToken,
+                    verifiedContentToken = location.verifiedContentToken, sizeBytes = location.sizeBytes,
+                    modifiedEpochMs = location.modifiedEpochMs, validFrom = 1L, validTo = null,
+                ))
+            }
             database.libraryDao().insertTrackVersion(LibraryTrackVersionEntity(
                 versionId = "metadata-native-version", trackId = trackKey.trackId, providerId = "local",
                 validFrom = 1L, validTo = null, member = true, firstAddedEpochMs = 1_794_787_200_000L,

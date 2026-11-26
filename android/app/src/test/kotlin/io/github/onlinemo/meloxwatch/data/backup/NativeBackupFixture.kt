@@ -92,12 +92,13 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
     val permissions = BackupPermissionVerifier(database, library, sources, fileOperations::retainedRead)
     val relinker = RoomBackupRelinker(barrier, database, library, sources, io, { 1000L })
     var archiveInput: File? = null
+    var afterArchiveInputCopy: suspend (File) -> Unit = {}
     val coordinator = BackupCoordinator(context, barrier, database, library, queues, playlists, listening, fileOperations,
         configurations, resources, fonts, themes, io, BackupDocuments(context, io), permissions, relinker,
         epochMs = { BackupTestFixtures.EPOCH_MS }, elapsedMs = { 1000L }, copyInput = { _, directory ->
             val source = archiveInput ?: throw AssertionError("No synthetic local ZIP was supplied")
             val caller = currentCoroutineContext()
-            withContext(Dispatchers.IO) {
+            val copied = withContext(Dispatchers.IO) {
                 val target = directory.child("input.zip")
                 BackupCreatedFile.create(target).use { created ->
                     source.inputStream().use { input ->
@@ -116,6 +117,8 @@ internal class NativeBackupFixture(base: Context, private val root: File) {
                 syncBackupDirectory(directory.root)
                 target
             }
+            afterArchiveInputCopy(copied)
+            copied
         })
 
     suspend fun attachClosedPlayback() = withContext(Dispatchers.Main.immediate) {

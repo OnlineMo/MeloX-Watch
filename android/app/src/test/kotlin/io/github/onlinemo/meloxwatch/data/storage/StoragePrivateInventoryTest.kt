@@ -10,6 +10,7 @@ import java.nio.file.DirectoryStream
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.FileTime
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -38,6 +39,36 @@ class StoragePrivateInventoryTest {
     private val context: Context get() = object : ContextWrapper(RuntimeEnvironment.getApplication() as Context) {
         override fun getApplicationContext(): Context = this
         override fun getNoBackupFilesDir(): File = temporary.root
+    }
+
+    @Test(timeout = 30_000L)
+    fun aNestedGenerationChangingBetweenBatchesCannotKeepACompleteSubtotalUnderAnUnchangedRoot() = runBlocking {
+        val root = temporary.newFolder("backup-root")
+        val generation = File(root, "generation").apply { mkdirs() }
+        repeat(110) { File(generation, "${it.toString().padStart(3, '0')}.bin").writeBytes(byteArrayOf(1, 2)) }
+        val rootTime = Files.getLastModifiedTime(root.toPath())
+        val generationTime = Files.getLastModifiedTime(generation.toPath())
+        val changed = AtomicBoolean(false)
+        val nexts = AtomicInteger()
+        val inventory = StoragePrivateInventory(context, LocalProviderIo(), openDirectory = { path ->
+            orderedStream(path) {
+                if (path == generation.toPath() && nexts.incrementAndGet() == 101 && changed.compareAndSet(false, true)) {
+                    File(generation, "late.bin").writeBytes(byteArrayOf(3, 4, 5))
+                    Files.setLastModifiedTime(generation.toPath(), FileTime.fromMillis(generationTime.toMillis() + 2_000L))
+                }
+            }
+        })
+        val report = inventory.measure {
+            listOf(StorageDirectorySpec(root, StorageArea.RECOVERY, 2, null, classify = { _, _ -> StorageArea.RECOVERY }))
+        }
+        assertTrue(changed.get())
+        assertEquals(rootTime, Files.getLastModifiedTime(root.toPath()))
+        assertFalse(report.staging.complete)
+        assertNull(report.staging.bytes)
+        assertTrue(report.staging.unknownFiles > 0L)
+        assertEquals(StorageIssue.SOURCE_CHANGED, report.staging.issue)
+        assertArrayEquals(byteArrayOf(3, 4, 5), File(generation, "late.bin").readBytes())
+        assertArrayEquals(byteArrayOf(1, 2), File(generation, "000.bin").readBytes())
     }
 
     @Test(timeout = 30_000L)

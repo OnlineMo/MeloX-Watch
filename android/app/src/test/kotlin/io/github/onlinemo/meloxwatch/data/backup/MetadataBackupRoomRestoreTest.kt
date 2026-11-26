@@ -349,7 +349,12 @@ class MetadataBackupRoomRestoreTest {
         val before = RoomBackupCapture(fixture.database).mainDigest(checkCancelled = {})
         val archive = logicalArchive(setOf(BackupScope.LIBRARY), listOf(libraryMeta(), BackupTestFixtures.track(key.trackId, 2),
             BackupMetadataAssociations.record(MetadataAssociation(key, MetadataPurpose.ARTWORK, 3), BackupCell.Null, false)))
+        var beforeCacheSize = 0L
+        var beforeCacheSpill = 0L
         fixture.database.withTestWriterSql {
+            beforeCacheSize = scalarLong("PRAGMA main.cache_size")
+            beforeCacheSpill = scalarLong("PRAGMA main.cache_spill")
+            assertEquals(1L, scalarLong("SELECT COUNT(*) FROM pragma_database_list WHERE name='main' AND length(file)>0"))
             execute("CREATE TRIGGER metadata_dependants_before_library BEFORE UPDATE ON local_tracks " +
                 "WHEN EXISTS(SELECT 1 FROM local_metadata_associations WHERE trackId=NEW.trackId AND purpose='ARTWORK') " +
                 "BEGIN SELECT RAISE(ABORT,'metadata-dependants-were-not-cleared'); END")
@@ -357,14 +362,25 @@ class MetadataBackupRoomRestoreTest {
         val cancellation = CancellationException("Cancelled after prospective native digest")
         var reachedCommit = false
         try {
-            try { restoreZip(fixture, resources, archive, beforeCommit = { reachedCommit = true; throw cancellation }) }
+            try { restoreZip(fixture, resources, archive, beforeCommit = {
+                fixture.database.withTestWriterSql {
+                    assertEquals(-1024L, scalarLong("PRAGMA main.cache_size"))
+                    assertTrue(scalarLong("PRAGMA main.cache_spill") > 0L)
+                    assertEquals(0L, scalarLong("SELECT COUNT(*) FROM main.sqlite_schema WHERE name LIKE 'backup_%'"))
+                    assertEquals(0L, scalarLong("SELECT COUNT(*) FROM sqlite_temp_schema WHERE name LIKE 'backup_%'"))
+                }
+                reachedCommit = true
+                throw cancellation
+            }) }
             catch (failure: CancellationException) { assertSame(cancellation, failure) }
             assertTrue(reachedCommit)
             assertEquals(original, association(fixture, key, MetadataPurpose.ARTWORK))
             assertEquals(before, RoomBackupCapture(fixture.database).mainDigest(checkCancelled = {}))
             fixture.database.withTestWriterSql {
-                assertEquals(1L, scalarLong("PRAGMA temp_store"))
-                assertEquals(0L, scalarLong("SELECT COUNT(*) FROM sqlite_temp_schema WHERE name LIKE 'backup_metadata_%'"))
+                assertEquals(beforeCacheSize, scalarLong("PRAGMA main.cache_size"))
+                assertEquals(beforeCacheSpill, scalarLong("PRAGMA main.cache_spill"))
+                assertEquals(0L, scalarLong("SELECT COUNT(*) FROM main.sqlite_schema WHERE name LIKE 'backup_%'"))
+                assertEquals(0L, scalarLong("SELECT COUNT(*) FROM sqlite_temp_schema WHERE name LIKE 'backup_%'"))
             }
         } finally { fixture.database.withTestWriterSql { execute("DROP TRIGGER metadata_dependants_before_library") } }
     }
@@ -586,6 +602,7 @@ class MetadataBackupRoomRestoreTest {
             null, location?.locationId, location?.uri, location?.grantUri, location?.grantFlags,
             location?.access?.name, location?.contentRevision)))
         check(queue.advanceStaging(generation, 0, 1) == 1); check(queue.seal(generation) == 1)
+        check(queue.markPublished(generation, old.queueRevision + 1) == 1)
         check(queue.publish(generation, old.activeGenerationId, old.queueRevision, old.queueRevision + 1, entry, 0, 0) == 1)
     }
 

@@ -279,11 +279,13 @@ class MeloXApplication : Application() {
     private suspend fun measurePrivateStorage(): StoragePrivateReport {
         requireBackupStorageReady()
         return backupMutationBarrier.mutation({ StorageException(StorageIssue.BUSY) }) {
-            storageInventory.measure {
-                FileStoragePhysical.privateAudioSpecifications(this) + listOf(lyricsCopies.storageDirectorySpecOnWorker(),
-                    metadataArtworkFiles.storageDirectorySpecOnWorker(), lyricsFontFiles.storageDirectorySpecOnWorker(),
-                    themes.storageDirectorySpecOnWorker(), playbackBackgrounds.storageDirectorySpecOnWorker(),
-                    backups.storageDirectorySpecOnWorker())
+            backups.withStorageInventory { backupSpecification ->
+                storageInventory.measure {
+                    FileStoragePhysical.privateAudioSpecifications(this) + listOf(lyricsCopies.storageDirectorySpecOnWorker(),
+                        metadataArtworkFiles.storageDirectorySpecOnWorker(), lyricsFontFiles.storageDirectorySpecOnWorker(),
+                        themes.storageDirectorySpecOnWorker(), playbackBackgrounds.storageDirectorySpecOnWorker(),
+                        backupSpecification())
+                }
             }
         }
     }
@@ -448,7 +450,7 @@ class MeloXApplication : Application() {
         LocalArtworkRepository(this, localProviderIo, validateRead = localSources::validateRead, bitmaps = themeBitmaps,
             confirmedArtwork = { descriptor, edge -> metadataAssociations.acquireArtwork(descriptor, edge, artworks) })
     }
-    val artworks get() = artworkOwner.value
+    val artworks: LocalArtworkRepository get() = artworkOwner.value
     private val recoveryLock = Mutex()
     private var localRecovered = false
     private val preferencesOwner = lazy { UserPreferencesRepositoryFactory.create(this, applicationScopeOwner.value) }
