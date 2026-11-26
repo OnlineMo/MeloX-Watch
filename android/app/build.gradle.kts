@@ -148,6 +148,8 @@ val prepareBundledSqliteHost by tasks.registering(Sync::class) {
 tasks.withType<Test>().configureEach {
     dependsOn(prepareRobolectricSdk)
     dependsOn(prepareBundledSqliteHost)
+    // Keep host workers on tiered C1 while the pinned JDK C2 crash is under investigation.
+    jvmArgs("-XX:+TieredCompilation", "-XX:TieredStopAtLevel=1")
     val nativeCrashPhase = System.getenv("MELOX_CI_BUILD_PHASE")
         ?.takeIf { it.matches(Regex("[a-z][a-z0-9-]{0,80}")) } ?: "unmonitored"
     val nativeCrashDirectory = layout.buildDirectory.dir("ci-native-crash/$nativeCrashPhase")

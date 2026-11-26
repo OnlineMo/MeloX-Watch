@@ -10,9 +10,14 @@ pluginManagement {
     }
 
     repositories {
-        google()
+        // The admitted Kotlin Android marker bytes are the Maven Central publication.
+        google {
+            content { excludeModule("org.jetbrains.kotlin.android", "org.jetbrains.kotlin.android.gradle.plugin") }
+        }
         mavenCentral()
-        gradlePluginPortal()
+        gradlePluginPortal {
+            content { excludeModule("org.jetbrains.kotlin.android", "org.jetbrains.kotlin.android.gradle.plugin") }
+        }
     }
     plugins {
         id("com.android.application") version toolchain.getProperty("agp.version")

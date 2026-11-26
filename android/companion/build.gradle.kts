@@ -111,6 +111,8 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     dependsOn(prepareRobolectricSdk)
+    // Keep host workers on tiered C1 while the pinned JDK C2 crash is under investigation.
+    jvmArgs("-XX:+TieredCompilation", "-XX:TieredStopAtLevel=1")
     systemProperty("robolectric.offline", "true")
     systemProperty("robolectric.usePreinstrumentedJars", "true")
     systemProperty("robolectric.dependency.dir", robolectricSdkDirectory.get().asFile.absolutePath)
