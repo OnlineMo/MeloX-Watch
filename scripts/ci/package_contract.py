@@ -195,8 +195,17 @@ def current_schemas(root=ROOT, revision=None):
     return paths
 
 
+def historical_schema_paths(main_version):
+    """实际主库8保留7原件；旧单库首次6的准入门槛继续使用原tuple。"""
+    require(type(main_version) is int and 0 < main_version <= 2147483647,
+            'Watch history requires one actual integer main schema version')
+    versions = HISTORICAL_SCHEMA_VERSIONS + ((7,) if main_version >= 8 else ())
+    return {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in versions}
+
+
 def allowed_schema_paths(root=ROOT, revision=None):
-    history = {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in HISTORICAL_SCHEMA_VERSIONS}
+    declarations = room_declarations(root, revision)
+    history = historical_schema_paths(declarations[DATABASE_SOURCE]['version'])
     return history | set(current_schemas(root, revision))
 
 
@@ -237,7 +246,7 @@ def required_inputs(root=ROOT):
     if len(current) == 1 and int(PurePosixPath(current[0]).stem) <= max(HISTORICAL_SCHEMA_VERSIONS):
         return ('gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile',
                 SCHEMA_DIRECTORY + '/1.json', current[0])
-    history = {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in HISTORICAL_SCHEMA_VERSIONS}
+    history = historical_schema_paths(int(PurePosixPath(current_schema(root)).stem))
     return tuple(sorted({'gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile'} |
                         history | set(current)))
 

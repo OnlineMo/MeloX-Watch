@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import java.security.MessageDigest
 import java.text.Normalizer
 import java.util.Locale
@@ -50,6 +51,7 @@ internal fun PlaylistReference.identityKey(): String = playlistDigest(
 internal fun PlaylistReference.record(generation: String, memberId: String, ordinal: Long) = PlaylistMemberEntity(
     generation, memberId, ordinal, identityKey(), trackKey?.providerId, trackKey?.trackId, placeholderId,
     issue?.name, titleHint, artistHint, albumHint, relativePathHint, descriptionHint, durationMs,
+    cueReference = cueReference?.let(CueReferenceCodec::encode),
 )
 
 internal fun PlaylistMemberEntity.model(): PlaylistMember = decodePlaylistRecord {
@@ -62,6 +64,7 @@ internal fun PlaylistMemberEntity.model(): PlaylistMember = decodePlaylistRecord
         issue = issue?.let(PlaylistReferenceIssue::valueOf),
         titleHint = titleHint, artistHint = artistHint, albumHint = albumHint,
         relativePathHint = relativePathHint, descriptionHint = descriptionHint, durationMs = durationMs,
+        cueReference = cueReference?.let { CueReferenceCodec.decode(it, portableOnly = true) },
     )
     require(reference.identityKey() == referenceKey)
     PlaylistMember(memberId, ordinal, reference)

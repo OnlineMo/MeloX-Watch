@@ -8,6 +8,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceObservation
 import io.github.onlinemo.meloxwatch.data.local.ObservedCandidate
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import java.net.URI
 import java.net.URISyntaxException
 import kotlinx.coroutines.NonCancellable
@@ -31,74 +32,91 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
         validateCueScope(frozen)
         if (parsed.files.isEmpty()) throw CueException(CueIssue.INVALID_INPUT)
         if (parsed.files.size > CueLimits.FILES) throw CueException(CueIssue.LIMIT_EXCEEDED)
+        val root = RequestedPath()
         for ((index, file) in parsed.files.withIndex()) {
             if (file.index != index || file.path.components.isEmpty()) throw CueException(CueIssue.INVALID_INPUT)
-            // Reject declared excess before provider work; root counts as one directory, audio name as zero.
             if (frozen.directories.size + file.path.components.size - 1 > CueLimits.DIRECTORY_DEPTH) {
                 throw CueException(CueIssue.LIMIT_EXCEEDED)
             }
+            var path = root
+            for (component in file.path.components) {
+                if (path.fileIndex != null) throw CueException(CueIssue.INVALID_PATH)
+                val key = cueNameKey(component, namePolicy)
+                path = path.children.getOrPut(key) { RequestedPath() }
+            }
+            if (path.fileIndex != null) throw CueException(CueIssue.DUPLICATE_REFERENCE)
+            if (path.children.isNotEmpty()) throw CueException(CueIssue.INVALID_PATH)
+            path.fileIndex = file.index
         }
         val budget = LookupBudget()
         validateObservation(frozen, access.observe(frozen.source.spec))
         for (index in 1 until frozen.directories.size) {
             val expected = frozen.directories[index]
-            val actual = findChild(frozen, frozen.directories[index - 1].objectId, expected.displayName, namePolicy, budget, expected.objectId)
-                ?: throw CueException(CueIssue.SOURCE_CHANGED)
+            val actual = findChildren(frozen, frozen.directories[index - 1].objectId, emptySet(), namePolicy, budget,
+                expected.objectId).origin ?: throw CueException(CueIssue.SOURCE_CHANGED)
             requireSameEdge(actual, expected)
         }
-        val parentId = frozen.directories.last().objectId
-        val cue = findChild(frozen, parentId, frozen.cue.displayName, namePolicy, budget, frozen.cue.objectId)
-            ?: throw CueException(CueIssue.SOURCE_CHANGED)
-        requireSameEdge(cue, frozen.cue)
-        if (cue.providerContentToken != frozen.cue.providerContentToken ||
-            (cue.sizeBytes != null && frozen.cue.sizeBytes != null && cue.sizeBytes != frozen.cue.sizeBytes)) {
-            throw CueException(CueIssue.SOURCE_CHANGED)
-        }
-        val result = ArrayList<CueMatchedFile>()
-        val entities = HashSet<String>()
-        for (file in parsed.files) {
+        val files = HashMap<Int, ObservedCandidate>()
+        val objects = HashSet<String>()
+        var actualCue: ObservedCandidate? = null
+        suspend fun resolve(path: RequestedPath, parentId: String, ancestors: Set<String>, originId: String? = null) {
             currentCoroutineContext().ensureActive()
-            var parent = parentId
-            val ancestors = frozen.directories.mapTo(HashSet()) { it.objectId }
-            var audio: ObservedCandidate? = null
-            for ((index, component) in file.path.components.withIndex()) {
-                val candidate = findChild(frozen, parent, component, namePolicy, budget)
-                    ?: throw CueException(CueIssue.MISSING_AUDIO)
-                if (candidate.objectId in ancestors) throw CueException(CueIssue.SOURCE_CHANGED)
-                if (index == file.path.components.lastIndex) {
-                    if (candidate.directory || candidate.objectId == cue.objectId) throw CueException(CueIssue.INVALID_AUDIO)
-                    audio = candidate
+            val found = findChildren(frozen, parentId, path.children.keys, namePolicy, budget, originId)
+            if (originId != null) {
+                val cue = found.origin ?: throw CueException(CueIssue.SOURCE_CHANGED)
+                requireSameEdge(cue, frozen.cue)
+                if (cue.providerContentToken != frozen.cue.providerContentToken ||
+                    cue.sizeBytes != null && frozen.cue.sizeBytes != null && cue.sizeBytes != frozen.cue.sizeBytes) {
+                    throw CueException(CueIssue.SOURCE_CHANGED)
+                }
+                actualCue = cue
+            }
+            for ((key, child) in path.children) {
+                currentCoroutineContext().ensureActive()
+                val candidate = found.matches[key] ?: throw CueException(CueIssue.MISSING_AUDIO)
+                if (candidate.objectId in ancestors || candidate.objectId == frozen.cue.objectId) {
+                    throw CueException(CueIssue.SOURCE_CHANGED)
+                }
+                val fileIndex = child.fileIndex
+                if (fileIndex != null) {
+                    if (candidate.directory) throw CueException(CueIssue.INVALID_AUDIO)
+                    if (!objects.add(candidate.objectId)) throw CueException(CueIssue.DUPLICATE_REFERENCE)
+                    files[fileIndex] = candidate
                 } else {
                     if (!candidate.directory) throw CueException(CueIssue.INVALID_PATH)
-                    ancestors += candidate.objectId
-                    parent = candidate.objectId
+                    resolve(child, candidate.objectId, ancestors + candidate.objectId)
                 }
             }
-            val candidate = audio ?: throw CueException(CueIssue.INVALID_INPUT)
-            if (!entities.add(candidate.objectId)) throw CueException(CueIssue.DUPLICATE_REFERENCE)
-            result += CueMatchedFile(file.index, candidate)
         }
+        // 请求的名称组成有界前缀树；每个共用目录只做一次完整扫描。
+        resolve(root, frozen.directories.last().objectId, frozen.directories.mapTo(HashSet()) { it.objectId }, frozen.cue.objectId)
         validateObservation(frozen, access.observe(frozen.source.spec))
         currentCoroutineContext().ensureActive()
-        return CueMatchedFiles(parsed.rawContentToken, frozen.copy(cue = cue), result.toList())
+        val result = parsed.files.map { file -> CueMatchedFile(file.index, files[file.index] ?: throw CueException(CueIssue.MISSING_AUDIO)) }
+        return CueMatchedFiles(parsed.rawContentToken, frozen.copy(cue = actualCue ?: throw CueException(CueIssue.SOURCE_CHANGED)), result)
     }
 
-    private suspend fun findChild(
+    private class RequestedPath {
+        val children = LinkedHashMap<String, RequestedPath>()
+        var fileIndex: Int? = null
+    }
+    private data class DirectoryMatches(val matches: Map<String, ObservedCandidate>, val origin: ObservedCandidate?)
+
+    private suspend fun findChildren(
         scope: CueDirectoryScope,
         parentObjectId: String,
-        name: String,
+        names: Set<String>,
         policy: CueNamePolicy,
         budget: LookupBudget,
         expectedObjectId: String? = null,
-    ): ObservedCandidate? {
+    ): DirectoryMatches {
         currentCoroutineContext().ensureActive()
-        // An already-authorized origin is re-proven by object identity, not a display-name guess.
-        val expectedName = if (expectedObjectId == null) cueNameKey(name, policy) else null
         val authority = cueContentAuthority(scope.source.spec.uri)
         val cursor = access.open(scope.source.spec, parentObjectId)
         var primaryFailure: Throwable? = null
         try {
-            var matched: ObservedCandidate? = null
+            val matches = LinkedHashMap<String, ObservedCandidate>()
+            var origin: ObservedCandidate? = null
             while (!cursor.exhausted) {
                 currentCoroutineContext().ensureActive()
                 val batch = cursor.nextBatch(LocalInputLimits.BATCH_SIZE)
@@ -112,32 +130,31 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
                     if (candidate.parentObjectId != parentObjectId || candidate.objectId == parentObjectId) {
                         throw CueException(CueIssue.SOURCE_CHANGED)
                     }
-                    if (expectedObjectId != null) {
-                        if (candidate.objectId != expectedObjectId) continue
-                    } else {
-                        val candidateName = try { cueNameKey(candidate.displayName, policy) }
-                        catch (error: CueException) {
-                            // Unaddressable display names never become path components.
-                            if (error.issue == CueIssue.INVALID_PATH) continue else throw error
-                        }
-                        if (candidateName != expectedName) continue
+                    if (candidate.objectId == expectedObjectId) {
+                        if (origin != null && origin != candidate) throw CueException(CueIssue.SOURCE_CHANGED)
+                        origin = candidate
                     }
-                    if (matched != null && matched.objectId != candidate.objectId) throw CueException(CueIssue.AMBIGUOUS_PATH)
-                    if (matched != null && matched != candidate) throw CueException(CueIssue.SOURCE_CHANGED)
-                    matched = candidate
+                    val key = try { cueNameKey(candidate.displayName, policy) }
+                    catch (failure: CueException) {
+                        if (failure.issue == CueIssue.INVALID_PATH) continue else throw failure
+                    }
+                    if (key !in names) continue
+                    val previous = matches[key]
+                    if (previous != null && previous.objectId != candidate.objectId) throw CueException(CueIssue.AMBIGUOUS_PATH)
+                    if (previous != null && previous != candidate) throw CueException(CueIssue.SOURCE_CHANGED)
+                    matches[key] = candidate
                 }
             }
             currentCoroutineContext().ensureActive()
-            return matched
-        } catch (error: Throwable) {
-            primaryFailure = error
-            throw error
+            return DirectoryMatches(matches.toMap(), origin)
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            throw failure
         } finally {
-            // Do not create the next cursor or free provider ownership before physical retirement finishes.
             try { withContext(NonCancellable) { cursor.closeAndAwait() } }
-            catch (error: Throwable) {
+            catch (failure: Throwable) {
                 val primary = primaryFailure
-                if (primary == null) throw error else if (primary !== error) primary.addSuppressed(error)
+                if (primary == null) throw failure else if (primary !== failure) primary.addSuppressed(failure)
             }
         }
     }
@@ -155,10 +172,8 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
             observation.root.uri != scope.directories.first().uri || !observation.root.directory) {
             throw CueException(CueIssue.SOURCE_CHANGED)
         }
-        if (observation.access.read != ObservedCapability.AVAILABLE ||
-            observation.access.enumerate != ObservedCapability.AVAILABLE ||
-            (scope.source.grant.persistedRead == ObservedCapability.AVAILABLE &&
-                observation.access.persistedRead != ObservedCapability.AVAILABLE)) {
+        if (!observation.access.allowsFileReadValidation(observation.source.kind) || observation.access.enumerate != ObservedCapability.AVAILABLE ||
+            scope.source.grant.persistedRead == ObservedCapability.AVAILABLE && observation.access.persistedRead != ObservedCapability.AVAILABLE) {
             throw CueException(CueIssue.AUTHORIZATION_REQUIRED)
         }
     }
@@ -166,8 +181,7 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
     private class LookupBudget {
         private var visited = 0
         fun visit() {
-            visited++
-            if (visited > CueLimits.LOOKUP_CANDIDATES) throw CueException(CueIssue.LIMIT_EXCEEDED)
+            if (++visited > CueLimits.LOOKUP_CANDIDATES) throw CueException(CueIssue.LIMIT_EXCEEDED)
         }
     }
 }
@@ -175,7 +189,7 @@ class CuePathMatcher(private val access: LocalSourceAccess) {
 internal fun validateCueScope(scope: CueDirectoryScope) {
     val source = scope.source
     if (source.state != LibrarySourceState.ACTIVE || source.spec.kind != LocalSourceKind.TREE ||
-        source.grant.read != ObservedCapability.AVAILABLE || source.grant.enumerate != ObservedCapability.AVAILABLE) {
+        !source.grant.allowsFileReadValidation(source.spec.kind) || source.grant.enumerate != ObservedCapability.AVAILABLE) {
         throw CueException(CueIssue.AUTHORIZATION_REQUIRED)
     }
     if (source.authEpoch < 0L || source.revision < 0L || scope.directories.isEmpty()) throw CueException(CueIssue.INVALID_INPUT)

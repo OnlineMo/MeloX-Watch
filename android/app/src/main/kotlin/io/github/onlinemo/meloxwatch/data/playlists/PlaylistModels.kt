@@ -29,6 +29,7 @@ data class PlaylistReference(
     val relativePathHint: String? = null,
     val descriptionHint: String? = null,
     val durationMs: Long? = null,
+    val cueReference: io.github.onlinemo.meloxwatch.model.LocalCueReference? = null,
 ) {
     init {
         require((trackKey == null) != (placeholderId == null))
@@ -42,6 +43,7 @@ data class PlaylistReference(
             it == null || it.length <= PlaylistLimits.MAX_FIELD_CHARACTERS
         })
         require(durationMs == null || durationMs > 0L)
+        require(cueReference == null || !cueReference.isBound && (trackKey == null || trackKey == cueReference.trackKey))
     }
 }
 

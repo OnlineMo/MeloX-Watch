@@ -72,7 +72,7 @@ class RoomFolderPlaylistController(
             try {
                 val view = acquired.openLibrary(
                     query = LibraryQuery(sourceId = choice.binding.sourceId, folderNodeId = choice.binding.nodeId,
-                        folderSubtree = choice.binding.subtree, readableOnly = true),
+                        folderSubtree = choice.binding.subtree, readableOnly = true, allowUnknownTreeReadValidation = true),
                     sort = LibrarySort(LibrarySortField.FILENAME_NATURAL),
                 )
                 val folder = library.folder(view, choice.binding.nodeId) ?: fail(PlaylistIssue.SOURCE_UNAVAILABLE)

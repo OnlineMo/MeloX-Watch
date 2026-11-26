@@ -23,6 +23,10 @@ import io.github.onlinemo.meloxwatch.data.backup.BackupMergeMode
 import io.github.onlinemo.meloxwatch.data.backup.BackupRestorePreview
 import io.github.onlinemo.meloxwatch.data.backup.BackupScope
 import io.github.onlinemo.meloxwatch.data.backup.BackupStartupState
+import io.github.onlinemo.meloxwatch.data.backup.BackupRelinkMatch
+import io.github.onlinemo.meloxwatch.data.backup.BackupRelinkPreview
+import io.github.onlinemo.meloxwatch.data.cue.CueAdoptionDifferences
+import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -113,15 +117,40 @@ class WatchBackupSettingsTest {
         compose.onNodeWithText("Restore backup").assertDoesNotExist()
     }
 
+    @Test
+    fun cueIdentityAndContentRequireSeparateReachableConfirmationControls() {
+        val preview = BackupRelinkPreview("cue-preview", "old-cue-track", TrackKey.newLocal(), "Old", "New",
+            BackupRelinkMatch.DIFFERENT_CONTENT, CueAdoptionDifferences(true, true, 0, 1, 1, 0), 2, 2, 10_003L)
+        var state by mutableStateOf(BackupUiState(page = BackupUiPage.RELINK,
+            startup = BackupStartupState.Ready(false), relinkPreview = preview))
+        val actions = actions(allowDifferent = { state = state.copy(allowDifferentContent = it) },
+            cueDifferences = { state = state.copy(allowCueDifferences = it) })
+        compose.runOnUiThread {
+            checkNotNull(controller).get().setContent { WatchBackupSettings(state, ScreenShape.ROUND, true, actions, onBack = {}) }
+        }
+        val cueConsent = "Confirm the displayed source, identity and whole-group boundary changes"
+        scrollTo(cueConsent)
+        compose.onNodeWithText(cueConsent).performClick()
+        scrollTo("Confirm file association")
+        compose.onNodeWithText("Confirm file association").assertIsNotEnabled()
+        compose.runOnUiThread { state = state.copy(allowDifferentContent = true, allowCueDifferences = false) }
+        compose.onNodeWithText("Confirm file association").assertIsNotEnabled()
+        scrollTo(cueConsent)
+        compose.onNodeWithText(cueConsent).performClick()
+        scrollTo("Confirm file association")
+        compose.onNodeWithText("Confirm file association").assertIsEnabled()
+    }
+
     private fun scrollTo(text: String) {
         compose.onNode(hasScrollAction()).performScrollToNode(hasText(text))
     }
 
     private fun actions(effects: (Boolean) -> Unit = {}, fontLicense: (Boolean) -> Unit = {},
-        confirmRestore: () -> Unit = {}): BackupUiActions = BackupUiActions(
+        confirmRestore: () -> Unit = {}, allowDifferent: (Boolean) -> Unit = {}, cueDifferences: (Boolean) -> Unit = {}): BackupUiActions = BackupUiActions(
         home = {}, beginExport = {}, beginRestore = {}, scope = { _, _ -> }, mode = {}, privacy = {}, effects = effects,
         fontLicense = fontLicense, chooseDestination = {}, chooseInput = {}, recheckRestore = {}, confirmRestore = confirmRestore,
         cancel = {}, retryOutputCleanup = {}, showMissing = {}, firstMissingPage = {}, nextMissingPage = {}, selectMissing = {},
-        chooseExistingTarget = {}, allowDifferent = {}, confirmRelink = {}, openSources = {}, openAppearance = {}, retryStorage = {},
+        chooseExistingTarget = {}, allowDifferent = allowDifferent, allowCueDifferences = cueDifferences,
+        confirmRelink = {}, openSources = {}, openAppearance = {}, retryStorage = {},
     )
 }

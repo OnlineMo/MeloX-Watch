@@ -4,6 +4,8 @@ import androidx.sqlite.SQLiteConnection
 import androidx.sqlite.SQLiteStatement
 import androidx.sqlite.driver.bundled.BundledSQLiteDriver
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import java.io.FilterOutputStream
 import java.io.InputStream
@@ -55,19 +57,34 @@ internal class SqliteBackupStage private constructor(
     fun beginRelinkReferences() {
         checkCancelled()
         connection.execute("DROP TABLE IF EXISTS temp.relink_reference_tracks")
-        connection.execute("CREATE TEMP TABLE relink_reference_tracks(trackId TEXT NOT NULL PRIMARY KEY,missingQueue INTEGER NOT NULL) WITHOUT ROWID")
+        connection.execute("CREATE TEMP TABLE relink_reference_tracks(trackId TEXT NOT NULL PRIMARY KEY,missingQueue INTEGER NOT NULL,cueReference TEXT) WITHOUT ROWID")
     }
-    fun referenceTrack(trackId: String, missingQueue: Boolean) {
+    fun referenceTrack(trackId: String, missingQueue: Boolean, reference: LocalCueReference? = null) {
         checkCancelled()
-        connection.prepare("INSERT INTO temp.relink_reference_tracks(trackId,missingQueue) VALUES(?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue)").use {
-            it.bindText(1, trackId); it.bindLong(2, if (missingQueue) 1L else 0L); it.step()
+        val encoded = reference?.portable()?.let(CueReferenceCodec::encode)
+        val previous = connection.prepare("SELECT cueReference FROM temp.relink_reference_tracks WHERE trackId=?").use {
+            it.bindText(1, trackId);
+            if (it.step() && !it.isNull(0)) it.getText(0) else null
+        }
+        if (previous != null && encoded != null && previous != encoded) throw BackupException(BackupIssue.INVALID_REFERENCE)
+        connection.prepare("INSERT INTO temp.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use {
+            it.bindText(1, trackId);
+            it.bindLong(2, if (missingQueue) 1L else 0L);
+            it.bindNullableText(3, encoded);
+            it.step()
         }
     }
-    fun referenceTrackPage(after: String?): List<Pair<String, Boolean>> = connection.prepare(
-        "SELECT trackId,missingQueue FROM temp.relink_reference_tracks WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100",
+    fun referenceTrackPage(after: String?): List<BackupRelinkTrack> = connection.prepare(
+        "SELECT trackId,missingQueue,cueReference FROM temp.relink_reference_tracks WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100",
     ).use {
         it.bindNullableText(1, after); it.bindNullableText(2, after)
-        buildList { while (it.step()) { checkCancelled(); add(it.getText(0) to (it.getLong(1) == 1L)) } }
+        buildList {
+            while (it.step()) {
+                checkCancelled();
+                add(BackupRelinkTrack(it.getText(0), it.getLong(1) == 1L,
+                    if (it.isNull(2)) null else CueReferenceCodec.decode(it.getText(2), portableOnly = true)))
+            }
+        }
     }
 
     fun bindingDigest(): String {

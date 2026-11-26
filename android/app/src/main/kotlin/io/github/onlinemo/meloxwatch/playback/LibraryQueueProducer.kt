@@ -50,7 +50,7 @@ internal class LibraryQueueProducer(
                 val track = checkNotNull(selectedTrack)
                 QueueInputPage(frozen, 0L, listOf(QueueEntry(
                     UUID.randomUUID().toString(), track.trackKey, 0L, 0L,
-                    track.title, track.metadata.durationMs, track.location,
+                    track.title, track.metadata.durationMs, track.location, cueReference = track.cueReference,
                 )))
             } else checkNotNull(delegate).read(offset, limit).copy(view = frozen)
             require(page.entries.size <= frozen.totalCount - offset)

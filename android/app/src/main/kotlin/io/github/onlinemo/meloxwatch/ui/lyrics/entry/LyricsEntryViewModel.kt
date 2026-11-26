@@ -106,8 +106,9 @@ data class LyricsEntryUiState(
     val onlineOrigin: OnlineLyricsOrigin? = null,
     val onlineIssue: OnlineLyricsIssue? = null,
     val onlineFromCache: Boolean = false,
+    val timelineOriginMs: Long = 0L,
 ) {
-    val mapping: LyricsClockMapping get() = LyricsClockMapping(userOffset = LyricsUserOffset(
+    val mapping: LyricsClockMapping get() = LyricsClockMapping(timelineOriginMs = timelineOriginMs, userOffset = LyricsUserOffset(
         offsetDraftMs ?: preferences?.userDelayMs ?: 0,
     ))
 }
@@ -312,7 +313,10 @@ class LyricsEntryViewModel(
         if (local != null && local.owner === owner && local.owner.key == latestKey &&
             local.owner.identity.sourceGeneration == sourceGeneration) {
             return LyricsExternalRead(local.externalIdentity, local.owner.key.entryId, sourceGeneration, local.primary.document,
-                local.translated, LyricsClockMapping(userOffset = LyricsUserOffset(local.owner.preferences.userDelayMs)))
+                local.translated, LyricsClockMapping(
+                    timelineOriginMs = cueLyricsTimelineOrigin(local.owner.context.cueReference, local.primary.source.origin),
+                    userOffset = LyricsUserOffset(local.owner.preferences.userDelayMs),
+                ))
         }
         val online = onlineLoaded ?: return null
         val fence = online.fence
@@ -882,7 +886,9 @@ class LyricsEntryViewModel(
                                 if (result.accountedBytes > available) {
                                     translationFailure = LyricsLoadFailure(LyricsLoadIssue.MEMORY_LIMIT)
                                 } else {
-                                    translated = translationMatcher.match(primary.document, result.document)
+                                    translated = translationMatcher.match(primary.document, result.document,
+                                        cueLyricsTimelineOrigin(context.cueReference, primary.source.origin),
+                                        cueLyricsTimelineOrigin(context.cueReference, result.source.origin))
                                     ensureCurrent(operation)
                                     translation = result
                                 }
@@ -1135,6 +1141,7 @@ class LyricsEntryViewModel(
             documentId = primary.document.documentId,
             content = LyricsPageContent.Ready(primary.document, translated), preferences = current.preferences,
             sourceOrigin = primary.source.origin, failure = null, translationFailure = translationFailure,
+            timelineOriginMs = cueLyricsTimelineOrigin(current.context.cueReference, primary.source.origin),
             offsetDraftMs = null, offsetDraftNeedsReview = false, canReviewOffsetDraft = false, notice = notice)
     }
 

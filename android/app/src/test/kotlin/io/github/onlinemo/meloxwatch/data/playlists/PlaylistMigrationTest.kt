@@ -43,7 +43,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** 旧DDL只取历史云导出的1/2 schema；先独立观察历史v3，再验证生产v7仓储。 */
+/** 旧DDL只取历史云导出的1/2 schema；先独立观察历史v3，再验证生产v8仓储。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -157,7 +157,7 @@ class PlaylistMigrationTest {
     private suspend fun exerciseAllPlaylistTables(database: MeloXDatabase, suffix: String): PlaylistCommit {
         database.withTestWriterTransaction {
             val sqlite = this
-            assertEquals(7, sqlite.scalarLong("PRAGMA user_version").toInt())
+            assertEquals(8, sqlite.scalarLong("PRAGMA user_version").toInt())
             val names = sqlite.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'playlist_%' ORDER BY name") { statement ->
                 buildList { while (statement.step()) add(statement.getText(0)) }
             }
@@ -226,7 +226,7 @@ class PlaylistMigrationTest {
             assertProductionPreserved(database, before)
         } finally { database.close() }
         SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY).use { sqlite ->
-            assertEquals(7, sqlite.version)
+            assertEquals(8, sqlite.version)
             for (table in before) {
                 sqlite.rawQuery(select(table), null).use { assertEquals(table.name, table.rows, cells(it)) }
             }
@@ -251,8 +251,8 @@ class PlaylistMigrationTest {
         MeloXDatabase::class.java, file.absolutePath)
         .setDriver(BundledSQLiteDriver())
         .addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3,
-            MeloXDatabase.MIGRATION_3_4, MeloXDatabase.MIGRATION_4_5,
-            MeloXDatabase.MIGRATION_5_6, MeloXDatabase.MIGRATION_6_7).build()
+            MeloXDatabase.MIGRATION_3_4, MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6,
+            MeloXDatabase.MIGRATION_6_7, MeloXDatabase.MIGRATION_7_8).build()
 
     private fun createOldDatabase(file: File, version: Int): List<TableRows> {
         val relative = "schemas/io.github.onlinemo.meloxwatch.data.database.MeloXDatabase/$version.json"
@@ -315,9 +315,9 @@ class PlaylistMigrationTest {
     private suspend fun assertProductionPreserved(database: MeloXDatabase, before: List<TableRows>) = database.withTestWriterTransaction {
         // Acquiring the writer opens Room's real upgrade path and generated validation.
         val sqlite = this
-        assertEquals(7, sqlite.scalarLong("PRAGMA user_version").toInt())
-        assertEquals(48L, sqlite.scalarLong("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata')"))
-        for (table in VERSION_SIX_NEW_TABLES) assertEquals(0L, count(sqlite, table))
+        assertEquals(8, sqlite.scalarLong("PRAGMA user_version").toInt())
+        assertEquals(54L, sqlite.scalarLong("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata')"))
+        for (table in VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES) assertEquals(0L, count(sqlite, table))
         for (table in before) sqlite.query(select(table)) { assertEquals(table.name, table.rows, cells(it)) }
         sqlite.query("PRAGMA foreign_key_check") { assertFalse(it.step()) }
         sqlite.query("PRAGMA integrity_check") {
@@ -506,5 +506,7 @@ class PlaylistMigrationTest {
             "display_groups", "display_names", "display_album_links", "display_artist_links",
             "transfer_room_operations", "transfer_display_previews", "transferred_theme_candidates",
         )
+        private val VERSION_EIGHT_CUE_TABLES = listOf("local_cue_documents", "local_cue_group_versions", "local_cue_native_segments",
+            "local_cue_aliases", "local_cue_alias_versions", "local_cue_alias_segments")
     }
 }

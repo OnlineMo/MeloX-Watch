@@ -7,6 +7,10 @@ import androidx.room.useReaderConnection
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteStatement
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.cue.CueAdoptionPlan
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
+import io.github.onlinemo.meloxwatch.data.library.LibraryException
+import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryArtistEntity
 import io.github.onlinemo.meloxwatch.data.library.LibraryCodec
 import io.github.onlinemo.meloxwatch.data.library.LibrarySortKeys
@@ -21,14 +25,17 @@ import io.github.onlinemo.meloxwatch.data.library.metadata
 import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
+import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLimits
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistReference
 import io.github.onlinemo.meloxwatch.data.playlists.record
 import io.github.onlinemo.meloxwatch.data.playlists.playlistNameKey
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -44,25 +51,43 @@ internal class RoomBackupRelinker(
 ) {
     private val dao = database.libraryDao()
     private var held: Held? = null
-    private class Held(val model: BackupRelinkPreview, val hint: BackupRelinkHint, val descriptor: LocalReadDescriptor,
-        val missingMetadataDigest: String, val targetMetadataDigest: String, val relationId: String, val expires: Long)
+    private class Held(val model: BackupRelinkPreview, val hint: BackupRelinkHint?, val descriptor: LocalReadDescriptor?,
+        val missingMetadataDigest: String, val targetMetadataDigest: String, val relationId: String, val expires: Long,
+        val cuePlan: CueAdoptionPlan? = null)
 
-    suspend fun isMissing(hint: BackupRelinkHint): Boolean = scalar(
+    suspend fun isMissing(hint: BackupRelinkHint): Boolean {
+        val key = TrackKey(TrackKey.LOCAL_PROVIDER, hint.trackId)
+        val current = dao.currentTrack(hint.trackId)?.cueReference?.let(CueReferenceCodec::decode)
+        if (current != null || hint.cueReference != null) return isMissingCue(key, current)
+        return scalar(
         "SELECT EXISTS(SELECT 1 FROM local_track_locations r JOIN local_locations l ON l.locationId=r.locationId WHERE r.trackId=? AND r.locationId=? AND r.validTo IS NULL AND l.identityKey=? AND l.verifiedContentToken IS NULL)",
         BackupCell.Text(hint.trackId), BackupCell.Text(hint.locationId),
         BackupCell.Text(LibrarySortKeys.identity("BACKUP_UNVERIFIED", hint.archiveSha256, hint.record.key))) == 1L
+    }
+
+    private suspend fun isMissingCue(key: TrackKey, current: LocalCueReference?): Boolean {
+        if (current == null || !current.isBound) return true
+        if (library.cueNeedsReassociation(key)) return true
+        return try {
+            library.resolveCueRead(key, current);
+            false
+        }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: LibraryException) { if (failure.issue == LibraryIssue.BUSY) throw BackupException(BackupIssue.BUSY, failure) else true }
+    }
 
     suspend fun missing(journal: BackupRestoreJournal, after: String?, limit: Int): BackupRelinkPage {
         if (limit !in 1..100) throw BackupException(BackupIssue.INVALID_INPUT)
         val items = ArrayList<BackupMissingFile>()
         var cursor = after
         var more = false
-        while (items.size < limit) {
+        while (items.size < limit && cursor?.startsWith("cue:") != true) {
             val page = physical { signal -> signal.throwIfCanceled(); journal.relinkPage(cursor) }
             if (page.isEmpty()) break
             for (hint in page) {
                 currentCoroutineContext().ensureActive()
                 cursor = hint.id
+                if (hint.cueReference != null || dao.currentTrack(hint.trackId)?.cueReference != null) continue
                 if (isMissing(hint)) {
                     val track = dao.currentTrack(hint.trackId)
                     items += BackupMissingFile(hint.id, hint.trackId, track?.displayTitle ?: "Unavailable track")
@@ -71,7 +96,35 @@ internal class RoomBackupRelinker(
             }
             if (page.size < 100 && items.size < limit) break
         }
-        return BackupRelinkPage(items, cursor.takeIf { more })
+        if (more) return BackupRelinkPage(items, cursor)
+        var afterCue = cursor?.takeIf { it.startsWith("cue:") }?.removePrefix("cue:")?.takeIf { it.isNotEmpty() }
+        while (items.size < limit) {
+            val page = cueTrackPage(afterCue)
+            if (page.isEmpty()) break
+            for ((id, title) in page) {
+                currentCoroutineContext().ensureActive()
+                afterCue = id
+                val reference = dao.currentTrack(id)?.cueReference?.let(CueReferenceCodec::decode) ?: continue
+                if (isMissingCue(reference.trackKey, reference)) items += BackupMissingFile("cue:$id", id, title, isCue = true)
+                if (items.size == limit) return BackupRelinkPage(items, "cue:$id")
+            }
+            if (page.size < 100) break
+        }
+        return BackupRelinkPage(items, null)
+    }
+
+    private suspend fun cueTrackPage(after: String?): List<Pair<String, String>> = database.useReaderConnection { reader ->
+        reader.deferredTransaction { reader.usePrepared("SELECT trackId,displayTitle FROM local_track_versions WHERE validTo IS NULL AND cueReference IS NOT NULL AND (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100") { statement ->
+            if (after == null) {
+                statement.bindNull(1);
+                statement.bindNull(2)
+            }
+            else {
+                statement.bindText(1, after);
+                statement.bindText(2, after)
+            }
+            buildList { while (statement.step()) add(statement.getText(0) to statement.getText(1)) }
+        } }
     }
 
     suspend fun preview(journal: BackupRestoreJournal, missingTrackId: String, target: TrackKey): BackupRelinkPreview {
@@ -80,6 +133,7 @@ internal class RoomBackupRelinker(
         val hint = findHint(journal, missingTrackId) ?: throw BackupException(BackupIssue.STALE_PREVIEW)
         val original = dao.currentTrack(missingTrackId)
         val originalIdentity = dao.track(missingTrackId) ?: throw BackupException(BackupIssue.STALE_PREVIEW)
+        if (original?.cueReference != null || hint.cueReference != null) return previewCue(missingTrackId, target, hint)
         val descriptor = library.resolveLocalRead(target)
         if (descriptor.location.locationId == hint.locationId) throw BackupException(BackupIssue.STALE_PREVIEW)
         validateDescriptor(descriptor)
@@ -95,21 +149,67 @@ internal class RoomBackupRelinker(
         return model
     }
 
-    suspend fun confirm(journal: BackupRestoreJournal, token: String, allowDifferent: Boolean): BackupRelinkReceipt {
+    suspend fun previewCue(missingTrackId: String, target: TrackKey, hint: BackupRelinkHint? = null,
+        preferRegisteredNative: Boolean = false): BackupRelinkPreview {
+        discardAll()
+        val key = TrackKey(TrackKey.LOCAL_PROVIDER, missingTrackId)
+        val native = if (preferRegisteredNative) cueLibrary { library.registeredNativeCueSelection(target) } else null
+        val plan = cueLibrary { library.previewCueAdoption(key, target, native) }
+        validateCueSources(plan)
+        if (!cueLibrary { library.isCueAdoptionCurrent(plan) }) throw BackupException(BackupIssue.STALE_PREVIEW)
+        val difference = plan.differences
+        val match = when {
+            difference.unknownAudioContent > 0 -> BackupRelinkMatch.UNKNOWN_CONTENT
+            difference.differentOrUnknownContent -> BackupRelinkMatch.DIFFERENT_CONTENT
+            else -> BackupRelinkMatch.VERIFIED_MATCH
+        }
+        val byNumber = plan.targets.associateBy { it.reference.identity.trackNumber }
+        val members = plan.sources.map { source ->
+            val next = source.reference.identity
+            val old = byNumber[next.trackNumber]
+            CueRelinkMemberPreview(next.trackNumber, old?.title, source.metadata.title ?: "CUE ${next.trackNumber}",
+                old?.reference?.identity?.startFrame, old?.reference?.identity?.endFrameExclusive, old?.reference?.identity?.endUsExclusive,
+                next.startFrame, next.endFrameExclusive, next.endUsExclusive)
+        }
+        val model = BackupRelinkPreview(UUID.randomUUID().toString(), missingTrackId, target,
+            plan.targets.single { it.trackKey == key }.title,
+            dao.currentTrack(target.trackId)?.displayTitle ?: throw BackupException(BackupIssue.STALE_PREVIEW), match,
+            difference, plan.targets.size, plan.sources.size, plan.affectedQueueEntries, plan.affectedPlaylistEntries, members)
+        held = Held(model, hint, null, "", "", "", Math.addExact(elapsedMs(), PREVIEW_MS), plan)
+        return model
+    }
+
+    suspend fun confirm(journal: BackupRestoreJournal, token: String, allowDifferent: Boolean,
+        allowCueDifferences: Boolean = false): BackupRelinkReceipt {
         barrier.requireExclusiveOwner()
         val selected = held?.takeIf { it.model.token == token && elapsedMs() <= it.expires }
             ?: throw BackupException(BackupIssue.STALE_PREVIEW)
         if (selected.model.match != BackupRelinkMatch.VERIFIED_MATCH && !allowDifferent) throw BackupException(BackupIssue.CONFLICT)
-        val hint = physical { signal -> signal.throwIfCanceled(); journal.relinkHint(selected.hint.id) }
+        val originalHint = selected.hint
+        val hint = originalHint?.let {
+            physical { signal ->
+                signal.throwIfCanceled();
+                journal.relinkHint(it.id)
+            }
+        }
+        if (selected.cuePlan != null) {
+            if (originalHint != null && (hint == null || hint.trackId != originalHint.trackId || hint.locationId != originalHint.locationId ||
+                hint.archiveSha256 != originalHint.archiveSha256 || !hint.record.sameContent(originalHint.record) ||
+                hint.cueReference != originalHint.cueReference || !isMissing(hint))) throw BackupException(BackupIssue.STALE_PREVIEW)
+            return confirmCue(journal, selected, allowDifferent, allowCueDifferences)
+        }
+        val fileHint = hint
             ?: throw BackupException(BackupIssue.STALE_PREVIEW)
-        if (hint.trackId != selected.hint.trackId || hint.locationId != selected.hint.locationId ||
-            hint.archiveSha256 != selected.hint.archiveSha256 || !hint.record.sameContent(selected.hint.record) || !isMissing(hint)) {
+        if (fileHint.trackId != originalHint.trackId || fileHint.locationId != originalHint.locationId ||
+            fileHint.archiveSha256 != originalHint.archiveSha256 || !fileHint.record.sameContent(originalHint.record) || !isMissing(fileHint)) {
             throw BackupException(BackupIssue.STALE_PREVIEW)
         }
+        val hintForFile = fileHint
         val descriptor = library.resolveLocalRead(selected.model.target)
         if (descriptor != selected.descriptor) throw BackupException(BackupIssue.STALE_PREVIEW)
         validateDescriptor(descriptor)
         val result = library.libraryTransaction {
+            val hint = hintForFile
             val old = dao.currentTrack(hint.trackId)
             val originalIdentity = dao.track(hint.trackId) ?: throw BackupException(BackupIssue.STALE_PREVIEW)
             val target = dao.currentTrack(selected.model.target.trackId) ?: throw BackupException(BackupIssue.STALE_PREVIEW)
@@ -156,12 +256,60 @@ internal class RoomBackupRelinker(
         }
         // The relation is the authority. A crash before this projection ack merely hides the stale hint.
         withContext(NonCancellable) {
-            physical { signal -> signal.throwIfCanceled(); journal.completeRelink(hint.id) }
+            physical { signal ->
+                signal.throwIfCanceled();
+                journal.completeRelink(fileHint.id)
+            }
             library.invalidateAfterBackupRestore()
             held = null
         }
         return result
     }
+
+    private suspend fun confirmCue(journal: BackupRestoreJournal, selected: Held, allowDifferent: Boolean,
+        allowCueDifferences: Boolean): BackupRelinkReceipt {
+        val plan = selected.cuePlan ?: throw BackupException(BackupIssue.STALE_PREVIEW)
+        if (plan.differences.requiresExplicitConfirmation && !allowCueDifferences ||
+            plan.differences.differentOrUnknownContent && !allowDifferent) throw BackupException(BackupIssue.CONFLICT)
+        if (!cueLibrary { library.isCueAdoptionCurrent(plan) }) throw BackupException(BackupIssue.STALE_PREVIEW)
+        validateCueSources(plan)
+        if (!cueLibrary { library.isCueAdoptionCurrent(plan) }) throw BackupException(BackupIssue.STALE_PREVIEW)
+        currentCoroutineContext().ensureActive()
+        val committed = cueLibrary { library.libraryTransaction {
+            library.commitCueAdoptionUnlocked(plan, allowCueDifferences, allowDifferent)
+        } }
+        withContext(NonCancellable) {
+            selected.hint?.let { hint ->
+                physical { signal ->
+                    signal.throwIfCanceled();
+                    journal.completeRelink(hint.id)
+                }
+            }
+            library.invalidateAfterBackupRestore()
+            held = null
+        }
+        return BackupRelinkReceipt(selected.model.missingTrackId, committed.repairedQueueEntries)
+    }
+
+    private suspend fun validateCueSources(plan: CueAdoptionPlan) {
+        val descriptors = plan.sources.flatMap { listOf(it.cueRead, it.audioRead) }.distinctBy {
+            Triple(it.source.spec.sourceId, it.aliasId, it.location)
+        }
+        for (descriptor in descriptors) {
+            currentCoroutineContext().ensureActive();
+            validateDescriptor(descriptor, cue = true)
+        }
+    }
+
+    private suspend fun <T> cueLibrary(action: suspend () -> T): T = try { action() }
+    catch (cancelled: CancellationException) { throw cancelled }
+    catch (failure: LibraryException) { throw BackupException(when (failure.issue) {
+        LibraryIssue.BUSY -> BackupIssue.BUSY
+        LibraryIssue.STORAGE_FULL -> BackupIssue.STORAGE_FULL
+        LibraryIssue.STORAGE_UNAVAILABLE -> BackupIssue.IO
+        LibraryIssue.INVALID_INPUT, LibraryIssue.INCOMPLETE -> BackupIssue.INVALID_REFERENCE
+        else -> BackupIssue.STALE_PREVIEW
+    }, failure) }
 
     fun discard(token: String) { if (held?.model?.token == token) held = null }
     fun discardAll() { held = null }
@@ -267,8 +415,15 @@ internal class RoomBackupRelinker(
             after = page.last().id
         }
     }
-    private suspend fun validateDescriptor(descriptor: LocalReadDescriptor) {
-        val observed = sources.validateRead(descriptor)
+    private suspend fun validateDescriptor(descriptor: LocalReadDescriptor, cue: Boolean = false) {
+        val observed = try { if (cue) sources.validateCueRead(descriptor) else sources.validateRead(descriptor) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: SourceReadException) { throw BackupException(when (failure.issue) {
+            SourceReadIssue.BUSY -> BackupIssue.BUSY
+            SourceReadIssue.PERMISSION_DENIED, SourceReadIssue.PERMISSION_REVOKED -> BackupIssue.PERMISSION_DENIED
+            SourceReadIssue.STORAGE_FULL -> BackupIssue.STORAGE_FULL
+            else -> BackupIssue.STALE_PREVIEW
+        }, failure) }
         if (observed.contentValidation != LocalContentValidation.VERIFIED || observed.copy(contentValidation = descriptor.contentValidation) != descriptor) {
             throw BackupException(BackupIssue.STALE_PREVIEW)
         }

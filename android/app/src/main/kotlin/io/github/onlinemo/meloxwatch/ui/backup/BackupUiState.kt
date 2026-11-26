@@ -44,6 +44,8 @@ data class BackupUiState(
     val relinkPreview: BackupRelinkPreview? = null,
     val relinkReceipt: BackupRelinkReceipt? = null,
     val allowDifferentContent: Boolean = false,
+    val allowCueDifferences: Boolean = false,
+    val cueRelinkTrackId: String? = null,
 ) {
     val ready: Boolean get() = startup is BackupStartupState.Ready
     val canEdit: Boolean get() = ready && !working && !pickerPending && !targetPickerPending
@@ -59,6 +61,7 @@ class BackupRelinkTargetRequest internal constructor(
     internal val missingTrackId: String,
     internal val hintId: String,
     internal val draftRevision: Long,
+    internal val cueTarget: Boolean = false,
 ) {
     internal var retired = false
     override fun toString(): String = "BackupRelinkTargetRequest"

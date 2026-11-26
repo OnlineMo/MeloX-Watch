@@ -18,6 +18,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryViewOwner
 import io.github.onlinemo.meloxwatch.data.library.LibraryViewToken
 import io.github.onlinemo.meloxwatch.data.library.LocalLibraryRepository
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
+import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.playlists.FrozenPlaylistInput
 import io.github.onlinemo.meloxwatch.data.playlists.LocalPlaylistRepository
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
@@ -766,7 +767,7 @@ class PlaylistEntryViewModel(
             val exact = library.folder(checkNotNull(owned.view), folder.nodeId)
             val source = library.source(folder.sourceId)
             if (exact != folder || source == null || source.state != LibrarySourceState.ACTIVE ||
-                source.grant.read != ObservedCapability.AVAILABLE || source.grant.enumerate != ObservedCapability.AVAILABLE) {
+                !source.grant.allowsFileReadValidation(source.spec.kind) || source.grant.enumerate != ObservedCapability.AVAILABLE) {
                 throw PlaylistException(PlaylistIssue.SOURCE_UNAVAILABLE)
             }
             currentCoroutineContext().ensureActive()

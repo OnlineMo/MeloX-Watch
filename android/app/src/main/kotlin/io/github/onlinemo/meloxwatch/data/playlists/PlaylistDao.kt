@@ -114,6 +114,22 @@ interface PlaylistDao {
     @Query("SELECT * FROM playlist_members WHERE generationId = :generation AND ordinal >= :first ORDER BY ordinal LIMIT :limit")
     suspend fun membersPage(generation: String, first: Long, limit: Int): List<PlaylistMemberEntity>
 
+    @Query("SELECT DISTINCT m.* FROM playlist_members m JOIN playlist_generations g ON g.dataGenerationId = m.generationId " +
+        "JOIN playlist_heads h ON h.activeGenerationId = g.generationId WHERE h.deleted = 0 AND g.state = 'PUBLISHED' " +
+        "AND m.providerId = :providerId AND m.trackId = :trackId " +
+        "AND (:afterGeneration IS NULL OR m.generationId > :afterGeneration OR " +
+        "(m.generationId = :afterGeneration AND m.memberId > :afterMember)) ORDER BY m.generationId, m.memberId LIMIT 100")
+    suspend fun cueMembersPage(providerId: String, trackId: String, afterGeneration: String?, afterMember: String?): List<PlaylistMemberEntity>
+
+    @Query("SELECT h.* FROM playlist_heads h JOIN playlist_generations g ON g.generationId = h.activeGenerationId " +
+        "WHERE h.deleted = 0 AND g.state = 'PUBLISHED' AND (:after IS NULL OR h.playlistId > :after) " +
+        "AND EXISTS (SELECT 1 FROM playlist_members m WHERE m.generationId = g.dataGenerationId " +
+        "AND m.providerId = 'local' AND m.trackId IN (:trackIds)) ORDER BY h.playlistId LIMIT 100")
+    suspend fun cueAffectedHeads(trackIds: List<String>, after: String?): List<PlaylistHeadEntity>
+
+    @Query("UPDATE playlist_meta SET revision = :next WHERE id = 1 AND revision = :expected")
+    suspend fun advanceCueRevision(expected: Long, next: Long): Int
+
     @Query("SELECT * FROM playlist_members WHERE generationId = :generation AND memberId = :id")
     suspend fun member(generation: String, id: String): PlaylistMemberEntity?
 

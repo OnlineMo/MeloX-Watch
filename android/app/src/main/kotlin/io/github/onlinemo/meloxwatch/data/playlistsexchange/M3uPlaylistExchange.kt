@@ -75,7 +75,7 @@ class M3uPlaylistExchange(private val newMemberId: () -> String = ::exchangeId) 
                         )
                     }
                     line.startsWith("#MELOX-TRACK-ID:") -> {
-                        if (pending.trackKey != null) exchangeFail(PlaylistExchangeIssue.MALFORMED)
+                        if (pending.trackKey != null || pending.cueReference != null) exchangeFail(PlaylistExchangeIssue.MALFORMED)
                         val id = line.substringAfter(':').takeIf { it.isNotBlank() }
                             ?: exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
                         val key = TrackKey(TrackKey.LOCAL_PROVIDER, id)
@@ -83,7 +83,7 @@ class M3uPlaylistExchange(private val newMemberId: () -> String = ::exchangeId) 
                         pending = pending.copy(trackKey = key)
                     }
                     line.startsWith("#MELOX-CUE:") -> {
-                        if (pending.cue != null) exchangeFail(PlaylistExchangeIssue.MALFORMED)
+                        if (pending.cue != null || pending.cueReference != null) exchangeFail(PlaylistExchangeIssue.MALFORMED)
                         val value = line.substringAfter(':')
                         val separator = value.indexOf(',')
                         if (separator < 0) exchangeFail(PlaylistExchangeIssue.MALFORMED)
@@ -91,6 +91,13 @@ class M3uPlaylistExchange(private val newMemberId: () -> String = ::exchangeId) 
                         if (track == null || track !in 1..99) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
                         val path = ExchangeRelativePath.parse(value.substring(separator + 1))
                         pending = pending.copy(cue = ExchangeCueHint(path, track))
+                    }
+                    line.startsWith("#MELOX-CUE-REF:") -> {
+                        if (pending.cueReference != null || pending.hasExtinf) exchangeFail(PlaylistExchangeIssue.MALFORMED)
+                        val reference = ExchangeCueReferenceCodec.fromBase64(line.substringAfter(':'))
+                        if (pending.trackKey != null && pending.trackKey != reference.trackKey ||
+                            pending.cue != null && pending.cue.trackNumber != reference.identity.trackNumber) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
+                        pending = pending.copy(cueReference = reference)
                     }
                     line.startsWith("#EXT-X-") || line.startsWith("#MELOX-") -> {
                         exchangeFail(PlaylistExchangeIssue.UNSUPPORTED_FORMAT)
@@ -102,14 +109,17 @@ class M3uPlaylistExchange(private val newMemberId: () -> String = ::exchangeId) 
             if (count == PlaylistExchangeLimits.MEMBERS) exchangeFail(PlaylistExchangeIssue.LIMIT_EXCEEDED)
             validateExchangeText(line)
             val classified = classify(line)
+            val cue = pending.cueReference?.let { reference ->
+                ExchangeCueHint(pending.cue?.relativePath, reference.identity.trackNumber, reference)
+            } ?: pending.cue
             val member = ExchangeMember(
                 ordinal = count,
                 memberId = newMemberId(),
                 originalMemberId = classified.originalMemberId,
-                trackKey = pending.trackKey,
+                trackKey = pending.trackKey ?: cue?.reference?.trackKey,
                 relativePath = classified.path,
-                mediaKind = if (pending.cue == null) ExchangeMediaKind.AUDIO else ExchangeMediaKind.CUE_TRACK,
-                cue = pending.cue,
+                mediaKind = if (cue == null) ExchangeMediaKind.AUDIO else ExchangeMediaKind.CUE_TRACK,
+                cue = cue,
                 title = pending.title,
                 durationMs = pending.durationMs,
                 unresolved = classified.issue != null,
@@ -167,7 +177,10 @@ class M3uPlaylistExchange(private val newMemberId: () -> String = ::exchangeId) 
                 if (member.ordinal != offset + index) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
                 validateExchangeMember(member)
                 member.trackKey?.let { writeLine(writer, "#MELOX-TRACK-ID:${it.trackId}") }
-                member.cue?.let { writeLine(writer, "#MELOX-CUE:${it.trackNumber},${it.relativePath}") }
+                member.cue?.let { cue ->
+                    cue.relativePath?.let { writeLine(writer, "#MELOX-CUE:${cue.trackNumber},$it") }
+                    cue.reference?.let { writeLine(writer, "#MELOX-CUE-REF:${ExchangeCueReferenceCodec.base64(it)}") }
+                }
                 writeLine(writer, "#EXTINF:${formatDurationMs(member.durationMs)},${member.title.orEmpty()}")
                 // 不回显绝对路径/URI/被阻断的原始引用；占位只携带无访问能力的成员ID。
                 val path = member.relativePath?.toString()
@@ -198,8 +211,9 @@ class M3uPlaylistExchange(private val newMemberId: () -> String = ::exchangeId) 
         val durationMs: Long? = null,
         val trackKey: TrackKey? = null,
         val cue: ExchangeCueHint? = null,
+        val cueReference: io.github.onlinemo.meloxwatch.model.LocalCueReference? = null,
     ) {
-        fun present(): Boolean = hasExtinf || trackKey != null || cue != null
+        fun present(): Boolean = hasExtinf || trackKey != null || cue != null || cueReference != null
     }
 
     private data class Classified(

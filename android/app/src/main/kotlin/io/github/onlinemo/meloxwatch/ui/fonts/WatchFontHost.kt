@@ -114,6 +114,21 @@ fun WatchFontHost(
     retryIdentity: Any = Unit,
     content: @Composable (WatchFontHostValue) -> Unit,
 ) {
+    content(rememberWatchFontHost(runtime, owner, editor, request, pageEpoch, visibleNow, install, retryIdentity))
+}
+
+/** Resource admission can change while its caller keeps page content at one composition site. */
+@Composable
+internal fun rememberWatchFontHost(
+    runtime: LyricsFontRuntime,
+    owner: LyricsFontPresentationOwner,
+    editor: LyricsFontEditor,
+    request: WatchFontRequest,
+    pageEpoch: Any,
+    visibleNow: () -> Boolean,
+    install: (LyricsFontPresentationKind, () -> Unit, () -> Unit) -> AutoCloseable?,
+    retryIdentity: Any = Unit,
+): WatchFontHostValue {
     // Only one completed bounded text pair is memoized by source document/UI identity. There
     // is no map and no face cache; page/Window changes can reread settings without rebuilding text.
     val coverage = remember(request.coverageIdentity) { mutableStateOf<LyricsFontPreviewText?>(null) }
@@ -198,10 +213,9 @@ fun WatchFontHost(
 
     // Reading the counter observes the sole Flow without putting its face-bearing value in a
     // Compose State holder. The value itself borrows current state only when its content reads it.
-    val host = remember(work, loading, coverageIssue, displayChange) {
+    return remember(work, loading, coverageIssue, displayChange) {
         WatchFontHostValue(loading, coverageIssue, work.previewText, work)
     }
-    content(host)
 }
 
 /** Back/retry/reset/errors/licenses remain readable even when the selected font lacks glyphs. */

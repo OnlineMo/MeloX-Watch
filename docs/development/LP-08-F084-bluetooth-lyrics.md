@@ -42,6 +42,8 @@ hello body 上限 256 字节。认证帧为 16 字节头、最多 8192 字节明
 
 关闭同步撤销取权、清当前文本并取消比较等待。外部源另等待 exact retired lyrics Job 实际退出，transport 等待实际 socket/worker 退出；分别有 2.5 秒等待边界。等待失败保留原失败与对象，阻止替换，明确重试退休，不能把 timeout 当资源已释放。播放服务 quiesce 等待两者后才报告释放；UI 仍可单独持有自己的正常本地阅读。比较阶段 ACL 断连由 native close 信号立即取消等待，不持续留存旧数字直至两分钟超时。
 
+发送器的服务观察器与下一行边界任务纳入这次外部阅读独立的子 Job。关闭同步取消整个子树，awaitClosed 先等待共享读取的精确退休，再在 finally 等待输出子树实际完成；上层原有 2.5 秒退休边界仍约束两者。共享可见歌词页保持自己的读取，不以页面仍健康或 Job 已收到 cancel 作为输出退出的证据。
+
 ## 5. 迁移与备份
 
 player preferences 升至 schema 6，唯一新字段 bluetoothLyricsEnabled 默认 false。schema 1–5 读取保留原字段和 revision，新字段默认关闭；成功明确保存才迁移。schema 5 Help 六字段不重置。通用设置页的 draft 保存/恢复/取消保全该 Boolean；runtime 设备/认证/接收能力没有对应恢复字段。
@@ -51,6 +53,8 @@ LP-11 portable backup schema 1 不改变，外部输出 activation 不在导出�
 ## 6. 回归定义及待取证
 
 新增定义覆盖真实 Wire pair 编解码、commit/reveal、确认前无文本、sequence/epoch 重放、header/ciphertext 篡改、编码和限额、关闭；偏好旧 schema/Help/真实文件 reopen/CAS/失败重试与 backup 排除；原 Entry 的隐藏/离页/共享文档/保存偏移/预览隔离/非协作退出；实际服务 facade 时钟与 UI 事件隔离；会话隐藏、断连、超时和原退休失败。定义尚未云编译或执行，不记为测试通过。
+
+BluetoothLyricsSenderTest 补充真实 LocalLyricsParser、LyricsEntryViewModel、ServiceLyricsPlaybackPort 和两端 BluetoothLyricsWire 的组合定义：保存偏移下的原文/严格关联译文、seek 和切曲、隐藏页面只调度下一真实行边界、暂停取消定时、可见页面继续读取时等待输出子树退休、旧取消加载迟到及 UTF-8 长行截短。这些定义必须通过后续精确源码云运行；内存字节通路和受控 Player 不能替代两个 Android APK 的物理 RFCOMM 互通或原 AC。
 
 | 原 AC / 验收域 | 必须取得的精确证据 | 当前状态 |
 | --- | --- | --- |

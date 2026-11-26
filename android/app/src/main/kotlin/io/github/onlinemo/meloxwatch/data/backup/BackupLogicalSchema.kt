@@ -4,6 +4,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.library.LibrarySourceState
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import io.github.onlinemo.meloxwatch.data.library.LocalCodecParametersCodec
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsUserOffset
 import io.github.onlinemo.meloxwatch.data.network.JsonArray
@@ -43,6 +44,7 @@ internal object BackupLogicalSchema {
             "discNumber" to number(true, maximum = Int.MAX_VALUE.toLong()), "trackNumber" to number(true, maximum = Int.MAX_VALUE.toLong()),
             "compilation" to flag, "mimeType" to text(true, 256), "parserVersion" to number(minimum = 1, maximum = Int.MAX_VALUE.toLong()),
             "metadataIssue" to text(true, 64), "codecParameters" to text(true, LocalCodecParametersCodec.MAX_BYTES),
+            "cueReference" to text(true, CueReferenceCodec.MAX_BYTES),
         ),
         BackupRecordKind.TRACK_LOCATION to mapOf("trackId" to text(characters = 128), "locationId" to text(characters = 128)),
         BackupRecordKind.SOURCE_HINT to mapOf(
@@ -72,7 +74,8 @@ internal object BackupLogicalSchema {
             "positionMs" to number(), "completedCycles" to number(maximum = Int.MAX_VALUE.toLong())),
         BackupRecordKind.QUEUE_ENTRY to mapOf("providerId" to text(characters = 128), "trackId" to text(characters = 128),
             "originalOrder" to number(), "playbackOrder" to number(), "displayName" to text(true),
-            "durationMs" to number(true), "locationIdHint" to text(true, 128), "uriHint" to text(true, 8192)),
+            "durationMs" to number(true), "locationIdHint" to text(true, 128), "uriHint" to text(true, 8192),
+            "cueReference" to text(true, CueReferenceCodec.MAX_BYTES)),
         BackupRecordKind.HISTORY_META to mapOf("totalPlayCount" to number(), "totalListeningMs" to number()),
         BackupRecordKind.HISTORY_ENTRY to mapOf("ordinal" to number(minimum = 1), "providerId" to text(characters = 128),
             "trackId" to text(characters = 128), "displayName" to text(true), "firstProgressEpochMs" to number(),
@@ -106,9 +109,10 @@ internal object BackupLogicalSchema {
                 BackupRecordKind.RULE, BackupRecordKind.DISPLAY_GROUP, BackupRecordKind.DISPLAY_NAME, BackupRecordKind.DISPLAY_ALBUM_LINK,
                 BackupRecordKind.DISPLAY_ARTIST_LINK, BackupRecordKind.FAVORITES_HEAD, BackupRecordKind.PLAYLIST_HEAD,
                 BackupRecordKind.QUEUE_ENTRY, BackupRecordKind.LYRICS_TRACK, BackupRecordKind.THEME_INSTALLATION) && record.key.length > 128) reject()
-        if (record.values.keys != expected.keys) reject()
+        val legacy = if (record.kind in CUE_BACKUP_KINDS) setOf("cueReference") else emptySet()
+        if (record.values.keys != expected.keys && record.values.keys != expected.keys - legacy) reject()
         for ((name, spec) in expected) {
-            val value = record.values[name] ?: reject()
+            val value = record.values[name] ?: if (name in legacy) BackupCell.Null else reject()
             if (value == BackupCell.Null && spec.nullable) continue
             val valid = when (spec.type) {
                 Type.TEXT -> value is BackupCell.Text && value.value.length <= spec.characters
@@ -118,6 +122,7 @@ internal object BackupLogicalSchema {
             }
             if (!valid) reject()
         }
+        record.portableCueReference()
         when (record.kind) {
             BackupRecordKind.LIBRARY_META -> if (record.key != "library") reject()
             BackupRecordKind.TRACK -> {
@@ -161,7 +166,8 @@ internal object BackupLogicalSchema {
                 PlaylistReference(provider?.let { TrackKey(it, record.text("trackId")) }, record.optionalText("placeholderId"),
                     record.optionalText("issue")?.let { name -> PlaylistReferenceIssue.entries.firstOrNull { it.name == name } ?: reject() },
                     record.optionalText("titleHint"), record.optionalText("artistHint"), record.optionalText("albumHint"),
-                    record.optionalText("relativePathHint"), record.optionalText("descriptionHint"), record.optionalLong("durationMs"))
+                    record.optionalText("relativePathHint"), record.optionalText("descriptionHint"), record.optionalLong("durationMs"),
+                    cueReference = record.portableCueReference())
             }
             BackupRecordKind.QUEUE_META -> {
                 if (record.key != "queue" || QueueRepeatMode.entries.none { it.name == record.text("repeatMode") }) reject()
@@ -249,7 +255,8 @@ internal object BackupLogicalSchema {
     private fun playlistMemberFields() = mapOf("playlistId" to text(characters = 128), "memberId" to text(characters = 128),
         "ordinal" to number(), "providerId" to text(true, 128), "trackId" to text(true, 128), "placeholderId" to text(true, 128),
         "issue" to text(true, 64), "titleHint" to text(true), "artistHint" to text(true), "albumHint" to text(true),
-        "relativePathHint" to text(true), "descriptionHint" to text(true), "durationMs" to number(true, 1))
+        "relativePathHint" to text(true), "descriptionHint" to text(true), "durationMs" to number(true, 1),
+        "cueReference" to text(true, CueReferenceCodec.MAX_BYTES))
     private fun reject(): Nothing = throw BackupException(BackupIssue.INVALID_INPUT)
 }
 

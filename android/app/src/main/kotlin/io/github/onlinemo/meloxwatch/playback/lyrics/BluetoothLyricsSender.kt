@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 class BluetoothLyricsSender(
     private val model: LyricsEntryViewModel,
     private val playback: ServiceLyricsPlaybackPort,
-    private val scope: CoroutineScope,
+    scope: CoroutineScope,
     private val offer: (BluetoothLyricsPayload) -> Unit,
     private val onFailure: (BluetoothLyricsIssue) -> Unit,
 ) : BluetoothLyricsSource {
@@ -39,15 +39,17 @@ class BluetoothLyricsSender(
         service.clock?.queueEntryId == entryId &&
             (service.state == Player.STATE_READY || service.state == Player.STATE_BUFFERING)
     }
+    // 观察器和行边界任务同属这次外部阅读；取消不能提前证明它们已经退出。
+    private val sourceWork = Job(scope.coroutineContext[Job])
+    private val workScope = CoroutineScope(scope.coroutineContext + sourceWork)
     private var open = true
     private var readingRetired = false
     private var timer: Job? = null
     private var epoch = 0L
     private var fingerprint: Fingerprint? = null
     private var previous: BluetoothLyricsPayload? = null
-    private var observer: Job? = null
     init {
-        observer = scope.launch {
+        workScope.launch {
             merge(model.uiState.map { Unit }, playback.serviceChanges).onStart { emit(Unit) }.collect { safeUpdate() }
         }
     }
@@ -137,7 +139,7 @@ class BluetoothLyricsSender(
         val wait = ceil((boundary.toDouble() - position.toDouble()) / speed.toDouble()).toLong()
             .coerceIn(1L, BluetoothLyricsLimits.SESSION_MS)
         // Only the scalar delay and owner are captured; the borrowed reading ends with this call.
-        timer = scope.launch { delay(wait); if (open && reading.isCurrent) safeUpdate() }
+        timer = workScope.launch { delay(wait); if (open && reading.isCurrent) safeUpdate() }
     }
 
     private fun group(count: Int, maximum: Int, text: (Int) -> String): BluetoothLyricsText {
@@ -174,10 +176,8 @@ class BluetoothLyricsSender(
     override fun close() {
         if (open) {
             open = false
-            timer?.cancel()
+            sourceWork.cancel()
             timer = null
-            observer?.cancel()
-            observer = null
             previous = null
             fingerprint = null
         }
@@ -187,5 +187,12 @@ class BluetoothLyricsSender(
         }
     }
 
-    override suspend fun awaitClosed() { reading.awaitClosed() }
+    override suspend fun awaitClosed() {
+        try {
+            reading.awaitClosed()
+        } finally {
+            // 即使读取退休失败，仍核验这次输出的协程树；上层的 2.5 秒边界保持生效。
+            sourceWork.join()
+        }
+    }
 }

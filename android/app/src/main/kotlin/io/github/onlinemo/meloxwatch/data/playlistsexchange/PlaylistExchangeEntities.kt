@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.playlistsexchange
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -45,6 +47,7 @@ data class PlaylistExchangeRowEntity(
     val durationMs: Long?,
     val importIssue: String,
     val availability: String,
+    @ColumnInfo(defaultValue = "NULL") val cueReference: String? = null,
 ) {
     fun reference(): PlaylistReference = PlaylistReference(
         trackKey = trackId?.let { TrackKey(TrackKey.LOCAL_PROVIDER, it) },
@@ -52,6 +55,7 @@ data class PlaylistExchangeRowEntity(
         issue = referenceIssue?.let(PlaylistReferenceIssue::valueOf),
         titleHint = title, artistHint = artist, albumHint = album,
         relativePathHint = relativePath, descriptionHint = description, durationMs = durationMs,
+        cueReference = cueReference?.let { CueReferenceCodec.decode(it, portableOnly = true) },
     )
 }
 

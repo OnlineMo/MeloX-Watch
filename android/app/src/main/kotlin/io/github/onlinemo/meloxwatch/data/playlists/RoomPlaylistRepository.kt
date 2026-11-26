@@ -4,6 +4,7 @@ import android.database.sqlite.SQLiteConstraintException
 import android.database.sqlite.SQLiteFullException
 import android.os.SystemClock
 import androidx.room.RoomDatabase
+import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteException
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
 import io.github.onlinemo.meloxwatch.data.database.toPlatformSQLiteException
@@ -15,6 +16,7 @@ import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -37,6 +39,7 @@ class RoomPlaylistRepository(
     private val processId: String = PROCESS_ID,
     private val folderFenceVerifier: PlaylistTransactionFenceVerifier? = null,
     private val libraryFenceVerifier: PlaylistLibraryTransactionFenceVerifier? = null,
+    private val cueInputRegistrar: (suspend (String) -> Unit)? = null,
 ) : LocalPlaylistRepository {
     private val actions = Mutex()
 
@@ -605,43 +608,72 @@ class RoomPlaylistRepository(
         counts: BuildCounts,
         participant: PlaylistCommitParticipant?,
         onAccepted: () -> Unit,
-    ): PlaylistCommit = withContext(NonCancellable) {
-        val commit = database.withPreservedTransaction {
-            replay(request, fingerprint, participant)?.let { return@withPreservedTransaction it }
-            verifyExpectedHead(request, plan.old)
-            verifyTransactionFences(request)
-            if (dao.generation(staged.generationId) != staged.copy(state = "SEALED", memberCount = counts.count)) {
-                throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
-            }
-            val meta = requireMeta()
-            val nextGlobal = increment(meta.revision)
-            val old = plan.old
-            participant?.claimCommit()
-            if (dao.publish(staged.generationId, nextGlobal) != 1) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
-            if (old == null) {
-                dao.insertHead(PlaylistHeadEntity(request.playlistId, staged.generationId, staged.revision, meta.nextPlaylistSequence))
-            } else {
-                if (dao.closeGeneration(old.generationId, nextGlobal - 1L) != 1) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
-                if (dao.publishHead(request.playlistId, old.revision, old.generationId,
-                        staged.generationId, staged.revision, deleted = false) != 1) {
-                    throw PlaylistException(PlaylistIssue.CONFLICT)
+    ): PlaylistCommit {
+        val caller = currentCoroutineContext()
+        val callerJob = checkNotNull(caller[Job])
+        checkStagingActive(participant)
+        return withContext(NonCancellable) {
+            val commit = database.withPreservedTransaction {
+                replay(request, fingerprint, participant)?.let { return@withPreservedTransaction it }
+                verifyExpectedHead(request, plan.old)
+                verifyTransactionFences(request)
+                if (dao.generation(staged.generationId) != staged.copy(state = "SEALED", memberCount = counts.count)) {
+                    throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
+                }
+                val meta = requireMeta()
+                val nextGlobal = increment(meta.revision)
+                val old = plan.old
+                if (!plan.shareData) {
+                    // 只恢复原调用者Job，保留当前Room限域连接及备份屏障；登记仍未对外提交。
+                    withContext(callerJob) {
+                        // 观察者覆盖整次登记及生成DAO替换的Job，至Room任务实际退出。
+                        withRoomCallerCancellation {
+                            checkStagingActive(participant)
+                            registerCueInputs(staged.dataGenerationId)
+                            checkStagingActive(participant)
+                        }
+                    }
+                }
+                caller.ensureActive()
+                participant?.claimCommit()
+                if (dao.publish(staged.generationId, nextGlobal) != 1) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
+                if (old == null) {
+                    dao.insertHead(PlaylistHeadEntity(request.playlistId, staged.generationId, staged.revision, meta.nextPlaylistSequence))
+                } else {
+                    if (dao.closeGeneration(old.generationId, nextGlobal - 1L) != 1) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
+                    if (dao.publishHead(request.playlistId, old.revision, old.generationId,
+                            staged.generationId, staged.revision, deleted = false) != 1) {
+                        throw PlaylistException(PlaylistIssue.CONFLICT)
+                    }
+                }
+                val nextSequence = if (old == null) increment(meta.nextPlaylistSequence) else meta.nextPlaylistSequence
+                if (dao.updateMeta(meta.copy(revision = nextGlobal, nextPlaylistSequence = nextSequence)) != 1) {
+                    throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
+                }
+                val sameName = dao.sameNameCount(plan.nameKey, request.playlistId)
+                val receipt = PlaylistReceiptEntity(request.operationId, request.playlistId, fingerprint, staged.revision,
+                    plan.result.name, counts.added, counts.removed, counts.duplicates, sameName)
+                dao.insertReceipt(receipt)
+                receipt.model(currentSnapshot(request.playlistId), wasReplay = false).also {
+                    participant?.recordCommit(it)
                 }
             }
-            val nextSequence = if (old == null) increment(meta.nextPlaylistSequence) else meta.nextPlaylistSequence
-            if (dao.updateMeta(meta.copy(revision = nextGlobal, nextPlaylistSequence = nextSequence)) != 1) {
-                throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
-            }
-            val sameName = dao.sameNameCount(plan.nameKey, request.playlistId)
-            val receipt = PlaylistReceiptEntity(request.operationId, request.playlistId, fingerprint, staged.revision,
-                plan.result.name, counts.added, counts.removed, counts.duplicates, sameName)
-            dao.insertReceipt(receipt)
-            receipt.model(currentSnapshot(request.playlistId), wasReplay = false).also {
-                participant?.recordCommit(it)
-            }
+            // 事务返回才代表提交成功；历史receipt重放不能认领本次staging。
+            if (!commit.wasReplay) onAccepted()
+            commit
         }
-        // 事务返回才代表提交成功；历史receipt重放不能认领本次staging。
-        if (!commit.wasReplay) onAccepted()
-        commit
+    }
+
+    /** 提示登记与歌单共用未提交writer；登记取消回滚两域，最终发布沿用同一事务。 */
+    private suspend fun registerCueInputs(generationId: String) {
+        val present = database.useWriterConnection { writer -> writer.usePrepared(
+            "SELECT EXISTS(SELECT 1 FROM playlist_members WHERE generationId=? AND cueReference IS NOT NULL)",
+        ) { statement ->
+            statement.bindText(1, generationId)
+            if (!statement.step()) throw PlaylistException(PlaylistIssue.RECOVERY_REQUIRED)
+            statement.getLong(0) == 1L
+        } }
+        if (present) (cueInputRegistrar ?: throw PlaylistException(PlaylistIssue.SOURCE_UNAVAILABLE))(generationId)
     }
 
     private suspend fun acceptUnchanged(

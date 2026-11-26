@@ -29,7 +29,7 @@ object CueParser {
     /**
      * Borrowed stream: caller owns closing and the existing LocalProviderIo physical channel.
      * Call off Main; this function creates no dispatcher/executor and never retries another encoding.
-     * GB18030 is available only through the explicit encoding argument after a user-directed retry.
+     * 只有显式选择编码并重试时才使用 GB18030。
      */
     fun read(
         input: InputStream,

@@ -315,26 +315,30 @@ internal class CompanionTransferClient(
     }
 
     suspend fun retryRetirement() {
+        val previous: Deferred<Unit>?
         val physical = synchronized(lock) {
             if (retryingRetirement || stopping?.isCompleted == false) throw TransferException(TransferIssue.BUSY)
             if (mutableState.value.phase !in setOf(CompanionConnectionPhase.RECOVERY_REQUIRED, CompanionConnectionPhase.OFF)) throw TransferException(TransferIssue.BUSY)
             retryingRetirement = true
-            val owner = admitted
-            retirementWork?.takeIf { !it.isCompleted || !it.isCancelled } ?: closeScope.async(
-                NonCancellable, start = CoroutineStart.LAZY,
-            ) {
-                // 旧业务即使仍阻塞也能触达真实关闭；等待取消不销毁这个物理所有者。
-                factory.retryRetirement()
-                owner?.complete?.await()
-                // open 的迟到结果可能在第一次工厂快照之后才登记。
-                factory.retryRetirement()
-                val retained = synchronized(lock) { wire }
-                if (retained?.retired == false || factory.retirementRequired) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
-            }.also { retirementWork = it }
+            previous = retirementWork?.takeIf { !it.isCompleted || !it.isCancelled }
+            previous ?: newRetirementWork(admitted).also { retirementWork = it }
         }
         physical.start()
         try {
-            withTimeout(retirementWaitMs) { physical.await() }
+            withTimeout(retirementWaitMs) {
+                try { physical.await() }
+                catch (error: TransferException) {
+                    if (previous !== physical || error.issue != TransferIssue.RECOVERY_REQUIRED) throw error
+                    // 本次明确重试可能接住旧等待的迟到失败；先等旧 owner 退出，再用同一预算确认。
+                    physical.join()
+                    val confirmation = synchronized(lock) {
+                        if (!retryingRetirement || retirementWork !== physical || !physical.isCompleted) throw error
+                        newRetirementWork(admitted).also { retirementWork = it }
+                    }
+                    confirmation.start()
+                    confirmation.await()
+                }
+            }
             synchronized(lock) {
                 if (admitted != null || wire?.retired == false || factory.retirementRequired) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
                 wire = null
@@ -349,6 +353,18 @@ internal class CompanionTransferClient(
             synchronized(lock) { publish(CompanionConnectionPhase.RECOVERY_REQUIRED, pending?.target, pending?.sessionId, issue = TransferIssue.RECOVERY_REQUIRED) }
             throw error
         } finally { synchronized(lock) { retryingRetirement = false } }
+    }
+
+    private fun newRetirementWork(owner: Admission?): Deferred<Unit> = closeScope.async(
+        NonCancellable, start = CoroutineStart.LAZY,
+    ) {
+        // 旧业务即使仍阻塞也能触达真实关闭；等待取消不销毁这个物理所有者。
+        factory.retryRetirement()
+        owner?.complete?.await()
+        // open 的迟到结果可能在第一次工厂快照之后才登记。
+        factory.retryRetirement()
+        val retained = synchronized(lock) { wire }
+        if (retained?.retired == false || factory.retirementRequired) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
     }
 
     private fun sessionDeadline(connection: CompanionWireConnection, selected: Pending): Long {

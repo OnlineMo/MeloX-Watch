@@ -81,7 +81,7 @@ class BackupViewModel(
             operation?.cancel()
             retirePreviews()
             mutableState.update { it.copy(progress = null, effectsAcknowledged = false,
-                fontLicenseAcknowledged = false, allowDifferentContent = false, cancellable = false,
+                fontLicenseAcknowledged = false, allowDifferentContent = false, allowCueDifferences = false, cancellable = false,
                 cancelling = operation != null) }
             return
         }
@@ -109,7 +109,7 @@ class BackupViewModel(
         draftRevision++
         mutableState.update { it.copy(page = BackupUiPage.HOME, hasRestoreInput = false,
             privacyAcknowledged = false, effectsAcknowledged = false, fontLicenseAcknowledged = false,
-            issue = null, cancelled = false, selectedMissing = null, allowDifferentContent = false) }
+            issue = null, cancelled = false, selectedMissing = null, cueRelinkTrackId = null, allowDifferentContent = false, allowCueDifferences = false) }
     }
 
     private fun open(page: BackupUiPage) {
@@ -121,7 +121,7 @@ class BackupViewModel(
         mutableState.update { it.copy(page = page, hasRestoreInput = false, issue = null,
             pickerUnavailable = false, cancelled = false, exportReceipt = null, restoreReceipt = null,
             privacyAcknowledged = false, effectsAcknowledged = false, fontLicenseAcknowledged = false,
-            selectedMissing = null, allowDifferentContent = false) }
+            selectedMissing = null, cueRelinkTrackId = null, allowDifferentContent = false, allowCueDifferences = false) }
     }
 
     fun setScope(scope: BackupScope, selected: Boolean) {
@@ -153,6 +153,10 @@ class BackupViewModel(
     fun acknowledgeDifferentContent(value: Boolean) {
         if (canAct()) mutableState.update { it.copy(allowDifferentContent = value) }
     }
+    fun acknowledgeCueDifferences(value: Boolean) {
+        if (canAct()) mutableState.update { it.copy(allowCueDifferences = value) }
+    }
+
 
     /** 只容许一个外部选择器；退休结果仍占回执槽，不能套用给后来的一次选择。 */
     fun beginDestinationPicker(): Boolean {
@@ -205,7 +209,7 @@ class BackupViewModel(
         if (target != null) {
             queuedTarget = null
             if (!target.request.retired && target.request.draftRevision == draftRevision) {
-                previewRelinkTarget(target.request.missingTrackId, target.track)
+                previewRelinkTarget(target.request.missingTrackId, target.track, target.preferRegisteredNative)
             }
             return
         }
@@ -270,7 +274,7 @@ class BackupViewModel(
 
     fun showMissingFiles() {
         if (!canAct()) return
-        mutableState.update { it.copy(page = BackupUiPage.MISSING_FILES, selectedMissing = null,
+        mutableState.update { it.copy(page = BackupUiPage.MISSING_FILES, selectedMissing = null, cueRelinkTrackId = null,
             missingFiles = emptyList(), missingPageLoaded = false, missingPageAfter = null, nextMissingPage = null, issue = null) }
         queuedMissingPage = MissingPageRequest(null)
         retirePreviews()
@@ -285,7 +289,7 @@ class BackupViewModel(
             val page = coordinator.missingRelinks(after = after, limit = 100)
             if (isCurrent(expected)) mutableState.update { it.copy(page = BackupUiPage.MISSING_FILES,
                 missingFiles = page.items.toList(), missingPageLoaded = true, missingPageAfter = after, nextMissingPage = page.next,
-                selectedMissing = null, relinkPreview = null, allowDifferentContent = false) }
+                selectedMissing = null, cueRelinkTrackId = null, relinkPreview = null, allowDifferentContent = false, allowCueDifferences = false) }
         }
     }
 
@@ -293,53 +297,56 @@ class BackupViewModel(
         if (!canAct() || mutableState.value.missingFiles.none { it.hintId == file.hintId && it.trackId == file.trackId }) return
         draftRevision++
         mutableState.update { it.copy(page = BackupUiPage.RELINK, selectedMissing = file,
-            relinkPreview = null, relinkReceipt = null, allowDifferentContent = false, issue = null) }
+            relinkPreview = null, relinkReceipt = null, allowDifferentContent = false, allowCueDifferences = false,
+            cueRelinkTrackId = file.trackId.takeIf { file.isCue }, issue = null) }
     }
 
     /** 目标仅来自已授权曲库；Activity 保持同一流程 owner，窗口隐藏时不做 I/O。 */
     fun beginRelinkTargetRequest(): BackupRelinkTargetRequest? {
         val missing = mutableState.value.selectedMissing ?: return null
         if (!canAct() || targetRequest != null) return null
-        val request = BackupRelinkTargetRequest(missing.trackId, missing.hintId, draftRevision)
+        val request = BackupRelinkTargetRequest(missing.trackId, missing.hintId, draftRevision, missing.isCue)
         targetRequest = request
         mutableState.update { it.copy(targetPickerPending = true) }
         return request
     }
 
-    fun relinkTargetPicked(request: BackupRelinkTargetRequest, target: TrackKey?) {
+    fun relinkTargetPicked(request: BackupRelinkTargetRequest, target: TrackKey?, preferRegisteredNative: Boolean = false) {
         if (targetRequest !== request) return
         targetRequest = null
         mutableState.update { it.copy(targetPickerPending = false) }
         val missing = mutableState.value.selectedMissing ?: return
         if (target == null || request.retired || request.draftRevision != draftRevision || !pageSelected ||
             missing.trackId != request.missingTrackId || missing.hintId != request.hintId) return
-        queuedTarget = RelinkTarget(request, target)
+        queuedTarget = RelinkTarget(request, target, preferRegisteredNative && request.cueTarget)
         resumeQueuedPick()
     }
 
-    private fun previewRelinkTarget(missingTrackId: String, target: TrackKey) {
+    private fun previewRelinkTarget(missingTrackId: String, target: TrackKey, preferRegisteredNative: Boolean) {
         launchOperation { expected ->
             mutableState.value.relinkPreview?.token?.let { coordinator.discardRelinkPreview(it) }
-            mutableState.update { it.copy(relinkPreview = null, allowDifferentContent = false) }
-            val preview = coordinator.previewRelink(missingTrackId, target)
+            mutableState.update { it.copy(relinkPreview = null, allowDifferentContent = false, allowCueDifferences = false) }
+            val preview = if (mutableState.value.cueRelinkTrackId == missingTrackId)
+                coordinator.previewCueRelink(missingTrackId, target, preferRegisteredNative) else coordinator.previewRelink(missingTrackId, target)
             if (!isCurrent(expected)) {
                 withContext(NonCancellable) { coordinator.discardRelinkPreview(preview.token) }
                 return@launchOperation
             }
-            mutableState.update { it.copy(relinkPreview = preview, allowDifferentContent = false) }
+            mutableState.update { it.copy(relinkPreview = preview, allowDifferentContent = false, allowCueDifferences = false) }
         }
     }
 
     fun confirmRelink() {
         val current = mutableState.value
         val preview = current.relinkPreview ?: return
-        if (!canAct() || (preview.match != BackupRelinkMatch.VERIFIED_MATCH && !current.allowDifferentContent)) return
-        mutableState.update { it.copy(allowDifferentContent = false) }
+        if (!canAct() || (preview.match != BackupRelinkMatch.VERIFIED_MATCH && !current.allowDifferentContent) ||
+            preview.cueDifferences?.requiresExplicitConfirmation == true && !current.allowCueDifferences) return
+        mutableState.update { it.copy(allowDifferentContent = false, allowCueDifferences = false) }
         launchOperation { expected ->
-            val receipt = coordinator.confirmRelink(preview.token, current.allowDifferentContent)
+            val receipt = coordinator.confirmRelink(preview.token, current.allowDifferentContent, current.allowCueDifferences)
             if (isCurrent(expected)) {
-                mutableState.update { it.copy(page = BackupUiPage.MISSING_FILES, selectedMissing = null,
-                    relinkPreview = null, relinkReceipt = receipt, allowDifferentContent = false) }
+                mutableState.update { it.copy(page = BackupUiPage.MISSING_FILES, selectedMissing = null, cueRelinkTrackId = null,
+                    relinkPreview = null, relinkReceipt = receipt, allowDifferentContent = false, allowCueDifferences = false) }
                 val page = coordinator.missingRelinks(mutableState.value.missingPageAfter, 100)
                 if (isCurrent(expected)) mutableState.update { it.copy(missingFiles = page.items.toList(), missingPageLoaded = true, nextMissingPage = page.next) }
             }
@@ -397,7 +404,7 @@ class BackupViewModel(
         val restoreToken = current.restorePreview?.token
         val relinkToken = current.relinkPreview?.token
         mutableState.update { it.copy(restorePreview = null, relinkPreview = null,
-            effectsAcknowledged = false, fontLicenseAcknowledged = false, allowDifferentContent = false) }
+            effectsAcknowledged = false, fontLicenseAcknowledged = false, allowDifferentContent = false, allowCueDifferences = false) }
         if (restoreToken == null && relinkToken == null) return
         check(retirement == null)
         val retiring = PreviewRetirement(restoreToken, relinkToken, operation)
@@ -457,7 +464,7 @@ class BackupViewModel(
 
     private enum class PickerKind { INPUT, DESTINATION }
     private class PreviewRetirement(val restoreToken: String?, val relinkToken: String?, val previous: Job?)
-    private class RelinkTarget(val request: BackupRelinkTargetRequest, val track: TrackKey)
+    private class RelinkTarget(val request: BackupRelinkTargetRequest, val track: TrackKey, val preferRegisteredNative: Boolean)
     private class MissingPageRequest(val after: String?)
     private class Picker(val kind: PickerKind, val revision: Long, val scopes: Set<BackupScope>, val mode: BackupMergeMode) {
         var retired = false

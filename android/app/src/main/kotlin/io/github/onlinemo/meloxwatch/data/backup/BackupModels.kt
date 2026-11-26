@@ -10,7 +10,7 @@ import io.github.onlinemo.meloxwatch.data.imports.ImportLimits
 object BackupLimits {
     const val FORMAT_VERSION = 1
     const val LOGICAL_VERSION = 1
-    const val DATABASE_VERSION = 7
+    const val DATABASE_VERSION = 8
     const val LOGICAL_ARCHIVE_BYTES = 100L * 1024 * 1024
     const val EXPANDED_LOGICAL_BYTES = 200L * 1024 * 1024
     const val CHUNK_BYTES = 2 * 1024 * 1024
@@ -172,7 +172,7 @@ sealed interface BackupStartupState {
     data class Unavailable(val issue: BackupIssue) : BackupStartupState
 }
 
-class BackupMissingFile internal constructor(val hintId: String, val trackId: String, val title: String) {
+class BackupMissingFile internal constructor(val hintId: String, val trackId: String, val title: String, val isCue: Boolean = false) {
     override fun toString(): String = "BackupMissingFile"
 }
 class BackupRelinkPage internal constructor(val items: List<BackupMissingFile>, val next: String?) {
@@ -180,7 +180,11 @@ class BackupRelinkPage internal constructor(val items: List<BackupMissingFile>, 
 }
 enum class BackupRelinkMatch { VERIFIED_MATCH, DIFFERENT_CONTENT, UNKNOWN_CONTENT }
 class BackupRelinkPreview internal constructor(val token: String, val missingTrackId: String, val target: TrackKey,
-    val originalTitle: String, val targetTitle: String, val match: BackupRelinkMatch) {
+    val originalTitle: String, val targetTitle: String, val match: BackupRelinkMatch,
+    val cueDifferences: io.github.onlinemo.meloxwatch.data.cue.CueAdoptionDifferences? = null,
+    val cueOriginalMembers: Int = 0, val cueTargetMembers: Int = 0, val affectedQueueEntries: Long = 0L,
+    val affectedPlaylistEntries: Long = 0L, cueMembers: List<CueRelinkMemberPreview> = emptyList()) {
+    val cueMembers: List<CueRelinkMemberPreview> = Collections.unmodifiableList(cueMembers.toList())
     override fun toString(): String = "BackupRelinkPreview"
 }
 data class BackupRelinkReceipt(val trackId: String, val repairedQueueEntries: Long)

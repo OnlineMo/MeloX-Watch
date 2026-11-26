@@ -57,7 +57,7 @@ class RoomLibraryMaterializationTest {
         fixture.database.withTestReaderSql {
             val version = checkNotNull(scalarText("SELECT sqlite_version()")).split('.').map { it.toInt() }
             assertTrue(version[0] > 3 || version[0] == 3 && version[1] >= 35)
-            assertEquals(7L, scalarLong("PRAGMA user_version"))
+            assertEquals(8L, scalarLong("PRAGMA user_version"))
         }
         val view = fixture.library.openView()
         try {

@@ -271,7 +271,7 @@ private fun LazyListScope.backupMissing(state: BackupUiState, actions: BackupUiA
     for (file in state.missingFiles) backupItem("missing:${file.hintId}", left, width) {
         WatchContentRow(enabled = state.canEdit, onClick = { actions.selectMissing(file) }) {
             WatchText(file.title.ifBlank { stringResource(R.string.backup_ui_untitled) }, primary = true)
-            WatchText(stringResource(R.string.backup_ui_choose_relink))
+            WatchText(stringResource(if (file.isCue) R.string.cue_relink_action else R.string.backup_ui_choose_relink))
         }
     }
     backupItem("missing-pagination", left, width) {
@@ -290,11 +290,20 @@ private fun LazyListScope.backupRelink(state: BackupUiState, actions: BackupUiAc
             WatchActionRow(stringResource(R.string.backup_ui_missing), enabled = state.canEdit, onClick = actions.showMissing)
         } else {
             WatchText(missing.title.ifBlank { stringResource(R.string.backup_ui_untitled) }, primary = true)
-            WatchText(stringResource(R.string.backup_ui_missing_explanation))
+            WatchText(stringResource(if (missing.isCue) R.string.cue_relink_pending else R.string.backup_ui_missing_explanation))
             WatchActionRow(stringResource(R.string.backup_ui_existing_target), enabled = state.canEdit,
                 onClick = actions.chooseExistingTarget)
             WatchActionRow(stringResource(R.string.backup_ui_sources), enabled = state.canEdit, onClick = actions.openSources)
         }
+    }
+    for (member in state.relinkPreview?.cueMembers.orEmpty()) backupItem("cue-member:${member.trackNumber}", left, width) {
+        WatchText(stringResource(R.string.cue_relink_member_title, member.trackNumber, member.targetTitle), primary = true)
+        member.originalTitle?.let { WatchText(stringResource(R.string.backup_ui_original_title, it)) }
+        member.originalStartFrame?.let { start -> WatchText(stringResource(R.string.cue_relink_old_bounds, start,
+            member.originalEndFrameExclusive?.toString() ?: stringResource(R.string.cue_relink_end_of_audio),
+            checkNotNull(member.originalEndUsExclusive))) }
+        WatchText(stringResource(R.string.cue_relink_new_bounds, member.targetStartFrame,
+            member.targetEndFrameExclusive?.toString() ?: stringResource(R.string.cue_relink_end_of_audio), member.targetEndUsExclusive))
     }
     state.relinkPreview?.let { preview -> backupItem("relink-confirm", left, width) {
         WatchText(stringResource(R.string.backup_ui_original_title, preview.originalTitle))
@@ -306,8 +315,22 @@ private fun LazyListScope.backupRelink(state: BackupUiState, actions: BackupUiAc
         }))
         if (preview.match != BackupRelinkMatch.VERIFIED_MATCH) WatchCheckRow(stringResource(R.string.backup_ui_different_ack),
             state.allowDifferentContent, enabled = state.canEdit, onChange = actions.allowDifferent)
+        preview.cueDifferences?.let { differences ->
+            WatchText(stringResource(R.string.cue_relink_group_counts, preview.cueOriginalMembers,
+                preview.cueTargetMembers, preview.affectedQueueEntries))
+            WatchText(stringResource(R.string.cue_relink_playlist_counts, preview.affectedPlaylistEntries))
+            if (differences.identityChanged) WatchText(stringResource(R.string.cue_relink_identity_change))
+            if (differences.cueContentChanged) WatchText(stringResource(R.string.cue_relink_cue_change))
+            if (differences.audioContentChanged > 0) WatchText(stringResource(R.string.cue_relink_audio_change, differences.audioContentChanged))
+            if (differences.unknownAudioContent > 0) WatchText(stringResource(R.string.cue_relink_audio_unknown, differences.unknownAudioContent))
+            if (differences.boundsChanged > 0) WatchText(stringResource(R.string.cue_relink_bounds_change, differences.boundsChanged))
+            if (differences.extraNativeTracks > 0) WatchText(stringResource(R.string.cue_relink_extra_members, differences.extraNativeTracks))
+            if (differences.requiresExplicitConfirmation) WatchCheckRow(stringResource(R.string.cue_relink_group_ack),
+                state.allowCueDifferences, enabled = state.canEdit, onChange = actions.allowCueDifferences)
+        }
         WatchActionRow(stringResource(R.string.backup_ui_confirm_relink), enabled = state.canEdit &&
-            (preview.match == BackupRelinkMatch.VERIFIED_MATCH || state.allowDifferentContent), primary = true,
+            (preview.match == BackupRelinkMatch.VERIFIED_MATCH || state.allowDifferentContent) &&
+            (preview.cueDifferences?.requiresExplicitConfirmation != true || state.allowCueDifferences), primary = true,
             onClick = actions.confirmRelink)
     } }
 }

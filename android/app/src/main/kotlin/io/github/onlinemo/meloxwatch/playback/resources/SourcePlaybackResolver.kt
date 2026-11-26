@@ -15,6 +15,7 @@ fun interface OnlinePlaybackResolver {
 /** Provider creation is lazy: resolving local content never constructs an account store or HTTP client. */
 class SourcePlaybackResolver(
     private val local: suspend (QueueEntry) -> QueueEntry,
+    private val resources: RuntimePlaybackResources? = null,
     private val online: suspend () -> OnlinePlaybackResolver,
 ) {
     suspend fun resolve(
@@ -25,7 +26,16 @@ class SourcePlaybackResolver(
     ): RuntimePlaybackResource {
         currentCoroutineContext().ensureActive()
         return when (entry.trackKey.providerId) {
-            TrackKey.LOCAL_PROVIDER -> RuntimePlaybackResource(local(entry))
+            TrackKey.LOCAL_PROVIDER -> {
+                val validated = local(entry)
+                if (validated.cueReference == null) RuntimePlaybackResource(validated)
+                else {
+                    if (validated.cueReference.isBound != true) throw QueuePlaybackException(QueuePlaybackFailure(
+                        QueuePlaybackIssue.SOURCE_CHANGED, entry.queueEntryId))
+                    (resources ?: throw QueuePlaybackException(QueuePlaybackFailure(
+                        QueuePlaybackIssue.SOURCE_UNSUPPORTED, entry.queueEntryId))).registerCue(validated)
+                }
+            }
             "netease" -> {
                 if (intent != PlaybackSourceIntent.ONLINE_ALLOWED) throw QueuePlaybackException(
                     QueuePlaybackFailure(QueuePlaybackIssue.LOCAL_ONLY_ONLINE_SKIPPED, entry.queueEntryId))

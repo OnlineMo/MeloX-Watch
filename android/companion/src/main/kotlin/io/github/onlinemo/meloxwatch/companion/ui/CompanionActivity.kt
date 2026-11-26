@@ -5,10 +5,12 @@ import android.os.Bundle
 import android.content.Intent
 import io.github.onlinemo.meloxwatch.companion.bluetoothlyrics.BluetoothLyricsReceiverActivity
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.initializer
@@ -45,7 +47,10 @@ class CompanionActivity : ComponentActivity() {
         })
         model = provider[CompanionViewModel::class.java]
         licenses = provider[CompanionLicensesViewModel::class.java]
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(CompanionInk.background.toArgb()),
+            navigationBarStyle = SystemBarStyle.dark(CompanionInk.background.toArgb()),
+        )
         setContent {
             val state by model.state.collectAsStateWithLifecycle()
             val licenseState by licenses.state.collectAsStateWithLifecycle()

@@ -232,7 +232,11 @@ def execute_stage(root, state, stage, before, legacy):
             environment.pop(name, None)
         if stage == 'test-debug':
             environment['CI_PACKAGE_DEBUG_BINDING'] = json.dumps(state['binding'], sort_keys=True, separators=(',', ':'), allow_nan=False)
-        legacy.run_gradle(legacy.gradle_command(tasks), cwd=Path(root) / 'android', env=environment,
+        command = legacy.gradle_command(tasks)
+        if stage == 'test-debug':
+            # Keep independent application scopes in one invocation; its failure still gates later stages.
+            command.append('--continue')
+        legacy.run_gradle(command, cwd=Path(root) / 'android', env=environment,
                           phase='package-' + stage, build_sha=state['binding']['build_sha'],
                           total_deadline=state['deadline_monotonic_seconds'],
                           overall_limit_seconds=state['overall_limit_seconds'])

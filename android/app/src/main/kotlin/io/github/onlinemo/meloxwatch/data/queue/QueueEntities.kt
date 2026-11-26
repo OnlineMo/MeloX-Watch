@@ -56,6 +56,8 @@ data class QueueGenerationEntity(
     indices = [
         Index(value = ["generationId", "originalOrder"], unique = true),
         Index(value = ["generationId", "playbackOrder"], unique = true),
+        Index(value = ["generationId", "providerId", "trackId", "queueEntryId"],
+            name = "index_queue_entries_generationId_providerId_trackId_queueEntryId"),
     ],
 )
 data class QueueEntryEntity(
@@ -74,6 +76,7 @@ data class QueueEntryEntity(
     val grantFlags: Int?,
     val access: String?,
     val contentRevision: Long?,
+    @ColumnInfo(defaultValue = "NULL") val cueReference: String? = null,
 )
 
 /** 两个 FK 也约束清理：不能删除活动代次或当前实例。 */

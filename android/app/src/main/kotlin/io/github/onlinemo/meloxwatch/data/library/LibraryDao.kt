@@ -9,6 +9,7 @@ import androidx.room.RawQuery
 import androidx.room.Update
 import androidx.room.Upsert
 import androidx.room.RoomRawQuery
+import io.github.onlinemo.meloxwatch.data.cue.CueDocumentEntity
 import kotlinx.coroutines.flow.Flow
 
 data class LibraryRowRecord(
@@ -50,6 +51,8 @@ interface LibraryDao {
     @Query("SELECT * FROM library_meta WHERE id = 1") fun observeMeta(): Flow<LibraryMetaEntity?>
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertMeta(value: LibraryMetaEntity): Long
     @Update suspend fun updateMeta(value: LibraryMetaEntity): Int
+    @Query("UPDATE library_meta SET revision = :nextRevision, nextAddedSequence = :nextSequence WHERE id = 1 AND revision = :expectedRevision")
+    suspend fun advanceCueHintMeta(expectedRevision: Long, nextRevision: Long, nextSequence: Long): Int
     @Query("SELECT * FROM local_sources WHERE sourceId = :id") suspend fun source(id: String): LibrarySourceEntity?
     @Query("SELECT * FROM local_sources WHERE (:after IS NULL OR sourceId > :after) ORDER BY sourceId LIMIT :limit") suspend fun sourcesPage(after: String?, limit: Int): List<LibrarySourceEntity>
     @Query("SELECT * FROM local_sources WHERE activeScanId IS NOT NULL AND (:after IS NULL OR sourceId > :after) ORDER BY sourceId LIMIT 100") suspend fun activeSourcesPage(after: String?): List<LibrarySourceEntity>
@@ -72,6 +75,14 @@ interface LibraryDao {
     @Query("SELECT EXISTS (SELECT 1 FROM local_track_locations WHERE locationId = :id AND validTo IS NULL LIMIT 1)") suspend fun hasLocationRelation(id: String): Boolean
     @Query("SELECT * FROM local_track_locations WHERE locationId = :id AND validTo IS NULL AND (:after IS NULL OR relationId > :after) ORDER BY relationId LIMIT :limit") suspend fun locationRelations(id: String, after: String?, limit: Int = LibraryLimits.PAGE_SIZE): List<LibraryTrackLocationEntity>
     @Query("SELECT * FROM local_track_versions WHERE trackId = :id AND validTo IS NULL") suspend fun currentTrack(id: String): LibraryTrackVersionEntity?
+    @Query("SELECT EXISTS (SELECT 1 FROM local_track_locations r JOIN local_track_versions t ON t.trackId = r.trackId AND t.validTo IS NULL WHERE r.locationId = :id AND r.validTo IS NULL AND t.cueReference IS NULL LIMIT 1)") suspend fun hasPhysicalLocationRelation(id: String): Boolean
+    @Query("SELECT DISTINCT t.* FROM local_track_versions t JOIN local_track_locations r ON r.trackId = t.trackId AND r.validTo IS NULL WHERE r.locationId = :id AND t.validTo IS NULL AND t.cueReference IS NULL AND t.member = 1 ORDER BY t.trackId LIMIT 2") suspend fun physicalTracks(id: String): List<LibraryTrackVersionEntity>
+    @Query("SELECT * FROM local_track_versions WHERE validTo IS NULL AND cueReference IS NOT NULL AND json_extract(cueReference, '$.identity.cueId') = :cueId ORDER BY trackId LIMIT 100") suspend fun currentCueTracks(cueId: String): List<LibraryTrackVersionEntity>
+    @Query("SELECT * FROM local_track_versions WHERE validTo IS NULL AND cueReference IS NOT NULL AND json_extract(cueReference, '$.identity.sourceId') = :sourceId AND json_extract(cueReference, '$.identity.cueId') = :cueId ORDER BY trackId LIMIT 100")
+    suspend fun currentLogicalCueTracks(sourceId: String, cueId: String): List<LibraryTrackVersionEntity>
+    @Query("SELECT * FROM local_track_locations WHERE trackId = :id AND validTo IS NULL ORDER BY relationId LIMIT 100") suspend fun trackRelations(id: String): List<LibraryTrackLocationEntity>
+    @Query("UPDATE local_track_locations SET validTo = :revision - 1 WHERE trackId = :id AND validTo IS NULL") suspend fun closeTrackRelations(id: String, revision: Long): Int
+    @Query("SELECT EXISTS (SELECT 1 FROM local_track_locations WHERE trackId = :trackId AND locationId = :locationId AND validTo IS NULL LIMIT 1)") suspend fun hasTrackLocationRelation(trackId: String, locationId: String): Boolean
     /** Only cached labels for a bounded page; this projection grants no access to the original file. */
     @Query("""
         SELECT providerId, trackId,
@@ -113,6 +124,9 @@ interface LibraryDao {
     @Update suspend fun updateSeen(value: LibrarySeenEntity)
     @Insert(onConflict = OnConflictStrategy.IGNORE) suspend fun insertFrontier(value: LibraryFrontierEntity): Long
     @Query("SELECT * FROM scan_frontier WHERE scanId = :id AND state = 'QUEUED' ORDER BY objectId LIMIT 1") suspend fun nextFrontier(id: String): LibraryFrontierEntity?
+    @Query("SELECT * FROM scan_frontier WHERE scanId = :id AND state = 'CUE_QUEUED' ORDER BY objectId LIMIT 1") suspend fun nextCueFrontier(id: String): LibraryFrontierEntity?
+    @Query("SELECT COUNT(*) FROM scan_frontier WHERE scanId = :id AND state IN ('QUEUED', 'RUNNING')") suspend fun pendingDirectories(id: String): Long
+    @Query("SELECT COUNT(*) FROM scan_frontier WHERE scanId = :id AND state IN ('CUE_RUNNING', 'CUE_VALIDATED')") suspend fun runningCueCount(id: String): Long
     @Query("SELECT * FROM scan_frontier WHERE scanId = :id AND objectId = :objectId") suspend fun frontier(id: String, objectId: String): LibraryFrontierEntity?
     @Update suspend fun updateFrontier(value: LibraryFrontierEntity)
     @Query("SELECT COUNT(*) FROM scan_frontier WHERE scanId = :id AND state != 'DONE'") suspend fun incompleteFrontier(id: String): Long
@@ -137,6 +151,8 @@ interface LibraryDao {
     @RawQuery suspend fun aliasRows(query: RoomRawQuery): List<LibraryAliasEntity>
     @RawQuery suspend fun text(query: RoomRawQuery): String?
     @RawQuery suspend fun trackKeys(query: RoomRawQuery): List<LibraryTrackKeyRecord>
+    @RawQuery suspend fun cuePathDocuments(query: RoomRawQuery): List<CueDocumentEntity>
+    @RawQuery suspend fun aliasRowsForCue(query: RoomRawQuery): List<LibraryAliasVersionEntity>
     @Query("SELECT * FROM import_operations WHERE operationId = :id") suspend fun importRecord(id: String): LibraryImportEntity?
     @Query("SELECT * FROM import_operations WHERE ownedSourceId = :sourceId AND phase = 'COMMITTED'") suspend fun ownedImport(sourceId: String): LibraryImportEntity?
     @Insert suspend fun insertImport(value: LibraryImportEntity)
@@ -150,7 +166,7 @@ interface LibraryDao {
     @Query("DELETE FROM local_track_locations WHERE relationId IN (SELECT p.relationId FROM local_track_locations p WHERE p.validTo IS NOT NULL AND NOT EXISTS (SELECT 1 FROM library_views v WHERE v.revision BETWEEN p.validFrom AND p.validTo) LIMIT 100)") suspend fun cleanRelations(): Int
     @Query("DELETE FROM scan_rules WHERE versionId IN (SELECT p.versionId FROM scan_rules p WHERE p.validTo IS NOT NULL AND NOT EXISTS (SELECT 1 FROM library_views v WHERE v.revision BETWEEN p.validFrom AND p.validTo) LIMIT 100)") suspend fun cleanRules(): Int
     @Query("DELETE FROM local_source_versions WHERE (sourceId, validFrom) IN (SELECT p.sourceId, p.validFrom FROM local_source_versions p WHERE p.validTo IS NOT NULL AND NOT EXISTS (SELECT 1 FROM library_views v WHERE v.revision BETWEEN p.validFrom AND p.validTo) LIMIT 100)") suspend fun cleanSourceVersions(): Int
-    @Query("DELETE FROM local_grants WHERE grantId IN (SELECT g.grantId FROM local_grants g WHERE NOT EXISTS (SELECT 1 FROM local_sources s WHERE s.grantId = g.grantId) AND NOT EXISTS (SELECT 1 FROM local_source_versions v WHERE v.grantId = g.grantId) LIMIT 100)") suspend fun cleanGrants(): Int
+    @Query("DELETE FROM local_grants WHERE grantId IN (SELECT g.grantId FROM local_grants g WHERE NOT EXISTS (SELECT 1 FROM local_sources s WHERE s.grantId = g.grantId) AND NOT EXISTS (SELECT 1 FROM local_source_versions v WHERE v.grantId = g.grantId) AND NOT EXISTS (SELECT 1 FROM local_cue_group_versions c WHERE c.grantId = g.grantId) LIMIT 100)") suspend fun cleanGrants(): Int
     @Query("SELECT scanId FROM scan_generations p WHERE NOT EXISTS (SELECT 1 FROM local_sources s WHERE s.activeScanId = p.scanId OR s.latestScanId = p.scanId OR s.absenceScanId = p.scanId) AND NOT EXISTS (SELECT 1 FROM local_source_versions v WHERE v.absenceScanId = p.scanId) ORDER BY scanId LIMIT 1") suspend fun obsoleteScanId(): String?
     @Query("DELETE FROM scan_seen WHERE scanId = :id AND objectId IN (SELECT objectId FROM scan_seen WHERE scanId = :id LIMIT 100)") suspend fun cleanSeen(id: String): Int
     @Query("DELETE FROM scan_frontier WHERE scanId = :id AND objectId IN (SELECT objectId FROM scan_frontier WHERE scanId = :id LIMIT 100)") suspend fun cleanFrontier(id: String): Int

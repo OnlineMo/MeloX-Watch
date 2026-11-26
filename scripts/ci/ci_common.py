@@ -9,6 +9,7 @@ import subprocess
 ROOT = Path(__file__).resolve().parents[2]
 REPOSITORY = 'OnlineMo/MeloX-Watch'
 OWNER = 'OnlineMo'
+OWNER_ID = 143324986
 OWNER_EMAIL = '143324986+OnlineMo@users.noreply.github.com'
 APPLICATION_ID = 'io.github.onlinemo.meloxwatch'
 PHONE_APPLICATION_ID = APPLICATION_ID + '.companion'
@@ -77,8 +78,10 @@ def trusted_context(workflow, environment=None):
     """校验受信任入口；实际 job 权限和 runner 隔离仍由受控工作流保证。"""
     environment = os.environ if environment is None else environment
     cloud_only(environment)
-    for key, expected in {'GITHUB_REPOSITORY': REPOSITORY, 'GITHUB_ACTOR': OWNER,
-                          'GITHUB_TRIGGERING_ACTOR': OWNER, 'GITHUB_WORKFLOW': workflow}.items():
+    for key, expected in {'GITHUB_REPOSITORY': REPOSITORY,
+                           'GITHUB_REPOSITORY_OWNER': OWNER, 'GITHUB_REPOSITORY_OWNER_ID': str(OWNER_ID),
+                           'GITHUB_ACTOR': OWNER, 'GITHUB_ACTOR_ID': str(OWNER_ID),
+                           'GITHUB_TRIGGERING_ACTOR': OWNER, 'GITHUB_WORKFLOW': workflow}.items():
         require(environment.get(key) == expected, 'Untrusted workflow context: ' + key)
     if workflow == 'Cloud build':
         require(environment.get('GITHUB_EVENT_NAME') in ('push', 'workflow_dispatch'), 'PRs cannot use stable signing')

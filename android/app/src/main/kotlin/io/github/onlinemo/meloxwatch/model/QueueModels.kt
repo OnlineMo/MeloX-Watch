@@ -45,6 +45,7 @@ data class QueueEntry(
     val durationMs: Long? = null,
     val location: LocalLocationReference? = null,
     val accountId: String? = null,
+    val cueReference: LocalCueReference? = null,
 ) {
     init {
         require(queueEntryId.isNotBlank())
@@ -52,6 +53,7 @@ data class QueueEntry(
         require(durationMs == null || durationMs >= 0L)
         require(accountId == null || accountId.isNotBlank())
         require(trackKey.providerId != TrackKey.LOCAL_PROVIDER || accountId == null)
+        cueReference?.requireEntry(trackKey, location)
     }
 }
 

@@ -5,6 +5,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,7 +22,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -30,10 +31,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
@@ -42,10 +44,10 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading as semanticHeading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -55,32 +57,36 @@ import androidx.compose.ui.window.Dialog
 import io.github.onlinemo.meloxwatch.companion.R
 import io.github.onlinemo.meloxwatch.data.transfer.TransferIssue
 
-internal object CompanionInk {
-    val background = Color.Black
-    val surface = Color(0xff121214)
-    val raised = Color(0xff1c1c1f)
-    val primary = Color.White
-    val secondary = Color(0xffc7c7cc)
-    val accent = Color(0xffff375f)
-    val error = Color(0xffffb4ab)
-    val border = Color(0xff545458)
-}
-
 @Composable
-internal fun MeloXText(text: String, modifier: Modifier = Modifier, secondary: Boolean = false, heading: Boolean = false, mono: Boolean = false) {
-    BasicText(text, modifier, style = TextStyle(
-        color = if (secondary) CompanionInk.secondary else CompanionInk.primary,
-        fontSize = if (heading) 26.sp else 17.sp,
-        lineHeight = if (heading) 32.sp else 24.sp,
-        fontWeight = if (heading) FontWeight.Bold else FontWeight.Normal,
-        fontFamily = if (mono) FontFamily.Monospace else FontFamily.SansSerif,
-    ))
+internal fun MeloXText(
+    text: String,
+    modifier: Modifier = Modifier,
+    secondary: Boolean = false,
+    heading: Boolean = false,
+    mono: Boolean = false,
+) {
+    val typography = when {
+        heading -> CompanionTypography.title
+        secondary -> CompanionTypography.secondary
+        else -> CompanionTypography.body
+    }
+    BasicText(
+        text,
+        modifier.then(if (heading) Modifier.semantics { semanticHeading() } else Modifier),
+        style = typography.copy(
+            color = if (secondary) CompanionInk.secondary else CompanionInk.primary,
+            fontFamily = if (mono) FontFamily.Monospace else FontFamily.SansSerif,
+        ),
+    )
 }
 
 @Composable
 internal fun MeloXCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Column(modifier.fillMaxWidth().background(CompanionInk.surface, RoundedCornerShape(18.dp)).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp), content = content)
+    Column(
+        modifier.fillMaxWidth().background(CompanionInk.surface, CompanionShape.card).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        content = content,
+    )
 }
 
 @Composable
@@ -88,14 +94,30 @@ internal fun MeloXAction(
     label: String, onClick: () -> Unit, modifier: Modifier = Modifier,
     enabled: Boolean = true, prominent: Boolean = false,
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
     var focused by remember { mutableStateOf(false) }
-    Box(modifier.fillMaxWidth().heightIn(min = 48.dp)
-        .onFocusChanged { focused = it.isFocused }
-        .border(if (focused) 2.dp else 1.dp, if (focused || prominent && enabled) CompanionInk.accent else CompanionInk.border, RoundedCornerShape(12.dp))
-        .background(CompanionInk.raised, RoundedCornerShape(12.dp))
-        .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-        .padding(horizontal = 14.dp, vertical = 12.dp)) {
-        MeloXText(label, secondary = !enabled)
+    val outline = when {
+        focused -> CompanionInk.focus
+        prominent && enabled -> CompanionInk.accent
+        else -> CompanionInk.border
+    }
+    // 按压只改变中性表面；亮红保留给符号和边界，文字对比度不随强调色下降。
+    Box(
+        modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .background(if (pressed && enabled) CompanionInk.pressed else CompanionInk.raised, CompanionShape.control)
+            .border(if (focused) 2.dp else 1.dp, outline, CompanionShape.control)
+            .clickable(interactionSource = interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        BasicText(
+            label,
+            style = CompanionTypography.action.copy(
+                color = if (enabled) CompanionInk.primary else CompanionInk.secondary,
+                fontFamily = FontFamily.SansSerif,
+            ),
+        )
     }
 }
 
@@ -107,25 +129,42 @@ internal fun MeloXField(
     var focused by remember { mutableStateOf(false) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         MeloXText(label, secondary = true)
-        BasicTextField(value, { next -> if (next.length <= maximum) onValueChange(next) },
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).onFocusChanged { focused = it.isFocused }
+        BasicTextField(
+            value,
+            { next -> if (next.length <= maximum) onValueChange(next) },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                .onFocusChanged { focused = it.isFocused }
                 .semantics { contentDescription = label }
-                .border(if (focused) 2.dp else 1.dp, if (focused) CompanionInk.accent else CompanionInk.border, RoundedCornerShape(10.dp))
-                .background(CompanionInk.background, RoundedCornerShape(10.dp)).padding(12.dp),
-            enabled = enabled, singleLine = !multiline,
+                .border(if (focused) 2.dp else 1.dp, if (focused) CompanionInk.focus else CompanionInk.border, CompanionShape.field)
+                .background(CompanionInk.background, CompanionShape.field)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            enabled = enabled,
+            singleLine = !multiline,
             textStyle = TextStyle(color = CompanionInk.primary, fontSize = 18.sp, lineHeight = 26.sp, fontFamily = FontFamily.SansSerif),
             keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = false),
             visualTransformation = if (secret) PasswordVisualTransformation() else VisualTransformation.None,
+            cursorBrush = SolidColor(CompanionInk.focus),
         )
     }
 }
 
 @Composable
 internal fun MeloXToggle(label: String, selected: Boolean, onChange: (Boolean) -> Unit, enabled: Boolean = true) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(selected, enabled = enabled, role = Role.Checkbox, onValueChange = onChange).padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .background(if (pressed && enabled) CompanionInk.pressed else CompanionInk.surface, CompanionShape.control)
+            .then(if (focused) Modifier.border(2.dp, CompanionInk.focus, CompanionShape.control) else Modifier)
+            .toggleable(selected, interactionSource = interaction, indication = null, enabled = enabled, role = Role.Checkbox, onValueChange = onChange)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Canvas(Modifier.size(22.dp)) {
-            drawRoundRect(CompanionInk.secondary, style = Stroke(width = 2.dp.toPx()))
+            drawRoundRect(CompanionInk.border, style = Stroke(width = 2.dp.toPx()))
             if (selected) {
                 drawLine(CompanionInk.primary, Offset(size.width * .2f, size.height * .5f), Offset(size.width * .44f, size.height * .75f), 2.dp.toPx(), StrokeCap.Round)
                 drawLine(CompanionInk.primary, Offset(size.width * .44f, size.height * .75f), Offset(size.width * .83f, size.height * .24f), 2.dp.toPx(), StrokeCap.Round)
@@ -137,10 +176,21 @@ internal fun MeloXToggle(label: String, selected: Boolean, onChange: (Boolean) -
 
 @Composable
 internal fun MeloXChoice(label: String, selected: Boolean, onClick: () -> Unit, enabled: Boolean = true) {
-    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(selected, enabled = enabled, role = Role.RadioButton, onClick = onClick).padding(vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    var focused by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp)
+            .onFocusChanged { focused = it.isFocused }
+            .background(if (pressed && enabled) CompanionInk.pressed else CompanionInk.surface, CompanionShape.control)
+            .then(if (focused) Modifier.border(2.dp, CompanionInk.focus, CompanionShape.control) else Modifier)
+            .selectable(selected, interactionSource = interaction, indication = null, enabled = enabled, role = Role.RadioButton, onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         Canvas(Modifier.size(22.dp)) {
-            drawCircle(CompanionInk.secondary, style = Stroke(width = 2.dp.toPx()))
+            drawCircle(CompanionInk.border, style = Stroke(width = 2.dp.toPx()))
             if (selected) drawCircle(CompanionInk.primary, radius = size.minDimension * .22f)
         }
         MeloXText(label, secondary = !enabled)
@@ -148,16 +198,21 @@ internal fun MeloXChoice(label: String, selected: Boolean, onClick: () -> Unit, 
 }
 
 @Composable
-internal fun MeloXDivider() { Spacer(Modifier.fillMaxWidth().height(1.dp).background(CompanionInk.border)) }
+internal fun MeloXDivider() {
+    Spacer(Modifier.fillMaxWidth().height(1.dp).background(CompanionInk.border))
+}
 
 @Composable
 internal fun MeloXConfirmation(title: String, message: String, confirm: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     val windowHeight = LocalWindowInfo.current.containerSize.height
     val maximumHeight = with(LocalDensity.current) { windowHeight.toDp() * .85f }
     Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maximumHeight)
-            .background(CompanionInk.surface, RoundedCornerShape(20.dp)).verticalScroll(rememberScrollState()).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Column(
+            Modifier.widthIn(max = 560.dp).fillMaxWidth().heightIn(max = maximumHeight)
+                .background(CompanionInk.surface, CompanionShape.card)
+                .verticalScroll(rememberScrollState()).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
             MeloXText(title, heading = true)
             MeloXText(message)
             MeloXAction(confirm, onConfirm, prominent = true)

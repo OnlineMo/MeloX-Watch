@@ -132,31 +132,46 @@ internal class OnlineResourceState(
 class RuntimePlaybackResource internal constructor(
     val entry: QueueEntry,
     internal val online: OnlineResourceState? = null,
+    internal val cue: CueRuntimeResourceState? = null,
 ) : AutoCloseable {
     private val closed = AtomicBoolean()
     val isOnline: Boolean get() = online != null
     val status: PlaybackResourceStatus? get() = online?.status
     val budget: PlaybackResolutionBudget? get() = online?.budget
-    val mediaUri: Uri get() = if (online == null) (requireNotNull(entry.location).uri).toUri()
-        else Uri.Builder().scheme(RuntimePlaybackResources.SCHEME).authority("resource").appendPath(online.key).build()
+    val mediaUri: Uri get() = when {
+        cue != null -> Uri.Builder().scheme(RuntimePlaybackResources.CUE_SCHEME).authority("resource").appendPath(cue.key).build()
+        online != null -> Uri.Builder().scheme(RuntimePlaybackResources.SCHEME).authority("resource").appendPath(online.key).build()
+        else -> (requireNotNull(entry.location).uri).toUri()
+    }
 
     fun retain(forEntry: QueueEntry = entry): RuntimePlaybackResource {
         if (closed.get() || forEntry.queueEntryId != entry.queueEntryId || forEntry.trackKey != entry.trackKey ||
-            forEntry.accountId != entry.accountId || forEntry.location != entry.location) {
+            forEntry.accountId != entry.accountId || forEntry.location != entry.location || forEntry.cueReference != entry.cueReference) {
             throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, entry.queueEntryId))
         }
-        try { if (online != null) online.owner.retain(online, newAcquisition = false) }
+        try {
+            if (online != null) online.owner.retain(online, newAcquisition = false)
+            if (cue != null) cue.owner.retainCue(cue)
+        }
         catch (error: MediaTransportException) { throw QueuePlaybackException(QueuePlaybackFailure(error.issue, entry.queueEntryId)) }
-        return RuntimePlaybackResource(forEntry, online)
+        return RuntimePlaybackResource(forEntry, online, cue)
     }
 
     fun checkCurrent() {
         if (closed.get()) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.SOURCE_CHANGED, entry.queueEntryId))
-        try { if (online != null) online.owner.checkPrepared(online) }
+        try {
+            if (online != null) online.owner.checkPrepared(online)
+            if (cue != null) cue.owner.checkCue(cue)
+        }
         catch (error: MediaTransportException) { throw QueuePlaybackException(QueuePlaybackFailure(error.issue, entry.queueEntryId)) }
     }
 
-    override fun close() { if (closed.compareAndSet(false, true) && online != null) online.owner.release(online) }
+    override fun close() {
+        if (closed.compareAndSet(false, true)) {
+            if (online != null) online.owner.release(online)
+            if (cue != null) cue.owner.releaseCue(cue)
+        }
+    }
     override fun toString(): String = "RuntimePlaybackResource(online=$isOnline, redacted)"
 }
 
@@ -180,6 +195,8 @@ class PreparedPlaybackWindow(
 class RuntimePlaybackResources {
     private val memory = Any()
     private val states = mutableMapOf<String, OnlineResourceState>()
+    private val cueStates = mutableMapOf<String, CueRuntimeResourceState>()
+    private val cueCloseFailures = mutableSetOf<CueRuntimeResourceState>()
     private val physicalMedia = AtomicBoolean()
     private val mutableOpenedResource = MutableStateFlow<OpenedPlaybackResourceMetadata?>(null)
     internal val openedResource = mutableOpenedResource.asStateFlow()
@@ -205,13 +222,77 @@ class RuntimePlaybackResources {
         configurationCurrent: () -> Boolean = { true },
         associated: PlaybackAssociatedResources? = null,
     ): RuntimePlaybackResource = synchronized(memory) {
-        if (states.size >= MAX_RESOURCES) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY, entry.queueEntryId))
+        if (states.size + cueStates.size >= MAX_RESOURCES) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY, entry.queueEntryId))
         if (entry.accountId == null) throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.LOGIN_REQUIRED, entry.queueEntryId))
         val key = UUID.randomUUID().toString()
         val state = OnlineResourceState(this, key, entry, target, budget, expiresElapsedMs, status, accountCurrent, configurationCurrent, associated)
         state.checkNewAcquisition()
         states[key] = state
         RuntimePlaybackResource(entry, state)
+    }
+
+    internal fun invalidateCue(entryId: String) = synchronized(memory) {
+        cueStates.values.filter { it.entry.queueEntryId == entryId }.forEach { it.revoked = true }
+    }
+
+    internal fun registerCue(entry: QueueEntry): RuntimePlaybackResource = synchronized(memory) {
+        if (states.size + cueStates.size >= MAX_RESOURCES || cueCloseFailures.isNotEmpty()) {
+            throw QueuePlaybackException(QueuePlaybackFailure(QueuePlaybackIssue.BUSY, entry.queueEntryId))
+        }
+        val key = UUID.randomUUID().toString()
+        val state = CueRuntimeResourceState(this, key, entry)
+        cueStates[key] = state
+        RuntimePlaybackResource(entry, cue = state)
+    }
+
+    internal fun acquireCue(uri: Uri): CueRuntimeResourceState = synchronized(memory) {
+        if (uri.scheme != CUE_SCHEME || uri.authority != "resource" || uri.pathSegments.size != 1 ||
+            uri.query != null || uri.fragment != null) throw MediaTransportException(QueuePlaybackIssue.RESOURCE_INVALID)
+        val key = uri.lastPathSegment ?: throw MediaTransportException(QueuePlaybackIssue.RESOURCE_INVALID)
+        val state = cueStates[key] ?: throw MediaTransportException(QueuePlaybackIssue.RESOURCE_EXPIRED)
+        retainCue(state)
+        state
+    }
+    internal fun checkCue(state: CueRuntimeResourceState) = synchronized(memory) {
+        if (state.owner !== this || cueStates[state.key] !== state || cueCloseFailures.isNotEmpty()) {
+            throw MediaTransportException(QueuePlaybackIssue.SOURCE_CHANGED)
+        }
+        state.check()
+    }
+    internal fun retainCue(state: CueRuntimeResourceState) = synchronized(memory) {
+        checkCue(state)
+        if (state.references == Int.MAX_VALUE) throw MediaTransportException(QueuePlaybackIssue.BUSY)
+        state.references++
+    }
+    /** 撤销后已有读取仍可退休；它不授予新的acquire权限。 */
+    internal fun retainCueRetirement(state: CueRuntimeResourceState): CueRetirementLease = synchronized(memory) {
+        if (state.owner !== this || cueStates[state.key] !== state || state.references <= 0 || state.references == Int.MAX_VALUE) {
+            throw MediaTransportException(QueuePlaybackIssue.SOURCE_CHANGED)
+        }
+        state.references++
+        CueRetirementLease(state)
+    }
+    internal class CueRetirementLease(val state: CueRuntimeResourceState) : AutoCloseable {
+        private val closed = AtomicBoolean()
+        override fun close() { if (closed.compareAndSet(false, true)) state.owner.releaseCue(state) }
+    }
+    internal fun cueCloseFailed(state: CueRuntimeResourceState, closer: AutoCloseable) = synchronized(memory) {
+        state.failedReadOwners.add(closer)
+        cueCloseFailures.add(state)
+        Unit
+    }
+    internal fun cueCloseRetired(state: CueRuntimeResourceState, closer: AutoCloseable) = synchronized(memory) {
+        state.failedReadOwners.remove(closer)
+        if (state.failedReadOwners.isEmpty()) cueCloseFailures.remove(state)
+        Unit
+    }
+    internal fun releaseCue(state: CueRuntimeResourceState) = synchronized(memory) {
+        if (state.owner !== this || cueStates[state.key] !== state || state.references <= 0) return@synchronized
+        state.references--
+        if (state.references == 0) {
+            state.revoked = true;
+            cueStates.remove(state.key)
+        }
     }
 
     internal fun retain(state: OnlineResourceState, newAcquisition: Boolean) = synchronized(memory) {
@@ -290,6 +371,7 @@ class RuntimePlaybackResources {
 
     companion object {
         const val SCHEME = "meloxstream"
+        const val CUE_SCHEME = "meloxcue"
         private const val MAX_RESOURCES = 6
     }
 }

@@ -29,7 +29,10 @@ internal class LibraryPlaylistInput(
         val page = library.page(view, cursor, limit)
         if (page.view != view || page.tracks.size > limit) fail(PlaylistIssue.SOURCE_CHANGED)
         val references = page.tracks.map { track ->
-            if (track.availability != LibraryAvailability.AVAILABLE) fail(PlaylistIssue.SOURCE_CHANGED)
+            if (track.availability != LibraryAvailability.AVAILABLE &&
+                !(view.query.allowUnknownTreeReadValidation && track.availability == LibraryAvailability.UNKNOWN)) {
+                fail(PlaylistIssue.SOURCE_CHANGED)
+            }
             PlaylistReference(trackKey = track.trackKey, titleHint = track.metadata.title,
                 artistHint = track.metadata.artist, albumHint = track.metadata.album, durationMs = track.metadata.durationMs)
         }

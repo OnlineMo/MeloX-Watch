@@ -4,6 +4,7 @@ import android.app.Application
 import io.github.onlinemo.meloxwatch.data.backup.BackupException
 import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -25,6 +26,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryRules
 import io.github.onlinemo.meloxwatch.data.library.LibrarySource
 import io.github.onlinemo.meloxwatch.data.library.LibrarySourcePage
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
+import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceSpec
@@ -47,6 +49,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 
 enum class SourcesNotice { CANCELLED, NO_FILE_PICKER, NO_TREE_PICKER, ADDED, REAUTHORIZED, REMOVED, RULES_SAVED, RULES_CONFLICT }
 
@@ -73,6 +77,7 @@ data class SourcesUiState(
     val filterDraft: Boolean? = null,
     val working: Boolean = false,
     val stopping: Boolean = false,
+    val waitingForFileOperation: Boolean = false,
     val sourceIssue: SourceReadIssue? = null,
     val libraryIssue: LibraryIssue? = null,
     val importIssue: ImportIssue? = null,
@@ -169,11 +174,14 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
             while (action?.isCompleted == false) action?.join()
             currentCoroutineContext().ensureActive()
             if (requestRevision != selectionRevision) return@launch
-            runAction {
+            val waitBudget = SelectionReadBudget(app.localProviderIo.trackReads())
+            runAction(awaitReadRetirement = { waitBudget.retirement.awaitRetired() }) {
                 val spec = LocalSourceSpec(UUID.randomUUID().toString(), kind, uri.toString(), flags)
-                val observed = if (original == null) app.localSources.observe(spec)
+                val observed = readSelectionProvider(waitBudget) {
+                    if (original == null) app.localSources.observe(spec)
                     else app.localSources.verifyReauthorization(original.spec, spec)
-                val selection = readSelection(observed, original)
+                }
+                val selection = readSelection(observed, original, waitBudget = waitBudget)
                 currentCoroutineContext().ensureActive()
                 if (requestRevision == selectionRevision && mutableState.value.reauthorization == original) {
                     mutableState.update { it.copy(selected = selection) }
@@ -234,6 +242,13 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         val latest = app.library.source(source.spec.sourceId) ?: throw LibraryException(LibraryIssue.SOURCE_UNAVAILABLE)
         val rules = app.library.rules()
         app.scans.start(latest, rules.revision)
+    }
+
+    fun retryCueGb18030(source: LibrarySource) = runAction {
+        if (source.spec.kind != LocalSourceKind.TREE) throw LibraryException(LibraryIssue.INVALID_INPUT)
+        val latest = app.library.source(source.spec.sourceId) ?: throw LibraryException(LibraryIssue.SOURCE_UNAVAILABLE)
+        val rules = app.library.rules()
+        app.scans.start(latest, rules.revision, cueEncoding = io.github.onlinemo.meloxwatch.data.cue.CueEncoding.GB18030)
     }
 
     fun cancelScan() {
@@ -352,12 +367,16 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         action?.cancel()
     }
 
-    private fun runAction(quietIfBusy: Boolean = false, block: suspend () -> Unit) {
+    private fun runAction(
+        quietIfBusy: Boolean = false,
+        awaitReadRetirement: suspend () -> Unit = { app.localProviderIo.awaitIdle() },
+        block: suspend () -> Unit,
+    ) {
         if (action?.isCompleted == false) {
             if (!quietIfBusy) mutableState.update { it.copy(sourceIssue = SourceReadIssue.BUSY) }
             return
         }
-        mutableState.update { it.copy(working = true, stopping = false, sourceIssue = null,
+        mutableState.update { it.copy(working = true, stopping = false, waitingForFileOperation = false, sourceIssue = null,
             libraryIssue = null, importIssue = null, fileIssue = null, notice = null) }
         action = viewModelScope.launch {
             try { block() }
@@ -366,8 +385,11 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
                 throw error
             } catch (error: Exception) { publishFailure(error) }
             finally {
-                withContext(NonCancellable) { app.localProviderIo.awaitIdle() }
-                mutableState.update { it.copy(working = false, stopping = false) }
+                withContext(NonCancellable) {
+                    // 最新选择仅等待自己的未退休读；其它动作保持原全局退出契约。
+                    awaitReadRetirement()
+                }
+                mutableState.update { it.copy(working = false, stopping = false, waitingForFileOperation = false) }
             }
         }
     }
@@ -407,21 +429,24 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         observed: LocalSourceObservation,
         original: LibrarySource?,
         previous: SourceSelection? = null,
+        waitBudget: SelectionReadBudget? = null,
     ): SourceSelection {
         if (previous != null) {
             if (observed.identity != previous.observation.identity) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
-            app.localSources.verifyObservedCandidate(observed.source, previous.observation.root)
+            readSelectionProvider(waitBudget) { app.localSources.verifyObservedCandidate(observed.source, previous.observation.root) }
         }
         val candidate = observed.root
-        app.localSources.verifyObservedCandidate(observed.source, candidate)
+        readSelectionProvider(waitBudget) { app.localSources.verifyObservedCandidate(observed.source, candidate) }
         val nativeProof = candidate.providerContentToken?.let { !it.startsWith("sha256:") } == true
-        val before = if (!candidate.directory && !nativeProof) app.localMetadata.contentToken(candidate) else null
+        val before = if (!candidate.directory && !nativeProof) {
+            readSelectionProvider(waitBudget) { app.localMetadata.contentToken(candidate) }
+        } else null
         if (previous?.verifiedContentToken != null && before != previous.verifiedContentToken) {
             throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
         }
-        val metadata = if (candidate.directory) null else app.localMetadata.read(candidate)
-        app.localSources.verifyObservedCandidate(observed.source, candidate)
-        if (before != null && app.localMetadata.contentToken(candidate) != before) {
+        val metadata = if (candidate.directory) null else readSelectionProvider(waitBudget) { app.localMetadata.read(candidate) }
+        readSelectionProvider(waitBudget) { app.localSources.verifyObservedCandidate(observed.source, candidate) }
+        if (before != null && readSelectionProvider(waitBudget) { app.localMetadata.contentToken(candidate) } != before) {
             throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
         }
         currentCoroutineContext().ensureActive()
@@ -432,6 +457,51 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
                     values.title ?: candidate.displayName, values.durationMs, location(observed))
         }
         return SourceSelection(observed, metadata, entry, original, before)
+    }
+
+    /** 最新选择沿单个等待预算重试准入；每个已返回的普通读都已退出物理槽。 */
+    private suspend fun <T> readSelectionProvider(budget: SelectionReadBudget?, block: suspend () -> T): T {
+        if (budget == null) return block()
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            try {
+                return withContext(budget.retirement) { block() }
+            } catch (cancelled: CancellationException) {
+                // 取消可能先于底层实际关闭，finally按精确回执等待而非全局空闲。
+                throw cancelled
+            } catch (failure: Exception) {
+                if (failure !is SourceReadException || !app.localProviderIo.isAdmissionBusy(failure)) throw failure
+                budget.admissionCollisions++
+                if (budget.admissionCollisions >= SELECTION_ADMISSION_COLLISIONS || budget.remainingWaitMs <= 0L) throw failure
+                mutableState.update { it.copy(waitingForFileOperation = true) }
+                val waitStarted = SystemClock.elapsedRealtime()
+                val idle = try {
+                    withTimeoutOrNull(budget.remainingWaitMs) {
+                        app.localProviderIo.awaitIdle()
+                        true
+                    }
+                } finally {
+                    val waitedMs = (SystemClock.elapsedRealtime() - waitStarted).coerceAtLeast(0L)
+                    budget.remainingWaitMs = (budget.remainingWaitMs - waitedMs).coerceAtLeast(0L)
+                    mutableState.update { it.copy(waitingForFileOperation = false) }
+                }
+                if (idle != true) throw failure
+                // 八次准入上限和被动状态等待同时保留，不在主线程忙等。
+                yield()
+            }
+        }
+    }
+
+    private class SelectionReadBudget(
+        val retirement: LocalProviderIo.ReadRetirement,
+        var remainingWaitMs: Long = SELECTION_WAIT_MS,
+        var admissionCollisions: Int = 0,
+    )
+
+    private companion object {
+        // 与 DEV-005 单文件检查同用八秒初值，仅计算等待而非重设每个步骤的期限。
+        const val SELECTION_WAIT_MS = 8_000L
+        const val SELECTION_ADMISSION_COLLISIONS = 8
     }
 
     private fun location(observed: LocalSourceObservation): LocalLocationReference = LocalLocationReference(

@@ -1,5 +1,10 @@
 package io.github.onlinemo.meloxwatch.data.scan
 
+import io.github.onlinemo.meloxwatch.data.cue.CueEncoding
+import io.github.onlinemo.meloxwatch.data.cue.CueException
+import io.github.onlinemo.meloxwatch.data.cue.CueGroupCommit
+import io.github.onlinemo.meloxwatch.data.cue.CueIssue
+import io.github.onlinemo.meloxwatch.data.cue.CueScanStore
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryMutationStore
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
@@ -45,6 +50,9 @@ class LocalScanEngine(
     private val verifyMetadataCandidate: suspend (LocalSourceSpec, ObservedCandidate) -> Unit = { _, _ ->
         throw SourceReadException(SourceReadIssue.CONTENT_UNKNOWN)
     },
+    private val scanCue: suspend (ScanToken, ObservedCandidate, CueEncoding) -> CueGroupCommit = { _, _, _ ->
+        throw CueException(CueIssue.INVALID_AUDIO)
+    },
 ) {
     private val startLock = Mutex()
     private val activeLock = Any()
@@ -58,21 +66,22 @@ class LocalScanEngine(
         rulesRevision: Long,
         mode: ScanMode = ScanMode.FULL,
         sinceMediaGeneration: Long? = null,
+        cueEncoding: CueEncoding = CueEncoding.UTF8,
     ): ScanToken {
         synchronized(activeLock) {
             active?.let {
-                return reusableToken(it, source, rulesRevision, mode)
+                return reusableToken(it, source, rulesRevision, mode, cueEncoding)
             }
         }
         if (!startLock.tryLock()) throw SourceReadException(SourceReadIssue.BUSY)
         try {
             synchronized(activeLock) {
                 active?.let {
-                    return reusableToken(it, source, rulesRevision, mode)
+                    return reusableToken(it, source, rulesRevision, mode, cueEncoding)
                 }
             }
             val token = store.beginScan(source.spec.sourceId, source.authEpoch, rulesRevision, mode)
-            val task = Active(token)
+            val task = Active(token, cueEncoding)
             task.job = scope.launch(start = CoroutineStart.LAZY) { task.entered.set(true); run(task, source, sinceMediaGeneration) }
             synchronized(activeLock) { active = task }
             publish(task, ScanState(token, ScanPhase.PREPARING))
@@ -109,9 +118,9 @@ class LocalScanEngine(
         }
     }
 
-    private fun reusableToken(task: Active, source: LibrarySource, rulesRevision: Long, mode: ScanMode): ScanToken {
+    private fun reusableToken(task: Active, source: LibrarySource, rulesRevision: Long, mode: ScanMode, encoding: CueEncoding): ScanToken {
         val token = task.token
-        if (task.stopping.get() || token.sourceId != source.spec.sourceId || token.mode != mode) {
+        if (task.stopping.get() || token.sourceId != source.spec.sourceId || token.mode != mode || task.cueEncoding != encoding) {
             throw SourceReadException(SourceReadIssue.BUSY)
         }
         if (token.sourceRevision != source.revision || token.authEpoch != source.authEpoch || token.rulesRevision != rulesRevision) {
@@ -173,7 +182,7 @@ class LocalScanEngine(
                     currentCoroutineContext().ensureActive()
                     if (candidate.directory) continue
                     val isExcluded = store.isExcluded(task.token, candidate.objectId, candidate.parentObjectId)
-                    if (isExcluded || !candidate.mayContainAudio) {
+                    if (isExcluded || candidate.mayContainCue || !candidate.mayContainAudio) {
                         continue
                     }
                     try {
@@ -227,6 +236,35 @@ class LocalScanEngine(
                     if (error.issue == SourceReadIssue.PERMISSION_DENIED || error.issue == SourceReadIssue.PERMISSION_REVOKED) authorizationValid = false
                     counters = store.completeDirectory(task.token, directory.objectId, false).counters
                 }
+            }
+            // 全部枚举游标释放后，CUE 查询才开启自己的游标。
+            val cues = store as? CueScanStore
+            if (cues != null) while (true) {
+                currentCoroutineContext().ensureActive()
+                if (backgrounded || task.stopping.get()) throw CancellationException("CUE scan paused at group boundary")
+                val candidate = cues.nextCueDocument(task.token) ?: break
+                try {
+                    provider { scanCue(task.token, candidate, task.cueEncoding) }
+                    counters = cues.completeCueDocument(task.token, candidate.objectId).counters
+                } catch (failure: CueException) {
+                    complete = false
+                    if (failure.issue == CueIssue.AUTHORIZATION_REQUIRED) authorizationValid = false
+                    counters = cues.completeCueDocument(task.token, candidate.objectId, failure.issue).counters
+                } catch (failure: SourceReadException) {
+                    if (failure.issue == SourceReadIssue.BUSY || failure.issue == SourceReadIssue.SOURCE_CHANGED) throw failure
+                    complete = false
+                    val issue = when (failure.issue) {
+                        SourceReadIssue.PERMISSION_DENIED, SourceReadIssue.PERMISSION_REVOKED -> {
+                            authorizationValid = false;
+                            CueIssue.AUTHORIZATION_REQUIRED
+                        }
+                        SourceReadIssue.FILE_MISSING, SourceReadIssue.SOURCE_UNAVAILABLE -> CueIssue.MISSING_AUDIO
+                        SourceReadIssue.CONTENT_UNKNOWN -> CueIssue.UNVERIFIED_CONTENT
+                        else -> CueIssue.INVALID_AUDIO
+                    }
+                    counters = cues.completeCueDocument(task.token, candidate.objectId, issue).counters
+                }
+                publish(task, ScanState(task.token, ScanPhase.RUNNING, counters))
             }
             val last = provider { sources.observe(first.source) }
             val same = first.identity == last.identity && first.providerVersion == last.providerVersion
@@ -299,7 +337,7 @@ class LocalScanEngine(
         synchronized(activeLock) { if (active === task && (!task.stopping.get() || value.phase != ScanPhase.RUNNING)) mutableState.value = value }
     }
 
-    private class Active(val token: ScanToken) {
+    private class Active(val token: ScanToken, val cueEncoding: CueEncoding) {
         lateinit var job: Job
         val stopping = AtomicBoolean(false)
         val entered = AtomicBoolean(false)

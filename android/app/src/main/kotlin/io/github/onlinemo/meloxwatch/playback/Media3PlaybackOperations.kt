@@ -19,8 +19,12 @@ import kotlin.coroutines.resumeWithException
 
 /** Media3 has a masking position; a playback-thread fence prevents treating that as a completed seek. */
 @UnstableApi
-class Media3PlaybackOperations(override val player: Player) : PlaybackBackendOperations {
+class Media3PlaybackOperations(
+    override val player: Player,
+    private val rollingQueueTailsEnabled: Boolean = false,
+) : PlaybackBackendOperations {
     override val supportsContinuousPlayback: Boolean get() = !closed
+    override val supportsRollingQueueTail: Boolean get() = !closed && rollingQueueTailsEnabled
     private val exoPlayer = requireNotNull(
         (if (player is RoutingPlaybackPlayer) player.wrappedPlayer else player) as? ExoPlayer,
     )

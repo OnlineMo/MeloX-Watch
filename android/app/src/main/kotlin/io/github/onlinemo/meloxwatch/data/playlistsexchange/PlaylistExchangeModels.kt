@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.playlistsexchange
 
 import io.github.onlinemo.meloxwatch.model.TrackKey
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import java.text.Normalizer
 import java.util.UUID
 
@@ -15,6 +16,7 @@ object PlaylistExchangeLimits {
     const val NAME_CODE_POINTS = 80
     const val TRACK_ID_CHARACTERS = 1024
     const val JSON_STRING_TOKEN_CHARACTERS = FIELD_CHARACTERS * 6
+    const val CUE_REFERENCE_BYTES = 4096
 }
 
 enum class PlaylistExchangeEncoding { UTF8, GB18030 }
@@ -42,9 +44,12 @@ private fun exchangeDiagnosticCause(cause: Throwable?): Throwable? {
 }
 
 /** CUE清单的相对提示和原始轨号；命中实体音频路径不能替代逻辑分轨匹配。 */
-data class ExchangeCueHint(val relativePath: ExchangeRelativePath, val trackNumber: Int) {
+data class ExchangeCueHint(val relativePath: ExchangeRelativePath?, val trackNumber: Int,
+    val reference: LocalCueReference? = null) {
     init {
         require(trackNumber in 1..99)
+        require(relativePath != null || reference != null)
+        require(reference == null || !reference.isBound && reference.identity.trackNumber == trackNumber)
     }
 }
 
@@ -196,6 +201,12 @@ internal fun validateExchangeMember(member: ExchangeMember) {
     }
     if ((member.mediaKind == ExchangeMediaKind.CUE_TRACK) != (member.cue != null)) {
         exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
+    }
+    member.cue?.reference?.let { reference ->
+        if (member.trackKey != null && member.trackKey != reference.trackKey) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
+        if (member.contentSha256 != null && reference.identity.audioContentTokenHint != null &&
+            reference.identity.audioContentTokenHint.removePrefix("sha256:") != member.contentSha256) exchangeFail(PlaylistExchangeIssue.INVALID_VALUE)
+        ExchangeCueReferenceCodec.encode(reference)
     }
     if (member.trackKey == null && member.relativePath == null && member.contentSha256 == null &&
         member.cue == null && !member.unresolved) {
