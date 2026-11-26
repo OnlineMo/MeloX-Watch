@@ -18,6 +18,8 @@ import io.github.onlinemo.meloxwatch.data.backup.BackupException
 import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
 import io.github.onlinemo.meloxwatch.data.backup.BackupResourceWriter
 import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
+import io.github.onlinemo.meloxwatch.data.storage.StorageArea
+import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -86,6 +88,16 @@ class AndroidLyricsFontFiles private constructor(
     private val parser = SfntFontParser()
     private val backupPinLock = Any()
     private var backupRetained = emptyMap<String, LyricsFontAsset>()
+
+    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+        check(Looper.myLooper() != Looper.getMainLooper())
+        return StorageDirectorySpec(directoryProvider().absoluteFile, StorageArea.FONTS, 1,
+            LyricsFontLimits.DIRECTORY_ENTRIES.toLong(), classify = { parts, directory ->
+                val name = parts.singleOrNull()
+                if (directory || name == null || managedId(name) == null) null
+                else if (name.endsWith(FONT_EXTENSION)) StorageArea.FONTS else StorageArea.RECOVERY
+            }, mutableFile = { it.last().endsWith(PART_EXTENSION) }, requireNonEmpty = { it.last().endsWith(FONT_EXTENSION) })
+    }
 
     /** Only the journal owner can retain the two old and two prospective saved roles. */
     internal suspend fun retainForBackup(assets: List<LyricsFontAsset>) {

@@ -1,5 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.themes
 
+import io.github.onlinemo.meloxwatch.data.storage.StorageArea
+import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -66,6 +69,23 @@ class LocalBackgroundImages private constructor(
     ) : this({ directory }, io, bitmaps, opener, availableBytes, backupBarrier)
 
     private val occupied = AtomicBoolean(false)
+
+    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+        check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        return StorageDirectorySpec(directoryProvider().absoluteFile, StorageArea.BACKGROUNDS, 1,
+            PlaybackBackgroundLimits.DIRECTORY_ENTRIES.toLong(), classify = { parts, directory ->
+                val name = parts.singleOrNull()
+                when {
+                    directory || name == null -> null
+                    name in setOf("owner.lock", "settings.bin") -> StorageArea.BACKGROUNDS
+                    name in setOf("settings.bin.bak", "settings.bin.new") -> StorageArea.RECOVERY
+                    name.endsWith(".image") && isThemeOperationId(name.removeSuffix(".image")) -> StorageArea.BACKGROUNDS
+                    name.endsWith(".part") && isThemeOperationId(name.removeSuffix(".part")) -> StorageArea.RECOVERY
+                    else -> null
+                }
+            }, lockFile = "owner.lock", mutableFile = { it.last().endsWith(".part") || it.last().endsWith(".bak") || it.last().endsWith(".new") },
+            requireNonEmpty = { it.last().endsWith(".image") }, sentinels = listOf("settings.bin", "settings.bin.bak", "settings.bin.new"))
+    }
     private val previewLock = Any()
     private var held: PreviewRecord? = null
     private var backupRetained = emptyMap<String, BackgroundImageRef>()

@@ -42,6 +42,11 @@ fun StorageControls(model: StorageViewModel = rememberWatchViewModel(StorageView
         if (report == null) WatchText(stringResource(R.string.storage_unmeasured)) else {
             Category(stringResource(R.string.storage_originals), report.originalReferences)
             Category(stringResource(R.string.storage_copies), report.audioCopies)
+            Category(stringResource(R.string.storage_lyrics_copies), report.lyricsCopies)
+            Category(stringResource(R.string.storage_saved_artwork), report.savedArtwork)
+            Category(stringResource(R.string.storage_fonts), report.fonts)
+            Category(stringResource(R.string.storage_themes), report.themes)
+            Category(stringResource(R.string.storage_backgrounds), report.backgrounds)
             Category(stringResource(R.string.storage_artwork), report.artworkCache)
             Category(stringResource(R.string.storage_lyrics), report.lyricsCache)
             Category(stringResource(R.string.storage_recovery), report.recoveryStaging)
@@ -50,9 +55,9 @@ fun StorageControls(model: StorageViewModel = rememberWatchViewModel(StorageView
         state.clear?.let { cleared ->
             WatchText(stringResource(R.string.storage_clear_observed), primary = true)
             WatchText(stringResource(R.string.storage_clear_category, stringResource(R.string.storage_artwork),
-                bytes(cleared.artworkBefore.bytes), bytes(cleared.artworkAfter.bytes)))
+                observedBytes(cleared.artworkBefore), observedBytes(cleared.artworkAfter)))
             WatchText(stringResource(R.string.storage_clear_category, stringResource(R.string.storage_lyrics),
-                bytes(cleared.lyricsBefore.bytes), bytes(cleared.lyricsAfter.bytes)))
+                observedBytes(cleared.lyricsBefore), observedBytes(cleared.lyricsAfter)))
             WatchText(stringResource(R.string.storage_available_change, bytes(cleared.availableBefore), bytes(cleared.availableAfter)))
             cleared.issue?.let { WatchText(stringResource(storageIssueText(it)), error = true) }
         }
@@ -68,10 +73,15 @@ fun StorageControls(model: StorageViewModel = rememberWatchViewModel(StorageView
 
 @Composable
 private fun Category(name: String, category: StorageCategory) {
-    WatchText(stringResource(R.string.storage_category, name, bytes(category.bytes), category.files))
+    WatchText(stringResource(R.string.storage_category, name, observedBytes(category), category.files))
     if (category.unknownFiles > 0L) WatchText(stringResource(R.string.storage_unknown_files, category.unknownFiles))
     category.issue?.let { WatchText(stringResource(storageIssueText(it)), error = true) }
 }
+
+@Composable
+private fun observedBytes(category: StorageCategory): String = if (category.complete) bytes(category.observedBytes)
+    else category.observedBytes?.let { stringResource(R.string.storage_known_subtotal, bytes(it)) }
+        ?: stringResource(R.string.library_unknown)
 
 @Composable
 private fun bytes(value: Long?): String = value?.let {
@@ -86,4 +96,5 @@ private fun storageIssueText(issue: StorageIssue): Int = when (issue) {
     StorageIssue.STORAGE_FULL -> R.string.library_storage_full
     StorageIssue.CANCELLED -> R.string.library_cancelled
     StorageIssue.UNAVAILABLE -> R.string.library_storage_unavailable
+    StorageIssue.CLEANUP_REQUIRED -> R.string.storage_cleanup_required
 }

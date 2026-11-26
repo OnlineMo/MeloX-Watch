@@ -111,6 +111,8 @@ class OwnedLyricsProvider : ContentProvider() {
             return result
         }
 
+        internal fun storageDirectory(context: Context): File = File(context.noBackupFilesDir.canonicalFile, DIRECTORY)
+
         internal fun finalFile(context: Context, token: String): File = child(context, token, ".lrc")
         internal fun stagingFile(context: Context, token: String): File = child(context, token, ".part")
 

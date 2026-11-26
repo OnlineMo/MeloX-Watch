@@ -4,8 +4,6 @@ import android.content.Context
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationException
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationIssue
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationsRuntime
-import io.github.onlinemo.meloxwatch.data.imports.AudioCopyQuota
-import io.github.onlinemo.meloxwatch.data.imports.OwnedAudioProvider
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -26,6 +24,7 @@ class FileStorageRepository(
     private val artworkClear: suspend () -> StorageCategory,
     private val lyricsMeasure: suspend () -> StorageCategory,
     private val lyricsClear: suspend () -> StorageCategory,
+    private val privateMeasure: suspend () -> StoragePrivateReport,
 ) {
     private val commands = Mutex()
     private val mutableClear = MutableStateFlow<StorageClearReport?>(null)
@@ -49,9 +48,10 @@ class FileStorageRepository(
             if (page.nextLocationId != null && page.nextLocationId == after) throw StorageException(StorageIssue.SOURCE_CHANGED)
             after = page.nextLocationId
         } while (after != null)
-        StorageReport(originals, privateAudio(OwnedAudioProvider.DIRECTORY, ".audio"), measured(artworkMeasure), measured(lyricsMeasure),
-            combineStorage(operations.measureRecoveryStorage(), combineStorage(privateAudio(OwnedAudioProvider.DIRECTORY, ".part"),
-                privateAudio(AudioCopyQuota.TRANSFER_DIRECTORY, ".partial"))), io.read { FileStoragePhysical.available(context) })
+        val owned = privateMeasure()
+        StorageReport(originals, owned.audioCopies, owned.lyricsCopies, owned.savedArtwork, owned.fonts, owned.themes, owned.backgrounds,
+            measured(artworkMeasure), measured(lyricsMeasure), combineStorage(operations.measureRecoveryStorage(), owned.staging),
+            owned.availableBytes)
     }
 
     suspend fun clearCaches(): StorageClearReport = command {
@@ -64,11 +64,18 @@ class FileStorageRepository(
             artworkClear()
             currentCoroutineContext().ensureActive()
             lyricsClear()
-        } catch (cancelled: CancellationException) { cancellation = cancelled
-        failure = StorageIssue.CANCELLED }
-        catch (error: Exception) { failure = issue(error) }
+        } catch (cancelled: CancellationException) {
+            cancellation = cancelled
+            failure = StorageIssue.CANCELLED
+        } catch (error: Exception) { failure = issue(error) }
         val result = withContext(NonCancellable) {
-            io.awaitIdle()
+            try { awaitCommandRetired() }
+            catch (retired: Throwable) {
+                val cancelled = cancellation
+                if (cancelled == null) throw retired
+                if (cancelled !== retired) cancelled.addSuppressed(retired)
+                throw cancelled
+            }
             StorageClearReport(beforeArtwork, measured(artworkMeasure), beforeLyrics, measured(lyricsMeasure), availableBefore,
                 io.read { FileStoragePhysical.available(context) }, failure)
         }
@@ -77,19 +84,40 @@ class FileStorageRepository(
         result
     }
 
-    private suspend fun privateAudio(directory: String, suffix: String): StorageCategory = try {
-        io.read { signal -> FileStoragePhysical.privateAudio(context, directory, suffix, signal) }
-    } catch (cancelled: CancellationException) { throw cancelled }
-    catch (error: Exception) { StorageCategory(null, 0L, 1L, issue(error)) }
-
-    private suspend fun measured(action: suspend () -> StorageCategory): StorageCategory = try { action() }
+    private suspend fun measured(action: suspend () -> StorageCategory): StorageCategory = try {
+        action().let { it.copy(bytes = it.observedBytes) }
+    }
         catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) { StorageCategory(null, 0L, 1L, issue(error)) }
 
     private suspend fun <T> command(action: suspend () -> T): T {
         if (!commands.tryLock()) throw StorageException(StorageIssue.BUSY)
-        try { return operations.withExclusiveLibraryMutation(requireNoPending = false, action = action) }
+        try {
+            val retirement = io.trackReads()
+            return withContext(retirement) {
+                operations.withExclusiveLibraryMutation(requireNoPending = false) {
+                    var failure: Throwable? = null
+                    try { action() }
+                    catch (error: Throwable) { failure = error; throw error }
+                    finally {
+                        try { withContext(NonCancellable) { retirement.awaitRetired() } }
+                        catch (retired: Throwable) {
+                            val original = failure
+                            if (original == null) throw retired
+                            if (original !== retired) original.addSuppressed(retired)
+                        }
+                    }
+                }
+            }
+        }
         finally { commands.unlock() }
+    }
+
+    private suspend fun awaitCommandRetired() {
+        val retirement = currentCoroutineContext()[LocalProviderIo.ReadRetirement]
+            ?: throw StorageException(StorageIssue.UNAVAILABLE)
+        check(retirement.io === io)
+        retirement.awaitRetired()
     }
     private fun issue(failure: Exception) = when (failure) {
         is StorageException -> failure.issue

@@ -1,5 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.backup
 
+import io.github.onlinemo.meloxwatch.data.storage.StorageArea
+import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
+
 import android.content.Context
 import android.os.CancellationSignal
 import android.os.SystemClock
@@ -86,6 +89,16 @@ class BackupCoordinator internal constructor(
     private val reader = BackupArchiveReader()
     private val writer = BackupArchiveWriter()
     private var directory: BackupPrivateDirectory? = null
+
+    /** The initialized owner supplies its exact root; capacity reads do not open or repair SQLite. */
+    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+        check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        requireReady()
+        val owned = directory ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+        owned.ownership()
+        return StorageDirectorySpec(owned.root, StorageArea.RECOVERY, BackupLimits.JSON_DEPTH,
+            null, classify = { _, _ -> StorageArea.RECOVERY })
+    }
     private var journal: BackupRestoreJournal? = null
     private var heldPreview: HeldPreview? = null
     private val closeRetentions = BackupCloseRetentions(io) {

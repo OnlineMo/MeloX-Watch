@@ -20,6 +20,8 @@ import io.github.onlinemo.meloxwatch.data.backup.BackupException
 import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
 import io.github.onlinemo.meloxwatch.data.backup.BackupResourceWriter
 import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
+import io.github.onlinemo.meloxwatch.data.storage.StorageArea
+import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
 import java.io.File
 import java.io.InputStream
 import java.io.ByteArrayInputStream
@@ -66,6 +68,18 @@ class LyricsDocumentCopies(
     private val pinLock = Any()
     private val pins = HashSet<String>()
     private val backupPins = HashSet<String>()
+
+    /** Capacity reads use the namespace without creating, pruning or acquiring text contents. */
+    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+        check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        return StorageDirectorySpec(OwnedLyricsProvider.storageDirectory(context), StorageArea.LYRICS, 1,
+            MAX_STORED_ENTRIES.toLong(), classify = { parts, directory ->
+                if (directory || parts.size != 1) null else try {
+                    requireStoredName(parts.single())
+                    if (parts.single().endsWith(".lrc")) StorageArea.LYRICS else StorageArea.RECOVERY
+                } catch (_: SourceReadException) { null }
+            }, mutableFile = { it.last().endsWith(".part") }, requireNonEmpty = { it.last().endsWith(".lrc") })
+    }
 
     internal suspend fun beginBackupRetention() {
         requireBackupOwner()
