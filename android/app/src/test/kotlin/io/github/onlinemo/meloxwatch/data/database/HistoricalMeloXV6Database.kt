@@ -47,23 +47,23 @@ import io.github.onlinemo.meloxwatch.data.listening.ListeningMetaEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningRoundEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningSegmentEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningTrackEntity
-import io.github.onlinemo.meloxwatch.data.playlists.PlaylistDao
+import io.github.onlinemo.meloxwatch.data.playlists.HistoricalPlaylistDao
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistGenerationEntity
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistHeadEntity
-import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMemberEntity
+import io.github.onlinemo.meloxwatch.data.playlists.HistoricalPlaylistMemberEntity
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMetaEntity
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMigrations
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistReceiptEntity
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistViewEntity
-import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangeDao
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.HistoricalPlaylistExchangeDao
 import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangeMigrations
 import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangePreviewEntity
-import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExchangeRowEntity
+import io.github.onlinemo.meloxwatch.data.playlistsexchange.HistoricalPlaylistExchangeRowEntity
 import io.github.onlinemo.meloxwatch.data.playlistsexchange.PlaylistExportReceiptEntity
-import io.github.onlinemo.meloxwatch.data.queue.QueueDao
-import io.github.onlinemo.meloxwatch.data.queue.QueueEntryEntity
+import io.github.onlinemo.meloxwatch.data.queue.HistoricalQueueDao
+import io.github.onlinemo.meloxwatch.data.queue.HistoricalQueueEntryEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueGenerationEntity
-import io.github.onlinemo.meloxwatch.data.queue.QueueHeadEntity
+import io.github.onlinemo.meloxwatch.data.queue.HistoricalQueueHeadEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueMigrations
 import io.github.onlinemo.meloxwatch.data.transfer.TransferDisplayPreviewEntity
 import io.github.onlinemo.meloxwatch.data.transfer.TransferRoomDao
@@ -75,7 +75,7 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
 /** 冻结V6声明；独立结构依据来自固定云端导出的6.json。 */
 @Database(
     entities = [
-        QueueGenerationEntity::class, QueueEntryEntity::class, QueueHeadEntity::class,
+        QueueGenerationEntity::class, HistoricalQueueEntryEntity::class, HistoricalQueueHeadEntity::class,
         LibraryMetaEntity::class, LibrarySourceEntity::class, LibraryGrantEntity::class, LibrarySourceVersionEntity::class,
         LibraryLocationEntity::class, LibraryLocationVersionEntity::class, LibraryTrackEntity::class,
         LibraryTrackLocationEntity::class, HistoricalTrackVersionEntity::class, HistoricalArtistEntity::class,
@@ -85,8 +85,8 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
         ListeningMetaEntity::class, ListeningRoundEntity::class, ListeningSegmentEntity::class,
         ListeningHistoryEntity::class, ListeningTrackEntity::class, ListeningDayEntity::class,
         PlaylistMetaEntity::class, PlaylistHeadEntity::class, PlaylistGenerationEntity::class,
-        PlaylistMemberEntity::class, PlaylistViewEntity::class, PlaylistReceiptEntity::class,
-        PlaylistExchangePreviewEntity::class, PlaylistExchangeRowEntity::class, PlaylistExportReceiptEntity::class,
+        HistoricalPlaylistMemberEntity::class, PlaylistViewEntity::class, PlaylistReceiptEntity::class,
+        PlaylistExchangePreviewEntity::class, HistoricalPlaylistExchangeRowEntity::class, PlaylistExportReceiptEntity::class,
         LyricsTrackPreferencesEntity::class, LibraryTransferredImportEntity::class,
         DisplayGroupEntity::class, DisplayNameEntity::class, DisplayAlbumLinkEntity::class,
         DisplayArtistLinkEntity::class, TransferRoomOperationEntity::class, TransferDisplayPreviewEntity::class,
@@ -105,11 +105,11 @@ abstract class HistoricalMeloXV6Database : RoomDatabase() {
         super.close()
     }
 
-    abstract fun queueDao(): QueueDao
+    abstract fun queueDao(): HistoricalQueueDao
     abstract fun libraryDao(): HistoricalLibraryDao
     abstract fun listeningDao(): ListeningDao
-    abstract fun playlistDao(): PlaylistDao
-    abstract fun playlistExchangeDao(): PlaylistExchangeDao
+    abstract fun playlistDao(): HistoricalPlaylistDao
+    abstract fun playlistExchangeDao(): HistoricalPlaylistExchangeDao
     abstract fun lyricsDao(): LyricsDao
     abstract fun transferredImportDao(): TransferredImportDao
     abstract fun displayDao(): DisplayDao

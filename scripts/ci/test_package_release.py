@@ -21,7 +21,9 @@ from test_package_contract import PLAN, VERSION, debug_test_fixture, manifest
 from test_apk_licenses import license_fixture_bytes
 
 ENV = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
-       'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Cloud build',
+       'GITHUB_REPOSITORY_OWNER': 'OnlineMo', 'GITHUB_REPOSITORY_OWNER_ID': '143324986',
+       'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_ACTOR_ID': '143324986',
+       'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Cloud build',
        'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/contribution', 'GITHUB_SHA': 'a' * 40,
        'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1', 'GH_TOKEN': 'fixture-only'}
 

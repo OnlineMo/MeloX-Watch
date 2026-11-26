@@ -6,6 +6,10 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 
 /**
  * ListenerSet defers recursive sendEvent and release then drops those listeners. Always perform
@@ -17,6 +21,7 @@ internal class ScheduledPlaybackRelease(
     private val lease: PlaybackEngineReleaseGuard.Lease,
     private val player: Player,
     private val closeOperations: () -> Unit = {},
+    private val afterNativeRelease: (suspend () -> Unit)? = null,
     private val releasePlayer: () -> Unit = player::release,
 ) {
     private val handler = Handler(Looper.getMainLooper())
@@ -31,8 +36,24 @@ internal class ScheduledPlaybackRelease(
         val result = CompletableDeferred<Unit>().also { completion = it }
         val accepted = handler.post {
             try {
-                releasePlaybackEngine(guard, lease, player, closeOperations, releasePlayer)
-                result.complete(Unit)
+                val retirement = afterNativeRelease
+                if (retirement == null) {
+                    releasePlaybackEngine(guard, lease, player, closeOperations, releasePlayer)
+                    result.complete(Unit)
+                } else {
+                    observePlaybackEngineRelease(guard, lease, player, closeOperations, releasePlayer)
+                    // 一次无父任务且有界的物理退休归同一进程engine lease所有。
+                    CoroutineScope(NonCancellable + Dispatchers.Main.immediate).launch {
+                        try {
+                            retirement()
+                            guard.confirmReleased(lease)
+                            result.complete(Unit)
+                        } catch (failure: Throwable) {
+                            guard.quarantine(lease)
+                            result.completeExceptionally(failure)
+                        }
+                    }
+                }
             } catch (error: Throwable) {
                 result.completeExceptionally(error)
             }

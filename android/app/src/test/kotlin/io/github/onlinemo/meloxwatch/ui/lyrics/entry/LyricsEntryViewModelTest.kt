@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.ui.lyrics.entry
 
 import android.content.Intent
+import io.github.onlinemo.meloxwatch.data.cue.CueByteFixture
+import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
 import io.github.onlinemo.meloxwatch.data.lyrics.LocalLyricsParser
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsClockMapping
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
@@ -81,6 +83,53 @@ import org.junit.Test
 /** 有界假边界控制时序；不将这里的会话、权限或 pin 断言当成设备验收。 */
 @OptIn(ExperimentalCoroutinesApi::class)
 class LyricsEntryViewModelTest {
+    @Test fun externalCueReadingUsesItsSavedDocumentOriginAndOffsetWhileThePageHasAnUnconfirmedDraft(): Unit = runTest {
+        for (explicit in listOf(false, true)) {
+            val cue = CueByteFixture().reference(2)
+            val file = checkNotNull(cue.binding).audio
+            val original = LocalLyricsLoadFixture().audio
+            val source = original.source.copy(
+                spec = LocalSourceSpec(file.sourceId, LocalSourceKind.TREE, checkNotNull(file.location.grantUri)),
+                grantId = file.grantId, revision = file.sourceRevision, authEpoch = file.authEpoch,
+            )
+            val audio = LocalReadDescriptor(cue.trackKey, source, file.aliasId, file.location, file.objectId,
+                file.providerContentToken, file.sizeBytes, file.verifiedContentToken, cueReference = cue)
+            val fixture = EntryFixture(this, StandardTestDispatcher(testScheduler), audio)
+            var external: LyricsEntryViewModel.ExternalReading? = null
+            try {
+                fixture.tracks.preferences = fixture.tracks.preferences.copy(userDelayMs = 500,
+                    primary = if (explicit) fixture.documents.goodAssociation() else null)
+                fixture.vm.onVisible(LyricsEntrySurface.OPTIONS)
+                runCurrent()
+                external = fixture.vm.bindExternalReading()
+                val accepted = checkNotNull(fixture.vm.readExternal())
+                val origin = if (explicit) 0L else 1013L
+                assertEquals(origin, accepted.mapping.timelineOriginMs)
+                assertEquals(500, accepted.mapping.userOffset.delayMs)
+                assertSame((fixture.vm.uiState.value.content as LyricsPageContent.Ready).document, accepted.document)
+                assertTrue(fixture.vm.beginOffset())
+                fixture.vm.adjustOffset(3)
+                assertEquals(800, fixture.vm.uiState.value.offsetDraftMs)
+                val reading = checkNotNull(fixture.vm.readExternal())
+                assertSame(accepted.document, reading.document)
+                assertEquals(origin, reading.mapping.timelineOriginMs)
+                assertEquals(500, reading.mapping.userOffset.delayMs)
+                fixture.vm.onHidden()
+                runCurrent()
+                val hidden = checkNotNull(fixture.vm.readExternal())
+                assertEquals(accepted.identity, hidden.identity)
+                assertEquals(accepted.mapping, hidden.mapping)
+                assertEquals(1, fixture.loads)
+                assertEquals(0, fixture.tracks.commits)
+                assertTrue(fixture.playback.dispatched.isEmpty())
+            } finally {
+                external?.close();
+                fixture.vm.close();
+                runCurrent()
+            }
+        }
+    }
+
     @Test fun externalClosureWaitsForItsExactNonCooperativeLoadToActuallyExit(): Unit = runTest {
         val fixture = fixture()
         val entered = CompletableDeferred<Unit>()
@@ -622,9 +671,9 @@ class LyricsEntryViewModelTest {
     private fun TestScope.fixture() = EntryFixture(this, StandardTestDispatcher(testScheduler))
 }
 
-private class EntryFixture(scope: CoroutineScope, private val dispatcher: CoroutineDispatcher) {
-    val audio = LocalLyricsLoadFixture().audio
-    val queues = EntryQueues(QueueEntry("entry-one", audio.trackKey, 0L, 0L, location = audio.location))
+private class EntryFixture(scope: CoroutineScope, private val dispatcher: CoroutineDispatcher, cueAudio: LocalReadDescriptor? = null) {
+    val audio = cueAudio ?: LocalLyricsLoadFixture().audio
+    val queues = EntryQueues(QueueEntry("entry-one", audio.trackKey, 0L, 0L, location = audio.location, cueReference = audio.cueReference))
     val tracks = EntryTracks(audio.trackKey, queues)
     val documents = EntryDocuments()
     val playback = EntryPlayback(queues)
@@ -644,7 +693,7 @@ private class EntryFixture(scope: CoroutineScope, private val dispatcher: Corout
         queues = queues,
         resolveContext = { entry ->
             check(entry.trackKey == audio.trackKey)
-            LocalLyricsContext(audio, null)
+            LocalLyricsContext(audio, null, audio.cueReference)
         },
         validateContext = { context ->
             contextValidations++

@@ -23,12 +23,17 @@ from sign import validate_manifest
 SOURCE = 'a' * 40
 VERSION = {'versionName': '0.1.0', 'versionCode': '25'}
 ENV = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
-       'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Cloud build',
+       'GITHUB_REPOSITORY_OWNER': 'OnlineMo', 'GITHUB_REPOSITORY_OWNER_ID': '143324986',
+       'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_ACTOR_ID': '143324986',
+       'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Cloud build',
        'GITHUB_EVENT_NAME': 'push', 'GITHUB_REF': 'refs/heads/contribution', 'GITHUB_SHA': SOURCE,
        'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2'}
-RUN = {'repository': {'full_name': 'OnlineMo/MeloX-Watch'}, 'run_attempt': 2, 'head_sha': SOURCE,
+RUN = {'repository': {'full_name': 'OnlineMo/MeloX-Watch',
+                      'owner': {'login': 'OnlineMo', 'id': 143324986}},
+       'run_attempt': 2, 'head_sha': SOURCE,
        'head_branch': 'contribution', 'path': '.github/workflows/cloud-build.yml', 'event': 'push',
-       'actor': {'login': 'OnlineMo'}, 'triggering_actor': {'login': 'OnlineMo'}, 'conclusion': 'success'}
+       'actor': {'login': 'OnlineMo', 'id': 143324986},
+       'triggering_actor': {'login': 'OnlineMo', 'id': 143324986}, 'conclusion': 'success'}
 
 
 def archive_bytes(files):
@@ -93,6 +98,108 @@ class ArtifactDownloadTests(unittest.TestCase):
                 signed_open.assert_not_called()
 
 
+class ReleaseAssetDownloadTests(unittest.TestCase):
+    def test_release_asset_requests_binary_representation_and_keeps_original_bytes(self):
+        original = b'\x00\xfforiginal release asset\n'
+        metadata = b'{"id":456,"name":"watch-release.apk"}'
+
+        def response_for(request, timeout):
+            # 按协商表示模拟HTTP响应，防止直接返回fixture掩盖媒体类型错误。
+            return io.BytesIO(original if request.get_header('Accept') == 'application/octet-stream' else metadata)
+
+        with patch('artifact_io.urllib.request.build_opener') as make_opener:
+            make_opener.return_value.open.side_effect = response_for
+            self.assertEqual(GitHub(token='fixture-token').download_release_asset(456), original)
+            make_opener.assert_called_once_with(NoRedirect)
+            request = make_opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.full_url, 'https://api.github.com/repos/OnlineMo/MeloX-Watch/releases/assets/456')
+            self.assertEqual(request.get_header('Accept'), 'application/octet-stream')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer fixture-token')
+            self.assertEqual(request.get_header('X-github-api-version'), '2022-11-28')
+
+    def test_existing_watch_phone_and_snapshot_hashes_use_the_binary_http_path(self):
+        from release import verify_existing_assets
+
+        originals = {'watch-release.apk': b'original watch', 'phone-release.apk': b'original phone',
+                     'snapshot.bundle': b'original snapshot objects'}
+        assets = [{'id': index, 'name': name} for index, name in enumerate(originals, start=1)]
+        client = GitHub(token='fixture-token')
+        client.pages = MagicMock(return_value=assets)
+
+        def response_for(request, timeout):
+            asset = assets[int(request.full_url.rsplit('/', 1)[1]) - 1]
+            original = originals[asset['name']]
+            return io.BytesIO(original if request.get_header('Accept') == 'application/octet-stream'
+                              else json.dumps(asset).encode())
+
+        with tempfile.TemporaryDirectory() as temporary, patch('artifact_io.urllib.request.build_opener') as make_opener:
+            paths = {name: Path(temporary) / name for name in originals}
+            for name, path in paths.items():
+                path.write_bytes(originals[name])
+            make_opener.return_value.open.side_effect = response_for
+            self.assertEqual(verify_existing_assets(client, 12, paths), set(originals))
+            client.pages.assert_called_once_with('/releases/12/assets')
+            self.assertEqual([call.args[0].full_url for call in make_opener.return_value.open.call_args_list],
+                             ['https://api.github.com/repos/OnlineMo/MeloX-Watch/releases/assets/' + str(index)
+                              for index in range(1, 4)])
+
+    def test_release_asset_https_redirect_does_not_forward_authorization(self):
+        path = '/repos/OnlineMo/MeloX-Watch/releases/assets/456'
+        signed_url = 'https://release.example.invalid/watch-release.apk?signature=fixture'
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.read.return_value = b'original release asset'
+        redirect = urllib.error.HTTPError('https://api.github.com' + path, 302, 'Found',
+                                          {'Location': signed_url}, None)
+        with patch('artifact_io.urllib.request.build_opener') as make_opener, \
+                patch('artifact_io.urllib.request.urlopen', return_value=response) as signed_open:
+            make_opener.return_value.open.side_effect = redirect
+            self.assertEqual(GitHub(token='fixture-token').download_release_asset(456), b'original release asset')
+            request = make_opener.return_value.open.call_args.args[0]
+            self.assertEqual(request.get_header('Accept'), 'application/octet-stream')
+            self.assertEqual(request.get_header('Authorization'), 'Bearer fixture-token')
+            signed_open.assert_called_once_with(signed_url, timeout=60)
+            response.read.assert_called_once_with(MAX_ARCHIVE_BYTES + 1)
+
+    def test_release_asset_non_https_redirect_is_rejected_before_external_request(self):
+        for location in ('http://release.example.invalid/asset', 'ftp://release.example.invalid/asset', ''):
+            redirect = urllib.error.HTTPError('https://api.github.com/repos/OnlineMo/MeloX-Watch/releases/assets/456',
+                                              302, 'Found', {'Location': location}, None)
+            with self.subTest(location=location), patch('artifact_io.urllib.request.build_opener') as make_opener, \
+                    patch('artifact_io.urllib.request.urlopen') as signed_open:
+                make_opener.return_value.open.side_effect = redirect
+                with self.assertRaisesRegex(ValueError, 'redirect must use HTTPS'):
+                    GitHub(token='fixture-token').download_release_asset(456)
+                signed_open.assert_not_called()
+
+    def test_release_asset_size_bound_applies_to_direct_and_redirected_bytes(self):
+        for redirected in (False, True):
+            response = MagicMock()
+            response.__enter__.return_value = response
+            response.read.return_value = b'012345678'
+            with self.subTest(redirected=redirected), patch('artifact_io.MAX_ARCHIVE_BYTES', 8), \
+                    patch('artifact_io.urllib.request.build_opener') as make_opener, \
+                    patch('artifact_io.urllib.request.urlopen', return_value=response) as signed_open:
+                if redirected:
+                    make_opener.return_value.open.side_effect = urllib.error.HTTPError(
+                        'https://api.github.com/repos/OnlineMo/MeloX-Watch/releases/assets/456', 302, 'Found',
+                        {'Location': 'https://release.example.invalid/asset'}, None)
+                else:
+                    make_opener.return_value.open.return_value = response
+                with self.assertRaisesRegex(ValueError, 'exceeds size limit'):
+                    GitHub(token='fixture-token').download_release_asset(456)
+                response.read.assert_called_once_with(9)
+                if not redirected:
+                    signed_open.assert_not_called()
+
+    def test_release_asset_id_must_be_one_positive_integer_before_http(self):
+        with patch('artifact_io.urllib.request.build_opener') as make_opener:
+            for asset_id in (0, -1, True, '456', 456.0, '/repos/other/repo/releases/assets/456'):
+                with self.subTest(asset_id=asset_id), self.assertRaisesRegex(ValueError, 'Invalid release asset ID'):
+                    GitHub(token='fixture-token').download_release_asset(asset_id)
+            make_opener.assert_not_called()
+
+
 class ArtifactBoundaryTests(unittest.TestCase):
     def test_invalid_existing_signatures_cannot_be_treated_as_unsigned(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -110,6 +217,30 @@ class ArtifactBoundaryTests(unittest.TestCase):
                         {'GITHUB_WORKFLOW': 'Untrusted'}, {'GITHUB_SHA': ''}]:
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 trusted_context('Cloud build', ENV | changes)
+
+    def test_owner_environment_ids_cannot_be_replaced_by_matching_logins(self):
+        trusted_context('Cloud build', ENV)
+        for key in ('GITHUB_ACTOR_ID', 'GITHUB_REPOSITORY_OWNER_ID'):
+            for value in (None, '', '1', '143324986.0'):
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    trusted_context('Cloud build', ENV | {key: value})
+        with self.assertRaises(ValueError):
+            trusted_context('Cloud build', ENV | {'GITHUB_REPOSITORY_OWNER': 'other'})
+
+    def test_producing_actor_and_repository_owner_ids_are_strict_metadata_integers(self):
+        validate_run(RUN, 2, SOURCE, RUN['path'], 'push', 'contribution', True)
+        for field in ('actor', 'triggering_actor', 'repository-owner'):
+            for value in (None, 1, True, 143324986.0, '143324986'):
+                changed = copy.deepcopy(RUN)
+                record = changed['repository']['owner'] if field == 'repository-owner' else changed[field]
+                record['id'] = value
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    validate_run(changed, 2, SOURCE, RUN['path'], 'push', 'contribution', True)
+        for value in (None, {'login': 'other', 'id': 143324986}):
+            changed = copy.deepcopy(RUN)
+            changed['repository']['owner'] = value
+            with self.subTest(owner=value), self.assertRaises(ValueError):
+                validate_run(changed, 2, SOURCE, RUN['path'], 'push', 'contribution', True)
 
     def test_secret_injection_stops_before_preflight_or_gradle(self):
         for name in ('SIGNING_KEY_B64', 'SIGNING_PASSWORD', 'RELEASE_KEYSTORE_B64', 'CI_DEBUG_STORE_PASSWORD'):

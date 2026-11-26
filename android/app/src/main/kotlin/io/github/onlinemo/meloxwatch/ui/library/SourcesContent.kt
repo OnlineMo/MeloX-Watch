@@ -32,7 +32,14 @@ internal fun LazyListScope.sourcesContent(
 ) {
     item(key = "sources:status") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (state.working) LibraryText(stringResource(if (state.stopping) R.string.library_stopping else R.string.library_reading))
+            if (state.working) {
+                val progressText = when {
+                    state.stopping -> R.string.library_stopping
+                    state.waitingForFileOperation -> R.string.library_busy
+                    else -> R.string.library_reading
+                }
+                LibraryText(stringResource(progressText))
+            }
             state.sourceIssue?.let { LibraryText(stringResource(sourceIssueText(it)), error = true) }
             if (state.sourceIssue in setOf(SourceReadIssue.PERMISSION_DENIED, SourceReadIssue.PERMISSION_REVOKED)) {
                 LibraryButton(stringResource(R.string.probe_permission_settings), true, onPermissionSettings)
@@ -139,6 +146,13 @@ internal fun LazyListScope.sourcesContent(
             LibraryText(stringResource(if (source.grant.persistedRead == ObservedCapability.AVAILABLE) R.string.library_access_persisted
                 else if (source.spec.kind == LocalSourceKind.APP_OWNED) R.string.library_access_owned else R.string.library_access_temporary))
             LibraryButton(stringResource(R.string.library_scan_source), !state.working && source.state != LibrarySourceState.REMOVED) { model.scan(source) }
+            if (source.spec.kind == LocalSourceKind.TREE) {
+                LibraryText(stringResource(R.string.cue_scan_utf8))
+                LibraryText(stringResource(R.string.cue_scan_gb18030_explanation))
+                LibraryButton(stringResource(R.string.cue_scan_gb18030), !state.working && source.state == LibrarySourceState.ACTIVE &&
+                    (state.scan == null || state.scan.phase in setOf(ScanPhase.COMPLETED, ScanPhase.CANCELLED,
+                        ScanPhase.FAILED, ScanPhase.INTERRUPTED, ScanPhase.PAUSED_BACKGROUND))) { model.retryCueGb18030(source) }
+            }
             if (source.spec.kind in setOf(LocalSourceKind.DOCUMENT, LocalSourceKind.TREE)) {
                 LibraryButton(stringResource(R.string.library_reauthorize), !state.working) { model.beginReauthorization(source) }
             }

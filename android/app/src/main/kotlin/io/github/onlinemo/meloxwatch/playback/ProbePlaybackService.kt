@@ -57,6 +57,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Deferred
@@ -105,6 +107,7 @@ class ProbePlaybackService : MediaSessionService() {
     private var seekStateObserver: Job? = null
     private var commandPreferencesObserver: Job? = null
     private var onlineAccountObserver: Job? = null
+    private var cueMetadataObserver: Job? = null
     private var resourceStatusObserver: Job? = null
     private var initializing = true
     private var initializationComplete = false
@@ -195,14 +198,23 @@ class ProbePlaybackService : MediaSessionService() {
                 sleepTimer?.state?.value?.let { it.initialized && it.timer.active == null } == true
             },
             mayBeginContinuousRound = statistics::canBeginContinuousRound,
+            mayKeepContinuousTail = statistics::canKeepContinuousTail,
             onContinuousRoundChanged = statistics::beginContinuousRound,
-            sourceResolver = SourcePlaybackResolver(LocalPlaybackResolver(application)::resolve) {
-                application.onlineMusic().playbackResolver
+            sourceResolver = SourcePlaybackResolver(LocalPlaybackResolver(application)::resolve,
+                resources = application.runtimePlaybackResources) { application.onlineMusic().playbackResolver },
+            checkCueBinding = { entry ->
+                application.library.resolveCueRead(entry.trackKey, entry.cueReference)
+                Unit
             },
             resolveMetadata = { entry ->
                 val accountId = entry.accountId
                 if (entry.trackKey.providerId == "netease" && accountId != null) {
                     application.existingOnlineCatalog()?.catalog?.presentation(accountId, entry.trackKey.trackId)?.let { metadata ->
+                        MediaMetadata.Builder().setTitle(metadata.title ?: entry.displayName).setArtist(metadata.artist)
+                            .setAlbumTitle(metadata.album).build()
+                    }
+                } else if (entry.cueReference != null) {
+                    application.library.resolveCueRead(entry.trackKey, entry.cueReference).metadata?.let { metadata ->
                         MediaMetadata.Builder().setTitle(metadata.title ?: entry.displayName).setArtist(metadata.artist)
                             .setAlbumTitle(metadata.album).build()
                     }
@@ -214,6 +226,26 @@ class ProbePlaybackService : MediaSessionService() {
         owner.attach(queues, statistics)
         onlineAccountObserver = serviceScope.launch {
             application.onlineAccountChanges.revision.collect { if (!destroyed) queues.onAccountStateChanged() }
+        }
+        cueMetadataObserver = serviceScope.launch {
+            combine(application.library.cueRevisions(), queues.state.map { queues.cueEntriesSnapshot() }.distinctUntilChanged()) { _, entries -> entries }
+                .collectLatest { entries ->
+                    for (entry in entries) {
+                        val issue = try {
+                            application.library.resolveCueRead(entry.trackKey, entry.cueReference);
+                            null
+                        }
+                        catch (failure: CancellationException) { throw failure }
+                        catch (failure: LibraryException) { when (failure.issue) {
+                            LibraryIssue.PERMISSION_REVOKED -> QueuePlaybackIssue.PERMISSION_DENIED
+                            LibraryIssue.FILE_MISSING -> QueuePlaybackIssue.FILE_MISSING
+                            LibraryIssue.RECOVERY_REQUIRED, LibraryIssue.STORAGE_UNAVAILABLE -> QueuePlaybackIssue.RECOVERY_REQUIRED
+                            else -> QueuePlaybackIssue.SOURCE_CHANGED
+                        } }
+                        currentCoroutineContext().ensureActive()
+                        if (!destroyed && !quiescing && issue != null) queues.invalidateCueReference(entry, issue)
+                    }
+                }
         }
         val startup = PlaybackStartup()
         playbackStartup = startup
@@ -400,7 +432,7 @@ class ProbePlaybackService : MediaSessionService() {
         val lyricsBinding = lyricsPlaybackBinding
         lyricsPlaybackBinding = null
         val pendingJobs = listOfNotNull(activeCommand, initialization, extrasObserver, routeStateObserver,
-            seekStateObserver, commandPreferencesObserver, onlineAccountObserver, resourceStatusObserver, timerSaveCommand).distinct()
+            seekStateObserver, commandPreferencesObserver, onlineAccountObserver, cueMetadataObserver, resourceStatusObserver, timerSaveCommand).distinct()
         pendingJobs.forEach { it.cancel() }
         val session = mediaSession
         val owner = playbackOwner

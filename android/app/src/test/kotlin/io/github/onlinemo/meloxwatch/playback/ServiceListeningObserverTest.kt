@@ -399,6 +399,74 @@ class ServiceListeningObserverTest {
         assertEquals(2000L, repository.totalListeningMs)
     }
 
+    @Test
+    fun aCapturedContinuousTailKeepsItsEpochWhileANewReadIsPendingButClearRevokesTheHold() = runBlocking {
+        val first = entry(0)
+        val second = entry(1)
+        beginPlaying(first)
+        advance(1000L, 1000L)
+        val old = backend.positionInfo()
+        backend.choose(second)
+        backend.notifyDiscontinuity(old, backend.positionInfo(), Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        val capturedEpochs = repository.state()
+        val gate = repository.blockNextState()
+        observer.beginContinuousRound(second, 0L)
+        assertTrue(gate.entered.isCompleted)
+        assertFalse(observer.canBeginContinuousRound())
+        assertTrue(observer.canKeepContinuousTail())
+        advance(200L, 200L)
+        repository.observedEpochs.value = null
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(observer.canBeginContinuousRound())
+        assertFalse(observer.canKeepContinuousTail())
+        // 新缓存只供下一轮次；正在读取的旧轮次仍不能授权下一个AUTO。
+        val nextEpochs = ListeningEpochs(historyEpoch = 7L, statisticsEpoch = 8L)
+        repository.changeEpochs(nextEpochs)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertFalse(observer.canBeginContinuousRound())
+        backend.notifyPlaying(false)
+        gate.release.complete(Unit)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(observer.canBeginContinuousRound())
+        observer.detach()
+        assertFalse(observer.canKeepContinuousTail())
+        backend.player.release()
+        observer.close()
+        val incoming = repository.attempts.single { it.trackKey == second.trackKey }
+        assertEquals(capturedEpochs, incoming.epochs)
+        assertEquals(200L, incoming.totalListeningMs)
+        assertEquals(nextEpochs, repository.state())
+        assertEquals(0, backend.lateCalls)
+        assertTrue(failures.isEmpty())
+    }
+
+    @Test
+    fun anUnboundCapturedTailCannotRetainPermissionOrAccessTheReleasedBackend() = runBlocking {
+        val first = entry(0)
+        val second = entry(1)
+        beginPlaying(first)
+        advance(1000L, 1000L)
+        val old = backend.positionInfo()
+        backend.choose(second)
+        backend.notifyDiscontinuity(old, backend.positionInfo(), Player.DISCONTINUITY_REASON_AUTO_TRANSITION)
+        val gate = repository.blockNextState()
+        observer.beginContinuousRound(second, 0L)
+        assertTrue(observer.canKeepContinuousTail())
+        advance(200L, 200L)
+        observer.unbindBackend()
+        backend.player.release()
+        assertFalse(observer.canKeepContinuousTail())
+        assertFalse(observer.canBeginContinuousRound())
+        gate.release.complete(Unit)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        observer.detach()
+        observer.close()
+        val incoming = repository.attempts.single { it.trackKey == second.trackKey }
+        assertEquals(200L, incoming.totalListeningMs)
+        assertEquals(0, backend.lateCalls)
+        assertTrue(failures.isEmpty())
+    }
+
     private suspend fun beginPlaying(entry: QueueEntry) {
         backend.choose(entry)
         observer.beginRound(entry)

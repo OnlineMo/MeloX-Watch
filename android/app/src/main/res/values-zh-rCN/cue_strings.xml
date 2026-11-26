@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="cue_read_timeout">CUE 内容校验超时。当前读取停止后可重试。</string>
+    <string name="cue_relink_group_counts">完整 CUE 组：原有 %1$d 轨，已核验 %2$d 轨，影响 %3$d 个队列实例。</string>
+    <string name="cue_relink_playlist_counts">%1$d 个歌单和收藏成员保持原身份。</string>
+    <string name="cue_relink_identity_change">访问文档或来源改变。原逻辑分轨身份和原轨号保持。</string>
+    <string name="cue_relink_cue_change">CUE 文档内容存在差异。</string>
+    <string name="cue_relink_audio_change">%1$d 轨的音频内容存在差异。</string>
+    <string name="cue_relink_audio_unknown">%1$d 轨的原音频内容未知。</string>
+    <string name="cue_relink_bounds_change">%1$d 轨的精确时段边界存在差异。</string>
+    <string name="cue_relink_extra_members">已核验的 CUE 组另含 %1$d 轨。</string>
+    <string name="cue_relink_group_ack">确认显示的来源、身份和整组时段边界变化</string>
+    <string name="cue_relink_action">重新关联完整 CUE 组</string>
+    <string name="cue_relink_pending">此 CUE 分轨需要整组重新关联。</string>
+    <string name="cue_relink_original_native">使用此项原扫描 CUE 组</string>
+    <string name="cue_relink_member_title">原轨号 %1$d：%2$s</string>
+    <string name="cue_relink_old_bounds">原时段：第 %1$d 帧到 %2$s；不含终点 %3$d 微秒。</string>
+    <string name="cue_relink_new_bounds">选择时段：第 %1$d 帧到 %2$s；不含终点 %3$d 微秒。</string>
+    <string name="cue_relink_end_of_audio">音频末尾</string>
+    <string name="cue_scan_utf8">CUE 扫描使用 UTF-8 或 UTF-8 BOM。</string>
+    <string name="cue_scan_gb18030">使用 GB18030 重新扫描 CUE</string>
+    <string name="cue_scan_gb18030_explanation">以 GB18030 明确重试此已授权目录。文件将重新读取，不自动猜测编码。</string>
+    <string name="cue_backend_precision">两种播放引擎均读取精确的 PCM16 样本窗口。定位和公开时钟使用毫秒。设备输出精度尚未测量。</string>
+</resources>

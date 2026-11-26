@@ -22,6 +22,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -312,13 +313,17 @@ class ThemeRepositoryCancellationTest {
         val cancellation = ControlledThemeCancellation()
         val delivered = AtomicBoolean(false)
         val completionCause = AtomicReference<Throwable?>(null)
+        val completionObserved = CompletableDeferred<Unit>()
         var caller: Deferred<ThemePreview>? = null
         try {
             val mainThread = scope.async { Thread.currentThread() }.await()
             val active = scope.async {
                 repository.prepareImport(Fixture.request()).also { delivered.set(true) }
             }
-            active.invokeOnCompletion { completionCause.set(it) }
+            active.invokeOnCompletion {
+                completionCause.set(it)
+                completionObserved.complete(Unit)
+            }
             caller = active
             awaitThemeLatch(if (blockOpen) source.openEntered else source.readEntered)
             val physicalThread = checkNotNull(dispatcher.workerThread.get())
@@ -330,6 +335,7 @@ class ThemeRepositoryCancellationTest {
             val stage = checkNotNull(File(directory, "staging").listFiles()).single()
 
             assertCallerQueueProgress(scope, mainThread) { active.cancel(cancellation) }
+            assertTrue(active.isCancelled)
             assertTrue(checkNotNull(source.signal.get()).isCanceled)
             assertEquals(0, source.inputCloses.get())
             assertEquals(0, source.descriptorCloses.get())
@@ -380,6 +386,8 @@ class ThemeRepositoryCancellationTest {
             assertNull("Physical provider gates must finish by observer release", source.firstGateFailure.get())
             io.awaitIdle()
             active.join()
+            // 以真实 completion callback 回执确认原取消原因；join 唤醒不作为 handler 已执行的证明。
+            completionObserved.await()
             assertSame(cancellation, completionCause.get())
             try {
                 active.await()

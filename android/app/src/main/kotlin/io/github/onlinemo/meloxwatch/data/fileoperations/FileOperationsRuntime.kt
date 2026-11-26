@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.fileoperations
 
 import android.content.Context
+import io.github.onlinemo.meloxwatch.data.cue.CueScanStore
 import io.github.onlinemo.meloxwatch.data.library.LibraryException
 import io.github.onlinemo.meloxwatch.data.library.LibraryIssue
 import io.github.onlinemo.meloxwatch.data.library.LibraryMutationStore
@@ -61,6 +62,7 @@ class FileOperationsRuntime(
     private var progressObserver: Job? = null
     @Volatile private var closed = false
     val mutations: LibraryMutationStore = FileOperationGuardedMutationStore(library) { initialized().guard }
+    val cueMutations: CueScanStore get() = mutations as CueScanStore
 
     /** 启动仅打开/校验私有日志，不枚举外部音乐目录，也不恢复执行草稿。 */
     suspend fun initialize(): FileOperationsState {

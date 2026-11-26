@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.playlists
 
 import androidx.room.Entity
+import androidx.room.ColumnInfo
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -62,6 +63,8 @@ data class PlaylistGenerationEntity(
 ], indices = [
     Index(value = ["generationId", "ordinal"], unique = true, name = "index_playlist_members_generationId_ordinal"),
     Index(value = ["generationId", "referenceKey"], unique = true, name = "index_playlist_members_generationId_referenceKey"),
+    Index(value = ["providerId", "trackId", "generationId", "memberId"],
+        name = "index_playlist_members_providerId_trackId_generationId_memberId"),
 ])
 data class PlaylistMemberEntity(
     val generationId: String,
@@ -78,6 +81,7 @@ data class PlaylistMemberEntity(
     val relativePathHint: String?,
     val descriptionHint: String?,
     val durationMs: Long?,
+    @ColumnInfo(defaultValue = "NULL") val cueReference: String? = null,
 )
 
 @Entity(tableName = "playlist_views", foreignKeys = [

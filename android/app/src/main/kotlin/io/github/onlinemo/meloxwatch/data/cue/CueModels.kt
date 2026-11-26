@@ -35,7 +35,7 @@ enum class CueIssue {
     INVALID_SYNTAX, UNSUPPORTED_DIRECTIVE, UNSUPPORTED_FILE_TYPE, UNSUPPORTED_GAP,
     INVALID_TRACK, INVALID_INDEX, INVALID_TIME, INVALID_PATH, DUPLICATE_REFERENCE,
     AMBIGUOUS_PATH, AUTHORIZATION_REQUIRED, SOURCE_CHANGED, INCOMPLETE_ENUMERATION,
-    MISSING_AUDIO, INVALID_AUDIO, UNVERIFIED_CONTENT, INVALID_BOUNDARIES,
+    MISSING_AUDIO, INVALID_AUDIO, UNVERIFIED_CONTENT, INVALID_BOUNDARIES, READ_TIMEOUT, READ_CLOSE_FAILED,
 }
 
 /** Error messages contain a code/line, never CUE contents, private paths or provider URIs. */
@@ -126,6 +126,7 @@ data class CueDocumentSnapshot(
     val objectId: String,
     val location: LocalLocationReference,
     val rawContentToken: String,
+    val encoding: CueEncoding = CueEncoding.UTF8,
 )
 
 /** Proven root-to-parent enumeration edges in an authorized TREE, followed by the CUE itself. */
@@ -176,7 +177,7 @@ data class CueSegment internal constructor(
     val albumPerformer: String?,
 )
 
-/** Preparation only: scan CAS/atomic commit and both playback clipping paths still belong to integration. */
+/** 准备结果包含不可变的完整组；扫描写事务在原子发布前仍重核两份文件。 */
 @ConsistentCopyVisibility
 data class PreparedCueGroup internal constructor(
     val document: CueDocumentSnapshot,

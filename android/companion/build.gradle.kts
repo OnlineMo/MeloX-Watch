@@ -117,7 +117,8 @@ tasks.withType<Test>().configureEach {
     systemProperty("robolectric.enabledSdks", "26")
     maxParallelForks = 1
     maxHeapSize = "512m"
-    failFast = true
+    // Collect the complete package Debug scope; a failed case still fails its Test task.
+    failFast = System.getenv("MELOX_CI_BUILD_PHASE") != "package-test-debug"
     testLogging { exceptionFormat = TestExceptionFormat.FULL }
     val taskIdentity = path
     addTestListener(object : TestListener {

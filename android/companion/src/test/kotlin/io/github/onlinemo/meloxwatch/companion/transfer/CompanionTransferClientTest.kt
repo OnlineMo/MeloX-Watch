@@ -431,6 +431,89 @@ class CompanionTransferClientTest {
         }
     }
 
+    @Test fun aNewExplicitRecoveryCanConfirmAfterItsReusedOlderAttemptFailsLate() = runBlocking {
+        withTimeout(5000L) {
+            val clock = MutableClock()
+            val authenticated = connection(clock)
+            val factory = FakeFactory(listOf(connection(clock), authenticated))
+            val client = CompanionTransferClient(factory, clock, retirementWaitMs = 100L)
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val attempts = AtomicInteger()
+            val callers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            var confirmation: Deferred<Unit>? = null
+            factory.beforeRetry = {
+                if (attempts.incrementAndGet() == 1) {
+                    withContext(NonCancellable) { entered.complete(Unit); release.await() }
+                    throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                }
+            }
+            try {
+                ready(client)
+                authenticated.failClose = true
+                val originalControl = client.disconnect()
+                issue(TransferIssue.RECOVERY_REQUIRED) { originalControl.await() }
+                issue(TransferIssue.RECOVERY_REQUIRED) { client.retryRetirement() }
+                entered.await()
+                assertEquals(1, attempts.get())
+                assertFalse(authenticated.retired)
+                assertSame(authenticated, factory.current)
+                // UNDISPATCHED 先把本次明确请求停在旧控制任务的 await，再释放迟到失败。
+                confirmation = callers.async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                    client.retryRetirement()
+                }
+                assertFalse(checkNotNull(confirmation).isCompleted)
+                authenticated.retryRetirement()
+                assertTrue(authenticated.retired)
+                assertEquals(CompanionConnectionPhase.RECOVERY_REQUIRED, client.state.value.phase)
+                assertSame(originalControl, client.disconnect())
+                release.complete(Unit)
+                checkNotNull(confirmation).await()
+                assertEquals(2, attempts.get())
+                assertEquals(null, factory.current)
+                assertEquals(CompanionConnectionPhase.OFF, client.state.value.phase)
+                issue(TransferIssue.RECOVERY_REQUIRED) { originalControl.await() }
+            } finally {
+                release.complete(Unit)
+                callers.cancel()
+                confirmation?.join()
+                try { client.disconnect().await() } catch (_: TransferException) { client.retryRetirement() }
+            }
+        }
+    }
+
+    @Test fun aFailureOfTheCurrentRecoveryNeedsAnotherExplicitRequest() = runBlocking {
+        withTimeout(5000L) {
+            val clock = MutableClock()
+            val authenticated = connection(clock)
+            val factory = FakeFactory(listOf(connection(clock), authenticated))
+            val client = CompanionTransferClient(factory, clock, retirementWaitMs = 100L)
+            val attempts = AtomicInteger()
+            factory.beforeRetry = { attempts.incrementAndGet() }
+            try {
+                ready(client)
+                authenticated.failClose = true
+                authenticated.failRetry = true
+                val originalControl = client.disconnect()
+                issue(TransferIssue.RECOVERY_REQUIRED) { originalControl.await() }
+                issue(TransferIssue.RECOVERY_REQUIRED) { client.retryRetirement() }
+                assertEquals(1, attempts.get())
+                assertSame(authenticated, factory.current)
+                assertFalse(authenticated.retired)
+                assertEquals(CompanionConnectionPhase.RECOVERY_REQUIRED, client.state.value.phase)
+                authenticated.failRetry = false
+                client.retryRetirement()
+                assertEquals(2, attempts.get())
+                assertEquals(null, factory.current)
+                assertEquals(CompanionConnectionPhase.OFF, client.state.value.phase)
+                issue(TransferIssue.RECOVERY_REQUIRED) { originalControl.await() }
+            } finally {
+                authenticated.failRetry = false
+                try { client.disconnect().await() } catch (_: TransferException) { client.retryRetirement() }
+            }
+        }
+    }
+
     @Test fun lateOpenFailedCloseKeepsRecoveryAndOriginalOwnerUntilRetry() = runBlocking {
         withTimeout(5000L) {
             val clock = MutableClock()

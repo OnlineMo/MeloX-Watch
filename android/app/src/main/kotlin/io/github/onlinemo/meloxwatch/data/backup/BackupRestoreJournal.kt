@@ -76,7 +76,7 @@ internal class BackupResourcePlan(
 }
 
 internal class BackupRelinkHint(val id: String, val trackId: String, val locationId: String, val archiveSha256: String,
-    val record: BackupRecord) {
+    val record: BackupRecord, val cueReference: io.github.onlinemo.meloxwatch.model.LocalCueReference? = null) {
     init {
         requireBackupUuid(id); requireBackupDigest(archiveSha256)
         require(trackId.isNotBlank() && trackId.length <= 128 && locationId.isNotBlank() && locationId.length <= 128)
@@ -85,6 +85,7 @@ internal class BackupRelinkHint(val id: String, val trackId: String, val locatio
         require(record.key.length <= 128 && trackId.none(Char::isISOControl) && locationId.none(Char::isISOControl))
         require(locationId == "restored-location-" + backupStableId(archiveSha256, BackupBindingFamily.LOCATION.name, record.key))
         require(id == stableUuid(archiveSha256, trackId, locationId))
+        require(cueReference == null || !cueReference.isBound && cueReference.trackKey == io.github.onlinemo.meloxwatch.model.TrackKey("local", trackId))
     }
     override fun toString(): String = "BackupRelinkHint"
 }
@@ -399,11 +400,14 @@ internal class BackupRestoreJournal private constructor(
             buildList { while (it.step()) add(decodeHint(it)) }
         }
     }
-    private fun decodeHint(statement: SQLiteStatement): BackupRelinkHint = BackupRelinkHint(statement.getText(0), statement.getText(1),
-        statement.getText(2), statement.getText(3), BackupJsonCodec.readRecord(statement.getBlob(4)))
+    private fun decodeHint(statement: SQLiteStatement): BackupRelinkHint {
+        val (record, reference) = BackupRelinkHintCodec.decode(statement.getBlob(4))
+        return BackupRelinkHint(statement.getText(0), statement.getText(1), statement.getText(2), statement.getText(3), record, reference)
+    }
     private fun bindHint(statement: SQLiteStatement, hint: BackupRelinkHint) {
         statement.bindText(1, hint.id); statement.bindText(2, hint.trackId); statement.bindText(3, hint.locationId)
-        statement.bindText(4, hint.archiveSha256); statement.bindBlob(5, BackupJsonCodec.record(hint.record))
+        statement.bindText(4, hint.archiveSha256);
+        statement.bindBlob(5, BackupRelinkHintCodec.encode(hint.record, hint.cueReference))
     }
 
     fun clearFinished(runId: String) {

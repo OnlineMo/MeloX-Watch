@@ -17,6 +17,7 @@ import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import io.github.onlinemo.meloxwatch.data.codec.LocalPcmDataSources
 import io.github.onlinemo.meloxwatch.data.codec.CodecReadException
 import io.github.onlinemo.meloxwatch.data.codec.CodecReadIssue
+import java.io.File
 
 /** No backend gets a raw remote URL; both use the same app-controlled acquisition policy. */
 @UnstableApi
@@ -25,6 +26,7 @@ internal class PlaybackDataSources(
     resources: RuntimePlaybackResources,
     controlledStreams: HttpsMediaStreams? = null,
     controlledLocalRaw: DataSource.Factory? = null,
+    controlledCueInputs: CuePcmInputFactory? = null,
 ) : DataSource.Factory, AutoCloseable {
     private val application = context.applicationContext
     // Tests supply the same bounded transport with deterministic responses; service construction uses the production client.
@@ -32,11 +34,18 @@ internal class PlaybackDataSources(
     private val power = application.getSystemService(PowerManager::class.java)
     private val localPcm = LocalPcmDataSources(controlledLocalRaw ?: DataSource.Factory { ContentDataSource(application) },
         powerSaveMode = { power?.isPowerSaveMode == true })
-    override fun createDataSource(): DataSource = RoutedDataSource(localPcm, streams)
-    fun platform(uri: Uri, onFailure: (QueuePlaybackIssue) -> Unit): RuntimeMediaDataSource = RuntimeMediaDataSource(uri, streams, onFailure)
+    private val cuePcm = CuePcmDataSources(controlledCueInputs ?: AndroidCuePcmInputFactory(application), resources,
+        CueBlockProofs.privateDirectory(File(application.dataDir, "no_backup/cue-proof-epochs")))
+    override fun createDataSource(): DataSource = RoutedDataSource(localPcm, cuePcm, streams)
+    fun platform(uri: Uri, onFailure: (QueuePlaybackIssue) -> Unit): SeekableRuntimeMediaDataSource =
+        if (uri.scheme == RuntimePlaybackResources.CUE_SCHEME) cuePcm.platform(uri, onFailure) else RuntimeMediaDataSource(uri, streams, onFailure)
+    suspend fun awaitCueRetirement() = cuePcm.awaitRetirement()
     override fun close() {
         var failure: Exception? = null
         try { localPcm.close() } catch (error: Exception) { failure = error }
+        try { cuePcm.close() } catch (error: Exception) {
+            if (failure == null) failure = error else if (failure !== error) failure.addSuppressed(error)
+        }
         try { streams.close() } catch (error: Exception) {
             if (failure == null) failure = error else if (failure !== error) failure.addSuppressed(error)
         }
@@ -51,7 +60,7 @@ internal class NoAutomaticPlaybackLoadRetry : DefaultLoadErrorHandlingPolicy(0) 
 }
 
 @UnstableApi
-private class RoutedDataSource(private val localPcm: LocalPcmDataSources, private val streams: HttpsMediaStreams) : DataSource {
+private class RoutedDataSource(private val localPcm: LocalPcmDataSources, private val cuePcm: CuePcmDataSources, private val streams: HttpsMediaStreams) : DataSource {
     private val listeners = mutableListOf<TransferListener>()
     private var active: DataSource? = null
     override fun addTransferListener(transferListener: TransferListener) {
@@ -63,6 +72,7 @@ private class RoutedDataSource(private val localPcm: LocalPcmDataSources, privat
         val source = when (dataSpec.uri.scheme) {
             "content" -> localPcm.createDataSource()
             RuntimePlaybackResources.SCHEME -> RuntimeHttpDataSource(streams)
+            RuntimePlaybackResources.CUE_SCHEME -> cuePcm.createDataSource()
             else -> throw MediaTransportException(QueuePlaybackIssue.RESOURCE_INVALID)
         }
         active = source
@@ -126,17 +136,22 @@ private class RuntimeHttpDataSource(private val streams: HttpsMediaStreams) : Ba
     }
 }
 
+/** 平台回调共用已观察的seek能力；getSize不增加源访问权限。 */
+internal abstract class SeekableRuntimeMediaDataSource : MediaDataSource() {
+    abstract val supportsSeek: Boolean
+}
+
 /** Platform callbacks read bounded chunks on their media worker. getSize/close never start network work. */
 internal class RuntimeMediaDataSource(
     private val uri: Uri,
     private val streams: HttpsMediaStreams,
     private val onFailure: (QueuePlaybackIssue) -> Unit,
-) : MediaDataSource() {
+) : SeekableRuntimeMediaDataSource() {
     private val reads = Any()
     @Volatile private var closed = false
     @Volatile private var stream: MediaStream? = null
     @Volatile private var total = -1L
-    @Volatile var supportsSeek = false
+    @Volatile override var supportsSeek = false
         private set
     private var nextPosition = 0L
 

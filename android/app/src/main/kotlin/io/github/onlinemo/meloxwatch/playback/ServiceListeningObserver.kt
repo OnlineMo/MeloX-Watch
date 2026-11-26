@@ -143,6 +143,11 @@ internal class ServiceListeningObserver(
         deferred == null && pending.size < MAX_PENDING_ROUNDS &&
         (repository.observedEpochs?.value != null || repository.observedEpochs == null && lastKnownEpochs != null)
 
+    /** 已捕获当前轮次可在无future尾部等待；清除失效和失败不保留该例外。 */
+    fun canKeepContinuousTail(): Boolean = !detached && attachedPlayer != null &&
+        (current != null || starting != null) && deferred == null && pending.size < MAX_PENDING_ROUNDS &&
+        (repository.observedEpochs?.value != null || repository.observedEpochs == null && lastKnownEpochs != null)
+
     /**
      * 真实 AUTO 回调冻结已确认 epoch 并捕获新轮次；异步新读只供后续轮次使用。
      * 短曲在 IO 期间结束也保留其真实采样；

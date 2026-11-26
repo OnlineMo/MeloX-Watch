@@ -17,6 +17,19 @@ internal fun releasePlaybackEngine(
     closeOperations: () -> Unit = {},
     releasePlayer: () -> Unit = player::release,
 ) {
+    observePlaybackEngineRelease(guard, lease, player, closeOperations, releasePlayer)
+    guard.confirmReleased(lease)
+}
+
+/** 原生观察可保留同一lease，等待对应媒体输入也完成实际退休。 */
+@UnstableApi
+internal fun observePlaybackEngineRelease(
+    guard: PlaybackEngineReleaseGuard,
+    lease: PlaybackEngineReleaseGuard.Lease,
+    player: Player,
+    closeOperations: () -> Unit = {},
+    releasePlayer: () -> Unit = player::release,
+) {
     guard.requireRetained(lease)
     var failure: Throwable? = null
     var releasing = false
@@ -52,6 +65,5 @@ internal fun releasePlaybackEngine(
         guard.quarantine(lease)
         throw error
     }
-    // A prior failure is sticky even if another release call has returned normally.
-    guard.confirmReleased(lease)
+    // 调用方仅在所需原生观察和物理观察均完成后确认本lease。
 }

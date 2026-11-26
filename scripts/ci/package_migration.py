@@ -11,8 +11,8 @@ import tomllib
 
 from build import dependency_lock_snapshot, migration_json, verification_snapshot
 from ci_common import require, sha256, write_json
-from package_contract import (DEPENDENCY_FILES, HISTORICAL_SCHEMA_VERSIONS, ROLES, SCHEMA_DIRECTORY, SPECS,
-                              committed_hash, current_schema, current_schemas, data_bytes, exact_data, input_hashes,
+from package_contract import (DATABASE_SOURCE, DEPENDENCY_FILES, HISTORICAL_SCHEMA_VERSIONS, ROLES, SCHEMA_DIRECTORY, SPECS,
+                              committed_hash, current_schema, current_schemas, data_bytes, exact_data, historical_schema_paths, input_hashes,
                               project_plan, required_inputs, room_declarations, safe_path, schema_output_paths)
 from package_build import REQUEST_FILE, source_hashes
 
@@ -107,11 +107,15 @@ def make_request(root, base, variants=('debug',), *, schema_version=None, allowe
         require(committed_hash(root, 'android/' + name, base) == digest, 'Reviewed package preimage differs from the base')
     current = current_schemas(root)
     main = current_schema(root)
-    history = {SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in HISTORICAL_SCHEMA_VERSIONS}
+    history = historical_schema_paths(int(Path(main).stem))
     # Frozen base bytes distinguish first generation from removal of an admitted export.
     base_history = {name: data_bytes(root, 'android/' + name, base, optional=True) for name in sorted(history)}
     require(all(raw is None or reviewed.get(name) == hashlib.sha256(raw).hexdigest()
                 for name, raw in base_history.items()), 'Admitted Watch history cannot be removed or recollected')
+    if int(Path(main).stem) >= 8:
+        base_main = data_bytes(root, 'android/' + main, base, optional=True)
+        require(base_main is None or reviewed.get(main) == hashlib.sha256(base_main).hexdigest(),
+                'Admitted current Watch schema cannot be removed or recollected')
     version = (4 if len(current) > 1 else 3) if schema_version is None else schema_version
     require(type(version) is int and version in (3, 4, 6, 7), 'Package schema request must be explicit v3/v4 or the independent v6/v7')
     require(version in (6, 7) or allowed_dependency_upgrades is None, 'Earlier requests cannot authorize version upgrades')
@@ -124,11 +128,12 @@ def make_request(root, base, variants=('debug',), *, schema_version=None, allowe
         schema_six = SCHEMA_DIRECTORY + '/6.json'
         if main == schema_six and base_history[schema_six] is None and schema_six not in reviewed:
             required_history = history - {schema_six}
-        require(required_history <= set(reviewed), 'Request must retain admitted Watch history1/2/3/6')
+        require(required_history <= set(reviewed),
+                'Request must retain admitted Watch history1/2/3/6 and each registered predecessor')
     if version in (6, 7):
         from package_lock_versions import KIND as upgrade_kind, validate_upgrades
         require(history | {'gradle/verification-metadata.xml', 'app/gradle.lockfile', 'companion/gradle.lockfile'} <= set(reviewed),
-                'A version migration requires the complete admitted XML, dual locks and Watch history1/2/3/6')
+                'A version migration requires the complete admitted XML, dual locks and Watch history1/2/3/6 and each registered predecessor')
         for name in DEPENDENCY_FILES:
             raw = data_bytes(root, 'android/' + name, base, optional=True)
             require(raw is None or reviewed.get(name) == hashlib.sha256(raw).hexdigest(),
@@ -616,8 +621,8 @@ def record_failure(root, state, stage, failure):
     report.mkdir(parents=True, exist_ok=True)
     partial = {}
     unavailable = []
-    admitted_schema_outputs = set(request_current_schemas(request)) | {
-        SCHEMA_DIRECTORY + '/' + str(value) + '.json' for value in HISTORICAL_SCHEMA_VERSIONS}
+    admitted_schema_outputs = set(request_current_schemas(request)) | historical_schema_paths(
+        request['room_declarations'][DATABASE_SOURCE]['version'])
     allowed = set(request['reviewed_input_hashes']) | set(DEPENDENCY_FILES) | admitted_schema_outputs
     try:
         allowed |= set(schema_output_paths(root, allow_unexpected=True))

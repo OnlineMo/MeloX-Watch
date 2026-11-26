@@ -99,7 +99,7 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
         ) { statement ->
             if (!statement.step() || statement.getLong(0) != 0L) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         }
-        for (projection in projections(includeResourceReferences, schema >= 7L)) {
+        for (projection in projections(includeResourceReferences, schema >= 7L, schema >= 8L)) {
             if (projection.kind.scope !in scopes) continue
             var after: String? = null
             while (true) {
@@ -140,15 +140,20 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
     private fun simple(kind: BackupRecordKind, key: String, from: String, where: String = "1", vararg columns: Column) =
         Projection(kind, key, from, where, columns.toList())
 
-    private fun projections(includeResources: Boolean, includeCodecParameters: Boolean): List<Projection> = buildList {
+    private fun projections(includeResources: Boolean, includeCodecParameters: Boolean, includeCue: Boolean): List<Projection> = buildList {
         add(simple(BackupRecordKind.LIBRARY_META, "'library'", "library_meta m", "m.id=1", f("shortAudioFilter", "m.shortAudioFilter")))
-        add(simple(BackupRecordKind.TRACK, "v.trackId", "local_track_versions v", "v.validTo IS NULL",
+        add(Projection(BackupRecordKind.TRACK, "v.trackId", "local_track_versions v", "v.validTo IS NULL", listOf(
             t("providerId", "v.providerId"), f("member", "v.member"), n("firstAddedEpochMs", "v.firstAddedEpochMs"),
             n("firstAddedSequence", "v.firstAddedSequence"), t("filename", "v.filename"), t("title", "v.title"), t("artist", "v.artist"),
             t("artists", "v.artists"), t("album", "v.album"), t("albumArtist", "v.albumArtist"), n("durationMs", "v.durationMs"),
             n("discNumber", "v.discNumber"), n("trackNumber", "v.trackNumber"), f("compilation", "v.compilation"), t("mimeType", "v.mimeType"),
             n("parserVersion", "v.parserVersion"), t("metadataIssue", "v.metadataIssue"),
-            t("codecParameters", if (includeCodecParameters) "v.codecParameters" else "NULL")))
+            t("codecParameters", if (includeCodecParameters) "v.codecParameters" else "NULL"),
+            t("cueReference", if (includeCue) "v.cueReference" else "NULL"))) { key, raw ->
+            BackupRecord(BackupRecordKind.TRACK, key, raw.toMutableMap().apply {
+                put("cueReference", portableCueCell(raw.optionalTextValue("cueReference")))
+            })
+        })
         add(simple(BackupRecordKind.TRACK_LOCATION, "r.relationId", "local_track_locations r", "r.validTo IS NULL", t("trackId", "r.trackId"), t("locationId", "r.locationId")))
         val ownedToken = "COALESCE((SELECT i.fileToken FROM import_operations i WHERE i.ownedSourceId=s.sourceId AND i.phase='COMMITTED'),(SELECT i.fileToken FROM transferred_import_operations i WHERE i.ownedSourceId=s.sourceId AND i.phase='COMMITTED'))"
         add(Projection(BackupRecordKind.SOURCE_HINT, "s.sourceId", "local_sources s", "1", listOf(t("spec", "s.spec"), t("state", "s.state"), t("ownedTokenHint", ownedToken))) { key, raw ->
@@ -209,9 +214,11 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
                 "playlist_heads h JOIN playlist_generations g ON g.generationId=h.activeGenerationId JOIN playlist_members m ON m.generationId=g.dataGenerationId", condition,
                 listOf(t("playlistId", "h.playlistId"), t("memberId", "m.memberId"), n("ordinal", "m.ordinal"), t("providerId", "m.providerId"), t("trackId", "m.trackId"),
                     t("placeholderId", "m.placeholderId"), t("issue", "m.issue"), t("titleHint", "m.titleHint"), t("artistHint", "m.artistHint"), t("albumHint", "m.albumHint"),
-                    t("relativePathHint", "m.relativePathHint"), t("descriptionHint", "m.descriptionHint"), n("durationMs", "m.durationMs"))) { _, raw ->
+                    t("relativePathHint", "m.relativePathHint"), t("descriptionHint", "m.descriptionHint"), n("durationMs", "m.durationMs"),
+                    t("cueReference", if (includeCue) "m.cueReference" else "NULL"))) { _, raw ->
                 BackupRecord(memberKind, backupStableId(raw.textValue("playlistId"), raw.textValue("memberId")), raw.toMutableMap().apply {
                     put("relativePathHint", backupText(BackupLogicalSchema.portableRelative(raw.optionalTextValue("relativePathHint"))))
+                    put("cueReference", portableCueCell(raw.optionalTextValue("cueReference")))
                 })
             })
         }
@@ -220,8 +227,10 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
             n("cycleLimit", "g.cycleLimit"), t("currentEntryId", "h.currentEntryId"), n("positionMs", "h.positionMs"), n("completedCycles", "h.completedCycles")))
         add(Projection(BackupRecordKind.QUEUE_ENTRY, "e.queueEntryId", "queue_head h JOIN queue_entries e ON e.generationId=h.activeGenerationId", "h.id=1",
             listOf(t("providerId", "e.providerId"), t("trackId", "e.trackId"), n("originalOrder", "e.originalOrder"), n("playbackOrder", "e.playbackOrder"),
-                t("displayName", "e.displayName"), n("durationMs", "e.durationMs"), t("locationIdHint", "e.locationId"), t("uriHint", "e.locationUri"))) { key, raw ->
+                t("displayName", "e.displayName"), n("durationMs", "e.durationMs"), t("locationIdHint", "e.locationId"), t("uriHint", "e.locationUri"),
+                t("cueReference", if (includeCue) "e.cueReference" else "NULL"))) { key, raw ->
             BackupRecord(BackupRecordKind.QUEUE_ENTRY, key, raw.toMutableMap().apply {
+                put("cueReference", portableCueCell(raw.optionalTextValue("cueReference")))
                 put("uriHint", backupText(BackupLogicalSchema.portableUri(raw.optionalTextValue("uriHint"))))
             })
         })

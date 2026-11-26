@@ -11,12 +11,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -24,8 +21,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.selected
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import io.github.onlinemo.meloxwatch.companion.R
 import io.github.onlinemo.meloxwatch.companion.data.CompanionConnectionPhase
@@ -63,20 +58,15 @@ internal fun CompanionUi(
     }
     Column(Modifier.fillMaxSize().background(CompanionInk.background).windowInsetsPadding(WindowInsets.safeDrawing).imePadding(),
         horizontalAlignment = Alignment.CenterHorizontally) {
-        MeloXAction(stringResource(R.string.back), back,
+        MeloXBack(stringResource(R.string.back), back,
             modifier = Modifier.widthIn(max = 720.dp).padding(horizontal = 16.dp, vertical = 8.dp))
         LazyColumn(Modifier.widthIn(max = 720.dp).fillMaxWidth().weight(1f), contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp), state = scroll) {
-            item(key = "screen-heading") { MeloXText(screenName(state.screen), heading = true) }
+            item(key = "screen-heading") { MeloXPageTitle(screenName(state.screen)) }
             item(key = "screen-navigation") {
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp), contentPadding = PaddingValues(vertical = 4.dp)) {
-                    items(CompanionScreen.entries, key = { it.name }) { screen ->
-                        MeloXAction(screenName(screen), {
-                            if (state.screen == CompanionScreen.LICENSES && screen != CompanionScreen.LICENSES) licenses.hide()
-                            model.navigate(screen)
-                        }, prominent = screen == state.screen,
-                            modifier = Modifier.width(144.dp).semantics { selected = screen == state.screen })
-                    }
+                MeloXNavigation(state.screen) { screen ->
+                    if (state.screen == CompanionScreen.LICENSES && screen != CompanionScreen.LICENSES) licenses.hide()
+                    model.navigate(screen)
                 }
             }
             if (state.screen != CompanionScreen.LICENSES) {

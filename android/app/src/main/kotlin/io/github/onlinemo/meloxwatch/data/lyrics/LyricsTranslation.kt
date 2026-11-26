@@ -37,7 +37,7 @@ class LyricsTranslation internal constructor(
 
 /**
  * Translation LRC is explicitly selected by the caller. Matching uses raw time minus each source
- * offset, never a nearest timestamp or a text heuristic. Equal-time groups of equal size pair by
+ * offset（同时减去各文档声明的时间线起点）。 Equal-time groups of equal size pair by
  * stable source ordinal; unequal groups remain wholly unmatched so duplicates cannot drift.
  * Track identity, source permission and association persistence remain with the acquisition owner.
  */
@@ -47,8 +47,10 @@ class LyricsTranslationMatcher internal constructor(
 ) {
     constructor(limits: LyricsLimits = LyricsLimits()) : this(limits, Dispatchers.Default)
 
-    suspend fun match(primary: LyricsDocument, translation: LyricsDocument): LyricsTranslation = withContext(workDispatcher) {
+    suspend fun match(primary: LyricsDocument, translation: LyricsDocument, primaryTimelineOriginMs: Long = 0L,
+        translationTimelineOriginMs: Long = 0L): LyricsTranslation = withContext(workDispatcher) {
         currentCoroutineContext().ensureActive()
+        require(primaryTimelineOriginMs >= 0L && translationTimelineOriginMs >= 0L)
         if (primary.timeline.size > limits.maxTimelineEntries || translation.timeline.size > limits.maxTimelineEntries) {
             throw LyricsParseException(LyricsParseIssue.TOO_MANY_TIMED_LINES)
         }
@@ -68,14 +70,14 @@ class LyricsTranslationMatcher internal constructor(
         while (primaryIndex < primary.timeline.size || translationIndex < translation.timeline.size) {
             currentCoroutineContext().ensureActive()
             if (primaryIndex == primary.timeline.size) {
-                if (normalizedTime(translation, translationIndex) == null) invalidTranslation++
+                if (normalizedTime(translation, translationIndex, translationTimelineOriginMs) == null) invalidTranslation++
                 translationIndex++
             } else if (translationIndex == translation.timeline.size) {
-                if (normalizedTime(primary, primaryIndex) == null) invalidPrimary++
+                if (normalizedTime(primary, primaryIndex, primaryTimelineOriginMs) == null) invalidPrimary++
                 primaryIndex++
             } else {
-                val primaryTime = normalizedTime(primary, primaryIndex)
-                val translationTime = normalizedTime(translation, translationIndex)
+                val primaryTime = normalizedTime(primary, primaryIndex, primaryTimelineOriginMs)
+                val translationTime = normalizedTime(translation, translationIndex, translationTimelineOriginMs)
                 when {
                     primaryTime == null -> {
                         invalidPrimary++
@@ -123,8 +125,8 @@ class LyricsTranslationMatcher internal constructor(
         )
     }
 
-    private fun normalizedTime(document: LyricsDocument, index: Int): Long? =
-        lyricsSubtract(document.timeline.line(index).startsAtMs, document.sourceOffsetMs)
+    private fun normalizedTime(document: LyricsDocument, index: Int, timelineOriginMs: Long): Long? =
+        lyricsSubtract(document.timeline.line(index).startsAtMs, document.sourceOffsetMs)?.let { lyricsSubtract(it, timelineOriginMs) }
 
     private suspend fun groupEnd(timeline: LyricsTimeline, start: Int): Int {
         val time = timeline.line(start).startsAtMs

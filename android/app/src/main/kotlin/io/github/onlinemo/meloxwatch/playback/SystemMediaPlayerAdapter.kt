@@ -29,7 +29,8 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.playback.route.AndroidRoutingSources
 import io.github.onlinemo.meloxwatch.playback.route.PlaybackAudioRoute
 import io.github.onlinemo.meloxwatch.playback.resources.PlaybackDataSources
-import io.github.onlinemo.meloxwatch.playback.resources.RuntimeMediaDataSource
+import io.github.onlinemo.meloxwatch.playback.resources.SeekableRuntimeMediaDataSource
+import io.github.onlinemo.meloxwatch.playback.resources.MediaTransportException
 import io.github.onlinemo.meloxwatch.playback.resources.RuntimePlaybackResources
 import java.io.FileNotFoundException
 import java.util.UUID
@@ -98,7 +99,7 @@ internal class SystemMediaPlayerAdapter(
     private var failure: PlaybackException? = null
     private var loadJob: Job? = null
     private var providerCancellation: CancellationSignal? = null
-    private var remoteSource: RuntimeMediaDataSource? = null
+    private var remoteSource: SeekableRuntimeMediaDataSource? = null
     private var attemptedSpeedTenths: Int? = null
     private var prepareFuture: SettableFuture<Unit>? = null
     private var inFlightSeek: SeekRequest? = null
@@ -409,7 +410,7 @@ internal class SystemMediaPlayerAdapter(
         val uri = item.localConfiguration?.uri
         val future = SettableFuture.create<Unit>()
         prepareFuture = future
-        if (uri == null || uri.scheme != "content" && (uri.scheme != RuntimePlaybackResources.SCHEME || remoteSources == null)) {
+        if (uri == null || uri.scheme != "content" && (uri.scheme !in setOf(RuntimePlaybackResources.SCHEME, RuntimePlaybackResources.CUE_SCHEME) || remoteSources == null)) {
             fail(sourceError("LOCAL_URI_REQUIRED", PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED))
             return future
         }
@@ -421,7 +422,13 @@ internal class SystemMediaPlayerAdapter(
         installCallbacks(generation)
         loadJob = scope.launch(Dispatchers.Main.immediate) {
             try {
-                if (uri.scheme == RuntimePlaybackResources.SCHEME) {
+                if (uri.scheme in setOf(RuntimePlaybackResources.SCHEME, RuntimePlaybackResources.CUE_SCHEME)) {
+                    if (uri.scheme == RuntimePlaybackResources.CUE_SCHEME && withTimeoutOrNull(5000L) {
+                            checkNotNull(remoteSources).awaitCueRetirement();
+                            true
+                        } != true) throw MediaTransportException(QueuePlaybackIssue.BUSY)
+                    currentCoroutineContext().ensureActive()
+                    if (!isCurrent(generation)) throw CancellationException("Platform source changed")
                     val source = checkNotNull(remoteSources).platform(uri) { issue ->
                         handler.post {
                             if (isCurrent(generation)) fail(sourceError("RESOURCE_${issue.name}", PlaybackException.ERROR_CODE_IO_UNSPECIFIED))
@@ -456,6 +463,12 @@ internal class SystemMediaPlayerAdapter(
             } catch (error: Exception) {
                 if (isCurrent(generation)) fail(when (error) {
                     is PlaybackException -> error
+                    is MediaTransportException -> PlaybackException("RESOURCE_${error.issue.name}", error, when (error.issue) {
+                        QueuePlaybackIssue.PERMISSION_DENIED -> PlaybackException.ERROR_CODE_IO_NO_PERMISSION
+                        QueuePlaybackIssue.FILE_MISSING -> PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND
+                        QueuePlaybackIssue.SOURCE_UNSUPPORTED -> PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED
+                        else -> PlaybackException.ERROR_CODE_IO_UNSPECIFIED
+                    })
                     is SourceReadException -> when (error.issue) {
                         SourceReadIssue.PERMISSION_DENIED, SourceReadIssue.PERMISSION_REVOKED ->
                             sourceError("PERMISSION_DENIED", PlaybackException.ERROR_CODE_IO_NO_PERMISSION)

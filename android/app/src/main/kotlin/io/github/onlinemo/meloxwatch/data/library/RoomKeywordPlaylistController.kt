@@ -55,7 +55,7 @@ class RoomKeywordPlaylistController(
         var handedOff = false
         var failure: Throwable? = null
         try {
-            val view = acquired.openLibrary(LibraryQuery(relativePathKeyword = normalized, readableOnly = true),
+            val view = acquired.openLibrary(LibraryQuery(relativePathKeyword = normalized, readableOnly = true, allowUnknownTreeReadValidation = true),
                 LibrarySort(LibrarySortField.FILENAME_NATURAL))
             val availableScope = library.playlistAvailableScopeCount(view)
             val broad = view.totalCount >= 1000L || availableScope >= 100L &&

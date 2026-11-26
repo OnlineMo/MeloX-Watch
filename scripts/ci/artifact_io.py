@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from ci_common import REPOSITORY, require, sha256
+from ci_common import OWNER, OWNER_ID, REPOSITORY, require, sha256
 
 MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
 MAX_EXPANDED_BYTES = 768 * 1024 * 1024
@@ -73,9 +73,17 @@ class GitHub:
         raise ValueError('GitHub collection exceeded the bounded pagination limit')
 
     def download(self, path):
+        return self._download(path, 'application/vnd.github+json')
+
+    def download_release_asset(self, asset_id):
+        require(type(asset_id) is int and asset_id > 0, 'Invalid release asset ID')
+        # Release资产GET默认返回JSON元数据；原字节校验必须显式协商二进制表示。
+        return self._download(f'/repos/{REPOSITORY}/releases/assets/{asset_id}', 'application/octet-stream')
+
+    def _download(self, path, accept):
         require(path.startswith('/repos/' + REPOSITORY + '/'), 'Unexpected download repository')
         request = urllib.request.Request('https://api.github.com' + path,
-            headers={'Authorization': 'Bearer ' + self.token, 'Accept': 'application/vnd.github+json',
+            headers={'Authorization': 'Bearer ' + self.token, 'Accept': accept,
                      'X-GitHub-Api-Version': '2022-11-28'})
         try:
             with urllib.request.build_opener(NoRedirect).open(request, timeout=60) as response:
@@ -128,10 +136,16 @@ def verify_checksums(directory):
 
 def validate_run(run, attempt, source_sha, workflow_path, event, branch, require_success=False):
     require(run['repository']['full_name'] == REPOSITORY, 'Foreign artifact repository')
+    owner = run['repository'].get('owner')
+    require(type(owner) is dict and owner.get('login') == OWNER and
+            type(owner.get('id')) is int and owner['id'] == OWNER_ID,
+            'Artifact repository owner ID differs')
     require(run['run_attempt'] == attempt, 'Run attempt mismatch; use the accepted attempt')
     require(run['head_sha'] == source_sha and run['head_branch'] == branch, 'Artifact source mismatch')
     require(run['path'] == workflow_path and run['event'] == event, 'Unexpected producing workflow')
     require(run['actor']['login'] == run['triggering_actor']['login'] == 'OnlineMo', 'Untrusted producing actor')
+    require(all(type(run[key].get('id')) is int and run[key]['id'] == OWNER_ID
+                for key in ('actor', 'triggering_actor')), 'Untrusted producing actor ID')
     require(not require_success or run['conclusion'] == 'success', 'Candidate run did not succeed')
 
 

@@ -190,7 +190,7 @@ class RoomFolderPlaylistMaintainer internal constructor(
         var failure: Throwable? = null
         try {
             val view = acquired.openLibrary(LibraryQuery(sourceId = binding.sourceId, folderNodeId = binding.nodeId,
-                folderSubtree = binding.subtree, readableOnly = true), LibrarySort(LibrarySortField.FILENAME_NATURAL))
+                folderSubtree = binding.subtree, readableOnly = true, allowUnknownTreeReadValidation = true), LibrarySort(LibrarySortField.FILENAME_NATURAL))
             val folder = library.folder(view, binding.nodeId) ?: fail(PlaylistIssue.SOURCE_UNAVAILABLE)
             if (folder.sourceId != binding.sourceId) fail(PlaylistIssue.SOURCE_CHANGED)
             val fence = catalogFence(binding.sourceId, view = view, expectedScanId = initial.scanId, binding = binding)

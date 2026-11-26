@@ -6,9 +6,10 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import candidate
+import release
 from ci_common import OWNER, OWNER_EMAIL, git
 from release import publish_assets, validate_release_target
 from release_evidence import (GATES, validate_approval, validate_approval_history,
@@ -151,6 +152,139 @@ class AcceptanceTests(unittest.TestCase):
                 validate_branch_protection(value, 15368)
 
 
+class CandidatePreparationIdentityTests(unittest.TestCase):
+    SOURCE = 'a' * 40
+    ENV = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
+           'GITHUB_REPOSITORY_OWNER': 'OnlineMo', 'GITHUB_REPOSITORY_OWNER_ID': '143324986',
+           'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_ACTOR_ID': '143324986',
+           'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Owner release',
+           'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main',
+           'GITHUB_SHA': SOURCE, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
+           'CANDIDATE_OPERATION': 'prepare-candidate'}
+
+    def run_metadata(self):
+        return {'id': 123, 'repository': {'full_name': 'OnlineMo/MeloX-Watch',
+                'owner': {'login': 'OnlineMo', 'id': 143324986}},
+                'run_attempt': 2, 'head_sha': self.SOURCE, 'head_branch': 'main',
+                'path': '.github/workflows/release.yml', 'event': 'workflow_dispatch',
+                'actor': {'login': 'OnlineMo', 'id': 143324986},
+                'triggering_actor': {'login': 'OnlineMo', 'id': 143324986}, 'conclusion': None}
+
+    def assert_rejected_before_snapshot(self, metadata):
+        with patch.dict(os.environ, self.ENV, clear=True), patch('check.check'), \
+                patch.object(candidate, 'project_plan', return_value={}), \
+                patch.object(candidate, 'GitHub') as client_type, patch.object(candidate, 'git') as git_boundary:
+            client_type.return_value.get.return_value = metadata
+            with self.assertRaises(ValueError):
+                candidate.prepare()
+            client_type.return_value.get.assert_called_once_with('/actions/runs/123/attempts/2')
+            git_boundary.assert_not_called()
+
+    def test_valid_owner_attempt_is_read_before_any_snapshot_git_mutation(self):
+        with patch.dict(os.environ, self.ENV, clear=True), patch('check.check'), \
+                patch.object(candidate, 'project_plan', return_value={}), \
+                patch.object(candidate, 'GitHub') as client_type, \
+                patch.object(candidate, 'git', return_value='b' * 40) as git_boundary:
+            client_type.return_value.get.return_value = self.run_metadata()
+            with self.assertRaisesRegex(ValueError, 'checkout differs'):
+                candidate.prepare()
+            client_type.return_value.get.assert_called_once_with('/actions/runs/123/attempts/2')
+            git_boundary.assert_called_once_with('rev-parse', 'HEAD')
+
+    def test_matching_triggering_login_with_foreign_id_never_creates_a_snapshot(self):
+        metadata = self.run_metadata()
+        metadata['triggering_actor']['id'] = 1
+        self.assert_rejected_before_snapshot(metadata)
+
+    def test_other_workflow_event_branch_or_attempt_cannot_prepare_a_snapshot(self):
+        for field, value in (('id', 124), ('id', 123.0), ('run_attempt', 3),
+                             ('head_sha', 'b' * 40), ('head_branch', 'contribution'),
+                             ('path', '.github/workflows/cloud-build.yml'), ('event', 'push')):
+            with self.subTest(field=field):
+                self.assert_rejected_before_snapshot(self.run_metadata() | {field: value})
+
+    def test_same_repository_and_logins_with_replaced_owner_or_actor_are_rejected(self):
+        for field in ('actor', 'repository-owner'):
+            metadata = self.run_metadata()
+            record = metadata['repository']['owner'] if field == 'repository-owner' else metadata[field]
+            record['id'] = 1
+            with self.subTest(field=field):
+                self.assert_rejected_before_snapshot(metadata)
+
+
+class PublicationAttemptIdentityTests(unittest.TestCase):
+    APPROVAL = 'a' * 40
+    ENV = {'GITHUB_ACTIONS': 'true', 'CI': 'true', 'GITHUB_REPOSITORY': 'OnlineMo/MeloX-Watch',
+           'GITHUB_REPOSITORY_OWNER': 'OnlineMo', 'GITHUB_REPOSITORY_OWNER_ID': '143324986',
+           'GITHUB_ACTOR': 'OnlineMo', 'GITHUB_ACTOR_ID': '143324986',
+           'GITHUB_TRIGGERING_ACTOR': 'OnlineMo', 'GITHUB_WORKFLOW': 'Owner release',
+           'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_REF': 'refs/heads/main',
+           'GITHUB_SHA': APPROVAL, 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '2',
+           'CANDIDATE_OPERATION': 'publish-candidate'}
+
+    def run_metadata(self):
+        return {'id': 123, 'repository': {'full_name': 'OnlineMo/MeloX-Watch',
+                'owner': {'login': 'OnlineMo', 'id': 143324986}},
+                'run_attempt': 2, 'head_sha': self.APPROVAL, 'head_branch': 'main',
+                'path': '.github/workflows/release.yml', 'event': 'workflow_dispatch',
+                'actor': {'login': 'OnlineMo', 'id': 143324986},
+                'triggering_actor': {'login': 'OnlineMo', 'id': 143324986}, 'conclusion': None}
+
+    def assert_rejected_before_candidate_or_publication(self, metadata):
+        with patch.dict(os.environ, self.ENV, clear=True), patch.object(release, 'GitHub') as client_type, \
+                patch.object(release, 'git', return_value=self.APPROVAL) as git_boundary, \
+                patch.object(release, 'fetch_candidate') as fetch, \
+                patch.object(release, 'push_new_tag') as tag, patch.object(release, 'publish_assets') as assets:
+            client = client_type.return_value
+            client.get.return_value = metadata
+            with self.assertRaises(ValueError):
+                release.publish(987, 1, 654, self.APPROVAL)
+            client.get.assert_called_once_with('/actions/runs/123/attempts/2')
+            git_boundary.assert_called_once_with('rev-parse', 'HEAD')
+            fetch.assert_not_called()
+            tag.assert_not_called()
+            assets.assert_not_called()
+            client.request.assert_not_called()
+
+    def test_valid_in_progress_publication_checks_its_own_attempt_before_fetching_old_candidate(self):
+        with patch.dict(os.environ, self.ENV, clear=True), patch.object(release, 'GitHub') as client_type, \
+                patch.object(release, 'git', return_value=self.APPROVAL) as git_boundary, \
+                patch.object(release, 'fetch_candidate', side_effect=ValueError('fixture old candidate boundary')) as fetch, \
+                patch.object(release, 'push_new_tag') as tag, patch.object(release, 'publish_assets') as assets:
+            client = client_type.return_value
+            client.get.side_effect = [self.run_metadata(), {'object': {'sha': self.APPROVAL}}]
+            with self.assertRaisesRegex(ValueError, 'fixture old candidate boundary'):
+                release.publish(987, 1, 654, self.APPROVAL)
+            self.assertEqual(client.get.call_args_list, [call('/actions/runs/123/attempts/2'), call('/git/ref/heads/main')])
+            git_boundary.assert_called_once_with('rev-parse', 'HEAD')
+            fetch.assert_called_once_with(client, 987, 1, 654, release.ROOT / 'accepted-candidate')
+            tag.assert_not_called()
+            assets.assert_not_called()
+            client.request.assert_not_called()
+
+    def test_matching_current_triggering_login_with_foreign_or_noninteger_id_never_writes_a_release(self):
+        for value in (1, 143324986.0, '143324986', True, None):
+            metadata = self.run_metadata()
+            metadata['triggering_actor']['id'] = value
+            with self.subTest(value=value):
+                self.assert_rejected_before_candidate_or_publication(metadata)
+
+    def test_current_repository_owner_and_original_actor_ids_are_checked_separately(self):
+        for field in ('actor', 'repository-owner'):
+            metadata = self.run_metadata()
+            record = metadata['repository']['owner'] if field == 'repository-owner' else metadata[field]
+            record['id'] = 1
+            with self.subTest(field=field):
+                self.assert_rejected_before_candidate_or_publication(metadata)
+
+    def test_current_run_id_attempt_approval_workflow_event_and_branch_cannot_be_substituted(self):
+        for field, value in (('id', 124), ('id', 123.0), ('run_attempt', 3),
+                             ('head_sha', 'b' * 40), ('head_branch', 'contribution'),
+                             ('path', '.github/workflows/cloud-build.yml'), ('event', 'push')):
+            with self.subTest(field=field):
+                self.assert_rejected_before_candidate_or_publication(self.run_metadata() | {field: value})
+
+
 class RecoveryTests(unittest.TestCase):
     def test_same_snapshot_recovery_and_stale_candidate_rules(self):
         manifest = {'version': {'versionName': '0.2.0', 'versionCode': '20'}, 'snapshot_sha': 'a' * 40}
@@ -163,7 +297,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_recovery_only_uploads_missing_identical_assets(self):
         with tempfile.TemporaryDirectory() as temporary:
-            paths = {name: Path(temporary) / name for name in ('watch-release.apk', 'snapshot.bundle')}
+            paths = {name: Path(temporary) / name for name in ('watch-release.apk', 'phone-release.apk', 'snapshot.bundle')}
             for name, path in paths.items():
                 path.write_bytes(('original fixture ' + name).encode())
 
@@ -175,10 +309,10 @@ class RecoveryTests(unittest.TestCase):
                 def pages(self, path):
                     if path == '/releases':
                         return [{'id': 12, 'tag_name': 'v0.1.0', 'prerelease': True, 'draft': True}]
-                    return [{'id': index, 'name': name} for index, name in enumerate(self.assets)]
+                    return [{'id': index, 'name': name} for index, name in enumerate(self.assets, start=1)]
 
-                def download(self, path):
-                    return list(self.assets.values())[int(path.rsplit('/', 1)[1])]
+                def download_release_asset(self, asset_id):
+                    return list(self.assets.values())[asset_id - 1]
 
                 def request(self, method, path, data, **kwargs):
                     self.calls.append((method, path))
@@ -188,7 +322,8 @@ class RecoveryTests(unittest.TestCase):
             client = Client()
             publish_assets(client, 'v0.1.0', 'a' * 40, paths, True)
             posts = [path for method, path in client.calls if method == 'POST']
-            self.assertEqual(posts, ['/repos/OnlineMo/MeloX-Watch/releases/12/assets?name=snapshot.bundle'])
+            self.assertEqual(posts, ['/repos/OnlineMo/MeloX-Watch/releases/12/assets?name=phone-release.apk',
+                                     '/repos/OnlineMo/MeloX-Watch/releases/12/assets?name=snapshot.bundle'])
             client.calls.clear()
             publish_assets(client, 'v0.1.0', 'a' * 40, paths, True)
             self.assertFalse(any(method == 'POST' for method, _ in client.calls))

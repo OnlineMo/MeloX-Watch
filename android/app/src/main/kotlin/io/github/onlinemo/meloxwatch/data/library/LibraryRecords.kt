@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import android.content.Intent
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import io.github.onlinemo.meloxwatch.data.local.LocalGrantObservation
 import io.github.onlinemo.meloxwatch.data.local.LocalNodeKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
@@ -155,9 +157,23 @@ internal object LibrarySortKeys {
         .joinToString("") { "%02x".format(Locale.ROOT, it.toInt() and 0xff) }
 }
 
+/** 当前授权行的平面事实与SQL门槛一致；旧JSON不能恢复已拒绝的读权或持久标记。 */
+internal fun LibraryGrantEntity.model(): LocalGrantObservation {
+    val read = ObservedCapability.entries.firstOrNull { it.name == readCapability }
+        ?: ObservedCapability.UNAVAILABLE
+    val persistedMask = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    val persistedFlags = acceptedPersistedFlags.takeIf { it >= 0 && (it and persistedMask.inv()) == 0 } ?: 0
+    // 未列出的枚举、写删、声明能力和持久化结果仍保留JSON观测；UNKNOWN只准许进入验证。
+    return LibraryCodec.grant(observation).copy(
+        read = read,
+        acceptedPersistedFlags = persistedFlags,
+        appOwned = appOwned,
+    )
+}
+
 internal fun LibrarySourceEntity.model(grant: LibraryGrantEntity): LibrarySource {
     require(grant.grantId == grantId && grant.sourceId == sourceId)
-    return LibrarySource(LibraryCodec.source(spec), LibraryCodec.grant(grant.observation), grantId, revision, authEpoch,
+    return LibrarySource(LibraryCodec.source(spec), grant.model(), grantId, revision, authEpoch,
         LibrarySourceState.valueOf(state), activeScanId, latestScanId)
 }
 
@@ -173,7 +189,14 @@ internal fun LibraryTrackVersionEntity.metadata() = LocalAudioMetadata(title, ar
     durationMs, discNumber, trackNumber, compilation, mimeType, parserVersion,
     codecParameters?.let(LocalCodecParametersCodec::decode))
 
-internal fun LibraryRowRecord.reference(): LocalLocationReference? {
+internal fun LibraryRowRecord.cueReference(): LocalCueReference? = track.cueReference?.let {
+    CueReferenceCodec.decode(it).also { reference ->
+        require(reference.trackKey == TrackKey(track.providerId, track.trackId))
+    }
+}
+
+internal fun LibraryRowRecord.reference(cue: LocalCueReference? = cueReference()): LocalLocationReference? {
+    if (cue != null) return cue.binding?.audio?.location
     val locationId = selectedLocationId ?: return null
     val uri = selectedUri ?: return null
     val grant = selectedGrantObservation?.let(LibraryCodec::grant) ?: return null
@@ -187,10 +210,13 @@ internal fun LibraryRowRecord.reference(): LocalLocationReference? {
     return LocalLocationReference(locationId, uri, selectedGrantUri ?: uri, grant.acceptedPersistedFlags, access, selectedContentRevision ?: 0L)
 }
 
-internal fun LibraryRowRecord.model() = LibraryTrack(TrackKey(track.providerId, track.trackId), track.displayTitle, track.filename,
-    track.metadata(), LibraryAvailability.entries.getOrNull(availabilityRank) ?: throw LibraryException(LibraryIssue.RECOVERY_REQUIRED),
-    track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, displayAlbumKey, reference(), selectedSourceId,
-    selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs, displayArtist, displayAlbum)
+internal fun LibraryRowRecord.model(): LibraryTrack {
+    val cue = cueReference()
+    return LibraryTrack(TrackKey(track.providerId, track.trackId), track.displayTitle, track.filename,
+        track.metadata(), LibraryAvailability.entries.getOrNull(availabilityRank) ?: throw LibraryException(LibraryIssue.RECOVERY_REQUIRED),
+        track.metadataIssue, track.firstAddedEpochMs, track.firstAddedSequence, displayAlbumKey, reference(cue), selectedSourceId,
+        selectedAliasId, selectedNodeId, effectivePlayCount, effectiveListeningMs, displayArtist, displayAlbum, cue)
+}
 
 internal fun LibraryRowRecord.cursor(view: LibraryViewToken) = LibraryCursor(view.viewId, view.revision, view.sortRuleVersion,
     missingRank, nullRank, sortKey, track.providerId, track.trackId)
