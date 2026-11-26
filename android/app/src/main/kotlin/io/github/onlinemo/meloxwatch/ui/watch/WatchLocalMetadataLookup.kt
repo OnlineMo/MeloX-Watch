@@ -159,7 +159,7 @@ internal fun WatchLocalMetadataLookup(
                         }
                         !preview.lyricsText.isNullOrBlank()
                     }
-                    LocalMetadataKind.ARTWORK -> MetadataArtworkPreview(preview, bitmaps,
+                    LocalMetadataKind.ARTWORK -> metadataArtworkPreview(preview, bitmaps,
                         enabled && targetReady && !state.initializing, idle && targetReady, onRetry)
                 }
                 WatchActionRow(stringResource(R.string.metadata_lookup_confirm), idle && targetReady && previewReady,
@@ -207,7 +207,7 @@ private fun MetadataQueryField(label: String, value: String, enabled: Boolean, o
 
 /** A display acquires its own bounded lease and retires it when its ticket or visibility changes. */
 @Composable
-private fun MetadataArtworkPreview(preview: LocalMetadataPreview, bitmaps: ThemeBitmapOwner,
+private fun metadataArtworkPreview(preview: LocalMetadataPreview, bitmaps: ThemeBitmapOwner,
     enabled: Boolean, canRetry: Boolean, onRetry: () -> Unit): Boolean {
     var lease by remember(bitmaps, preview.id, preview.artworkKey) { mutableStateOf<ThemeBitmapLease?>(null) }
     var unavailable by remember(bitmaps, preview.id, preview.artworkKey) { mutableStateOf(false) }
