@@ -51,11 +51,15 @@ internal object BackupMetadataAssociations {
     fun decode(row: BackupRecord, assetId: String? = null,
         trackKey: TrackKey = TrackKey(TrackKey.LOCAL_PROVIDER, row.key)): MetadataAssociation = try {
         if (row.kind !in KINDS || row.values.keys != fields(row.kind) || row.key.length > 128 ||
-            BackupLogicalSchema.portableHint(row.key) != row.key || trackKey.providerId != TrackKey.LOCAL_PROVIDER) {
+            BackupLogicalSchema.portableHint(row.key) != row.key || row.key.any { it == '/' || it == '\\' } ||
+            trackKey.providerId != TrackKey.LOCAL_PROVIDER) {
             throw BackupException(BackupIssue.INVALID_INPUT)
         }
         val value = MetadataAssociation(trackKey, purpose(row.kind), row.long("revision"), assetId,
             row.optionalText("sha256"), row.optionalLong("bytes"), row.optionalText("provenance")?.let(MetadataProvenance::decode))
+        if (value.byteCount != null && value.byteCount !in 1L..resourceKind(row.kind).limitBytes) {
+            throw BackupException(BackupIssue.INVALID_INPUT)
+        }
         val suppliedResource = row.optionalText("resourceId")
         if (suppliedResource != null && suppliedResource != resourceId(row)) throw BackupException(BackupIssue.INVALID_REFERENCE)
         if (row.kind == BackupRecordKind.METADATA_LYRICS && row.flag("primaryLinked") && value.sha256 == null) {

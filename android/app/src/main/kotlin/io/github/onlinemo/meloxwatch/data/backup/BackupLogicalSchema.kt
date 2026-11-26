@@ -255,7 +255,8 @@ internal object BackupLogicalSchema {
     private fun digest(value: String?) { if (value != null && !value.matches(Regex("[0-9a-f]{64}"))) reject() }
     private fun zone(value: String) { try { ZoneId.of(value) } catch (error: Exception) { throw BackupException(BackupIssue.INVALID_INPUT, error) } }
     private fun metadataFields(lyrics: Boolean) = mapOf("revision" to number(), "sha256" to text(true, 64),
-        "bytes" to number(true, 1, BackupLimits.IMAGE_BYTES), "provenance" to text(true, MetadataProvenance.PROVENANCE_BYTES),
+        "bytes" to number(true, 1, if (lyrics) BackupLimits.LYRICS_BYTES else BackupLimits.IMAGE_BYTES),
+        "provenance" to text(true, MetadataProvenance.PROVENANCE_BYTES),
         "resourceId" to text(true, 64), "cueReference" to text(true, CueReferenceCodec.MAX_BYTES)) +
         if (lyrics) mapOf("primaryLinked" to flag) else emptyMap()
     private fun playlistHeadFields() = mapOf("name" to text(), "kind" to text(characters = 32),

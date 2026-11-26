@@ -78,6 +78,9 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.createSavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -86,6 +89,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import io.github.onlinemo.meloxwatch.ui.fileoperations.FileOperationsViewModel
 import androidx.media3.common.Player
+import io.github.onlinemo.meloxwatch.BuildConfig
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.data.ProbeAccess
@@ -251,6 +255,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (BuildConfig.DEBUG) {
+            // 系统栏独立于内容遮罩；首帧前固定Debug窗口策略，遮罩启停只改变绘制。
+            WindowCompat.getInsetsController(window, window.decorView).apply {
+                systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                hide(WindowInsetsCompat.Type.systemBars())
+            }
+        }
         debugRoundMask.value = readDebugRoundMask(this)
         // A recreation reads the latest saved setting instead of replaying an old mask action.
         if (savedInstanceState == null) acceptDebugRoundMaskIntent(intent)

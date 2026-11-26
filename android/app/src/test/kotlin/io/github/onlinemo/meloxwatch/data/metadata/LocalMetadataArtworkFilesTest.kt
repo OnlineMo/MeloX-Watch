@@ -28,10 +28,12 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 
 /** Immutable assets use actual private files and decode; these tests do not attest device fsync/heap metrics. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 class LocalMetadataArtworkFilesTest {
     @get:Rule val temporary = TemporaryFolder()
     private fun context() = MetadataFileContext(RuntimeEnvironment.getApplication(), temporary.newFolder())

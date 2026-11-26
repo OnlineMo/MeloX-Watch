@@ -36,7 +36,11 @@ v1 为普通 ZIP：首项 `manifest.json`；按 `BackupRecordKind` 固定类型�
 
 歌词资源导出从当前数据库关联取得实际本机 URI并重验；已管理副本走原有 copy owner，外部路径先拒绝未核对 provider，再查独立的实际 persisted read/对象/内容。首个外部支持路径是经过 authority、包名和 system flag 核对的 AOSP 本地文档 provider。恢复的歌词资源成为新的应用私有副本/身份，不恢复外部 grant；无资源时仅保留经过当前关联内容/编码核对的既有本地关联，否则报告缺失。
 
-联网素材归档只保存内容摘要、字节、provenance 和资源 ID，不含原 asset UUID/URI；无资源则记录待恢复状态，不授予可读素材。联网 primary 的有效关系由原 URI/hash/metadata marker 精确生成 `primaryLinked`，Stage 核与同归档歌词行一致；恢复仅在两行实际应用且资源确认后重建 marker，不用内容去重替代原选择关系。MERGE 保留已确认/已清除的素材与当前手动歌词，REPLACE 同事务处理 FK 和递增墓碑。私有主事务 TEMP 使用 FILE 且读回核验，并为完整素材前像建立索引，不能将整份 provenance 集合放进未界定内存。
+联网素材归档只保存内容摘要、字节、provenance 和资源 ID，不含原 asset UUID/URI；无资源则记录待恢复状态，不授予可读素材。联网 primary 的有效关系由原 URI/hash/metadata marker 精确生成 `primaryLinked`，Stage 核与同归档歌词行一致；恢复仅在两行实际应用且资源确认后重建 marker，不用内容去重替代原选择关系。MERGE 保留已确认/已清除的素材与当前手动歌词，REPLACE 同事务处理 FK 和递增墓碑。完整素材前像保存原生八列、原 asset UUID 与原 provenance 文本，每批最多100行/2MiB；逐行类型/模型/内容读回及总数封存完成之前，不删除任何所选主库关联。
+
+素材前像和预览/重关联/封存复核索引使用现有私有 `rows.db` 的普通派生表，持有 `BEGIN IMMEDIATE` 租约，核对实际 main 文件及原文件身份、1MiB page cache 与启用的 spill。直接封存的 stage 也先取得租约并完成同样的严格 schema/类型/封存内容复核；派生表不进入封存 schema v1，关闭时原 ROLLBACK 恢复既有 stage。累计派生输入预算400MiB对应来包与原生前像两个独立的200MiB逻辑域，原131072页上限和512MiB物理剩余保留继续有效。未知同名表拒绝，不删除猜测的残留。
+
+主库的完整来源/曲目/歌单/歌词选择及历史保留集合使用同一 preserved Room 写事务内的普通 main scratch 表，累计派生输入最多200MiB；查询及播放器窗口仍按原合同有界，以上预算不限制完整产品列表容量。真实文件及物理空间每次写入重核；所选身份用主键分页/存在性查询，复核索引用双向主键匹配，不构建完整 TEMP 集合。只清本调用创建的表，成功路径在 prospective digest/COMMIT 前核验净空，取消或错误保留主库原事务 rollback及原因链。恢复退出时还原原 writer cache 配置；Room9、原 stage v1 和 ZIP v1 不扩张。
 
 历史与统计分别用归档 SHA-256+当前 domain epoch 的 receipt 幂等。合并携带当前域的既有 receipt，清空历史不能复活旧历史 receipt 或清掉统计 receipt，反之亦然；替换使用新的域。真实 round ledger 不删，导入的关闭历史 round 用不接受真实服务回调的规则版本，旧回调不能重新计次。历史保留预算仍依 LP-03，不能与完整队列容量混淆。
 
