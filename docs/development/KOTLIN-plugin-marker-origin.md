@@ -20,3 +20,11 @@ Central原件精确匹配现有唯一已准入pin；Portal原件精确匹配本�
 `pluginManagement.repositories` 的Google和Plugin Portal分别以 `content.excludeModule` 排除这一精确标记模块，原Maven Central对象与URL保留。该标记只从Central获取，其余插件、实现依赖、应用仓库和仓库顺序保持。Central不可用时不改用不同字节的标记，也不增加第二可信hash。
 
 工具链、依赖图、模块版本、已有锁、verification配置及每个原制品pin、Room9和既有输入原件均保持。没有新的依赖或schema采集请求，不调用writer，不放宽任何构建/静默/测试期限；此差量须一次新的普通完整双端Debug验证。原文件关闭修复、四个新SDK组合、34个回归目标、精确APK、设备及原AC仍待各自实际结果。
+
+## 解析失败诊断
+
+来源限定的 [run45887339281](https://github.com/OnlineMo/MeloX-Watch/actions/runs/45887339281)/attempt1 绑定 source `3ceb9ca5de37eff40fb5a74428e666f6190fa7a8`、build `b2f8a49563e892f130827f447bee9f1c902ccb81`。整轮114秒，实际Gradle进程15.813秒自然exit1，唯一明确故障为同一插件的 `UnknownPluginException`，没有具体底层失败链。报告 artifact `15150421362` 为4278字节，SHA-256 `d438704b73cde5816d4675fcd0e116b1e254d808255bb5bc1c65f49ae113e985`；两个原成员从canonical ZIP直接核CRC、SHA及字节数，未另存解压副本。
+
+固定 [Gradle 8.13](https://github.com/gradle/gradle/tree/073314332697ba45c16c0a0ce1891fa6794179ff) 的插件解析器以非传递lenient ArtifactView检查marker；任何解析失败都被归为notFound，仓库列表则列出全部配置对象。列表不能证明每个仓库都发起HTTP，也不能据此推定内容排除失效。插件仓库包装保留精确group/module过滤，原件没有证明Central的实际HTTP、缓存或元数据校验结果。
+
+普通双端Test阶段增加 `--info`，保存同一配置的解析诊断。既有严格校验、仓库规则、依赖/schema输入、构建期限及后续lint/组装门保持；不启用writer或图采集监听器。当前34个回归目标仍NOT_RUN，所有设备及发布门槛保持未通过。
