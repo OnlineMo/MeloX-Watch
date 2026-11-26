@@ -29,6 +29,7 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryTrackVersionEntity
 import io.github.onlinemo.meloxwatch.data.library.LocalAudioMetadata
 import io.github.onlinemo.meloxwatch.data.library.LocalCodecParametersCodec
 import io.github.onlinemo.meloxwatch.data.library.RoomLocalLibraryRepository
+import io.github.onlinemo.meloxwatch.data.library.currentCueMatchesPortableHint
 import io.github.onlinemo.meloxwatch.data.listening.ListeningDayEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningHistoryEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningLimits
@@ -41,10 +42,17 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceSpec
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsAssociation
+import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackPreferences
 import io.github.onlinemo.meloxwatch.data.lyrics.store.decode
 import io.github.onlinemo.meloxwatch.data.lyrics.store.entity
 import io.github.onlinemo.meloxwatch.data.lyrics.store.update
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataAssociationRow
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataAssociation
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataProvenance
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataPurpose
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataStoreException
+import io.github.onlinemo.meloxwatch.data.metadata.decode
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistGenerationEntity
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistHeadEntity
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLimits
@@ -57,8 +65,10 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueEntryEntity
 import io.github.onlinemo.meloxwatch.data.queue.QueueGenerationEntity
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.UUID
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 internal class BackupMainApplyResult(val missingReferences: Long, val bindings: Map<String, BackupCell>) {
     override fun toString(): String = "BackupMainApplyResult"
@@ -75,12 +85,26 @@ internal class RoomBackupMaterializer(
     private val library: RoomLocalLibraryRepository,
     private val permissions: BackupPermissionVerifier,
     private val restoredLyrics: (BackupRestoreJournal, String, String) -> LyricsAssociation?,
+    private val restoredMetadataAsset: (BackupRestoreJournal, String, MetadataPurpose, Long) -> String? = { _, _, _, _ -> null },
 ) {
     private val dao = database.libraryDao()
 
     suspend fun apply(run: BackupRestoreRun, stage: SqliteBackupStage, journal: BackupRestoreJournal,
         prepareCommit: suspend (Map<String, BackupCell>) -> Unit): BackupMainApplyResult {
         barrier.requireExclusiveOwner()
+        // This sole writer owns no other TEMP actor; configure disk storage before creating any transaction or table.
+        database.useWriterConnection { writer ->
+            if (writer.inTransaction()) throw BackupException(BackupIssue.BUSY)
+            writer.usePrepared("PRAGMA compile_options") { options ->
+                while (options.step()) if (options.getText(0).removePrefix("SQLITE_") == "TEMP_STORE=3") {
+                    throw BackupException(BackupIssue.UNSUPPORTED_RESOURCE)
+                }
+            }
+            writer.usePrepared("PRAGMA temp_store=FILE") { it.step() }
+            writer.usePrepared("PRAGMA temp_store") {
+                if (!it.step() || it.getLong(0) != 1L) throw BackupException(BackupIssue.UNSUPPORTED_RESOURCE)
+            }
+        }
         return library.libraryTransaction {
             stage.clearActualIds()
             permissions.checkFences(stage)
@@ -93,35 +117,38 @@ internal class RoomBackupMaterializer(
             if (initial.revision < 0L || initial.rulesRevision < 0L || initial.nextAddedSequence < 1L || initial.statisticsEpoch < 0L) {
                 throw BackupException(BackupIssue.RECOVERY_REQUIRED)
             }
-            val write = LibraryWrite(initial, increment(initial.revision), initial.nextAddedSequence, initial.statisticsEpoch)
-            var missing = 0L
-            val bindings = LinkedHashMap<String, BackupCell>()
-            if (BackupScope.LIBRARY in run.scopes) missing = add(missing, restoreLibrary(run, stage, write))
-            if (BackupScope.FAVORITES in run.scopes || BackupScope.PLAYLISTS in run.scopes) missing = add(missing, restorePlaylists(run, stage))
-            if (BackupScope.QUEUE in run.scopes) missing = add(missing, restoreQueue(run, stage))
-            if (BackupScope.HISTORY in run.scopes) {
-                bindings += restoreHistory(run, stage, journal, write)
-                for (kind in listOf(BackupRecordKind.HISTORY_ENTRY, BackupRecordKind.TRACK_TOTAL)) each(stage, kind) { row ->
-                    if (row.text("providerId") == TrackKey.LOCAL_PROVIDER && dao.currentTrack(row.text("trackId")) == null) missing = increment(missing)
+            withMetadataReplacement(run, stage) {
+                val write = LibraryWrite(initial, increment(initial.revision), initial.nextAddedSequence, initial.statisticsEpoch)
+                var missing = 0L
+                val bindings = LinkedHashMap<String, BackupCell>()
+                if (BackupScope.LIBRARY in run.scopes) missing = add(missing, restoreLibrary(run, stage, write))
+                if (BackupScope.FAVORITES in run.scopes || BackupScope.PLAYLISTS in run.scopes) missing = add(missing, restorePlaylists(run, stage))
+                if (BackupScope.QUEUE in run.scopes) missing = add(missing, restoreQueue(run, stage))
+                if (BackupScope.HISTORY in run.scopes) {
+                    bindings += restoreHistory(run, stage, journal, write)
+                    for (kind in listOf(BackupRecordKind.HISTORY_ENTRY, BackupRecordKind.TRACK_TOTAL)) each(stage, kind) { row ->
+                        if (row.text("providerId") == TrackKey.LOCAL_PROVIDER && dao.currentTrack(row.text("trackId")) == null) missing = increment(missing)
+                    }
                 }
-            }
-            if (BackupScope.LYRICS in run.scopes) missing = add(missing, restoreLyrics(run, stage, journal, write))
-            missing = add(missing, materializeMissingReferences(run, stage, journal, write))
-            if (write.changed) {
-                val filter = if (BackupScope.LIBRARY in run.scopes && run.mode == BackupMergeMode.REPLACE_SELECTED)
-                    stage.row(BackupRecordKind.LIBRARY_META, "library")?.flag("shortAudioFilter")
-                        ?: throw BackupException(BackupIssue.INVALID_REFERENCE) else initial.shortAudioFilter
-                if (dao.updateMeta(initial.copy(revision = write.revision, rulesRevision = write.rulesRevision,
-                        nextAddedSequence = write.nextAdded, shortAudioFilter = filter, statisticsEpoch = write.statisticsEpoch)) != 1) {
-                    throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                if (BackupScope.LYRICS in run.scopes) missing = add(missing, restoreLyrics(run, stage, journal, write))
+                missing = add(missing, restoreMetadata(run, stage, journal, write))
+                missing = add(missing, materializeMissingReferences(run, stage, journal, write))
+                if (write.changed) {
+                    val filter = if (BackupScope.LIBRARY in run.scopes && run.mode == BackupMergeMode.REPLACE_SELECTED)
+                        stage.row(BackupRecordKind.LIBRARY_META, "library")?.flag("shortAudioFilter")
+                            ?: throw BackupException(BackupIssue.INVALID_REFERENCE) else initial.shortAudioFilter
+                    if (dao.updateMeta(initial.copy(revision = write.revision, rulesRevision = write.rulesRevision,
+                            nextAddedSequence = write.nextAdded, shortAudioFilter = filter, statisticsEpoch = write.statisticsEpoch)) != 1) {
+                        throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                    }
                 }
+                // All stale cursors are retired in this same transaction, before their data is exposed.
+                execute("DELETE FROM library_views")
+                execute("DELETE FROM playlist_views")
+                execute("UPDATE playlist_exchange_previews SET state='INVALIDATED' WHERE state='READY'")
+                prepareCommit(bindings + ("mainMissingReferences" to BackupCell.Integer(missing)))
+                BackupMainApplyResult(missing, bindings)
             }
-            // All stale cursors are retired in this same transaction, before their data is exposed.
-            execute("DELETE FROM library_views")
-            execute("DELETE FROM playlist_views")
-            execute("UPDATE playlist_exchange_previews SET state='INVALIDATED' WHERE state='READY'")
-            prepareCommit(bindings + ("mainMissingReferences" to BackupCell.Integer(missing)))
-            BackupMainApplyResult(missing, bindings)
         }
     }
 
@@ -677,8 +704,23 @@ internal class RoomBackupMaterializer(
                     dao.insertTrack(LibraryTrackEntity(key.trackId, key.providerId, 0L, sequence))
                     write.changed = true
                 }
+                val linkedMetadata = stage.row(BackupRecordKind.METADATA_LYRICS, row.key)?.takeIf { it.flag("primaryLinked") }
+                val oldMetadata = linkedMetadata?.let { metadataBefore(run, key, MetadataPurpose.LYRICS) }
+                val appliesMetadata = run.mode == BackupMergeMode.REPLACE_SELECTED || oldMetadata == null ||
+                    oldMetadata.revision == 0L && oldMetadata.sha256 == null
+                val linkedPrimary = linkedMetadata?.takeIf { appliesMetadata }?.let { metadata ->
+                    val resourceId = checkNotNull(BackupMetadataAssociations.resourceId(metadata))
+                    val assetId = restoredMetadataAsset(journal, resourceId, MetadataPurpose.LYRICS, metadata.long("bytes"))
+                    val restored = restoredLyrics(journal, resourceId, LyricsEncodingChoice.UTF8.name)
+                    if (assetId == null || restored == null) null else {
+                        if (restored.uri != "content://$packageName.owned-lyrics/$assetId" ||
+                            restored.confirmedContentSha256 != metadata.text("sha256")) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        restored.copy(sourceId = "metadata-v1:$assetId")
+                    }
+                }
                 fun association(prefix: String, previous: LyricsAssociation?): LyricsAssociation? {
                     val hash = row.optionalText(prefix + "Sha256") ?: return null
+                    if (prefix == "primary" && linkedPrimary != null) return linkedPrimary
                     val resourceId = row.optionalText(prefix + "ResourceId")
                     if (BackupScope.RESOURCES in run.scopes && resourceId != null) restoredLyrics(journal, resourceId, row.text(prefix + "Encoding"))?.let { return it }
                     if (previous != null && previous.confirmedContentSha256 == hash &&
@@ -705,6 +747,126 @@ internal class RoomBackupMaterializer(
             }
             return missing
         } finally { execute("DROP TABLE IF EXISTS temp.backup_lyrics") }
+    }
+
+    /** FK dependants are removed only inside the real writer; revisions survive in its private temporary rows. */
+    private suspend fun <T> withMetadataReplacement(run: BackupRestoreRun, stage: SqliteBackupStage, action: suspend () -> T): T {
+        val purposes = MetadataPurpose.entries.filter { BackupMetadataAssociations.kind(it).scope in run.scopes }
+        for (purpose in purposes) each(stage, BackupMetadataAssociations.kind(purpose)) { row ->
+            BackupMetadataAssociations.decode(row)
+            val old = dao.currentTrack(row.key)
+            val track = dao.track(row.key)
+            if (track != null && track.providerId != TrackKey.LOCAL_PROVIDER) throw BackupException(BackupIssue.CONFLICT)
+            val incomingCue = row.portableCueReference()
+            val currentCue = old?.cueReference?.let { native ->
+                try { CueReferenceCodec.decode(native) }
+                catch (failure: IllegalArgumentException) { throw BackupException(BackupIssue.RECOVERY_REQUIRED, failure) }
+            }
+            if (incomingCue == null && currentCue != null || incomingCue != null && old != null && currentCue == null) {
+                throw BackupException(BackupIssue.CONFLICT)
+            }
+            if (incomingCue != null && currentCue != null) {
+                val matches = if (currentCue.isBound) currentCueMatchesPortableHint(currentCue, incomingCue) else
+                    CueReferenceCodec.encode(currentCue.portable()) == CueReferenceCodec.encode(incomingCue)
+                if (!matches) throw BackupException(BackupIssue.CONFLICT)
+            }
+        }
+        if (run.mode != BackupMergeMode.REPLACE_SELECTED || purposes.isEmpty()) return action()
+        execute("DROP TABLE IF EXISTS temp.backup_metadata_before")
+        execute("CREATE TEMP TABLE backup_metadata_before AS SELECT trackId,purpose,schemaVersion,revision,assetId,sha256,byteCount,provenance FROM local_metadata_associations WHERE 0")
+        try {
+            execute("CREATE UNIQUE INDEX temp.backup_metadata_before_key ON backup_metadata_before(purpose,trackId)")
+            for (purpose in purposes) {
+                execute("INSERT INTO temp.backup_metadata_before SELECT trackId,purpose,schemaVersion,revision,assetId,sha256,byteCount,provenance FROM local_metadata_associations WHERE purpose=?",
+                    BackupCell.Text(purpose.name))
+                execute("DELETE FROM local_metadata_associations WHERE purpose=?", BackupCell.Text(purpose.name))
+            }
+            return action()
+        } finally { withContext(NonCancellable) { execute("DROP TABLE IF EXISTS temp.backup_metadata_before") } }
+    }
+
+    private suspend fun restoreMetadata(run: BackupRestoreRun, stage: SqliteBackupStage, journal: BackupRestoreJournal,
+        write: LibraryWrite): Long {
+        val metadata = database.localMetadataDao()
+        var missing = 0L
+        for (purpose in MetadataPurpose.entries) {
+            val kind = BackupMetadataAssociations.kind(purpose)
+            if (kind.scope !in run.scopes) continue
+            val selection = if (purpose == MetadataPurpose.LYRICS) "backup_metadata_lyrics" else "backup_metadata_artwork"
+            createSelection(selection)
+            try {
+                each(stage, kind) { row ->
+                    val actualId = stage.actualId(BackupRecordKind.TRACK, row.key)
+                    if (actualId != row.key) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    val key = TrackKey(TrackKey.LOCAL_PROVIDER, actualId)
+                    select(selection, key.trackId)
+                    val old = metadataBefore(run, key, purpose)
+                    if (run.mode == BackupMergeMode.MERGE_KEEP_CURRENT && old != null &&
+                        (old.revision != 0L || old.sha256 != null)) return@each
+                    if (dao.currentTrack(key.trackId) == null) missing = increment(missing)
+                    if (dao.track(key.trackId) == null) {
+                        val sequence = write.nextAdded
+                        write.nextAdded = increment(write.nextAdded)
+                        dao.insertTrack(LibraryTrackEntity(key.trackId, key.providerId, 0L, sequence))
+                        write.changed = true
+                    }
+                    val incoming = BackupMetadataAssociations.decode(row, trackKey = key)
+                    val assetId = incoming.sha256?.let {
+                        restoredMetadataAsset(journal, checkNotNull(BackupMetadataAssociations.resourceId(row)),
+                            purpose, checkNotNull(incoming.byteCount))
+                    }
+                    if (incoming.sha256 != null && assetId == null) missing = increment(missing)
+                    val revision = nextMetadataRevision(maxOf(old?.revision ?: 0L, incoming.revision))
+                    val next = incoming.copy(revision = revision, assetId = assetId)
+                    if (run.mode == BackupMergeMode.REPLACE_SELECTED || old == null) {
+                        if (metadata.insert(next.entity()) == -1L) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                    } else if (metadata.updateIfRevision(key.trackId, purpose.name, old.revision, next.revision,
+                            next.assetId, next.sha256, next.byteCount, next.provenance?.encode()) != 1) {
+                        throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                    }
+                }
+                if (run.mode == BackupMergeMode.REPLACE_SELECTED) {
+                    val purposeName = if (purpose == MetadataPurpose.LYRICS) "LYRICS" else "ARTWORK"
+                    eachId("SELECT trackId FROM temp.backup_metadata_before WHERE purpose='$purposeName' " +
+                        "AND trackId NOT IN (SELECT id FROM temp.$selection) AND (? IS NULL OR trackId>?) ORDER BY trackId COLLATE BINARY LIMIT 100") { id ->
+                        val key = TrackKey(TrackKey.LOCAL_PROVIDER, id)
+                        val old = metadataBefore(run, key, purpose) ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                        if (metadata.insert(MetadataAssociation(key, purpose, nextMetadataRevision(old.revision)).entity()) == -1L) {
+                            throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                        }
+                    }
+                }
+            } finally { withContext(NonCancellable) { execute("DROP TABLE IF EXISTS temp.$selection") } }
+        }
+        return missing
+    }
+
+    private suspend fun metadataBefore(run: BackupRestoreRun, key: TrackKey, purpose: MetadataPurpose): MetadataAssociation? {
+        val row = if (run.mode != BackupMergeMode.REPLACE_SELECTED) database.localMetadataDao().row(key.trackId, purpose.name) else
+            database.useWriterConnection { writer -> writer.usePrepared(
+                "SELECT CASE WHEN typeof(schemaVersion)='integer' AND typeof(revision)='integer' AND " +
+                    "typeof(assetId) IN ('text','null') AND typeof(sha256) IN ('text','null') AND " +
+                    "typeof(byteCount) IN ('integer','null') AND typeof(provenance) IN ('text','null') THEN 1 ELSE 0 END," +
+                    "schemaVersion,revision,substr(assetId,1,37),substr(sha256,1,65),byteCount," +
+                    "substr(provenance,1,${MetadataProvenance.PROVENANCE_BYTES + 1}) FROM temp.backup_metadata_before " +
+                    "WHERE trackId=? AND purpose=? LIMIT 1") { statement ->
+                statement.bindText(1, key.trackId); statement.bindText(2, purpose.name)
+                if (!statement.step()) null else {
+                    if (statement.getLong(0) != 1L) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                    LocalMetadataAssociationRow(true, statement.getLong(1), statement.getLong(2),
+                        if (statement.isNull(3)) null else statement.getText(3),
+                        if (statement.isNull(4)) null else statement.getText(4),
+                        if (statement.isNull(5)) null else statement.getLong(5),
+                        if (statement.isNull(6)) null else statement.getText(6))
+                }
+            } }
+        return try { row?.decode(key, purpose) }
+        catch (failure: MetadataStoreException) { throw BackupException(BackupIssue.RECOVERY_REQUIRED, failure) }
+    }
+
+    private fun nextMetadataRevision(revision: Long): Long {
+        if (revision == Long.MAX_VALUE) throw BackupException(BackupIssue.CONFLICT)
+        return revision + 1L
     }
 
     private fun requiredBinding(stage: SqliteBackupStage, family: BackupBindingFamily, incoming: String): BackupStoredBinding =
@@ -814,7 +976,8 @@ internal class RoomBackupMaterializer(
     private fun add(left: Long, right: Long): Long = try { Math.addExact(left, right) }
     catch (failure: ArithmeticException) { throw BackupException(BackupIssue.STORAGE_FULL, failure) }
     companion object {
-        private val SELECTIONS = setOf("backup_sources", "backup_tracks", "backup_existing_tracks", "backup_playlists", "backup_lyrics")
+        private val SELECTIONS = setOf("backup_sources", "backup_tracks", "backup_existing_tracks", "backup_playlists", "backup_lyrics",
+            "backup_metadata_lyrics", "backup_metadata_artwork")
     }
 }
 

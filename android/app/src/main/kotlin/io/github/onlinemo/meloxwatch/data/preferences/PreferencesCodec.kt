@@ -46,6 +46,7 @@ internal object PreferencesCodec {
     private val speedKey = intPreferencesKey("playback_speed_tenths")
     private val gaplessKey = booleanPreferencesKey("gapless_playback")
     private val bluetoothLyricsKey = booleanPreferencesKey("bluetooth_lyrics_enabled")
+    private val metadataLookupKey = booleanPreferencesKey("metadata_lookup_enabled")
     private val rotaryEnabledKey = booleanPreferencesKey("rotary_enabled")
     private val rotaryActionKey = stringPreferencesKey("rotary_action")
     private val rotaryOrientationKey = stringPreferencesKey("rotary_orientation")
@@ -70,7 +71,7 @@ internal object PreferencesCodec {
         schemaKey.name, revisionKey.name, restorePositionKey.name, screenShapeKey.name,
         libraryLayoutKey.name, artworkPathKey.name,
         songTapKey.name, mediaButtonsKey.name, audioFocusKey.name,
-        backendKey.name, speedKey.name, gaplessKey.name, bluetoothLyricsKey.name,
+        backendKey.name, speedKey.name, gaplessKey.name, bluetoothLyricsKey.name, metadataLookupKey.name,
         rotaryEnabledKey.name, rotaryActionKey.name, rotaryOrientationKey.name, rotaryHapticsKey.name,
         mainProgressKey.name, progressGestureKey.name, sleepSummaryKey.name,
         guideCompletedKey.name, guideDismissedKey.name, guideStepKey.name, showTipsKey.name,
@@ -90,7 +91,8 @@ internal object PreferencesCodec {
         val legacyControls = legacy || schemaVersion == 3
         val legacyHelp = legacyControls || schemaVersion == 4
         val legacyBluetooth = legacyHelp || schemaVersion == 5
-        if (!legacyBluetooth && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
+        val legacyMetadata = legacyBluetooth || schemaVersion == 6
+        if (!legacyMetadata && schemaVersion != UserPreferences.CURRENT_SCHEMA_VERSION) {
             val isNewer = schemaVersion != null && schemaVersion > UserPreferences.CURRENT_SCHEMA_VERSION
             val reason = if (isNewer) {
                 PreferencesRecoveryReason.NEWER_SCHEMA
@@ -162,6 +164,12 @@ internal object PreferencesCodec {
         val bluetoothLyrics = if (legacyBluetooth) false else {
             (raw[bluetoothLyricsKey.name] as? Boolean).also {
                 if (it == null) invalidFields.add(PreferencesField.BLUETOOTH_LYRICS)
+            } ?: false
+        }
+        // A legacy or damaged file cannot create permission to disclose local track metadata.
+        val metadataLookup = if (legacyMetadata) false else {
+            (raw[metadataLookupKey.name] as? Boolean).also {
+                if (it == null) invalidFields.add(PreferencesField.METADATA_LOOKUP)
             } ?: false
         }
 
@@ -245,9 +253,10 @@ internal object PreferencesCodec {
                 controls = controls,
                 help = help,
                 bluetoothLyricsEnabled = bluetoothLyrics,
+                metadataLookupEnabled = metadataLookup,
             ),
             recovery = recovery,
-            isCanonical = !legacyBluetooth && recovery == null && raw.keys == canonicalNames,
+            isCanonical = !legacyMetadata && recovery == null && raw.keys == canonicalNames,
         )
     }
 
@@ -265,6 +274,7 @@ internal object PreferencesCodec {
         speedKey to preferences.playbackSpeedTenths,
         gaplessKey to preferences.gaplessPlayback,
         bluetoothLyricsKey to preferences.bluetoothLyricsEnabled,
+        metadataLookupKey to preferences.metadataLookupEnabled,
         rotaryEnabledKey to preferences.controls.rotaryEnabled,
         rotaryActionKey to preferences.controls.rotaryAction.name,
         rotaryOrientationKey to preferences.controls.rotaryOrientation.name,

@@ -358,12 +358,12 @@ internal class ProbePageRuntime internal constructor(
         }
 
         /**
-         * Register the exact Lyrics Entry ticket before starting its observer/context/clock work.
-         * It shares one fixed slot across playback lyrics, options, offset and association routes;
+         * Register the exact Entry or local-metadata ticket before its observer/context work starts.
+         * One fixed slot covers playback lyrics/options/offset/association and metadata lookup;
          * font memory callbacks cannot own cancellation of this separate work.
          */
         fun installUiWork(closeExact: () -> Unit): UiWorkRegistration? {
-            if (!visibleNow || route !in LYRICS_ENTRY_ROUTES) return null
+            if (!visibleNow || route !in UI_WORK_ROUTES) return null
             uiWork?.close()
             return synchronized(lock) {
                 if (!visibleNow || uiWork != null) null else UiWorkRegistration(this, closeExact).also { uiWork = it }
@@ -476,7 +476,7 @@ internal class ProbePageRuntime internal constructor(
 
     internal data class SourceStamp(val route: ProbePage, val mediaId: String?, val validMedia: Boolean?) {
         companion object {
-            fun of(state: ProbeUiState): SourceStamp = if (state.page == ProbePage.PLAYBACK || state.page in LYRICS_ENTRY_ROUTES) {
+            fun of(state: ProbeUiState): SourceStamp = if (state.page == ProbePage.PLAYBACK || state.page in UI_WORK_ROUTES) {
                 SourceStamp(state.page, state.playback.mediaId, validLyricsMedia(state.playback))
             } else SourceStamp(state.page, null, null)
         }
@@ -491,6 +491,7 @@ internal class ProbePageRuntime internal constructor(
             ProbePresentedPageKind.APPEARANCE)
         val LYRICS_ENTRY_ROUTES = setOf(ProbePage.LYRICS, ProbePage.LYRICS_OPTIONS,
             ProbePage.LYRICS_OFFSET, ProbePage.LYRICS_ASSOCIATION)
+        val UI_WORK_ROUTES = LYRICS_ENTRY_ROUTES + setOf(ProbePage.LOCAL_LYRICS_LOOKUP, ProbePage.LOCAL_ARTWORK_LOOKUP)
 
         fun validLyricsMedia(playback: ProbePlaybackState): Boolean = lyricsKeepBrightRequested(true, true, playback)
 

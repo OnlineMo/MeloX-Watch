@@ -29,7 +29,7 @@
     <string name="backup_ui_scope_preferences">App preferences</string>
     <string name="backup_ui_scope_lyrics">Lyrics associations</string>
     <string name="backup_ui_scope_resources">Selected fonts, images, themes and lyrics copies</string>
-    <string name="backup_ui_resource_dependency">Select preferences or lyrics before including their resources.</string>
+    <string name="backup_ui_resource_dependency">Select the library, preferences or lyrics before including their resources.</string>
     <string name="backup_ui_readable_warning">This backup is readable without a password. Keep it somewhere private.</string>
     <string name="backup_ui_excluded_fields">Credentials, pairing secrets, temporary access grants and diagnostic identities are excluded.</string>
     <string name="backup_ui_private_library">Library: track titles, display edits and file reference hints.</string>

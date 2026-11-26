@@ -24,6 +24,7 @@ data class UserPreferences(
     val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
     val help: HelpPreferences = HelpPreferences(),
     val bluetoothLyricsEnabled: Boolean = false,
+    val metadataLookupEnabled: Boolean = false,
 ) {
     init {
         require(schemaVersion == CURRENT_SCHEMA_VERSION)
@@ -47,10 +48,11 @@ data class UserPreferences(
         controls = controls,
         help = help,
         bluetoothLyricsEnabled = bluetoothLyricsEnabled,
+        metadataLookupEnabled = metadataLookupEnabled,
     )
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 6
+        const val CURRENT_SCHEMA_VERSION = 7
     }
 }
 
@@ -70,6 +72,7 @@ data class UserPreferencesDraft(
     val controls: PlaybackControlsPreferences = PlaybackControlsPreferences(),
     val help: HelpPreferences = HelpPreferences(),
     val bluetoothLyricsEnabled: Boolean = false,
+    val metadataLookupEnabled: Boolean = false,
 ) {
     init {
         require(librarySorts.keys == LibraryListContext.entries.toSet())

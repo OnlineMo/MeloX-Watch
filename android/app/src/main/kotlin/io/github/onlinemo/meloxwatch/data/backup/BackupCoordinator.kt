@@ -29,6 +29,7 @@ import io.github.onlinemo.meloxwatch.data.themes.ThemeException
 import io.github.onlinemo.meloxwatch.data.themes.ThemeIssue
 import io.github.onlinemo.meloxwatch.data.themes.PlaybackBackgroundException
 import io.github.onlinemo.meloxwatch.data.themes.PlaybackBackgroundIssue
+import io.github.onlinemo.meloxwatch.data.lyrics.active.OwnedLyricsProvider
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.File
 import java.nio.ByteBuffer
@@ -79,8 +80,9 @@ class BackupCoordinator internal constructor(
     val startup: StateFlow<BackupStartupState> = mutableStartup.asStateFlow()
     private val mutableProgress = MutableStateFlow<BackupProgress?>(null)
     val progress: StateFlow<BackupProgress?> = mutableProgress.asStateFlow()
-    private val capture = RoomBackupCapture(database)
-    private val materializer = RoomBackupMaterializer(context.packageName, barrier, database, library, permissions, resources::restoredLyrics)
+    private val capture = RoomBackupCapture(database) { assetId -> OwnedLyricsProvider.uri(context, assetId).toString() }
+    private val materializer = RoomBackupMaterializer(context.packageName, barrier, database, library, permissions,
+        resources::restoredLyrics, resources::restoredMetadataAsset)
     private val reader = BackupArchiveReader()
     private val writer = BackupArchiveWriter()
     private var directory: BackupPrivateDirectory? = null
@@ -257,7 +259,7 @@ class BackupCoordinator internal constructor(
                         SqliteBackupStage.create(originalGeneration, onOpened = register) { operationContext.ensureActive() }
                     }.also { before = it }
                     original.begin(BackupHeader(scopes = setOf(BackupScope.PREFERENCES, BackupScope.RESOURCES) +
-                        if (BackupScope.LYRICS in preview.model.scopes) setOf(BackupScope.LYRICS) else emptySet(),
+                        preview.model.scopes.intersect(setOf(BackupScope.LYRICS, BackupScope.LIBRARY)),
                         createdEpochMs = epochMs(), sourceDatabaseVersion = capture.sourceDatabaseVersion()))
                     captureSnapshot(original, fonts, includeLyricsResourceReferences = false)
                     val baseline = themes.readCatalogForBackup()
@@ -501,14 +503,16 @@ class BackupCoordinator internal constructor(
             val expected = if (direction == BackupConfigDirection.FORWARD) step.forward else step.before.record
             val actual = configurations.read(step.key, fonts)
             if (expected == null || !actual.record.sameContent(expected) || step.direction != direction || step.confirmedRevision == null ||
-                step.key != "theme" && actual.revision != step.confirmedRevision) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                step.key != "theme" && actual.revision != step.confirmedRevision ||
+                step.key == "player" && !actual.disclosuresDisabled) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
         }
     }
     private fun knownCurrent(step: BackupConfigStep, current: BackupConfigVersion): Boolean {
         val before = step.attemptBefore ?: step.before
         val target = step.attemptTarget
         return current.revision == before.revision && current.record.sameContent(before.record) ||
-            before.revision < Long.MAX_VALUE && current.revision == before.revision + 1L && target != null && current.record.sameContent(target)
+            before.revision < Long.MAX_VALUE && current.revision == before.revision + 1L && target != null &&
+                current.record.sameContent(target) && current.disclosuresDisabled
     }
 
     private suspend fun planRelinks(run: BackupRestoreRun, stage: SqliteBackupStage, saved: BackupRestoreJournal) {
@@ -536,7 +540,8 @@ class BackupCoordinator internal constructor(
                 if (page.isEmpty()) break
                 for (row in page) {
                     val track = when (kind) {
-                        BackupRecordKind.TRACK, BackupRecordKind.LYRICS_TRACK -> row.key
+                        BackupRecordKind.TRACK, BackupRecordKind.LYRICS_TRACK,
+                        BackupRecordKind.METADATA_LYRICS, BackupRecordKind.METADATA_ARTWORK -> row.key
                         BackupRecordKind.FAVORITES_MEMBER, BackupRecordKind.PLAYLIST_MEMBER ->
                             row.optionalText("trackId")?.takeIf { row.optionalText("providerId") == TrackKey.LOCAL_PROVIDER }
                         BackupRecordKind.QUEUE_ENTRY, BackupRecordKind.HISTORY_ENTRY, BackupRecordKind.TRACK_TOTAL ->

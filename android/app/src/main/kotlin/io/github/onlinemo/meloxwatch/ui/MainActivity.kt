@@ -106,6 +106,7 @@ import io.github.onlinemo.meloxwatch.ui.library.libraryContent
 import io.github.onlinemo.meloxwatch.ui.library.listeningIssueText
 import io.github.onlinemo.meloxwatch.model.ScreenShape
 import io.github.onlinemo.meloxwatch.model.ArtworkReadPath
+import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.model.PlaybackBackendKind
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
 import io.github.onlinemo.meloxwatch.playback.PlaybackBackendIssue
@@ -183,6 +184,9 @@ import io.github.onlinemo.meloxwatch.playback.OnlineQueueAction
 import io.github.onlinemo.meloxwatch.ui.online.OnlineViewModel
 import io.github.onlinemo.meloxwatch.ui.meting.MetingSettingsViewModel
 import io.github.onlinemo.meloxwatch.ui.watch.WatchMetingSettings
+import io.github.onlinemo.meloxwatch.ui.watch.WatchLocalMetadataLookup
+import io.github.onlinemo.meloxwatch.ui.metadata.LocalMetadataKind
+import io.github.onlinemo.meloxwatch.ui.metadata.LocalMetadataLookupViewModel
 import io.github.onlinemo.meloxwatch.ui.dsp.DspViewModel
 import io.github.onlinemo.meloxwatch.ui.dsp.WatchDspSettings
 import io.github.onlinemo.meloxwatch.ui.online.onlineContent
@@ -230,6 +234,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var transferViewModel: WatchTransferViewModel
     private lateinit var onlineViewModel: OnlineViewModel
     private lateinit var metingSettingsViewModel: MetingSettingsViewModel
+    private lateinit var metadataLookupViewModel: LocalMetadataLookupViewModel
     private lateinit var dspViewModel: DspViewModel
     private lateinit var playbackBackgroundViewModel: PlaybackBackgroundViewModel
     private lateinit var lyricsEntryViewModel: LyricsEntryViewModel
@@ -275,6 +280,16 @@ class MainActivity : ComponentActivity() {
         metingSettingsViewModel = ViewModelProvider(this, viewModelFactory {
             initializer { createMetingSettingsModel(app, playbackModel) }
         })[MetingSettingsViewModel::class.java]
+        metadataLookupViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer {
+                LocalMetadataLookupViewModel(app.metadataAssociations, app::metadataLookupClient, app.preferences,
+                    app.queues, app.lyricsMemory, previewArtwork = { key, bytes -> app.artworks.derived(key, 256, bytes) },
+                    awaitReadReady = {
+                        app.requireBackupStorageReady()
+                        app.library.initialize()
+                    }, savedStateHandle = createSavedStateHandle())
+            }
+        })[LocalMetadataLookupViewModel::class.java]
         fontPickerViewModel = ViewModelProvider(this)[ProbeFontPickerViewModel::class.java]
         lyricsPickerViewModel = ViewModelProvider(this)[ProbeLyricsPickerViewModel::class.java]
         appearancePickerViewModel = ViewModelProvider(this)[ProbeAppearancePickerViewModel::class.java]
@@ -347,6 +362,7 @@ class MainActivity : ComponentActivity() {
                 }
             },
             retire = {
+                metadataLookupViewModel.setVisible(false)
                 try { callbacks.close() }
                 finally {
                     try { aboutViewModel.setVisible(false) }
@@ -382,7 +398,7 @@ class MainActivity : ComponentActivity() {
                     ProbeTheme {
                         ProbeApp(probeViewModel, preferencesViewModel, queueViewModel,
                             libraryViewModel, sourcesViewModel, fileOperationsViewModel, listeningViewModel, playlistsViewModel,
-                            playlistEntryViewModel, appearanceViewModel, transferViewModel, onlineViewModel, metingSettingsViewModel, dspViewModel, aboutViewModel, backupViewModel, playbackBackgroundViewModel,
+                            playlistEntryViewModel, appearanceViewModel, transferViewModel, onlineViewModel, metingSettingsViewModel, metadataLookupViewModel, dspViewModel, aboutViewModel, backupViewModel, playbackBackgroundViewModel,
                             lyricsEntryViewModel, displayEditor, lyricsDisplayViewModel, fontPickerViewModel, lyricsPickerViewModel,
                             appearancePickerViewModel, exactRuntime, exactWindow, exactActivity, this)
                     }
@@ -447,6 +463,7 @@ class MainActivity : ComponentActivity() {
         if (uiPresentationBinding?.isCurrent == true && ::aboutViewModel.isInitialized) aboutViewModel.setVisible(false)
         if (uiPresentationBinding?.isCurrent == true && ::onlineViewModel.isInitialized) onlineViewModel.setVisible(false)
         if (uiPresentationBinding?.isCurrent == true && ::metingSettingsViewModel.isInitialized) metingSettingsViewModel.setVisible(false)
+        if (uiPresentationBinding?.isCurrent == true && ::metadataLookupViewModel.isInitialized) metadataLookupViewModel.setVisible(false)
         if (uiPresentationBinding?.isCurrent == true && ::dspViewModel.isInitialized) dspViewModel.setVisible(false)
         if (uiPresentationBinding?.isCurrent == true && ::fileOperationsViewModel.isInitialized) fileOperationsViewModel.setVisible(false)
         try {
@@ -469,6 +486,9 @@ class MainActivity : ComponentActivity() {
         val page = probeViewModel.uiState.value.page
         onlineViewModel.setVisible(visible && page == ProbePage.ONLINE)
         if (::metingSettingsViewModel.isInitialized) metingSettingsViewModel.setVisible(visible && page == ProbePage.METING)
+        if (::metadataLookupViewModel.isInitialized && (!visible || page !in setOf(ProbePage.LOCAL_LYRICS_LOOKUP, ProbePage.LOCAL_ARTWORK_LOOKUP))) {
+            metadataLookupViewModel.setVisible(false)
+        }
         if (::fileOperationsViewModel.isInitialized) fileOperationsViewModel.setVisible(visible && page == ProbePage.LIBRARY)
         if (::dspViewModel.isInitialized) dspViewModel.setVisible(visible && page == ProbePage.DSP)
         if (::aboutViewModel.isInitialized) aboutViewModel.setVisible(visible && page == ProbePage.HELP)
@@ -578,6 +598,7 @@ private fun ProbeApp(
     transferViewModel: WatchTransferViewModel,
     onlineViewModel: OnlineViewModel,
     metingSettingsViewModel: MetingSettingsViewModel,
+    metadataLookupViewModel: LocalMetadataLookupViewModel,
     dspViewModel: DspViewModel,
     aboutViewModel: AboutViewModel,
     backupViewModel: BackupViewModel,
@@ -600,6 +621,7 @@ private fun ProbeApp(
     val transfer by transferViewModel.state.collectAsStateWithLifecycle()
     val online by onlineViewModel.state.collectAsStateWithLifecycle()
     val meting by metingSettingsViewModel.state.collectAsStateWithLifecycle()
+    val metadataLookup by metadataLookupViewModel.state.collectAsStateWithLifecycle()
     val dsp by dspViewModel.state.collectAsStateWithLifecycle()
     val dspActual by app.dspRuntime.state.collectAsStateWithLifecycle()
     val about by aboutViewModel.state.collectAsStateWithLifecycle()
@@ -884,6 +906,8 @@ private fun ProbeApp(
                 viewModel.showPage(ProbePage.LYRICS_OPTIONS)
             }
             state.page == ProbePage.LYRICS_FONTS -> viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+            state.page == ProbePage.LOCAL_LYRICS_LOOKUP -> viewModel.showPage(ProbePage.LYRICS_OPTIONS)
+            state.page == ProbePage.LOCAL_ARTWORK_LOOKUP -> viewModel.showPage(ProbePage.PLAYBACK)
             state.page == ProbePage.APPEARANCE && appearance.busy -> Unit
             state.page == ProbePage.DSP -> viewModel.showPage(ProbePage.SETTINGS)
             state.page == ProbePage.PLAYLISTS && playlistEntryViewModel.back() -> Unit
@@ -910,6 +934,17 @@ private fun ProbeApp(
     val renderPage: @Composable (ProbePage, Boolean, ProbePageRuntime.SelectionBinding?) -> Unit = { page, active, selection ->
         val exactPage = rememberProbePresentedPage(pageRuntime, page.presentationKind(), selection, active && presented)
         val visiblePage = exactPage?.visibleNow == true
+        DisposableEffect(exactPage, metadataLookupViewModel, page) {
+            val kind = when (page) {
+                ProbePage.LOCAL_LYRICS_LOOKUP -> LocalMetadataKind.LYRICS
+                ProbePage.LOCAL_ARTWORK_LOOKUP -> LocalMetadataKind.ARTWORK
+                else -> null
+            }
+            val ticket = if (kind != null && exactPage?.visibleNow == true) metadataLookupViewModel.bindPresentation(kind) else null
+            val registered = if (ticket != null) exactPage?.installUiWork(ticket::close) else null
+            if (registered?.isCurrent == true) ticket?.show() else ticket?.close()
+            onDispose { registered?.close(); ticket?.close() }
+        }
         LaunchedEffect(exactPage, visiblePage, active, presented, backup.targetPickerPending) {
             if (page == ProbePage.BACKUP && activityBinding.isCurrent) {
                 val selected = viewModel.uiState.value.page == ProbePage.BACKUP
@@ -949,6 +984,8 @@ private fun ProbeApp(
                 ProbePage.LIBRARY -> "${library.screen}:${library.page?.view?.viewId}:${library.artworkRefreshPreview?.refreshId}" to library.pageStart
                 ProbePage.ONLINE -> "${online.screen}:${online.snapshot?.id}" to online.pageStart
                 ProbePage.HELP -> "${about.page}:${about.guideStep}:${about.licenseId}" to 0L
+                ProbePage.LOCAL_LYRICS_LOOKUP, ProbePage.LOCAL_ARTWORK_LOOKUP ->
+                    "${metadataLookup.kind}:${metadataLookup.preview?.id}:${metadataLookup.candidates.firstOrNull()?.id}" to 0L
                 ProbePage.PLAYLISTS -> "${playlists.screen}:${playlists.view?.viewId}:${playlists.importDraft?.preview?.previewId}:" +
                     "${playlistEntry.screen}:${playlistEntry.folder?.nodeId}:${playlistEntry.replacements?.nextCursor}" to playlists.pageStart
                 else -> null
@@ -1028,7 +1065,7 @@ private fun ProbeApp(
                         if (page != ProbePage.HOME && page !in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK, ProbePage.HELP)) {
                             item { ProbeButton(stringResource(R.string.probe_back), onClick = back) }
                         }
-                        if (page != ProbePage.HELP) item {
+                        if (page !in setOf(ProbePage.HELP, ProbePage.LOCAL_LYRICS_LOOKUP, ProbePage.LOCAL_ARTWORK_LOOKUP)) item {
                             OperationStatus(
                                 state,
                                 onCancel = viewModel::cancelFileRead,
@@ -1056,6 +1093,14 @@ private fun ProbeApp(
                                 onMetingSettings = { viewModel.showPage(ProbePage.METING) })
                             ProbePage.METING -> item(key = "meting:settings") {
                                 WatchMetingSettings(meting, visiblePage, metingSettingsViewModel, onBack = back)
+                            }
+                            ProbePage.LOCAL_LYRICS_LOOKUP, ProbePage.LOCAL_ARTWORK_LOOKUP -> item(key = "local-metadata:lookup") {
+                                WatchLocalMetadataLookup(metadataLookup, app.themeBitmaps, visiblePage,
+                                    metadataLookupViewModel::setEnabled, metadataLookupViewModel::setTitle, metadataLookupViewModel::setArtist,
+                                    metadataLookupViewModel::setSendTitle, metadataLookupViewModel::setSendArtist,
+                                    metadataLookupViewModel::search, metadataLookupViewModel::more, metadataLookupViewModel::preview,
+                                    metadataLookupViewModel::previewPage, metadataLookupViewModel::confirm,
+                                    metadataLookupViewModel::cancelPreview, metadataLookupViewModel::clear, metadataLookupViewModel::retry, back)
                             }
                             ProbePage.MEDIA -> mediaContent(state, viewModel, openMedia, openSettings)
                             ProbePage.TREE -> treeContent(state, viewModel, openTree)
@@ -1087,6 +1132,7 @@ private fun ProbeApp(
                                         },
                                         onDisplay = { viewModel.showPage(ProbePage.LYRICS_SETTINGS) },
                                         onFonts = { viewModel.showPage(ProbePage.LYRICS_FONTS) },
+                                        onLookup = { if (exactPage?.visibleNow == true) viewModel.showPage(ProbePage.LOCAL_LYRICS_LOOKUP) },
                                         onRetry = { if (exactPage?.visibleNow == true) lyricsEntryViewModel.retry() },
                                         onBack = back)
                                 }
@@ -1481,7 +1527,9 @@ private fun NowPlayingContent(
             viewModel.playbackInput.rotary(SystemClock.elapsedRealtime(), it)
         } ?: false }) {
         OperationStatus(state, onCancel = viewModel::cancelFileRead, onRetryQueue = viewModel::retryQueueRestore)
-        PlaybackDetails(state, viewModel, openDocument, title, artist)
+        PlaybackDetails(state, viewModel, openDocument, title, artist,
+            localTrack = track?.trackKey?.providerId == TrackKey.LOCAL_PROVIDER ||
+                state.selectedQueueEntry?.takeIf { it.queueEntryId == playback.mediaId }?.trackKey?.providerId == TrackKey.LOCAL_PROVIDER)
         if (playback.hasMedia) {
             PlaylistEntryStatus(entry, entryModel)
             PlaylistTrackControls(entry, entryModel, onAdd = onAddPlaying, onPlaylists = onPlaylists)
@@ -1491,7 +1539,7 @@ private fun NowPlayingContent(
 
 @Composable
 private fun PlaybackDetails(state: ProbeUiState, viewModel: ProbeViewModel, openDocument: () -> Unit,
-    title: String, artist: String) {
+    title: String, artist: String, localTrack: Boolean) {
     val selected = state.selectedAudio
     val playback = state.playback
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1513,6 +1561,12 @@ private fun PlaybackDetails(state: ProbeUiState, viewModel: ProbeViewModel, open
         ProbeButton(stringResource(R.string.input_media_volume_title)) { viewModel.showPage(ProbePage.VOLUME) }
         ProbeButton(stringResource(R.string.sleep_timer_title)) { viewModel.showPage(ProbePage.SLEEP_TIMER) }
         ProbeButton(stringResource(R.string.lyrics_settings)) { viewModel.showPage(ProbePage.LYRICS_OPTIONS) }
+        if (localTrack) ProbeButton(stringResource(R.string.metadata_lookup_artwork_title)) {
+            viewModel.showPage(ProbePage.LOCAL_ARTWORK_LOOKUP)
+        }
+        if (localTrack) ProbeButton(stringResource(R.string.metadata_lookup_lyrics_title)) {
+            viewModel.showPage(ProbePage.LOCAL_LYRICS_LOOKUP)
+        }
         BodyText(stringResource(R.string.watch_swipe_queue))
         ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) })
         if (selected != null && state.selectedQueueEntry?.queueEntryId != playback.mediaId) {
@@ -1948,6 +2002,8 @@ private fun pageTitle(page: ProbePage): Int = when (page) {
     ProbePage.LYRICS_OFFSET -> R.string.lyrics_offset_title
     ProbePage.LYRICS_SETTINGS -> R.string.lyrics_display_title
     ProbePage.LYRICS_FONTS -> R.string.lyrics_fonts_title
+    ProbePage.LOCAL_LYRICS_LOOKUP -> R.string.metadata_lookup_lyrics_title
+    ProbePage.LOCAL_ARTWORK_LOOKUP -> R.string.metadata_lookup_artwork_title
     ProbePage.APPEARANCE -> R.string.appearance_title
     ProbePage.TRANSFER -> R.string.transfer_title
     ProbePage.HELP -> R.string.help_title

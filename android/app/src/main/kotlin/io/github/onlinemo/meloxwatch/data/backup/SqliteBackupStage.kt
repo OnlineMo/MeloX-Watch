@@ -126,6 +126,7 @@ internal class SqliteBackupStage private constructor(
     override fun record(record: BackupRecord) {
         requireWriting()
         if (record.kind.scope !in header.scopes) throw BackupException(BackupIssue.INVALID_INPUT)
+        if (record.kind in BackupMetadataAssociations.KINDS && header.sourceDatabaseVersion < 9) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         val payload = BackupJsonCodec.record(record, checkCancelled)
         requireBackupSpace(directory.root, payload.size.toLong() + 8192L)
         logicalBytes = backupAdd(logicalBytes, payload.size.toLong(), BackupLimits.EXPANDED_LOGICAL_BYTES)
@@ -368,6 +369,7 @@ internal class SqliteBackupStage private constructor(
         return result
     }
     private fun decodeRow(kind: BackupRecordKind, key: String, payload: ByteArray, scope: Long, bytes: Long): BackupRecord {
+        if (kind in BackupMetadataAssociations.KINDS && header.sourceDatabaseVersion < 9) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         if (payload.size > BackupLimits.RECORD_BYTES) throw BackupException(BackupIssue.TOO_LARGE)
         if (scope != kind.scope.ordinal.toLong() || bytes != payload.size.toLong()) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
         return BackupJsonCodec.readRecord(payload, checkCancelled).also {
@@ -439,9 +441,10 @@ internal class SqliteBackupStage private constructor(
     }
 
     fun lyricsEncodings(resourceId: String): Set<LyricsEncodingChoice> = connection.prepare(
-        "SELECT DISTINCT encoding FROM resource_usage WHERE resourceId=? AND kind=? ORDER BY encoding",
+        "SELECT DISTINCT encoding FROM resource_usage WHERE resourceId=? AND kind IN (?,?) ORDER BY encoding",
     ).use {
         it.bindText(1, resourceId); it.bindLong(2, BackupRecordKind.LYRICS_TRACK.ordinal.toLong())
+        it.bindLong(3, BackupRecordKind.METADATA_LYRICS.ordinal.toLong())
         buildSet { while (it.step()) {
             val name = it.getText(0)
             add(LyricsEncodingChoice.entries.firstOrNull { encoding -> encoding.name == name } ?: throw BackupException(BackupIssue.INVALID_REFERENCE))
@@ -462,6 +465,9 @@ internal class SqliteBackupStage private constructor(
         }
         if (record.kind == BackupRecordKind.PREFERENCE) for ((field, resource) in BackupPreferencesCodec.resourceReferences(record)) usage(resource, field)
         if (record.kind == BackupRecordKind.THEME_INSTALLATION) usage(record.text("packageResourceId"), "package")
+        if (record.kind in BackupMetadataAssociations.KINDS) BackupMetadataAssociations.resourceId(record)?.let {
+            usage(it, "resource", if (record.kind == BackupRecordKind.METADATA_LYRICS) LyricsEncodingChoice.UTF8.name else null)
+        }
     }
 
     private fun addReferences(record: BackupRecord, indexPrefix: String = "") {
@@ -498,6 +504,10 @@ internal class SqliteBackupStage private constructor(
             }
             BackupRecordKind.PREFERENCE -> for ((field, key) in BackupPreferencesCodec.resourceReferences(record)) edge(field, BackupRecordKind.RESOURCE, key, hard = false)
             BackupRecordKind.THEME_INSTALLATION -> edge("package", BackupRecordKind.RESOURCE, record.text("packageResourceId"))
+            BackupRecordKind.METADATA_LYRICS, BackupRecordKind.METADATA_ARTWORK -> {
+                edge("track", BackupRecordKind.TRACK, record.key, hard = false)
+                edge("resource", BackupRecordKind.RESOURCE, record.optionalText("resourceId"), hard = false)
+            }
             else -> Unit
         }
     }
@@ -604,6 +614,37 @@ internal class SqliteBackupStage private constructor(
                 if (resource.flag("licenseRequired") != (installation.long("fontBytes") > 0L)) throw BackupException(BackupIssue.INVALID_REFERENCE)
             }
             after = page.last().key
+        }
+        for (kind in BackupMetadataAssociations.KINDS) {
+            after = null
+            while (true) {
+                val page = pageNow(kind, after)
+                if (page.isEmpty()) break
+                for (association in page) {
+                    val cue = association.portableCueReference()
+                    row(BackupRecordKind.TRACK, association.key)?.let { track ->
+                        if (track.portableCueReference() != cue) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    }
+                    val otherKind = if (kind == BackupRecordKind.METADATA_LYRICS) BackupRecordKind.METADATA_ARTWORK else BackupRecordKind.METADATA_LYRICS
+                    row(otherKind, association.key)?.let { other ->
+                        if (other.portableCueReference() != cue) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    }
+                    if (kind == BackupRecordKind.METADATA_LYRICS && association.flag("primaryLinked")) {
+                        val lyrics = row(BackupRecordKind.LYRICS_TRACK, association.key) ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        if (lyrics.optionalText("primarySha256") != association.optionalText("sha256") ||
+                            lyrics.optionalText("primaryEncoding") != LyricsEncodingChoice.UTF8.name ||
+                            lyrics.optionalText("primaryResourceId") != association.optionalText("resourceId")) {
+                            throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        }
+                    }
+                    val resourceId = BackupMetadataAssociations.resourceId(association) ?: continue
+                    row(BackupRecordKind.RESOURCE, resourceId)?.let { resource ->
+                        if (resourceDescriptorBytes(resource, BackupMetadataAssociations.resourceKind(kind)) != association.long("bytes") ||
+                            resource.text("sha256") != association.text("sha256")) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    }
+                }
+                after = page.last().key
+            }
         }
     }
     private fun resourceDescriptorBytes(record: BackupRecord, kind: BackupResourceKind): Long = BackupLogicalSchema.resourceDescriptor(record).let {

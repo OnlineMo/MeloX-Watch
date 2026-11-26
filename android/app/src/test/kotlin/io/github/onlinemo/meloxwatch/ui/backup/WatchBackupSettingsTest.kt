@@ -141,13 +141,33 @@ class WatchBackupSettingsTest {
         compose.onNodeWithText("Confirm file association").assertIsEnabled()
     }
 
+    @Test
+    fun libraryArtworkResourcesAreSelectableWithoutPreferencesOrLyrics() {
+        var state by mutableStateOf(BackupUiState(page = BackupUiPage.EXPORT,
+            startup = BackupStartupState.Ready(false), scopes = setOf(BackupScope.LIBRARY)))
+        val actions = actions(scopeChange = { scope, selected ->
+            state = state.copy(scopes = if (selected) state.scopes + scope else state.scopes - scope)
+        })
+        compose.runOnUiThread {
+            checkNotNull(controller).get().setContent { WatchBackupSettings(state, ScreenShape.ROUND, true, actions, onBack = {}) }
+        }
+        val label = "Selected fonts, images, themes and lyrics copies"
+        scrollTo(label)
+        compose.onNodeWithText(label).assertIsEnabled().performClick()
+        assertTrue(BackupScope.RESOURCES in state.scopes)
+        compose.runOnUiThread { state = state.copy(scopes = setOf(BackupScope.FAVORITES)) }
+        scrollTo(label)
+        compose.onNodeWithText(label).assertIsNotEnabled()
+    }
+
     private fun scrollTo(text: String) {
         compose.onNode(hasScrollAction()).performScrollToNode(hasText(text))
     }
 
     private fun actions(effects: (Boolean) -> Unit = {}, fontLicense: (Boolean) -> Unit = {},
-        confirmRestore: () -> Unit = {}, allowDifferent: (Boolean) -> Unit = {}, cueDifferences: (Boolean) -> Unit = {}): BackupUiActions = BackupUiActions(
-        home = {}, beginExport = {}, beginRestore = {}, scope = { _, _ -> }, mode = {}, privacy = {}, effects = effects,
+        confirmRestore: () -> Unit = {}, allowDifferent: (Boolean) -> Unit = {}, cueDifferences: (Boolean) -> Unit = {},
+        scopeChange: (BackupScope, Boolean) -> Unit = { _, _ -> }): BackupUiActions = BackupUiActions(
+        home = {}, beginExport = {}, beginRestore = {}, scope = scopeChange, mode = {}, privacy = {}, effects = effects,
         fontLicense = fontLicense, chooseDestination = {}, chooseInput = {}, recheckRestore = {}, confirmRestore = confirmRestore,
         cancel = {}, retryOutputCleanup = {}, showMissing = {}, firstMissingPage = {}, nextMissingPage = {}, selectMissing = {},
         chooseExistingTarget = {}, allowDifferent = allowDifferent, allowCueDifferences = cueDifferences,

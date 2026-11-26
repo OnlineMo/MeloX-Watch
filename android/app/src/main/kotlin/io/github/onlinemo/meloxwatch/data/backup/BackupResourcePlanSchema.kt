@@ -14,6 +14,7 @@ internal object BackupResourcePlanSchema {
     private val themeFields = setOf("id", "themeId", "manifestSha256", "packageSha256", "resourceSha256", "displayName", "resourceBytes", "fontBytes", "added")
     private val themeAddedFields = setOf("expectedRevision", "previewToken", "operationId")
     private val lyricsFields = setOf("uri", "sourceId", "documentId", "sha256", "bytes", "added")
+    private val metadataArtworkFields = setOf("id", "sha256", "bytes", "added")
 
     fun validate(owner: BackupResourceOwner, slot: String, resourceId: String, values: Map<String, BackupCell>) {
         try {
@@ -65,6 +66,12 @@ internal object BackupResourcePlanSchema {
                     require(row.text("documentId") == "uri:$raw")
                     val source = row.text("sourceId")
                     require(source.startsWith("lyrics:")); uuid(source.removePrefix("lyrics:"))
+                }
+                BackupResourceOwner.METADATA_ARTWORK -> {
+                    fields(values, metadataArtworkFields)
+                    uuid(row.text("id")); row.flag("added")
+                    resource(resourceId, BackupResourceKind.IMAGE, row.text("sha256"))
+                    require(slot == resourceId && row.long("bytes") in 1..BackupLimits.IMAGE_BYTES)
                 }
             }
         } catch (failure: BackupException) {

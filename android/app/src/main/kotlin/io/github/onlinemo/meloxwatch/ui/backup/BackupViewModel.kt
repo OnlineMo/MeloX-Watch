@@ -128,7 +128,7 @@ class BackupViewModel(
         if (!canAct()) return
         val scopes = mutableState.value.scopes.toMutableSet()
         if (selected) scopes.add(scope) else scopes.remove(scope)
-        if (BackupScope.PREFERENCES !in scopes && BackupScope.LYRICS !in scopes) scopes.remove(BackupScope.RESOURCES)
+        if (BackupScope.LIBRARY !in scopes && BackupScope.PREFERENCES !in scopes && BackupScope.LYRICS !in scopes) scopes.remove(BackupScope.RESOURCES)
         if (scopes == mutableState.value.scopes) return
         draftRevision++
         mutableState.update { it.copy(scopes = scopes.toSet(), privacyAcknowledged = false,
