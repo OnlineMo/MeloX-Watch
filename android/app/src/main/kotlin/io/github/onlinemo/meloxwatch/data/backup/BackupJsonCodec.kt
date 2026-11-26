@@ -98,11 +98,15 @@ internal object BackupJsonCodec {
         "resourceBytes" to number(value.resourceBytes), "chainSha256" to JsonText(value.chainSha256),
     )), BackupLimits.MANIFEST_BYTES, checkCancelled)
 
-    fun readCompletion(bytes: ByteArray, checkCancelled: () -> Unit = {}): BackupCompletion = readChecked {
+    fun readCompletion(bytes: ByteArray, checkCancelled: () -> Unit = {},
+        sourceDatabaseVersion: Int = BackupLimits.DATABASE_VERSION): BackupCompletion = readChecked {
+        if (sourceDatabaseVersion !in 1..BackupLimits.DATABASE_VERSION) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         val value = objectValue(decode(bytes, BackupLimits.MANIFEST_BYTES, checkCancelled))
         exactFields(value, COMPLETE_FIELDS)
         if (!flag(value["complete"])) throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
-        BackupCompletion(text(value["exportId"]), readCounts(value["records"]), readCounts(value["chunks"]),
+        if (objectValue(value["records"]).fields.keys != objectValue(value["chunks"]).fields.keys) corrupt()
+        BackupCompletion(text(value["exportId"]), readCounts(value["records"], sourceDatabaseVersion <= 8),
+            readCounts(value["chunks"], sourceDatabaseVersion <= 8),
             nonnegative(value["resources"]), nonnegative(value["logicalBytes"]), nonnegative(value["resourceBytes"]),
             text(value["chainSha256"]))
     }
@@ -138,10 +142,16 @@ internal object BackupJsonCodec {
         BackupRecordKind.entries.associate { it.name to number(values[it] ?: 0L) },
     )
 
-    private fun readCounts(value: JsonValue?): Map<BackupRecordKind, Long> {
+    private fun readCounts(value: JsonValue?, allowLegacyMetadata: Boolean): Map<BackupRecordKind, Long> {
         val objectValue = objectValue(value)
-        if (objectValue.fields.keys != BackupRecordKind.entries.map { it.name }.toSet()) corrupt()
-        return BackupRecordKind.entries.associateWith { nonnegative(objectValue[it.name]) }
+        val complete = BackupRecordKind.entries.map { it.name }.toSet()
+        val legacy = complete - BackupMetadataAssociations.KINDS.map { it.name }.toSet()
+        if (objectValue.fields.keys != complete && (!allowLegacyMetadata || objectValue.fields.keys != legacy)) corrupt()
+        val counts = BackupRecordKind.entries.associateWith {
+            if (it.name in objectValue.fields) nonnegative(objectValue[it.name]) else 0L
+        }
+        if (allowLegacyMetadata && BackupMetadataAssociations.KINDS.any { counts.getValue(it) != 0L }) corrupt()
+        return counts
     }
 
     private fun scope(value: String): BackupScope = BackupScope.entries.firstOrNull { it.name == value } ?: corrupt()

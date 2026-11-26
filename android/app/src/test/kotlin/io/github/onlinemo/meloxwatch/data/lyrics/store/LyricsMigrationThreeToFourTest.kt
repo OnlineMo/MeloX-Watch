@@ -38,7 +38,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** 历史 3→4 DDL、生产 1→8 打开过程和固定的 1/2 schema 分别作为独立判定依据。 */
+/** 历史 3→4 DDL、生产 1→9 打开过程和固定的 1/2 schema 分别作为独立判定依据。 */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [26], manifest = Config.NONE)
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
@@ -50,7 +50,7 @@ internal class LyricsMigrationThreeToFourTest {
         translation = LyricsRoomRows.association(translation = true), userDelayMs = -300)
 
     @Test(timeout = 30_000L)
-    fun generatedV3ToProductionV8AddsLyricsTransfersAndCueAndKeepsEveryOldObjectCellAndReopenIdentity() = runBlocking {
+    fun generatedV3ToProductionV9AddsLyricsTransfersAndCueAndKeepsEveryOldObjectCellAndReopenIdentity() = runBlocking {
         val file = File(folder.root, "from-generated-v3.db")
         val before = createVersionThree(file)
         val database = open(file)
@@ -223,8 +223,8 @@ internal class LyricsMigrationThreeToFourTest {
 
     private suspend fun assertV3Unchanged(database: RoomDatabase, before: V3Observation) = database.withTestWriterSql {
         val version = scalarLong("PRAGMA user_version")
-        val codecAdded = version == 7L || version == 8L
-        val cueAdded = version == 8L
+        val codecAdded = version in 7L..9L
+        val cueAdded = version in 8L..9L
         val codecCatalog = if (codecAdded) catalogWithCodecColumn(before.fullCatalog) else before.fullCatalog
         val expectedCatalog = if (cueAdded) catalogWithCueAdditions(codecCatalog) else codecCatalog
         assertEquals(expectedCatalog, query(FULL_V3_CATALOG_QUERY, block = ::statementRows))
@@ -327,14 +327,14 @@ internal class LyricsMigrationThreeToFourTest {
     }
 
     private suspend fun assertCurrentSchema(database: RoomDatabase, expectedLyricsRows: Long = 0L): String = database.withTestWriterSql {
-        assertEquals(8L, scalarLong("PRAGMA user_version"))
+        assertEquals(9L, scalarLong("PRAGMA user_version"))
         assertEquals(
-            V3_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") + VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES,
+            V3_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") + VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES + VERSION_NINE_METADATA_TABLES,
             applicationTables().toSet(),
         )
         assertEquals(expectedLyricsRows, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
-        for (table in VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES) {
+        for (table in VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES + VERSION_NINE_METADATA_TABLES) {
             assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table`"))
         }
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM queue_entries WHERE cueReference IS NOT NULL"))
@@ -381,6 +381,7 @@ internal class LyricsMigrationThreeToFourTest {
     ).setDriver(BundledSQLiteDriver()).addMigrations(
         MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3, lastMigration,
         MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6, MeloXDatabase.MIGRATION_6_7, MeloXDatabase.MIGRATION_7_8,
+        MeloXDatabase.MIGRATION_8_9,
     ).build()
 
     private fun supportOpen(file: File, failAfterDdl: Boolean): SupportSQLiteOpenHelper {
@@ -488,7 +489,8 @@ internal class LyricsMigrationThreeToFourTest {
             "'lyrics_track_preferences', 'transferred_import_operations', 'display_groups', 'display_names', " +
             "'display_album_links', 'display_artist_links', 'transfer_room_operations', 'transfer_display_previews', " +
             "'transferred_theme_candidates', 'local_cue_documents', 'local_cue_group_versions', " +
-            "'local_cue_native_segments', 'local_cue_aliases', 'local_cue_alias_versions', 'local_cue_alias_segments') ORDER BY type, name"
+            "'local_cue_native_segments', 'local_cue_aliases', 'local_cue_alias_versions', 'local_cue_alias_segments', " +
+            "'local_metadata_associations') ORDER BY type, name"
         // 可空新增列会改变四张旧表的声明；旧列与原单元格另行核验。
         private const val CATALOG_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' " +
             "AND name NOT IN ('room_master_table', 'android_metadata') AND tbl_name NOT IN (" +
@@ -496,7 +498,7 @@ internal class LyricsMigrationThreeToFourTest {
             "'display_groups', 'display_names', 'display_album_links', 'display_artist_links', " +
             "'transfer_room_operations', 'transfer_display_previews', 'transferred_theme_candidates', " +
             "'local_cue_documents', 'local_cue_group_versions', 'local_cue_native_segments', 'local_cue_aliases', " +
-            "'local_cue_alias_versions', 'local_cue_alias_segments') " +
+            "'local_cue_alias_versions', 'local_cue_alias_segments', 'local_metadata_associations') " +
             "AND NOT (type = 'table' AND name IN ('queue_entries', 'local_track_versions', 'playlist_members', 'playlist_exchange_rows')) " +
             "AND name NOT IN ('index_queue_entries_generationId_providerId_trackId_queueEntryId', " +
             "'index_playlist_members_providerId_trackId_generationId_memberId') ORDER BY type, name"
@@ -515,6 +517,7 @@ internal class LyricsMigrationThreeToFourTest {
         )
         private val VERSION_EIGHT_CUE_TABLES = setOf("local_cue_documents", "local_cue_group_versions", "local_cue_native_segments",
             "local_cue_aliases", "local_cue_alias_versions", "local_cue_alias_segments")
+        private val VERSION_NINE_METADATA_TABLES = setOf("local_metadata_associations")
         private val LYRICS_COLUMNS = listOf(
             Column("trackId", "TEXT", 1L, 1L), Column("schemaVersion", "INTEGER", 1L), Column("revision", "INTEGER", 1L),
             Column("primaryDocumentId", "TEXT", 0L), Column("primarySourceId", "TEXT", 0L), Column("primaryUri", "TEXT", 0L),

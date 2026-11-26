@@ -7,6 +7,7 @@ import io.github.onlinemo.meloxwatch.data.library.LocalCodecParametersCodec
 import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsUserOffset
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataProvenance
 import io.github.onlinemo.meloxwatch.data.network.JsonArray
 import io.github.onlinemo.meloxwatch.data.network.JsonBounds
 import io.github.onlinemo.meloxwatch.data.network.JsonText
@@ -96,6 +97,8 @@ internal object BackupLogicalSchema {
             "manifestSha256" to text(characters = 64), "displayName" to text(characters = ThemeLimits.NAME_CHARACTERS),
             "packageResourceId" to text(characters = 64), "resourceBytes" to number(maximum = ThemeLimits.UNPACKED_BYTES),
             "fontBytes" to number(maximum = ThemeLimits.UNPACKED_BYTES)),
+        BackupRecordKind.METADATA_LYRICS to metadataFields(true),
+        BackupRecordKind.METADATA_ARTWORK to metadataFields(false),
     )
 
     fun validate(record: BackupRecord) {
@@ -108,8 +111,9 @@ internal object BackupLogicalSchema {
                 BackupRecordKind.LOCATION_HINT, BackupRecordKind.NODE_HINT, BackupRecordKind.ALIAS_HINT, BackupRecordKind.IMPORT_HINT,
                 BackupRecordKind.RULE, BackupRecordKind.DISPLAY_GROUP, BackupRecordKind.DISPLAY_NAME, BackupRecordKind.DISPLAY_ALBUM_LINK,
                 BackupRecordKind.DISPLAY_ARTIST_LINK, BackupRecordKind.FAVORITES_HEAD, BackupRecordKind.PLAYLIST_HEAD,
-                BackupRecordKind.QUEUE_ENTRY, BackupRecordKind.LYRICS_TRACK, BackupRecordKind.THEME_INSTALLATION) && record.key.length > 128) reject()
-        val legacy = if (record.kind in CUE_BACKUP_KINDS) setOf("cueReference") else emptySet()
+                BackupRecordKind.QUEUE_ENTRY, BackupRecordKind.LYRICS_TRACK, BackupRecordKind.THEME_INSTALLATION,
+                BackupRecordKind.METADATA_LYRICS, BackupRecordKind.METADATA_ARTWORK) && record.key.length > 128) reject()
+        val legacy = if (record.kind in LEGACY_CUE_BACKUP_KINDS) setOf("cueReference") else emptySet()
         if (record.values.keys != expected.keys && record.values.keys != expected.keys - legacy) reject()
         for ((name, spec) in expected) {
             val value = record.values[name] ?: if (name in legacy) BackupCell.Null else reject()
@@ -201,6 +205,7 @@ internal object BackupLogicalSchema {
                 if (record.long("fontBytes") > record.long("resourceBytes") || record.text("displayName").isBlank() ||
                     record.text("displayName").any(Char::isISOControl)) reject()
             }
+            BackupRecordKind.METADATA_LYRICS, BackupRecordKind.METADATA_ARTWORK -> BackupMetadataAssociations.decode(record)
             else -> Unit
         }
     }
@@ -249,6 +254,11 @@ internal object BackupLogicalSchema {
     }
     private fun digest(value: String?) { if (value != null && !value.matches(Regex("[0-9a-f]{64}"))) reject() }
     private fun zone(value: String) { try { ZoneId.of(value) } catch (error: Exception) { throw BackupException(BackupIssue.INVALID_INPUT, error) } }
+    private fun metadataFields(lyrics: Boolean) = mapOf("revision" to number(), "sha256" to text(true, 64),
+        "bytes" to number(true, 1, if (lyrics) BackupLimits.LYRICS_BYTES else BackupLimits.IMAGE_BYTES),
+        "provenance" to text(true, MetadataProvenance.PROVENANCE_BYTES),
+        "resourceId" to text(true, 64), "cueReference" to text(true, CueReferenceCodec.MAX_BYTES)) +
+        if (lyrics) mapOf("primaryLinked" to flag) else emptyMap()
     private fun playlistHeadFields() = mapOf("name" to text(), "kind" to text(characters = 32),
         "createdEpochMs" to number(), "updatedEpochMs" to number(), "memberCount" to number(),
         "bindingSourceId" to text(true, 128), "bindingNodeId" to text(true, 128), "bindingSubtree" to Field(Type.FLAG, true))

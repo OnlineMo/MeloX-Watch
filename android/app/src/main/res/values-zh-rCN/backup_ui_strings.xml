@@ -29,7 +29,7 @@
     <string name="backup_ui_scope_preferences">应用设置</string>
     <string name="backup_ui_scope_lyrics">歌词关联</string>
     <string name="backup_ui_scope_resources">所选字体、图片、主题与歌词副本</string>
-    <string name="backup_ui_resource_dependency">请先选择设置或歌词，再包含对应资源。</string>
+    <string name="backup_ui_resource_dependency">请先选择曲库、设置或歌词，再包含对应资源。</string>
     <string name="backup_ui_readable_warning">此备份无需密码即可读取，请保存在私密位置。</string>
     <string name="backup_ui_excluded_fields">不包含登录凭据、配对密钥、临时授权能力与诊断身份。</string>
     <string name="backup_ui_private_library">曲库：曲名、显示编辑与文件引用提示。</string>

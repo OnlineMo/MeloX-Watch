@@ -32,7 +32,16 @@ internal class NeteaseLyricsException(val issue: NeteaseLyricsIssue) : Exception
 /** One native request. This class cannot invoke Meting or start audio when lyrics are unavailable. */
 internal class NeteaseLyricsApi(private val eapi: NeteaseEapi) {
     suspend fun fetch(trackId: String, credential: SessionCredential,
-        maxAccountedBytes: Long = LyricsLimits.ACCOUNTED_BYTES): NativeLyricsText = withContext(Dispatchers.Default) {
+        maxAccountedBytes: Long = LyricsLimits.ACCOUNTED_BYTES): NativeLyricsText =
+        readText(trackId, NeteaseCookie.fromCredential(credential), maxAccountedBytes)
+
+    /** Search confirmation authorizes this public lyric request; account cookies remain absent. */
+    suspend fun fetchMetadata(trackId: String,
+        maxAccountedBytes: Long = LyricsLimits.ACCOUNTED_BYTES): NativeLyricsText =
+        readText(trackId, null, maxAccountedBytes)
+
+    private suspend fun readText(trackId: String, cookie: NeteaseCookie?,
+        maxAccountedBytes: Long): NativeLyricsText = withContext(Dispatchers.Default) {
         if (!onlineCanonicalId(trackId)) invalid()
         require(maxAccountedBytes in 1L..LyricsLimits.ACCOUNTED_BYTES)
         val allowed = (maxAccountedBytes - RESPONSE_ENVELOPE_BYTES) / 6L
@@ -42,7 +51,7 @@ internal class NeteaseLyricsApi(private val eapi: NeteaseEapi) {
         val response = try { eapi.post("/api/song/lyric", mapOf(
             "id" to JsonText(trackId), "lv" to JsonNumber("-1"), "kv" to JsonNumber("-1"),
             "tv" to JsonNumber("-1"), "rv" to JsonNumber("-1"),
-        ), NeteaseCookie.fromCredential(credential), budget,
+        ), cookie, budget,
             JsonBounds(bytes = budget.responseBytes, nodes = 512, members = 64, stringChars = budget.responseBytes)) }
         catch (error: AuthException) {
             if (error.issue == AuthIssue.INVALID_RESPONSE) invalid()

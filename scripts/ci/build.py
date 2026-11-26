@@ -108,8 +108,12 @@ def gradle_environment(unsigned, diagnostic_phase=None):
 
 
 def gradle_command(tasks):
-    return ['bash', './gradlew', '--no-daemon', '--stacktrace', '--console=plain',
-            '--dependency-verification=strict', '--init-script', '../scripts/ci/enforce.gradle', *tasks]
+    command = ['bash', './gradlew', '--no-daemon', '--stacktrace', '--console=plain',
+               '--dependency-verification=strict', '--init-script', '../scripts/ci/enforce.gradle', *tasks]
+    # The paired Test stage needs repository failures that a plugin stack trace omits.
+    if ':app:testWatchAndroidDebugUnitTest' in command and ':companion:testPhoneAndroidDebugUnitTest' in command:
+        command.append('--info')
+    return command
 
 
 def missing_dependency_inputs():

@@ -32,6 +32,7 @@ fun WatchLyricsOptions(
     onRetry: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    onLookup: (() -> Unit)? = null,
 ) {
     if (!visible) return
     val enabled = state.canChoose && !state.loading && !state.saving && state.documentRequest == null
@@ -59,6 +60,9 @@ fun WatchLyricsOptions(
         WatchActionRow(stringResource(R.string.lyrics_clear_translation), enabled && state.preferences?.translation != null,
             onClick = { onClear(LyricsDocumentPurpose.TRANSLATION) })
         WatchActionRow(stringResource(R.string.lyrics_retry), !state.loading && !state.saving, onClick = onRetry)
+        if (onLookup != null) {
+            WatchActionRow(stringResource(R.string.metadata_lookup_lyrics_title), !state.saving, onClick = onLookup)
+        }
         WatchText(stringResource(R.string.lyrics_encoding_title), primary = true)
         WatchChoiceRow(stringResource(R.string.lyrics_encoding_auto), encoding == LyricsEncodingChoice.AUTO_BOM_OR_UTF8,
             enabled, onSelect = { onEncoding(LyricsEncodingChoice.AUTO_BOM_OR_UTF8) })

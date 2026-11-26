@@ -40,7 +40,7 @@ internal class RoomCueLibraryFixture(private val context: Context, private val f
         database = Room.databaseBuilder(context, MeloXDatabase::class.java, file.absolutePath)
             .setDriver(BundledSQLiteDriver()).addMigrations(MeloXDatabase.MIGRATION_1_2, MeloXDatabase.MIGRATION_2_3,
                 MeloXDatabase.MIGRATION_3_4, MeloXDatabase.MIGRATION_4_5, MeloXDatabase.MIGRATION_5_6,
-                MeloXDatabase.MIGRATION_6_7, MeloXDatabase.MIGRATION_7_8).build()
+                MeloXDatabase.MIGRATION_6_7, MeloXDatabase.MIGRATION_7_8, MeloXDatabase.MIGRATION_8_9).build()
         library = RoomLocalLibraryRepository(database, { elapsed }, { 1_790_000_000_000L })
         library.initialize()
     }

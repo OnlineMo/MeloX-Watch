@@ -15,7 +15,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 
 /** The storage revision belongs to the live native owner, never to the portable preference. */
-internal class BackupConfigVersion(val revision: Long, val record: BackupRecord) {
+internal class BackupConfigVersion(val revision: Long, val record: BackupRecord, val disclosuresDisabled: Boolean = true) {
     init {
         require(revision >= 0L)
         BackupPreferencesCodec.validate(record)
@@ -48,7 +48,8 @@ internal class BackupNativeConfigBridge(
     suspend fun read(key: String, fonts: LyricsFontBackupAccess): BackupConfigVersion {
         barrier.requireExclusiveOwner()
         return when (key) {
-            "player" -> preferences.readForBackup().let { BackupConfigVersion(it.revision, BackupPreferencesCodec.player(it)) }
+            "player" -> preferences.readForBackup().let { BackupConfigVersion(it.revision, BackupPreferencesCodec.player(it),
+                !it.bluetoothLyricsEnabled && !it.metadataLookupEnabled) }
             "appearance" -> appearance.read().let {
                 val actual = it.settings
                 if (actual == null || it.issue != null) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
@@ -74,13 +75,14 @@ internal class BackupNativeConfigBridge(
         if (before.record.key != canonical.key) throw BackupException(BackupIssue.INVALID_INPUT)
         val playerBefore = if (canonical.key == "player") preferences.readForBackup() else null
         val actualBefore = playerBefore?.let {
-            BackupConfigVersion(it.revision, BackupPreferencesCodec.player(it))
+            BackupConfigVersion(it.revision, BackupPreferencesCodec.player(it), !it.bluetoothLyricsEnabled && !it.metadataLookupEnabled)
         } ?: read(canonical.key, fonts)
         if (actualBefore.revision != before.revision || !actualBefore.record.sameContent(before.record)) {
             throw BackupException(BackupIssue.STALE_PREVIEW)
         }
         // Portable player rows omit activation; equal rows still need a real native disable.
-        if (actualBefore.record.sameContent(canonical) && playerBefore?.bluetoothLyricsEnabled != true) return actualBefore
+        if (actualBefore.record.sameContent(canonical) && playerBefore?.bluetoothLyricsEnabled != true &&
+            playerBefore?.metadataLookupEnabled != true) return actualBefore
         if (before.revision == Long.MAX_VALUE) throw BackupException(BackupIssue.CONFLICT)
         val attempt = try {
             when (canonical.key) {
@@ -102,8 +104,8 @@ internal class BackupNativeConfigBridge(
         val observed = try {
             if (canonical.key == "player") {
                 val player = preferences.readForBackup()
-                playerDisabled = !player.bluetoothLyricsEnabled
-                BackupConfigVersion(player.revision, BackupPreferencesCodec.player(player))
+                playerDisabled = !player.bluetoothLyricsEnabled && !player.metadataLookupEnabled
+                BackupConfigVersion(player.revision, BackupPreferencesCodec.player(player), playerDisabled)
             } else read(canonical.key, fonts)
         }
         catch (cancelled: CancellationException) { throw cancelled }

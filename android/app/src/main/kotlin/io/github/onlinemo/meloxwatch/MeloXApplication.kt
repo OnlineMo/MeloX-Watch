@@ -35,6 +35,9 @@ import io.github.onlinemo.meloxwatch.data.local.LocalArtifactDocuments
 import io.github.onlinemo.meloxwatch.data.online.OnlineCatalogFeatureOwner
 import io.github.onlinemo.meloxwatch.data.online.OnlineQueueDirectory
 import io.github.onlinemo.meloxwatch.data.network.BoundedHttpGetClient
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataArtworkFiles
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataRepository
+import io.github.onlinemo.meloxwatch.data.metadata.NeteaseMetadataClientOwner
 import io.github.onlinemo.meloxwatch.data.meting.MetingRuntimeOwner
 import io.github.onlinemo.meloxwatch.data.netease.OnlineAccountChanges
 import io.github.onlinemo.meloxwatch.data.netease.OnlineMusicRuntime
@@ -171,6 +174,8 @@ class MeloXApplication : Application() {
     val onlineAccountChanges by lazy { OnlineAccountChanges() }
     private val boundedHttpGetOwner = lazy { BoundedHttpGetClient(this) }
     internal val boundedHttpGets get() = boundedHttpGetOwner.value
+    private val metadataClientOwner = lazy { NeteaseMetadataClientOwner(this, { boundedHttpGets }) }
+    internal suspend fun metadataLookupClient() = metadataClientOwner.value.get()
     private val metingOwner = lazy { MetingRuntimeOwner(this, runtimePlaybackResources, { boundedHttpGets }) }
     internal val metingRuntime get() = metingOwner.value
     internal fun existingMetingRuntime() = if (metingOwner.isInitialized()) metingOwner.value else null
@@ -212,7 +217,10 @@ class MeloXApplication : Application() {
                 try { if (onlineRuntimeOwner.isInitialized()) onlineRuntimeOwner.value.close() }
                 finally {
                     try { if (metingOwner.isInitialized()) metingOwner.value.close() }
-                    finally { if (boundedHttpGetOwner.isInitialized()) boundedHttpGetOwner.value.close() }
+                    finally {
+                        try { if (metadataClientOwner.isInitialized()) metadataClientOwner.value.close() }
+                        finally { if (boundedHttpGetOwner.isInitialized()) boundedHttpGetOwner.value.close() }
+                    }
                 }
             }
         }
@@ -350,6 +358,13 @@ class MeloXApplication : Application() {
     val lyricsLoader by lazy {
         LocalLyricsLoader.android(this, localProviderIo, library, localSources, lyricsAuthority::isCurrent)
     }
+    internal val metadataArtworkFiles by lazy {
+        LocalMetadataArtworkFiles(this, localProviderIo, backupMutationBarrier, bitmaps = themeBitmaps)
+    }
+    internal val metadataAssociations by lazy {
+        LocalMetadataRepository(this, database, library, lyricsContexts, localSources, queues,
+            lyricsCopies, metadataArtworkFiles, backupMutationBarrier)
+    }
     val lyricsDisplay: LyricsDisplayStore by lazy { LyricsDisplayStoreFactory.get(this) }
 
     /** Registration and physical read proofs are separate checks, outside a Room writer. */
@@ -410,9 +425,10 @@ class MeloXApplication : Application() {
         transferUploads.awaitIdle()
     }
     private val artworkOwner = lazy {
-        LocalArtworkRepository(this, localProviderIo, validateRead = localSources::validateRead, bitmaps = themeBitmaps)
+        LocalArtworkRepository(this, localProviderIo, validateRead = localSources::validateRead, bitmaps = themeBitmaps,
+            confirmedArtwork = { descriptor, edge -> metadataAssociations.acquireArtwork(descriptor, edge, artworks) })
     }
-    val artworks get() = artworkOwner.value
+    val artworks: LocalArtworkRepository get() = artworkOwner.value
     private val recoveryLock = Mutex()
     private var localRecovered = false
     private val preferencesOwner = lazy { UserPreferencesRepositoryFactory.create(this, applicationScopeOwner.value) }
@@ -429,7 +445,7 @@ class MeloXApplication : Application() {
     }
     private val backupResources by lazy {
         BackupNativeResourceBridge(this, backupMutationBarrier, database, localProviderIo,
-            localSources, lyricsCopies, playbackBackgrounds, themes)
+            localSources, lyricsCopies, playbackBackgrounds, themes, metadataArtwork = metadataArtworkFiles)
     }
     internal val backupDocuments by lazy { BackupDocuments(localArtifactDocuments) }
     val backups by lazy {
@@ -479,6 +495,8 @@ class MeloXApplication : Application() {
             try {
                 val recovered = imports.recover()
                 playlistExchange.recoverAbandoned()
+                metadataAssociations.recoverLyrics()
+                metadataAssociations.recoverArtwork()
                 localRecovered = recovered.pending == 0L
                 if (localRecovered) null else ImportIssue.RECOVERY_REQUIRED
             } catch (error: CancellationException) { throw error }

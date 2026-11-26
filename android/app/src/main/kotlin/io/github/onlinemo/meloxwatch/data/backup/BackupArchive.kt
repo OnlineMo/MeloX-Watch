@@ -227,7 +227,7 @@ internal class BackupArchiveReader {
                     if (entry.name == BACKUP_COMPLETE_NAME) {
                         val bytes = smallEntry(zip, entry, BackupLimits.MANIFEST_BYTES, checkCancelled)
                         backupAdd(logicalBytes, bytes.size.toLong(), BackupLimits.EXPANDED_LOGICAL_BYTES)
-                        val completion = BackupJsonCodec.readCompletion(bytes, checkCancelled)
+                        val completion = BackupJsonCodec.readCompletion(bytes, checkCancelled, header.sourceDatabaseVersion)
                         if (entries.hasMoreElements() || entryCount != expectedEntries || completion.exportId != header.exportId ||
                             completion.records != counts || completion.chunks != chunks || completion.resources != resourceCount ||
                             completion.logicalBytes != logicalBytes || completion.resourceBytes != resourceBytes ||
@@ -242,6 +242,9 @@ internal class BackupArchiveReader {
                         if (resourceCursor != null) throw BackupException(BackupIssue.CORRUPT_ARCHIVE)
                         val kind = BackupRecordKind.entries.firstOrNull { it.name.lowercase(Locale.ROOT) == row.groupValues[1] }
                             ?: throw BackupException(BackupIssue.CORRUPT_ARCHIVE)
+                        if (kind in BackupMetadataAssociations.KINDS && header.sourceDatabaseVersion < 9) {
+                            throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
+                        }
                         val index = row.groupValues[2].toLongOrNull() ?: throw BackupException(BackupIssue.CORRUPT_ARCHIVE)
                         if (kind.scope !in header.scopes || kind.ordinal < lastKind || index != chunks[kind]) {
                             throw BackupException(BackupIssue.CORRUPT_ARCHIVE)

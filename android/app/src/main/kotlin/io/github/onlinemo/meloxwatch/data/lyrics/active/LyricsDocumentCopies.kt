@@ -22,6 +22,7 @@ import io.github.onlinemo.meloxwatch.data.backup.BackupResourceWriter
 import io.github.onlinemo.meloxwatch.data.backup.withBackupMutation
 import java.io.File
 import java.io.InputStream
+import java.io.ByteArrayInputStream
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.DirectoryStream
@@ -168,9 +169,21 @@ class LyricsDocumentCopies(
     }
 
     suspend fun create(candidate: ObservedCandidate, expectedSha256: String): Copy =
-        backupBarrier.withBackupMutation({ SourceReadException(SourceReadIssue.BUSY) }) { createActual(candidate, expectedSha256) }
+        backupBarrier.withBackupMutation({ SourceReadException(SourceReadIssue.BUSY) }) {
+            createActual(candidate.sizeBytes, expectedSha256) { signal -> openInput(candidate, signal) }
+        }
 
-    private suspend fun createActual(candidate: ObservedCandidate, expectedSha256: String): Copy {
+    /** Confirmed network text uses the same immutable file, quota and reference gate as a local text copy. */
+    internal suspend fun createConfirmedMetadata(bytes: ByteArray, expectedSha256: String): Copy {
+        if (bytes.size !in 1..LyricsLimits.INPUT_BYTES) throw SourceReadException(SourceReadIssue.INVALID_SOURCE)
+        val owned = bytes.copyOf()
+        return backupBarrier.withBackupMutation({ SourceReadException(SourceReadIssue.BUSY) }) {
+            createActual(owned.size.toLong(), expectedSha256) { ByteArrayInputStream(owned) }
+        }
+    }
+
+    private suspend fun createActual(expectedBytes: Long?, expectedSha256: String,
+        inputReader: (CancellationSignal) -> InputStream): Copy {
         require(expectedSha256.matches(Regex("[0-9a-f]{64}")))
         if (!operation.tryLock()) throw SourceReadException(SourceReadIssue.BUSY)
         val token = UUID.randomUUID().toString()
@@ -196,7 +209,7 @@ class LyricsDocumentCopies(
                         var copied = 0L
                         var reads = 0
                         val buffer = ByteArray(COPY_CHUNK_BYTES)
-                        openInput(candidate, signal).use { input ->
+                        inputReader(signal).use { input ->
                             FileChannel.open(staging.toPath(), StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE,
                                 LinkOption.NOFOLLOW_LINKS).use { output ->
                                 while (true) {
@@ -208,7 +221,7 @@ class LyricsDocumentCopies(
                                     if (count == 0 || count > buffer.size) throw SourceReadException(SourceReadIssue.INVALID_SOURCE)
                                     val next = copied + count
                                     requireSpace(root, occupiedBytes, next)
-                                    if (candidate.sizeBytes != null && next > candidate.sizeBytes) {
+                                    if (expectedBytes != null && next > expectedBytes) {
                                         throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
                                     }
                                     digest.update(buffer, 0, count)
@@ -220,7 +233,7 @@ class LyricsDocumentCopies(
                                     }
                                     copied = next
                                 }
-                                if (candidate.sizeBytes != null && copied != candidate.sizeBytes) {
+                                if (expectedBytes != null && copied != expectedBytes) {
                                     throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
                                 }
                                 if (copied == 0L) throw SourceReadException(SourceReadIssue.INVALID_SOURCE)

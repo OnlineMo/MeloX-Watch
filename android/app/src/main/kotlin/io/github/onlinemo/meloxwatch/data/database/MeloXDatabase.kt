@@ -52,6 +52,9 @@ import io.github.onlinemo.meloxwatch.data.library.LibraryViewEntity
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDao
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsMigrations
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackPreferencesEntity
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataAssociationEntity
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataDao
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataMigrations
 import io.github.onlinemo.meloxwatch.data.listening.ListeningDao
 import io.github.onlinemo.meloxwatch.data.listening.ListeningDayEntity
 import io.github.onlinemo.meloxwatch.data.listening.ListeningHistoryEntity
@@ -99,13 +102,13 @@ import io.github.onlinemo.meloxwatch.data.themes.TransferredThemeMigrations
         PlaylistMetaEntity::class, PlaylistHeadEntity::class, PlaylistGenerationEntity::class,
         PlaylistMemberEntity::class, PlaylistViewEntity::class, PlaylistReceiptEntity::class,
         PlaylistExchangePreviewEntity::class, PlaylistExchangeRowEntity::class, PlaylistExportReceiptEntity::class,
-        LyricsTrackPreferencesEntity::class, LibraryTransferredImportEntity::class,
+        LyricsTrackPreferencesEntity::class, LocalMetadataAssociationEntity::class, LibraryTransferredImportEntity::class,
         DisplayGroupEntity::class, DisplayNameEntity::class, DisplayAlbumLinkEntity::class,
         DisplayArtistLinkEntity::class, TransferRoomOperationEntity::class, TransferDisplayPreviewEntity::class,
         TransferredThemeCandidateEntity::class, CueDocumentEntity::class, CueGroupVersionEntity::class,
         CueNativeSegmentEntity::class, CueAliasEntity::class, CueAliasVersionEntity::class, CueAliasSegmentEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 abstract class MeloXDatabase : RoomDatabase() {
@@ -127,6 +130,7 @@ abstract class MeloXDatabase : RoomDatabase() {
     abstract fun playlistDao(): PlaylistDao
     abstract fun playlistExchangeDao(): PlaylistExchangeDao
     abstract fun lyricsDao(): LyricsDao
+    abstract fun localMetadataDao(): LocalMetadataDao
     abstract fun transferredImportDao(): TransferredImportDao
     abstract fun displayDao(): DisplayDao
     abstract fun transferRoomDao(): TransferRoomDao
@@ -192,11 +196,17 @@ abstract class MeloXDatabase : RoomDatabase() {
             override fun migrate(connection: SQLiteConnection) { CueMigrations.applyV7ToV8(connection) }
         }
 
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) { LocalMetadataMigrations.applyV8ToV9(db) }
+            override fun migrate(connection: SQLiteConnection) { LocalMetadataMigrations.applyV8ToV9(connection) }
+        }
+
         fun open(context: Context, backupBarrier: BackupMutationBarrier? = null): MeloXDatabase = Room.databaseBuilder(
             context.applicationContext,
             MeloXDatabase::class.java,
             FILE_NAME,
         ).setDriver(BundledSQLiteDriver()).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4,
-            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8).build().also { it.backupMutationBarrier = backupBarrier }
+            MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
+            .build().also { it.backupMutationBarrier = backupBarrier }
     }
 }

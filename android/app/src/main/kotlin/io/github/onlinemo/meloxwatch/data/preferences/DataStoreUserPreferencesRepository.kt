@@ -149,6 +149,7 @@ class DataStoreUserPreferencesRepository internal constructor(
                                 controls = draft.controls,
                                 help = draft.help,
                                 bluetoothLyricsEnabled = draft.bluetoothLyricsEnabled,
+                                metadataLookupEnabled = draft.metadataLookupEnabled,
                             ),
                         )
                     }

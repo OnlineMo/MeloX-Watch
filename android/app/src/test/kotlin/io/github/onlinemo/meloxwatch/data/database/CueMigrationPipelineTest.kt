@@ -35,7 +35,7 @@ class CueMigrationPipelineTest {
 
     @Test(timeout = 30_000L)
     fun realV6CellsSurviveBothNewMigrationsAndAllFourReferencesStayNullOnReopen() = runBlocking {
-        val file = File(temporary.root, "cue-v6-to-v8.db")
+        val file = File(temporary.root, "cue-v6-to-v9.db")
         val before = seed(file)
         val database = open(file)
         try { assertCurrent(database, before) } finally { database.close() }
@@ -77,7 +77,7 @@ class CueMigrationPipelineTest {
     }
 
     private suspend fun assertCurrent(database: MeloXDatabase, before: Map<String, FrozenTableRows>) = database.withTestWriterSql {
-        assertEquals(8L, scalarLong("PRAGMA user_version"))
+        assertEquals(9L, scalarLong("PRAGMA user_version"))
         schema.assertRowsPreserved(before, this)
         for (table in listOf("local_track_versions", "queue_entries", "playlist_members", "playlist_exchange_rows")) {
             assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table` WHERE cueReference IS NOT NULL"))
@@ -122,7 +122,7 @@ class CueMigrationPipelineTest {
     }
     private fun open(file: File, last: Migration = MeloXDatabase.MIGRATION_7_8): MeloXDatabase = Room.databaseBuilder(
         context, MeloXDatabase::class.java, file.absolutePath,
-    ).setDriver(BundledSQLiteDriver()).addMigrations(MeloXDatabase.MIGRATION_6_7, last).build()
+    ).setDriver(BundledSQLiteDriver()).addMigrations(MeloXDatabase.MIGRATION_6_7, last, MeloXDatabase.MIGRATION_8_9).build()
     private fun supportOpen(file: File): SupportSQLiteOpenHelper = FrameworkSQLiteOpenHelperFactory().create(
         SupportSQLiteOpenHelper.Configuration.builder(context).name(file.absolutePath).callback(object : SupportSQLiteOpenHelper.Callback(8) {
             override fun onConfigure(db: SupportSQLiteDatabase) { db.setForeignKeyConstraintsEnabled(true) }

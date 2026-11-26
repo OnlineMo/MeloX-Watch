@@ -10,7 +10,7 @@ import io.github.onlinemo.meloxwatch.data.imports.ImportLimits
 object BackupLimits {
     const val FORMAT_VERSION = 1
     const val LOGICAL_VERSION = 1
-    const val DATABASE_VERSION = 8
+    const val DATABASE_VERSION = 9
     const val LOGICAL_ARCHIVE_BYTES = 100L * 1024 * 1024
     const val EXPANDED_LOGICAL_BYTES = 200L * 1024 * 1024
     const val CHUNK_BYTES = 2 * 1024 * 1024
@@ -48,7 +48,8 @@ class BackupSelection(scopes: Set<BackupScope>) {
     val scopes: Set<BackupScope> = Collections.unmodifiableSet(scopes.toSet())
     init {
         require(this.scopes.isNotEmpty())
-        require(BackupScope.RESOURCES !in this.scopes || BackupScope.PREFERENCES in this.scopes || BackupScope.LYRICS in this.scopes)
+        require(BackupScope.RESOURCES !in this.scopes || BackupScope.PREFERENCES in this.scopes ||
+            BackupScope.LYRICS in this.scopes || BackupScope.LIBRARY in this.scopes)
     }
     override fun toString(): String = "BackupSelection"
 }
@@ -68,7 +69,8 @@ data class BackupHeader(
         require(logicalVersion == BackupLimits.LOGICAL_VERSION)
         require(sourceDatabaseVersion in 1..BackupLimits.DATABASE_VERSION)
         require(scopes.isNotEmpty() && createdEpochMs >= 0L)
-        require(BackupScope.RESOURCES !in scopes || BackupScope.PREFERENCES in scopes || BackupScope.LYRICS in scopes)
+        require(BackupScope.RESOURCES !in scopes || BackupScope.PREFERENCES in scopes ||
+            BackupScope.LYRICS in scopes || BackupScope.LIBRARY in scopes)
     }
 }
 
@@ -86,6 +88,7 @@ enum class BackupRecordKind(val scope: BackupScope) {
     TRACK_TOTAL(BackupScope.HISTORY), DAY_TOTAL(BackupScope.HISTORY),
     PREFERENCE(BackupScope.PREFERENCES), LYRICS_TRACK(BackupScope.LYRICS),
     RESOURCE(BackupScope.RESOURCES), THEME_INSTALLATION(BackupScope.RESOURCES),
+    METADATA_LYRICS(BackupScope.LYRICS), METADATA_ARTWORK(BackupScope.LIBRARY),
 }
 
 sealed interface BackupCell {

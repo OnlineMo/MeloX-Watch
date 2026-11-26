@@ -7,6 +7,12 @@ import io.github.onlinemo.meloxwatch.model.TrackKey
 import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.lyrics.LyricsEncodingChoice
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataAssociationRow
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataAssociation
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataProvenance
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataPurpose
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataStoreException
+import io.github.onlinemo.meloxwatch.data.metadata.decode
 import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -16,10 +22,15 @@ import java.nio.file.LinkOption
 import java.nio.file.StandardOpenOption
 import java.security.MessageDigest
 
+/** Native preimages retain the exact asset UUID and provenance bytes; content hashes are not identities. */
+internal class BackupMetadataBeforeRow(val trackId: String, val purpose: MetadataPurpose,
+    val row: LocalMetadataAssociationRow)
+
 /** A separate private database indexes portable rows; no archive SQL or storage table names execute. */
 internal class SqliteBackupStage private constructor(
     val directory: BackupPrivateDirectory,
     private val connection: SQLiteConnection,
+    private val fileIdentity: BackupFileIdentity,
     private val checkCancelled: () -> Unit,
 ) : BackupArchiveStaging, BackupSnapshot {
     private var transaction = false
@@ -28,24 +39,125 @@ internal class SqliteBackupStage private constructor(
     private var logicalBytes = 0L
     private var resourceBytes = 0L
     private var capturedHeader: BackupHeader? = null
+    private val derivedTables = LinkedHashMap<String, Long>()
+    private var metadataBeforeSealed = false
+    private var verifiedLease = false
     fun checkActive() = checkCancelled()
-    fun clearActualIds() { checkCancelled(); connection.execute("DELETE FROM actual_ids") }
+    fun clearActualIds() { requireVerifiedLease(); connection.execute("DELETE FROM actual_ids") }
     fun clearBindings() { checkCancelled(); connection.execute("DELETE FROM restore_bindings") }
 
-    fun beginResourceInventory() {
+    /** Derived tables live only in the existing rows.db lease and never extend sealed schema v1. */
+    fun beginMetadataBefore() {
+        requireVerifiedLease()
+        if (METADATA_BEFORE in derivedTables) throw BackupException(BackupIssue.BUSY)
+        createDerived(METADATA_BEFORE, "CREATE TABLE main.$METADATA_BEFORE(" +
+            "trackId TEXT NOT NULL COLLATE BINARY,purpose TEXT NOT NULL,schemaVersion INTEGER NOT NULL," +
+            "revision INTEGER NOT NULL,assetId TEXT,sha256 TEXT,byteCount INTEGER,provenance TEXT," +
+            "PRIMARY KEY(purpose,trackId)) WITHOUT ROWID")
+        metadataBeforeSealed = false
+    }
+
+    fun appendMetadataBefore(rows: List<BackupMetadataBeforeRow>) {
+        if (METADATA_BEFORE !in derivedTables || metadataBeforeSealed || rows.size > BackupLimits.ROWS_PER_CHUNK) {
+            throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
+        }
+        var batchBytes = 0L
+        for (entry in rows) {
+            checkCancelled()
+            val key = TrackKey(TrackKey.LOCAL_PROVIDER, entry.trackId)
+            decodeMetadataBefore(entry.row, key, entry.purpose)
+            val row = entry.row
+            val bytes = 128L + entry.trackId.toByteArray(Charsets.UTF_8).size + entry.purpose.name.length +
+                listOf(row.assetId, row.sha256, row.provenance).sumOf { it?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L }
+            batchBytes = backupAdd(batchBytes, bytes, BackupLimits.CHUNK_BYTES.toLong())
+        }
+        reserveDerived(METADATA_BEFORE, batchBytes)
+        for (entry in rows) {
+            checkCancelled()
+            val key = TrackKey(TrackKey.LOCAL_PROVIDER, entry.trackId)
+            val row = entry.row
+            connection.prepare("INSERT INTO main.$METADATA_BEFORE(trackId,purpose,schemaVersion,revision,assetId,sha256,byteCount,provenance) VALUES(?,?,?,?,?,?,?,?)").use {
+                it.bindText(1, entry.trackId); it.bindText(2, entry.purpose.name)
+                it.bindLong(3, row.schemaVersion); it.bindLong(4, row.revision)
+                it.bindNullableText(5, row.assetId); it.bindNullableText(6, row.sha256)
+                it.bindNullableLong(7, row.byteCount); it.bindNullableText(8, row.provenance); it.step()
+            }
+            val stored = readMetadataBefore(key, entry.purpose) ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            if (stored.schemaVersion != row.schemaVersion || stored.revision != row.revision ||
+                stored.assetId != row.assetId || stored.sha256 != row.sha256 || stored.byteCount != row.byteCount ||
+                stored.provenance != row.provenance) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+        }
+        requireStageFile()
+    }
+
+    fun sealMetadataBefore(expectedRows: Long) {
         checkCancelled()
-        connection.execute("DROP TABLE IF EXISTS temp.preview_resources")
-        connection.execute("CREATE TEMP TABLE preview_resources(resourceId TEXT NOT NULL PRIMARY KEY) WITHOUT ROWID")
+        if (METADATA_BEFORE !in derivedTables || metadataBeforeSealed || expectedRows < 0L ||
+            scalar("SELECT COUNT(*) FROM main.$METADATA_BEFORE") != expectedRows) {
+            throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+        }
+        requireStageFile()
+        metadataBeforeSealed = true
+    }
+
+    fun metadataBefore(key: TrackKey, purpose: MetadataPurpose): MetadataAssociation? {
+        requireMetadataBefore()
+        return readMetadataBefore(key, purpose)?.let { decodeMetadataBefore(it, key, purpose) }
+    }
+
+    fun metadataBeforePage(purpose: MetadataPurpose, after: String?): List<MetadataAssociation> {
+        requireMetadataBefore()
+        val ids = connection.prepare("SELECT trackId FROM main.$METADATA_BEFORE WHERE purpose=? AND (? IS NULL OR trackId>?) ORDER BY trackId COLLATE BINARY LIMIT 100").use {
+            it.bindText(1, purpose.name); it.bindNullableText(2, after); it.bindNullableText(3, after)
+            buildList { while (it.step()) { checkCancelled(); add(it.getText(0)) } }
+        }
+        return ids.map { id -> metadataBefore(TrackKey(TrackKey.LOCAL_PROVIDER, id), purpose)
+            ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED) }
+    }
+
+    fun endMetadataBefore() {
+        dropDerived(METADATA_BEFORE)
+        metadataBeforeSealed = false
+    }
+
+    private fun requireMetadataBefore() {
+        checkCancelled()
+        if (!transaction || !metadataBeforeSealed || METADATA_BEFORE !in derivedTables) {
+            throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
+        }
+        requireStageFile()
+    }
+
+    private fun readMetadataBefore(key: TrackKey, purpose: MetadataPurpose): LocalMetadataAssociationRow? = connection.prepare(
+        "SELECT CASE WHEN typeof(schemaVersion)='integer' AND typeof(revision)='integer' AND " +
+            "typeof(assetId) IN ('text','null') AND typeof(sha256) IN ('text','null') AND " +
+            "typeof(byteCount) IN ('integer','null') AND typeof(provenance) IN ('text','null') THEN 1 ELSE 0 END," +
+            "schemaVersion,revision,substr(assetId,1,37),substr(sha256,1,65),byteCount," +
+            "substr(provenance,1,${MetadataProvenance.PROVENANCE_BYTES + 1}) FROM main.$METADATA_BEFORE WHERE trackId=? AND purpose=? LIMIT 1",
+    ).use {
+        it.bindText(1, key.trackId); it.bindText(2, purpose.name)
+        if (!it.step()) null else LocalMetadataAssociationRow(it.getLong(0) == 1L, it.getLong(1), it.getLong(2),
+            if (it.isNull(3)) null else it.getText(3), if (it.isNull(4)) null else it.getText(4),
+            if (it.isNull(5)) null else it.getLong(5), if (it.isNull(6)) null else it.getText(6))
+    }
+
+    private fun decodeMetadataBefore(row: LocalMetadataAssociationRow, key: TrackKey,
+        purpose: MetadataPurpose): MetadataAssociation = try { row.decode(key, purpose) }
+    catch (failure: MetadataStoreException) { throw BackupException(BackupIssue.RECOVERY_REQUIRED, failure) }
+
+    fun beginResourceInventory() {
+        resetDerived("preview_resources", "CREATE TABLE main.preview_resources(resourceId TEXT NOT NULL PRIMARY KEY) WITHOUT ROWID")
     }
     fun inventoryResource(kind: BackupResourceKind, sha256: String) {
         checkCancelled()
         if (!sha256.matches(Regex("[0-9a-f]{64}"))) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
-        connection.prepare("INSERT OR IGNORE INTO temp.preview_resources(resourceId) VALUES(?)").use {
+        reserveDerived("preview_resources", 128L)
+        connection.prepare("INSERT OR IGNORE INTO main.preview_resources(resourceId) VALUES(?)").use {
             it.bindText(1, BackupLogicalSchema.resourceId(kind, sha256)); it.step()
         }
     }
-    fun inventorySize(): Long = scalar("SELECT COUNT(*) FROM temp.preview_resources")
-    fun inResourceInventory(id: String): Boolean = connection.prepare("SELECT 1 FROM temp.preview_resources WHERE resourceId=?").use {
+    fun inventorySize(): Long = scalar("SELECT COUNT(*) FROM main.preview_resources")
+    fun inResourceInventory(id: String): Boolean = connection.prepare("SELECT 1 FROM main.preview_resources WHERE resourceId=?").use {
         it.bindText(1, id); it.step()
     }
     fun hasTrackLocation(trackId: String, locationId: String): Boolean = connection.prepare(
@@ -55,19 +167,20 @@ internal class SqliteBackupStage private constructor(
         "SELECT 1 FROM logical_edges WHERE fromKind=? AND field='trackId' AND targetKey=? LIMIT 1",
     ).use { it.bindLong(1, BackupRecordKind.TRACK_LOCATION.ordinal.toLong()); it.bindText(2, trackId); it.step() }
     fun beginRelinkReferences() {
-        checkCancelled()
-        connection.execute("DROP TABLE IF EXISTS temp.relink_reference_tracks")
-        connection.execute("CREATE TEMP TABLE relink_reference_tracks(trackId TEXT NOT NULL PRIMARY KEY,missingQueue INTEGER NOT NULL,cueReference TEXT) WITHOUT ROWID")
+        resetDerived("relink_reference_tracks", "CREATE TABLE main.relink_reference_tracks(trackId TEXT NOT NULL PRIMARY KEY,missingQueue INTEGER NOT NULL,cueReference TEXT) WITHOUT ROWID")
     }
     fun referenceTrack(trackId: String, missingQueue: Boolean, reference: LocalCueReference? = null) {
         checkCancelled()
+        if (trackId.isBlank() || trackId.length > 128 || trackId.any(Char::isISOControl)) throw BackupException(BackupIssue.INVALID_REFERENCE)
         val encoded = reference?.portable()?.let(CueReferenceCodec::encode)
-        val previous = connection.prepare("SELECT cueReference FROM temp.relink_reference_tracks WHERE trackId=?").use {
+        reserveDerived("relink_reference_tracks", 128L + trackId.toByteArray(Charsets.UTF_8).size +
+            (encoded?.toByteArray(Charsets.UTF_8)?.size ?: 0))
+        val previous = connection.prepare("SELECT cueReference FROM main.relink_reference_tracks WHERE trackId=?").use {
             it.bindText(1, trackId);
             if (it.step() && !it.isNull(0)) it.getText(0) else null
         }
         if (previous != null && encoded != null && previous != encoded) throw BackupException(BackupIssue.INVALID_REFERENCE)
-        connection.prepare("INSERT INTO temp.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use {
+        connection.prepare("INSERT INTO main.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use {
             it.bindText(1, trackId);
             it.bindLong(2, if (missingQueue) 1L else 0L);
             it.bindNullableText(3, encoded);
@@ -75,7 +188,7 @@ internal class SqliteBackupStage private constructor(
         }
     }
     fun referenceTrackPage(after: String?): List<BackupRelinkTrack> = connection.prepare(
-        "SELECT trackId,missingQueue,cueReference FROM temp.relink_reference_tracks WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100",
+        "SELECT trackId,missingQueue,cueReference FROM main.relink_reference_tracks WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100",
     ).use {
         it.bindNullableText(1, after); it.bindNullableText(2, after)
         buildList {
@@ -126,6 +239,7 @@ internal class SqliteBackupStage private constructor(
     override fun record(record: BackupRecord) {
         requireWriting()
         if (record.kind.scope !in header.scopes) throw BackupException(BackupIssue.INVALID_INPUT)
+        if (record.kind in BackupMetadataAssociations.KINDS && header.sourceDatabaseVersion < 9) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         val payload = BackupJsonCodec.record(record, checkCancelled)
         requireBackupSpace(directory.root, payload.size.toLong() + 8192L)
         logicalBytes = backupAdd(logicalBytes, payload.size.toLong(), BackupLimits.EXPANDED_LOGICAL_BYTES)
@@ -297,8 +411,10 @@ internal class SqliteBackupStage private constructor(
         connection.prepare("UPDATE stage_meta SET phase='VERIFIED',logicalBytes=? WHERE id=1 AND phase='WRITING'").use {
             it.bindLong(1, logicalBytes); it.step()
         }
+        clearDerived(derivedTables.keys.toList())
         connection.execute("COMMIT")
         transaction = false
+        verifiedLease = false
         phase = "VERIFIED"
         syncBackupDirectory(directory.root)
     }
@@ -307,6 +423,9 @@ internal class SqliteBackupStage private constructor(
         if (transaction) {
             connection.execute("ROLLBACK")
             transaction = false
+            derivedTables.clear()
+            metadataBeforeSealed = false
+            verifiedLease = false
         }
         connection.execute("UPDATE stage_meta SET phase='FAILED' WHERE id=1 AND phase!='VERIFIED'")
         phase = "FAILED"
@@ -368,6 +487,7 @@ internal class SqliteBackupStage private constructor(
         return result
     }
     private fun decodeRow(kind: BackupRecordKind, key: String, payload: ByteArray, scope: Long, bytes: Long): BackupRecord {
+        if (kind in BackupMetadataAssociations.KINDS && header.sourceDatabaseVersion < 9) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         if (payload.size > BackupLimits.RECORD_BYTES) throw BackupException(BackupIssue.TOO_LARGE)
         if (scope != kind.scope.ordinal.toLong() || bytes != payload.size.toLong()) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
         return BackupJsonCodec.readRecord(payload, checkCancelled).also {
@@ -439,9 +559,10 @@ internal class SqliteBackupStage private constructor(
     }
 
     fun lyricsEncodings(resourceId: String): Set<LyricsEncodingChoice> = connection.prepare(
-        "SELECT DISTINCT encoding FROM resource_usage WHERE resourceId=? AND kind=? ORDER BY encoding",
+        "SELECT DISTINCT encoding FROM resource_usage WHERE resourceId=? AND kind IN (?,?) ORDER BY encoding",
     ).use {
         it.bindText(1, resourceId); it.bindLong(2, BackupRecordKind.LYRICS_TRACK.ordinal.toLong())
+        it.bindLong(3, BackupRecordKind.METADATA_LYRICS.ordinal.toLong())
         buildSet { while (it.step()) {
             val name = it.getText(0)
             add(LyricsEncodingChoice.entries.firstOrNull { encoding -> encoding.name == name } ?: throw BackupException(BackupIssue.INVALID_REFERENCE))
@@ -462,6 +583,9 @@ internal class SqliteBackupStage private constructor(
         }
         if (record.kind == BackupRecordKind.PREFERENCE) for ((field, resource) in BackupPreferencesCodec.resourceReferences(record)) usage(resource, field)
         if (record.kind == BackupRecordKind.THEME_INSTALLATION) usage(record.text("packageResourceId"), "package")
+        if (record.kind in BackupMetadataAssociations.KINDS) BackupMetadataAssociations.resourceId(record)?.let {
+            usage(it, "resource", if (record.kind == BackupRecordKind.METADATA_LYRICS) LyricsEncodingChoice.UTF8.name else null)
+        }
     }
 
     private fun addReferences(record: BackupRecord, indexPrefix: String = "") {
@@ -498,6 +622,10 @@ internal class SqliteBackupStage private constructor(
             }
             BackupRecordKind.PREFERENCE -> for ((field, key) in BackupPreferencesCodec.resourceReferences(record)) edge(field, BackupRecordKind.RESOURCE, key, hard = false)
             BackupRecordKind.THEME_INSTALLATION -> edge("package", BackupRecordKind.RESOURCE, record.text("packageResourceId"))
+            BackupRecordKind.METADATA_LYRICS, BackupRecordKind.METADATA_ARTWORK -> {
+                edge("track", BackupRecordKind.TRACK, record.key, hard = false)
+                edge("resource", BackupRecordKind.RESOURCE, record.optionalText("resourceId"), hard = false)
+            }
             else -> Unit
         }
     }
@@ -605,6 +733,37 @@ internal class SqliteBackupStage private constructor(
             }
             after = page.last().key
         }
+        for (kind in BackupMetadataAssociations.KINDS) {
+            after = null
+            while (true) {
+                val page = pageNow(kind, after)
+                if (page.isEmpty()) break
+                for (association in page) {
+                    val cue = association.portableCueReference()
+                    row(BackupRecordKind.TRACK, association.key)?.let { track ->
+                        if (track.portableCueReference() != cue) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    }
+                    val otherKind = if (kind == BackupRecordKind.METADATA_LYRICS) BackupRecordKind.METADATA_ARTWORK else BackupRecordKind.METADATA_LYRICS
+                    row(otherKind, association.key)?.let { other ->
+                        if (other.portableCueReference() != cue) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    }
+                    if (kind == BackupRecordKind.METADATA_LYRICS && association.flag("primaryLinked")) {
+                        val lyrics = row(BackupRecordKind.LYRICS_TRACK, association.key) ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        if (lyrics.optionalText("primarySha256") != association.optionalText("sha256") ||
+                            lyrics.optionalText("primaryEncoding") != LyricsEncodingChoice.UTF8.name ||
+                            lyrics.optionalText("primaryResourceId") != association.optionalText("resourceId")) {
+                            throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        }
+                    }
+                    val resourceId = BackupMetadataAssociations.resourceId(association) ?: continue
+                    row(BackupRecordKind.RESOURCE, resourceId)?.let { resource ->
+                        if (resourceDescriptorBytes(resource, BackupMetadataAssociations.resourceKind(kind)) != association.long("bytes") ||
+                            resource.text("sha256") != association.text("sha256")) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    }
+                }
+                after = page.last().key
+            }
+        }
     }
     private fun resourceDescriptorBytes(record: BackupRecord, kind: BackupResourceKind): Long = BackupLogicalSchema.resourceDescriptor(record).let {
         if (it.kind != kind) throw BackupException(BackupIssue.INVALID_REFERENCE)
@@ -619,48 +778,64 @@ internal class SqliteBackupStage private constructor(
         }
         for (sql in SCHEMA) {
             val table = Regex("^CREATE TABLE ([a-z_]+)").find(sql)?.groupValues?.get(1) ?: continue
-            if (table in DERIVED_COLUMNS) connection.execute(sql.replaceFirst("CREATE TABLE $table", "CREATE TEMP TABLE $VERIFY_PREFIX$table"))
+            if (table in DERIVED_COLUMNS) createDerived(VERIFY_PREFIX + table,
+                sql.replaceFirst("CREATE TABLE $table", "CREATE TABLE main.$VERIFY_PREFIX$table"))
         }
-        var records = 0L
-        var canonicalBytes = 0L
-        var verifiedResourceBytes = 0L
-        for (kind in BackupRecordKind.entries) {
-            var after: String? = null
-            while (true) {
-                val page = pageNow(kind, after)
-                if (page.isEmpty()) break
-                if (kind.scope !in header.scopes) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
-                requireBackupSpace(directory.root, BackupLimits.CHUNK_BYTES.toLong() + 8192L * page.size)
-                for (record in page) {
-                    checkCancelled()
-                    records = backupAdd(records, 1L, Long.MAX_VALUE)
-                    canonicalBytes = backupAdd(canonicalBytes, BackupJsonCodec.record(record, checkCancelled).size.toLong(), BackupLimits.EXPANDED_LOGICAL_BYTES)
-                    addLogicalIndexes(record, VERIFY_PREFIX)
-                    if (kind == BackupRecordKind.RESOURCE) {
-                        val resource = BackupLogicalSchema.resourceDescriptor(record)
-                        verifiedResourceBytes = backupAdd(verifiedResourceBytes, resource.bytes, BackupLimits.RESOURCE_ARCHIVE_BYTES)
-                        insertResource(resource, sealed = true, prefix = VERIFY_PREFIX)
+        var failure: Throwable? = null
+        try {
+            var records = 0L
+            var canonicalBytes = 0L
+            var verifiedResourceBytes = 0L
+            for (kind in BackupRecordKind.entries) {
+                var after: String? = null
+                while (true) {
+                    val page = pageNow(kind, after)
+                    if (page.isEmpty()) break
+                    if (kind.scope !in header.scopes) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+                    val canonicalSizes = page.map { BackupJsonCodec.record(it, checkCancelled).size.toLong() }
+                    reserveDerived(VERIFY_PREFIX + "logical_edges", canonicalSizes.sum())
+                    for (index in page.indices) {
+                        val record = page[index]
+                        checkCancelled()
+                        records = backupAdd(records, 1L, Long.MAX_VALUE)
+                        canonicalBytes = backupAdd(canonicalBytes, canonicalSizes[index], BackupLimits.EXPANDED_LOGICAL_BYTES)
+                        addLogicalIndexes(record, "main.$VERIFY_PREFIX")
+                        if (kind == BackupRecordKind.RESOURCE) {
+                            val resource = BackupLogicalSchema.resourceDescriptor(record)
+                            verifiedResourceBytes = backupAdd(verifiedResourceBytes, resource.bytes, BackupLimits.RESOURCE_ARCHIVE_BYTES)
+                            insertResource(resource, sealed = true, prefix = "main.$VERIFY_PREFIX")
+                        }
                     }
+                    after = page.last().key
                 }
-                after = page.last().key
+            }
+            if (records != scalar("SELECT COUNT(*) FROM logical_records") ||
+                canonicalBytes != logicalBytes || scalar("SELECT COALESCE(SUM(bytes),0) FROM logical_records") != logicalBytes) {
+                throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+            }
+            if (scalar("SELECT COUNT(*) FROM resources WHERE sealed!=1") != 0L) throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
+            for ((table, columns) in DERIVED_COLUMNS) {
+                checkCancelled()
+                val expected = "main.$VERIFY_PREFIX$table"
+                val matches = columns.split(',').joinToString(" AND ") { "actual.$it IS expected.$it" }
+                val differs = scalar("SELECT EXISTS(SELECT 1 FROM main.$table actual WHERE NOT EXISTS(" +
+                    "SELECT 1 FROM $expected expected WHERE $matches)) OR EXISTS(SELECT 1 FROM $expected expected WHERE NOT EXISTS(" +
+                    "SELECT 1 FROM main.$table actual WHERE $matches))")
+                if (differs != 0L) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+            }
+            resourceBytes = verifiedResourceBytes
+            validateReferences()
+            validateOrdering()
+            validateRelationships()
+            validateStatistics()
+        } catch (caught: Throwable) { failure = caught; throw caught }
+        finally {
+            try { clearDerived(DERIVED_COLUMNS.keys.map { VERIFY_PREFIX + it }) }
+            catch (closing: Throwable) {
+                val original = failure
+                if (original == null) throw closing else if (original !== closing) original.addSuppressed(closing)
             }
         }
-        if (records != scalar("SELECT COUNT(*) FROM logical_records") ||
-            canonicalBytes != logicalBytes || scalar("SELECT COALESCE(SUM(bytes),0) FROM logical_records") != logicalBytes) {
-            throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
-        }
-        if (scalar("SELECT COUNT(*) FROM resources WHERE sealed!=1") != 0L) throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
-        for ((table, columns) in DERIVED_COLUMNS) {
-            checkCancelled()
-            val expected = VERIFY_PREFIX + table
-            val differs = scalar("SELECT EXISTS(SELECT $columns FROM $table EXCEPT SELECT $columns FROM $expected) OR EXISTS(SELECT $columns FROM $expected EXCEPT SELECT $columns FROM $table)")
-            if (differs != 0L) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
-        }
-        resourceBytes = verifiedResourceBytes
-        validateReferences()
-        validateOrdering()
-        validateRelationships()
-        validateStatistics()
     }
 
     private fun verifyColumnTypes() {
@@ -719,6 +894,106 @@ internal class SqliteBackupStage private constructor(
             it.bindText(1, family); it.bindText(2, owner); it.bindText(3, identity); it.bindText(4, key); it.step()
         }
     }
+    private fun createDerived(name: String, sql: String) {
+        checkCancelled()
+        require(name in DERIVED_NAMES)
+        if (closed || phase !in setOf("WRITING", "VERIFIED")) throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
+        if (!transaction) {
+            requireVerifiedLease()
+        }
+        requireStageFile()
+        if (name in derivedTables || connection.prepare(
+                "SELECT 1 FROM main.sqlite_schema WHERE name=? UNION ALL SELECT 1 FROM sqlite_temp_schema WHERE name=? LIMIT 1",
+            ).use { it.bindText(1, name); it.bindText(2, name); it.step() }) {
+            throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+        }
+        requireBackupSpace(directory.root, 64 * 1024L)
+        connection.execute(sql)
+        derivedTables[name] = 0L
+    }
+
+    /** Direct sealed-stage callers acquire the same verified lease as a newly opened restore caller. */
+    private fun requireVerifiedLease() {
+        checkCancelled()
+        if (closed || phase != "VERIFIED") throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
+        if (!verifiedLease) {
+            if (!transaction) {
+                connection.execute("BEGIN IMMEDIATE")
+                transaction = true
+            }
+            verifySchema(connection)
+            verifyColumnTypes()
+            connection.prepare("SELECT header,phase,logicalBytes FROM stage_meta WHERE id=1").use {
+                if (!it.step() || it.getText(1) != "VERIFIED" || it.getLong(2) != logicalBytes ||
+                    BackupJsonCodec.readHeader(it.getBlob(0), checkCancelled) != header) {
+                    throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+                }
+            }
+            verifySealedState()
+            verifiedLease = true
+        }
+        requireStageFile()
+    }
+
+    private fun resetDerived(name: String, sql: String) {
+        if (name !in derivedTables) createDerived(name, sql) else {
+            checkCancelled(); requireStageFile()
+            connection.execute("DELETE FROM main.$name")
+            derivedTables[name] = 0L
+        }
+    }
+
+    private fun reserveDerived(name: String, bytes: Long) {
+        checkCancelled()
+        if (!transaction || name !in derivedTables || bytes < 0L) throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE)
+        val total = derivedTables.values.fold(0L) { sum, value -> backupAdd(sum, value, STAGE_DERIVED_BYTES) }
+        backupAdd(total, bytes, STAGE_DERIVED_BYTES)
+        requireBackupSpace(directory.root, backupAdd(bytes, 8192L, Long.MAX_VALUE))
+        derivedTables[name] = backupAdd(checkNotNull(derivedTables[name]), bytes, STAGE_DERIVED_BYTES)
+    }
+
+    private fun dropDerived(name: String) {
+        if (name !in derivedTables) return
+        if (!transaction) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+        requireStageFile()
+        connection.execute("DROP TABLE main.$name")
+        derivedTables.remove(name)
+    }
+
+    private fun clearDerived(names: Collection<String>) {
+        var failure: Throwable? = null
+        for (name in names) try { dropDerived(name) }
+        catch (closing: Throwable) {
+            val original = failure
+            if (original == null) failure = closing else if (original !== closing) original.addSuppressed(closing)
+        }
+        failure?.let { throw it }
+    }
+
+    /** A FILE pragma cannot override TEMP_STORE=3; ordinary main tables use the measured private file. */
+    private fun requireStageFile() {
+        val file = directory.child("rows.db")
+        fileIdentity.requireSame(file)
+        var found = false
+        connection.prepare("PRAGMA database_list").use {
+            while (it.step()) {
+                when (it.getText(1)) {
+                    "main" -> {
+                        if (found || it.getText(2) != file.absolutePath) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+                        found = true
+                    }
+                    "temp" -> Unit
+                    else -> throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+                }
+            }
+        }
+        if (!found || scalar("PRAGMA main.cache_size") != -1024L || scalar("PRAGMA main.cache_spill") <= 0L ||
+            scalar("PRAGMA main.max_page_count") != STAGE_MAX_PAGES) throw BackupException(BackupIssue.UNSUPPORTED_RESOURCE)
+        connection.prepare("PRAGMA main.journal_mode").use {
+            if (!it.step() || it.getText(0) != "delete") throw BackupException(BackupIssue.UNSUPPORTED_RESOURCE)
+        }
+    }
+
     private fun scalar(sql: String): Long = connection.prepare(sql).use { check(it.step()); it.getLong(0) }
     private fun requireWriting() { checkCancelled(); if (!transaction || phase != "WRITING") throw BackupException(BackupIssue.INCOMPLETE_ARCHIVE) }
     override fun close() {
@@ -726,7 +1001,7 @@ internal class SqliteBackupStage private constructor(
         var failure: Throwable? = null
         if (transaction) try { connection.execute("ROLLBACK"); transaction = false }
         catch (rollback: Throwable) { failure = rollback }
-        try { connection.close(); closed = true; transaction = false }
+        try { connection.close(); closed = true; transaction = false; derivedTables.clear(); metadataBeforeSealed = false; verifiedLease = false }
         catch (closing: Throwable) {
             val original = failure
             if (original == null) failure = closing
@@ -746,14 +1021,15 @@ internal class SqliteBackupStage private constructor(
             BackupCreatedFile.create(file).use { it.channel.force(true) }
             val identity = BackupFileIdentity.capture(file)
             val connection = BundledSQLiteDriver().open(file.absolutePath)
-            val result = SqliteBackupStage(directory, connection, checkCancelled)
+            val result = SqliteBackupStage(directory, connection, identity, checkCancelled)
             try {
                 onOpened(result)
                 connection.execute("PRAGMA journal_mode=DELETE")
                 connection.execute("PRAGMA synchronous=FULL")
                 connection.execute("PRAGMA cache_size=-1024")
+                connection.execute("PRAGMA cache_spill=1")
                 connection.execute("PRAGMA temp_store=FILE")
-                connection.execute("PRAGMA max_page_count=131072")
+                connection.execute("PRAGMA max_page_count=$STAGE_MAX_PAGES")
                 connection.execute("PRAGMA user_version=1")
                 for (sql in SCHEMA) connection.execute(sql)
                 identity.requireSame(file)
@@ -773,11 +1049,13 @@ internal class SqliteBackupStage private constructor(
             val file = directory.child("rows.db")
             val identity = BackupFileIdentity.capture(file)
             val connection = BundledSQLiteDriver().open(file.absolutePath)
-            val result = SqliteBackupStage(directory, connection, checkCancelled)
+            val result = SqliteBackupStage(directory, connection, identity, checkCancelled)
             try {
                 onOpened(result)
                 connection.execute("PRAGMA cache_size=-1024")
+                connection.execute("PRAGMA cache_spill=1")
                 connection.execute("PRAGMA temp_store=FILE")
+                connection.execute("PRAGMA max_page_count=$STAGE_MAX_PAGES")
                 // Only this private stage is reserved; main Room and archive readers remain separate.
                 connection.execute("BEGIN IMMEDIATE")
                 result.transaction = true
@@ -791,6 +1069,7 @@ internal class SqliteBackupStage private constructor(
                 }
                 result.verifySealedState()
                 identity.requireSame(file)
+                result.verifiedLease = true
                 return result
             } catch (failure: Throwable) {
                 try { result.close() } catch (closing: Throwable) { if (closing !== failure) failure.addSuppressed(closing) }
@@ -817,6 +1096,10 @@ internal class SqliteBackupStage private constructor(
         }
         private fun normalizedSql(sql: String): String = sql.trim().replace(Regex("\\s+"), " ").lowercase(java.util.Locale.ROOT)
         private const val VERIFY_PREFIX = "backup_expected_"
+        private const val METADATA_BEFORE = "backup_metadata_before"
+        private const val STAGE_MAX_PAGES = 131072L
+        // Incoming rows and the already bounded native before-image are separate logical domains.
+        private const val STAGE_DERIVED_BYTES = 2L * BackupLimits.EXPANDED_LOGICAL_BYTES
         private val DERIVED_COLUMNS = mapOf(
             "logical_edges" to "fromKind,recordKey,field,toKind,targetKey,hard",
             "resource_usage" to "resourceId,kind,recordKey,field,encoding",
@@ -825,6 +1108,8 @@ internal class SqliteBackupStage private constructor(
             "resources" to "resourceId,kind,bytes,sha256,licenseRequired,sealed",
             "node_parents" to "child,parent",
         )
+        private val DERIVED_NAMES = DERIVED_COLUMNS.keys.map { VERIFY_PREFIX + it }.toSet() +
+            setOf(METADATA_BEFORE, "preview_resources", "relink_reference_tracks")
         private val COLUMN_TYPES = mapOf(
             "stage_meta" to mapOf("id" to "integer", "header" to "blob", "phase" to "text", "logicalBytes" to "integer"),
             "logical_records" to mapOf("kind" to "integer", "recordKey" to "text", "scope" to "integer", "payload" to "blob", "bytes" to "integer"),

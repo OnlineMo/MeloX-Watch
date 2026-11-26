@@ -15,7 +15,7 @@ import java.util.UUID
 
 internal enum class BackupRestorePhase { PREPARING, CONFIGURING, MAIN_PREPARED, FINISHING_FORWARD, ROLLING_BACK, FINISHING_ROLLBACK }
 internal enum class BackupConfigDirection { FORWARD, ROLLBACK }
-internal enum class BackupResourceOwner { FONT, BACKGROUND, THEME, LYRICS }
+internal enum class BackupResourceOwner { FONT, BACKGROUND, THEME, LYRICS, METADATA_ARTWORK }
 
 internal class BackupRestoreRun(
     val id: String,
@@ -200,7 +200,7 @@ internal class BackupRestoreJournal private constructor(
         val before = step.attemptBefore ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
         val target = step.attemptTarget ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
         val maximum = if (before.revision == Long.MAX_VALUE) before.revision else before.revision + 1L
-        if (!actual.record.sameContent(target) || actual.revision !in before.revision..maximum ||
+        if (!actual.disclosuresDisabled || !actual.record.sameContent(target) || actual.revision !in before.revision..maximum ||
             actual.revision == before.revision && !before.record.sameContent(target)) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
         transaction {
             connection.prepare("UPDATE config_steps SET confirmedRevision=? WHERE configKey=?").use {
@@ -517,6 +517,19 @@ internal class BackupRestoreJournal private constructor(
         catch (closing: Throwable) { val original = failure; if (original == null) throw closing else if (original !== closing) original.addSuppressed(closing) } }
     }
 
+    /** Only an already verified v1 table is replaced; receipt bytes and owner ordinals are retained. */
+    private fun migrateLegacyResourceOwners() {
+        requireBackupSpace(directory.root, Files.size(directory.child("restore.db").toPath()) + 64 * 1024L)
+        transaction {
+            connection.execute("ALTER TABLE resource_plans RENAME TO legacy_resource_plans")
+            connection.execute(SCHEMA.single { it.startsWith("CREATE TABLE resource_plans(") })
+            connection.execute("INSERT INTO resource_plans(owner,slot,resourceId,metadata,confirmed) " +
+                "SELECT owner,slot,resourceId,metadata,confirmed FROM legacy_resource_plans")
+            connection.execute("DROP TABLE legacy_resource_plans")
+            connection.execute("PRAGMA user_version=2")
+        }
+    }
+
     override fun close() {
         var failure: Throwable? = null
         fun closeRemaining(action: () -> Unit) {
@@ -559,13 +572,21 @@ internal class BackupRestoreJournal private constructor(
                     opened.execute("BEGIN IMMEDIATE")
                     try {
                         for (sql in SCHEMA) opened.execute(sql)
-                        opened.execute("PRAGMA user_version=1")
+                        opened.execute("PRAGMA user_version=2")
                         opened.execute("COMMIT")
                     } catch (failure: Throwable) {
                         try { opened.execute("ROLLBACK") } catch (closing: Throwable) { if (failure !== closing) failure.addSuppressed(closing) }
                         throw failure
                     }
-                } else if (version != 1L) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                } else if (version == 1L) {
+                    verifySchema(opened, LEGACY_SCHEMA)
+                    journal.verifyState()
+                    if (opened.prepare("SELECT COUNT(*) FROM resource_plans WHERE owner NOT BETWEEN 0 AND 3").use {
+                            if (!it.step()) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                            it.getLong(0)
+                        } != 0L) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                    journal.migrateLegacyResourceOwners()
+                } else if (version != 2L) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
                 verifySchema(opened)
                 identity.requireSame(file)
                 syncBackupDirectory(directory.root)
@@ -577,7 +598,7 @@ internal class BackupRestoreJournal private constructor(
                     else BackupException(BackupIssue.RECOVERY_REQUIRED, failure)
             }
         }
-        private fun verifySchema(connection: SQLiteConnection) {
+        private fun verifySchema(connection: SQLiteConnection, schema: List<String> = SCHEMA) {
             val actual = LinkedHashMap<String, String>()
             connection.prepare("SELECT name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND type IN ('table','view','trigger','index') ORDER BY name").use {
                 while (it.step()) {
@@ -585,7 +606,7 @@ internal class BackupRestoreJournal private constructor(
                     actual[it.getText(0)] = normalizedSql(it.getText(1))
                 }
             }
-            val expected = SCHEMA.associate { sql ->
+            val expected = schema.associate { sql ->
                 val name = Regex("CREATE TABLE ([a-z_]+)").find(sql)?.groupValues?.get(1)
                     ?: throw BackupException(BackupIssue.RECOVERY_REQUIRED)
                 name to normalizedSql(sql)
@@ -600,12 +621,13 @@ internal class BackupRestoreJournal private constructor(
             "CREATE TABLE generation_owners(generationId TEXT NOT NULL PRIMARY KEY CHECK(length(generationId)=36),device INTEGER NOT NULL CHECK(device>=0),inode INTEGER NOT NULL CHECK(inode>=0)) WITHOUT ROWID, STRICT",
             "CREATE TABLE restore_run(id INTEGER NOT NULL PRIMARY KEY CHECK(id=1),runId TEXT NOT NULL,exportId TEXT NOT NULL,archiveSha256 TEXT NOT NULL,incomingGeneration TEXT NOT NULL,beforeGeneration TEXT NOT NULL,scopes BLOB NOT NULL CHECK(length(scopes) BETWEEN 1 AND 8),mode INTEGER NOT NULL CHECK(mode IN (0,1)),beforeMainDigest TEXT NOT NULL,phase INTEGER NOT NULL CHECK(phase BETWEEN 0 AND 5),targetGeneration TEXT,targetMainDigest TEXT,nativeBindings BLOB NOT NULL CHECK(length(nativeBindings)<=1048576),themeBaseline BLOB NOT NULL CHECK(length(themeBaseline)<=65536),CHECK((targetGeneration IS NULL)=(targetMainDigest IS NULL))) STRICT",
             "CREATE TABLE config_steps(configKey TEXT NOT NULL PRIMARY KEY,beforeRevision INTEGER NOT NULL CHECK(beforeRevision>=0),beforePayload BLOB NOT NULL CHECK(length(beforePayload)<=1048576),forwardPayload BLOB CHECK(length(forwardPayload)<=1048576),direction INTEGER CHECK(direction IN (0,1)),attemptRevision INTEGER CHECK(attemptRevision>=0),attemptBefore BLOB CHECK(length(attemptBefore)<=1048576),attemptTarget BLOB CHECK(length(attemptTarget)<=1048576),confirmedRevision INTEGER CHECK(confirmedRevision>=0)) WITHOUT ROWID, STRICT",
-            "CREATE TABLE resource_plans(owner INTEGER NOT NULL CHECK(owner BETWEEN 0 AND 3),slot TEXT NOT NULL CHECK(length(slot) BETWEEN 1 AND 128),resourceId TEXT NOT NULL CHECK(length(resourceId)=64),metadata BLOB NOT NULL CHECK(length(metadata)<=32768),confirmed INTEGER NOT NULL CHECK(confirmed IN (0,1)),PRIMARY KEY(owner,slot)) WITHOUT ROWID, STRICT",
+            "CREATE TABLE resource_plans(owner INTEGER NOT NULL CHECK(owner BETWEEN 0 AND 4),slot TEXT NOT NULL CHECK(length(slot) BETWEEN 1 AND 128),resourceId TEXT NOT NULL CHECK(length(resourceId)=64),metadata BLOB NOT NULL CHECK(length(metadata)<=32768),confirmed INTEGER NOT NULL CHECK(confirmed IN (0,1)),PRIMARY KEY(owner,slot)) WITHOUT ROWID, STRICT",
             "CREATE TABLE history_merge_receipts(archiveSha256 TEXT NOT NULL CHECK(length(archiveSha256)=64),epoch INTEGER NOT NULL CHECK(epoch>=0),PRIMARY KEY(archiveSha256,epoch)) WITHOUT ROWID, STRICT",
             "CREATE TABLE statistics_merge_receipts(archiveSha256 TEXT NOT NULL CHECK(length(archiveSha256)=64),epoch INTEGER NOT NULL CHECK(epoch>=0),PRIMARY KEY(archiveSha256,epoch)) WITHOUT ROWID, STRICT",
             "CREATE TABLE pending_relinks(hintId TEXT NOT NULL PRIMARY KEY CHECK(length(hintId)=36),trackId TEXT NOT NULL CHECK(length(trackId) BETWEEN 1 AND 128),locationId TEXT NOT NULL CHECK(length(locationId) BETWEEN 1 AND 128),archiveSha256 TEXT NOT NULL CHECK(length(archiveSha256)=64),payload BLOB NOT NULL CHECK(length(payload)<=1048576)) WITHOUT ROWID, STRICT",
             "CREATE TABLE relink_hints(hintId TEXT NOT NULL PRIMARY KEY CHECK(length(hintId)=36),trackId TEXT NOT NULL CHECK(length(trackId) BETWEEN 1 AND 128),locationId TEXT NOT NULL CHECK(length(locationId) BETWEEN 1 AND 128),archiveSha256 TEXT NOT NULL CHECK(length(archiveSha256)=64),payload BLOB NOT NULL CHECK(length(payload)<=1048576)) WITHOUT ROWID, STRICT",
         )
+        private val LEGACY_SCHEMA = SCHEMA.map { it.replace("CHECK(owner BETWEEN 0 AND 4)", "CHECK(owner BETWEEN 0 AND 3)") }
     }
 }
 

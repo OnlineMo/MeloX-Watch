@@ -15,6 +15,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceSpec
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
+import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.local.requirePlatformLocalProvider
 import io.github.onlinemo.meloxwatch.data.local.LocalArtifactException
 import io.github.onlinemo.meloxwatch.data.local.LocalArtifactIssue
@@ -26,6 +27,14 @@ import io.github.onlinemo.meloxwatch.data.lyrics.active.OwnedLyricsProvider
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsAssociation
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsTrackLimits
 import io.github.onlinemo.meloxwatch.data.lyrics.store.decode
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataAssociationRow
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataArtworkFiles
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataAssociation
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataProvenance
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataPurpose
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataStoreException
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataStoreIssue
+import io.github.onlinemo.meloxwatch.data.metadata.decode
 import io.github.onlinemo.meloxwatch.data.themes.BackgroundImageRef
 import io.github.onlinemo.meloxwatch.data.themes.CustomBackgroundImportRequest
 import io.github.onlinemo.meloxwatch.data.themes.LocalBackgroundImages
@@ -67,6 +76,7 @@ internal class BackupNativeResourceBridge(
     private val background: LocalBackgroundImages,
     private val themes: LocalThemeRepository,
     private val parser: LocalLyricsParser = LocalLyricsParser(),
+    private val metadataArtwork: LocalMetadataArtworkFiles? = null,
 ) {
     private val context = context.applicationContext
 
@@ -135,6 +145,11 @@ internal class BackupNativeResourceBridge(
                 after = page.last().first
             }
         } }
+        eachMetadata(scopes, stage::checkActive) { association ->
+            if (association.assetId != null) stage.inventoryResource(
+                BackupMetadataAssociations.resourceKind(BackupMetadataAssociations.kind(association.purpose)),
+                checkNotNull(association.sha256))
+        }
         var conflicts = 0L
         each(stage, BackupRecordKind.RESOURCE) { row ->
             val resource = BackupLogicalSchema.resourceDescriptor(row)
@@ -212,6 +227,32 @@ internal class BackupNativeResourceBridge(
                 if (resource.id != id) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
             }
         }
+        for (kind in BackupMetadataAssociations.KINDS) {
+            if (kind.scope !in stage.header.scopes) continue
+            each(stage, kind) { row ->
+                val id = row.optionalText("resourceId") ?: return@each
+                val current = currentMetadata(row) ?: throw BackupException(BackupIssue.STALE_PREVIEW)
+                if (current.assetId == null || !BackupMetadataAssociations.record(current,
+                        row.values.getValue("cueReference"), true,
+                        row.kind == BackupRecordKind.METADATA_LYRICS && row.flag("primaryLinked")).sameContent(row)) {
+                    throw BackupException(BackupIssue.STALE_PREVIEW)
+                }
+                if (stage.row(BackupRecordKind.RESOURCE, id) != null) return@each
+                val resource = captureResource(stage, BackupMetadataAssociations.resourceKind(kind), false) { output ->
+                    metadataBoundary {
+                        when (current.purpose) {
+                            MetadataPurpose.LYRICS -> copies.exportForBackup(ownedLyricsUri(checkNotNull(current.assetId)),
+                                checkNotNull(current.sha256), output)
+                            MetadataPurpose.ARTWORK -> artworkOwner().exportForBackup(checkNotNull(current.assetId),
+                                checkNotNull(current.byteCount), checkNotNull(current.sha256), output)
+                        }
+                    }
+                }
+                if (resource.id != id || resource.bytes != row.long("bytes")) {
+                    throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+                }
+            }
+        }
         return packages
     }
 
@@ -230,11 +271,21 @@ internal class BackupNativeResourceBridge(
                     fonts.validateForBackup(file, asset)
                 }
                 BackupResourceKind.IMAGE -> {
-                    val use = stage.firstResourceUse(resource.id, BackupRecordKind.PREFERENCE) ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
-                    if (use.record.key != "background") throw BackupException(BackupIssue.INVALID_REFERENCE)
-                    val image = BackupPreferencesCodec.background(use.record).customImage ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
-                    if (image.byteCount != resource.bytes || image.sha256 != resource.sha256) throw BackupException(BackupIssue.INVALID_REFERENCE)
-                    background.validateForBackup(file, image)
+                    val preference = stage.firstResourceUse(resource.id, BackupRecordKind.PREFERENCE)
+                    val metadata = stage.firstResourceUse(resource.id, BackupRecordKind.METADATA_ARTWORK)
+                    if (preference == null && metadata == null) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    if (preference != null) {
+                        if (preference.record.key != "background") throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        val image = BackupPreferencesCodec.background(preference.record).customImage ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        if (image.byteCount != resource.bytes || image.sha256 != resource.sha256) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        background.validateForBackup(file, image)
+                    }
+                    if (metadata != null) {
+                        if (metadata.record.long("bytes") != resource.bytes || metadata.record.text("sha256") != resource.sha256) {
+                            throw BackupException(BackupIssue.INVALID_REFERENCE)
+                        }
+                        metadataBoundary { artworkOwner().validateForBackup(file, resource.bytes, resource.sha256) }
+                    }
                 }
                 BackupResourceKind.THEME_PACKAGE -> {
                     val use = stage.firstResourceUse(resource.id, BackupRecordKind.THEME_INSTALLATION) ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
@@ -286,6 +337,17 @@ internal class BackupNativeResourceBridge(
         each(before, BackupRecordKind.LYRICS_TRACK) { row ->
             for (prefix in listOf("primary", "translation")) row.optionalText(prefix + "UriHint")?.let { uri ->
                 if (OwnedLyricsProvider.token(context, AndroidLocalSources.contentUri(uri)) != null) copies.retainForBackup(uri)
+            }
+        }
+        metadataBoundary {
+            metadataArtwork?.beginBackupRetention()
+            eachMetadata(before.header.scopes, before::checkActive) { association ->
+                association.assetId?.let { assetId ->
+                    when (association.purpose) {
+                        MetadataPurpose.LYRICS -> copies.retainForBackup(ownedLyricsUri(assetId))
+                        MetadataPurpose.ARTWORK -> artworkOwner().retainForBackup(assetId)
+                    }
+                }
             }
         }
     }
@@ -422,32 +484,113 @@ internal class BackupNativeResourceBridge(
         if (resourcesSelected && BackupScope.LYRICS in run.scopes) each(incoming, BackupRecordKind.RESOURCE) { row ->
             val resource = BackupLogicalSchema.resourceDescriptor(row)
             if (resource.kind != BackupResourceKind.LYRICS) return@each
-            val previous = before.firstResourceUse(resource.id, BackupRecordKind.LYRICS_TRACK)
-            val reused = previous?.record?.optionalText(previous.field + "UriHint")?.takeIf {
-                OwnedLyricsProvider.token(context, AndroidLocalSources.contentUri(it)) != null
+            prepareLyricsResource(run, incoming, before, session, journal, resource.id, resource.bytes, resource.sha256,
+                allowImport = true)
+        }
+        for (kind in BackupMetadataAssociations.KINDS) {
+            if (kind.scope !in run.scopes) continue
+            each(incoming, kind) { row ->
+                val hash = row.optionalText("sha256") ?: return@each
+                val current = currentMetadata(row)
+                if (run.mode == BackupMergeMode.MERGE_KEEP_CURRENT && current != null &&
+                    (current.revision != 0L || current.sha256 != null)) return@each
+                val id = checkNotNull(BackupMetadataAssociations.resourceId(row))
+                val allowImport = resourcesSelected && incoming.row(BackupRecordKind.RESOURCE, id) != null
+                metadataBoundary {
+                    when (BackupMetadataAssociations.purpose(kind)) {
+                        MetadataPurpose.LYRICS -> prepareLyricsResource(run, incoming, before, session, journal, id,
+                            row.long("bytes"), hash, allowImport, current)
+                        MetadataPurpose.ARTWORK -> prepareArtworkResource(run, incoming, before, session, journal, id,
+                            row.long("bytes"), hash, allowImport, current)
+                    }
+                }
             }
-            val copy = if (reused == null) copies.createForBackup(session.uri(context, resource.id), resource.bytes, resource.sha256) else null
-            val uri = copy?.uri ?: checkNotNull(reused)
-            try {
-                val source = LocalSourceSpec("lyrics:" + UUID.randomUUID().toString(), LocalSourceKind.DOCUMENT, uri)
-                val observed = sources.observe(source)
-                if (observed.root.directory || observed.root.uri != uri || observed.root.sizeBytes?.let { it != resource.bytes } == true) {
-                    throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
-                }
-                if (reused != null) {
-                    val writer = BackupResourceWriter.create(incoming.directory, BackupResourceKind.LYRICS, incoming::checkActive)
-                    try { copies.exportForBackup(uri, resource.sha256, writer) }
-                    finally { writer.close() }
-                }
-                journal.planResource(run.id, BackupResourcePlan(BackupResourceOwner.LYRICS, resource.id, resource.id, mapOf(
-                    "uri" to BackupCell.Text(uri), "sourceId" to BackupCell.Text(source.sourceId), "documentId" to BackupCell.Text(observed.root.objectId),
-                    "sha256" to BackupCell.Text(resource.sha256), "bytes" to BackupCell.Integer(resource.bytes), "added" to BackupCell.Flag(copy != null),
-                )))
-                copies.retainForBackup(uri)
-                journal.confirmResource(run.id, BackupResourceOwner.LYRICS, resource.id)
-            } finally { copy?.release() }
         }
         return PreparedBackupResources(targets, missing)
+    }
+
+    /** Reuse is admitted only after reading the actual immutable file; a portable hint supplies no access. */
+    private suspend fun prepareLyricsResource(run: BackupRestoreRun, incoming: SqliteBackupStage, before: SqliteBackupStage,
+        session: BackupResourceSession, journal: BackupRestoreJournal, id: String, bytes: Long, sha256: String,
+        allowImport: Boolean, current: MetadataAssociation? = null) {
+        journal.resource(BackupResourceOwner.LYRICS, id)?.let { plan ->
+            val value = privateRecord(plan)
+            if (!plan.confirmed || value.long("bytes") != bytes || value.text("sha256") != sha256) {
+                throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            }
+            return
+        }
+        val candidates = LinkedHashSet<String>()
+        current?.takeIf { it.sha256 == sha256 && it.byteCount == bytes }?.assetId?.let { candidates += ownedLyricsUri(it) }
+        before.firstResourceUse(id, BackupRecordKind.LYRICS_TRACK)?.let { use ->
+            use.record.optionalText(use.field + "UriHint")?.takeIf {
+                OwnedLyricsProvider.token(context, AndroidLocalSources.contentUri(it)) != null
+            }?.let(candidates::add)
+        }
+        before.firstResourceUse(id, BackupRecordKind.METADATA_LYRICS)?.record?.let { row ->
+            currentMetadata(row)?.takeIf { it.sha256 == sha256 && it.byteCount == bytes }?.assetId?.let { candidates += ownedLyricsUri(it) }
+        }
+        var reused: String? = null
+        for (candidate in candidates) {
+            if (existingFileIsValid {
+                    val output = BackupResourceWriter.create(incoming.directory, BackupResourceKind.LYRICS, incoming::checkActive)
+                    try {
+                        copies.exportForBackup(candidate, sha256, output)
+                        physical { signal -> signal.throwIfCanceled(); output.verifyWrittenFile {
+                            if (it.length() != bytes) throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+                        } }
+                    } finally { output.close() }
+                }) { reused = candidate; break }
+        }
+        if (reused == null && !allowImport) return
+        val copy = if (reused == null) copies.createForBackup(session.uri(context, id), bytes, sha256) else null
+        val uri = copy?.uri ?: checkNotNull(reused)
+        try {
+            val source = LocalSourceSpec("lyrics:" + UUID.randomUUID().toString(), LocalSourceKind.DOCUMENT, uri)
+            val observed = sources.observe(source)
+            if (observed.root.directory || observed.root.uri != uri || observed.root.sizeBytes?.let { it != bytes } == true ||
+                OwnedLyricsProvider.token(context, AndroidLocalSources.contentUri(uri)) == null) {
+                throw BackupException(BackupIssue.INTEGRITY_MISMATCH)
+            }
+            journal.planResource(run.id, BackupResourcePlan(BackupResourceOwner.LYRICS, id, id, mapOf(
+                "uri" to BackupCell.Text(uri), "sourceId" to BackupCell.Text(source.sourceId), "documentId" to BackupCell.Text(observed.root.objectId),
+                "sha256" to BackupCell.Text(sha256), "bytes" to BackupCell.Integer(bytes), "added" to BackupCell.Flag(copy != null),
+            )))
+            copies.retainForBackup(uri)
+            journal.confirmResource(run.id, BackupResourceOwner.LYRICS, id)
+        } finally { copy?.release() }
+    }
+
+    private suspend fun prepareArtworkResource(run: BackupRestoreRun, incoming: SqliteBackupStage, before: SqliteBackupStage,
+        session: BackupResourceSession, journal: BackupRestoreJournal, id: String, bytes: Long, sha256: String,
+        allowImport: Boolean, current: MetadataAssociation?) {
+        journal.resource(BackupResourceOwner.METADATA_ARTWORK, id)?.let { plan ->
+            val value = privateRecord(plan)
+            if (!plan.confirmed || value.long("bytes") != bytes || value.text("sha256") != sha256) {
+                throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            }
+            return
+        }
+        val candidates = LinkedHashSet<String>()
+        current?.takeIf { it.sha256 == sha256 && it.byteCount == bytes }?.assetId?.let(candidates::add)
+        before.firstResourceUse(id, BackupRecordKind.METADATA_ARTWORK)?.record?.let { row ->
+            currentMetadata(row)?.takeIf { it.sha256 == sha256 && it.byteCount == bytes }?.assetId?.let(candidates::add)
+        }
+        var reused: String? = null
+        for (candidate in candidates) {
+            if (existingFileIsValid { artworkOwner().verifyForBackup(candidate, bytes, sha256) }) { reused = candidate; break }
+        }
+        if (reused == null && !allowImport) return
+        val asset = if (reused == null) artworkOwner().createForBackup(session.uri(context, id), bytes, sha256) else null
+        val assetId = asset?.assetId ?: checkNotNull(reused)
+        try {
+            journal.planResource(run.id, BackupResourcePlan(BackupResourceOwner.METADATA_ARTWORK, id, id, mapOf(
+                "id" to BackupCell.Text(assetId), "sha256" to BackupCell.Text(sha256), "bytes" to BackupCell.Integer(bytes),
+                "added" to BackupCell.Flag(asset != null),
+            )))
+            artworkOwner().retainForBackup(assetId)
+            journal.confirmResource(run.id, BackupResourceOwner.METADATA_ARTWORK, id)
+        } finally { asset?.release() }
     }
 
     fun restoredLyrics(journal: BackupRestoreJournal, resourceId: String, encoding: String): LyricsAssociation? {
@@ -456,6 +599,19 @@ internal class BackupNativeResourceBridge(
         return LyricsAssociation(value.text("documentId"), value.text("sourceId"), value.text("uri"), 0,
             LyricsEncodingChoice.entries.firstOrNull { it.name == encoding }
                 ?: throw BackupException(BackupIssue.INVALID_REFERENCE), value.text("sha256"))
+    }
+
+    fun restoredMetadataAsset(journal: BackupRestoreJournal, resourceId: String, purpose: MetadataPurpose, bytes: Long): String? {
+        val owner = if (purpose == MetadataPurpose.LYRICS) BackupResourceOwner.LYRICS else BackupResourceOwner.METADATA_ARTWORK
+        val plan = journal.resource(owner, resourceId)?.takeIf { it.confirmed } ?: return null
+        val value = privateRecord(plan)
+        val kind = if (purpose == MetadataPurpose.LYRICS) BackupResourceKind.LYRICS else BackupResourceKind.IMAGE
+        if (value.long("bytes") != bytes || BackupLogicalSchema.resourceId(kind, value.text("sha256")) != resourceId) {
+            throw BackupException(BackupIssue.INVALID_REFERENCE)
+        }
+        return if (purpose == MetadataPurpose.ARTWORK) value.text("id") else
+            OwnedLyricsProvider.token(context, AndroidLocalSources.contentUri(value.text("uri")))
+                ?: throw BackupException(BackupIssue.INVALID_REFERENCE)
     }
 
     suspend fun recoverRetention(journal: BackupRestoreJournal, fonts: LyricsFontBackupAccess) {
@@ -481,6 +637,20 @@ internal class BackupNativeResourceBridge(
         background.retainForBackup(images.distinctBy { it.id })
         copies.beginBackupRetention()
         if (!rollback) eachPlan(journal, BackupResourceOwner.LYRICS) { plan -> copies.retainForBackup(privateRecord(plan).text("uri")) }
+        metadataBoundary {
+            metadataArtwork?.beginBackupRetention()
+            if (!rollback) eachPlan(journal, BackupResourceOwner.METADATA_ARTWORK) { plan ->
+                artworkOwner().retainForBackup(privateRecord(plan).text("id"))
+            }
+            eachMetadata(setOf(BackupScope.LIBRARY, BackupScope.LYRICS)) { association ->
+                association.assetId?.let { assetId ->
+                    when (association.purpose) {
+                        MetadataPurpose.LYRICS -> copies.retainForBackup(ownedLyricsUri(assetId))
+                        MetadataPurpose.ARTWORK -> artworkOwner().retainForBackup(assetId)
+                    }
+                }
+            }
+        }
     }
 
     suspend fun retirePreparedPreviews(journal: BackupRestoreJournal) {
@@ -568,6 +738,10 @@ internal class BackupNativeResourceBridge(
     suspend fun cleanup(journal: BackupRestoreJournal, direction: BackupConfigDirection, fonts: LyricsFontBackupAccess) {
         barrier.requireExclusiveOwner()
         verifyThemeEvolution(journal)
+        val metadata = database.localMetadataDao()
+        if (MetadataPurpose.entries.any { metadata.recoveryBlocked(it.name) }) {
+            throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+        }
         if (direction == BackupConfigDirection.ROLLBACK) {
             val baseline = ThemeStorageRecords.decode(journal.themeBaseline())
             val retained = baseline.installed.map { it.ref }.toSet()
@@ -583,7 +757,16 @@ internal class BackupNativeResourceBridge(
         fonts.releaseBackupRetention(fonts.read().assetIds())
         background.releaseBackupRetention()
         copies.releaseBackupRetention()
-        copies.recover { uri -> database.lyricsDao().isDocumentUriReferenced(uri) }
+        copies.recover { uri ->
+            database.lyricsDao().isDocumentUriReferenced(uri) ||
+                OwnedLyricsProvider.token(context, AndroidLocalSources.contentUri(uri))?.let {
+                    metadata.isAnyAssetReferenced(it)
+                } == true
+        }
+        metadataBoundary {
+            metadataArtwork?.releaseBackupRetention()
+            metadataArtwork?.recover { assetId -> metadata.isAnyAssetReferenced(assetId) }
+        }
         verifyThemeEvolution(journal)
     }
 
@@ -612,6 +795,93 @@ internal class BackupNativeResourceBridge(
         "id" to BackupCell.Text(ref.installationId), "themeId" to BackupCell.Text(ref.themeId), "manifestSha256" to BackupCell.Text(ref.manifestSha256),
         "packageSha256" to BackupCell.Text(packageSha256), "displayName" to BackupCell.Text(name), "resourceBytes" to BackupCell.Integer(resourceBytes), "fontBytes" to BackupCell.Integer(fontBytes))
     private fun privateRecord(plan: BackupResourcePlan): BackupRecord = BackupRecord(BackupRecordKind.PREFERENCE, "private-resource", plan.metadata)
+
+    private fun artworkOwner(): LocalMetadataArtworkFiles = metadataArtwork ?: throw BackupException(BackupIssue.UNSUPPORTED_RESOURCE)
+    private fun ownedLyricsUri(assetId: String): String = OwnedLyricsProvider.uri(context, assetId).toString()
+
+    private suspend fun currentMetadata(row: BackupRecord): MetadataAssociation? = metadataBoundary {
+        val purpose = BackupMetadataAssociations.purpose(row.kind)
+        val key = TrackKey(TrackKey.LOCAL_PROVIDER, row.key)
+        database.localMetadataDao().row(row.key, purpose.name)?.decode(key, purpose)
+    }
+
+    /** Only one bounded SQL page is retained, including native UUIDs kept out of portable rows. */
+    private suspend fun eachMetadata(scopes: Set<BackupScope>, checkCancelled: () -> Unit = {},
+        action: suspend (MetadataAssociation) -> Unit) {
+        for (purpose in MetadataPurpose.entries) {
+            if (BackupMetadataAssociations.kind(purpose).scope !in scopes) continue
+            var after: String? = null
+            while (true) {
+                currentCoroutineContext().ensureActive(); checkCancelled()
+                val page = database.useReaderConnection { reader -> reader.usePrepared(
+                    "SELECT substr(trackId,1,129),typeof(trackId)," +
+                        "CASE WHEN typeof(schemaVersion)='integer' AND typeof(revision)='integer' AND " +
+                        "typeof(assetId) IN ('text','null') AND typeof(sha256) IN ('text','null') AND " +
+                        "typeof(byteCount) IN ('integer','null') AND typeof(provenance) IN ('text','null') THEN 1 ELSE 0 END," +
+                        "schemaVersion,revision,substr(assetId,1,37),substr(sha256,1,65),byteCount," +
+                        "substr(provenance,1,${MetadataProvenance.PROVENANCE_BYTES + 1}) FROM local_metadata_associations " +
+                        "WHERE purpose=? AND (? IS NULL OR trackId>?) ORDER BY trackId COLLATE BINARY LIMIT 100") { statement ->
+                    statement.bindText(1, purpose.name); statement.bindNullableText(2, after); statement.bindNullableText(3, after)
+                    buildList {
+                        while (statement.step()) {
+                            checkCancelled()
+                            if (statement.getText(1) != "text" || statement.getLong(2) != 1L) throw BackupException(BackupIssue.INVALID_RESOURCE)
+                            val id = statement.getText(0)
+                            val row = LocalMetadataAssociationRow(true, statement.getLong(3), statement.getLong(4),
+                                if (statement.isNull(5)) null else statement.getText(5),
+                                if (statement.isNull(6)) null else statement.getText(6),
+                                if (statement.isNull(7)) null else statement.getLong(7),
+                                if (statement.isNull(8)) null else statement.getText(8))
+                            add(try { row.decode(TrackKey(TrackKey.LOCAL_PROVIDER, id), purpose) }
+                                catch (failure: MetadataStoreException) { throw metadataFailure(failure) }
+                                catch (failure: IllegalArgumentException) { throw BackupException(BackupIssue.INVALID_RESOURCE, failure) })
+                        }
+                    }
+                } }
+                if (page.isEmpty()) break
+                for (association in page) { currentCoroutineContext().ensureActive(); checkCancelled(); action(association) }
+                after = page.last().trackKey.trackId
+            }
+        }
+    }
+
+    private suspend fun existingFileIsValid(action: suspend () -> Unit): Boolean = try { action(); true }
+    catch (cancelled: CancellationException) { throw cancelled }
+    catch (failure: BackupException) {
+        if (failure.issue in setOf(BackupIssue.INVALID_RESOURCE, BackupIssue.INTEGRITY_MISMATCH, BackupIssue.STALE_PREVIEW)) false else throw failure
+    } catch (failure: MetadataStoreException) {
+        if (failure.issue in setOf(MetadataStoreIssue.SOURCE_CHANGED, MetadataStoreIssue.INVALID_RECORD,
+                MetadataStoreIssue.INVALID_INPUT, MetadataStoreIssue.INPUT_LIMIT)) false else throw failure
+    } catch (failure: SourceReadException) {
+        when (val cause = failure.cause) {
+            is BackupException -> if (cause.issue in setOf(BackupIssue.INVALID_RESOURCE, BackupIssue.INTEGRITY_MISMATCH)) false else throw cause
+            is MetadataStoreException -> if (cause.issue in setOf(MetadataStoreIssue.SOURCE_CHANGED, MetadataStoreIssue.INVALID_RECORD,
+                    MetadataStoreIssue.INVALID_INPUT, MetadataStoreIssue.INPUT_LIMIT)) false else throw metadataFailure(cause)
+            else -> if (failure.issue in setOf(SourceReadIssue.SOURCE_UNAVAILABLE, SourceReadIssue.FILE_MISSING,
+                    SourceReadIssue.SOURCE_CHANGED)) false else throw failure
+        }
+    }
+
+    private suspend fun <T> metadataBoundary(action: suspend () -> T): T = try { action() }
+    catch (cancelled: CancellationException) { throw cancelled }
+    catch (failure: MetadataStoreException) { throw metadataFailure(failure) }
+    catch (failure: SourceReadException) {
+        throw when (val cause = failure.cause) {
+            is MetadataStoreException -> metadataFailure(cause)
+            is BackupException -> cause
+            else -> failure
+        }
+    }
+
+    private fun metadataFailure(failure: MetadataStoreException): BackupException = BackupException(when (failure.issue) {
+        MetadataStoreIssue.INVALID_INPUT, MetadataStoreIssue.INVALID_RECORD -> BackupIssue.INVALID_RESOURCE
+        MetadataStoreIssue.TRACK_MISSING, MetadataStoreIssue.SOURCE_CHANGED -> BackupIssue.STALE_PREVIEW
+        MetadataStoreIssue.BUSY -> BackupIssue.BUSY
+        MetadataStoreIssue.CONFLICT -> BackupIssue.CONFLICT
+        MetadataStoreIssue.INPUT_LIMIT -> BackupIssue.TOO_LARGE
+        MetadataStoreIssue.LOW_SPACE -> BackupIssue.STORAGE_FULL
+        MetadataStoreIssue.LOW_MEMORY, MetadataStoreIssue.IO -> BackupIssue.IO
+    }, failure)
 
     private suspend fun captureResource(stage: SqliteBackupStage, kind: BackupResourceKind, license: Boolean,
         action: suspend (BackupResourceWriter) -> Unit): BackupResource {
