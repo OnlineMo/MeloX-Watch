@@ -428,7 +428,7 @@ class MeloXApplication : Application() {
         LocalArtworkRepository(this, localProviderIo, validateRead = localSources::validateRead, bitmaps = themeBitmaps,
             confirmedArtwork = { descriptor, edge -> metadataAssociations.acquireArtwork(descriptor, edge, artworks) })
     }
-    val artworks get() = artworkOwner.value
+    val artworks: LocalArtworkRepository get() = artworkOwner.value
     private val recoveryLock = Mutex()
     private var localRecovered = false
     private val preferencesOwner = lazy { UserPreferencesRepositoryFactory.create(this, applicationScopeOwner.value) }
