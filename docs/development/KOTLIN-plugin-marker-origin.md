@@ -27,4 +27,4 @@ Central原件精确匹配现有唯一已准入pin；Portal原件精确匹配本�
 
 固定 [Gradle 8.13](https://github.com/gradle/gradle/tree/073314332697ba45c16c0a0ce1891fa6794179ff) 的插件解析器以非传递lenient ArtifactView检查marker；任何解析失败都被归为notFound，仓库列表则列出全部配置对象。列表不能证明每个仓库都发起HTTP，也不能据此推定内容排除失效。插件仓库包装保留精确group/module过滤，原件没有证明Central的实际HTTP、缓存或元数据校验结果。
 
-普通双端Test阶段增加 `--info`，保存同一配置的解析诊断。既有严格校验、仓库规则、依赖/schema输入、构建期限及后续lint/组装门保持；不启用writer或图采集监听器。当前34个回归目标仍NOT_RUN，所有设备及发布门槛保持未通过。
+普通双端Test阶段已加入 `--info`，后继run45892568249已解析同一Kotlin Android插件并进入测试；原件不确定前两轮Central解析失败的具体HTTP或缓存原因。该轮手表宿主JVM在C2编译器处SIGSEGV退出，缺完整JUnit；手机120项原JUnit通过，业务目标的成功事件不替代完整验收。最新宿主Test配置与完整验证边界见[JVM测试稳定性](JVM-host-test-stability.md)。既有严格校验、仓库规则、依赖/schema输入、构建期限及后续lint/组装门保持，不启用writer或图采集监听器；所有设备及发布门槛保持未通过。
