@@ -166,8 +166,9 @@ internal object ThemeTestFixtures {
         available: (File) -> Long = { ROOM },
         faults: ThemeStorageFaults = ThemeStorageFaults {},
         validator: ThemeAssetValidator = ThemeAssetValidator(),
+        bitmaps: ThemeBitmapOwner = ThemeBitmapOwner(),
     ): LocalThemeRepository = LocalThemeRepository(directory, io, source, ThemeFontStorageBudget(otherFontBytes),
-        validator, available, faults)
+        validator, available, faults, bitmaps = bitmaps)
 
     fun expect(issue: ThemeIssue, action: () -> Unit): ThemeException {
         try {

@@ -92,20 +92,28 @@ class ThemePreviewImageNativeTest {
             val value = Fixture.packageOf(assets = listOf(image))
             val dispatcher = ThemeDeliveryIoDispatcher()
             val io = LocalProviderIo(dispatcher)
-            val repository = Fixture.repository(temporary.newFolder(), BytesThemeSource(value.zip()), io)
+            val bitmaps = ThemeBitmapOwner()
+            val repository = Fixture.repository(temporary.newFolder(), BytesThemeSource(value.zip()), io, bitmaps = bitmaps)
             val preview = repository.prepareImport(Fixture.request())
+            assertEquals(0L, bitmaps.usage().occupiedBytes)
             val scheduler = TestCoroutineScheduler()
             val scope = CoroutineScope(Job() + StandardTestDispatcher(scheduler))
             val done = CountDownLatch(1)
-            dispatcher.arm(done)
+            val startWorker = CountDownLatch(1)
+            val startedAfterRelease = dispatcher.arm(done, startWorker)
             val caller = scope.async { repository.loadPreviewImage(preview.token, image.id, 32) }
             try {
                 scheduler.runCurrent()
+                // Start decoding only after this drain can no longer consume its delivery.
+                startWorker.countDown()
                 awaitThemeLatch(done)
+                assertTrue(startedAfterRelease.get())
                 assertFalse(caller.isCompleted)
+                assertTrue(bitmaps.usage().occupiedBytes > 0L)
                 caller.cancel()
                 scheduler.runCurrent()
                 caller.join()
+                assertEquals(0L, bitmaps.usage().occupiedBytes)
                 val first = repository.loadPreviewImage(preview.token, image.id, 32)
                 val second = repository.loadPreviewImage(preview.token, image.id, 32)
                 try {
@@ -116,6 +124,7 @@ class ThemePreviewImageNativeTest {
                 }
                 repository.discardPreview(preview.token)
             } finally {
+                startWorker.countDown()
                 scope.cancel()
                 scheduler.runCurrent()
                 io.awaitIdle()
