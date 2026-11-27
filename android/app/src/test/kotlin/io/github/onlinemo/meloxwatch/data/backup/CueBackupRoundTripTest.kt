@@ -75,14 +75,26 @@ class CueBackupRoundTripTest {
     }
     @Test(timeout = 60_000L)
     fun fullArchiveRestoresPendingThenExplicitlyAdoptsANewVerifiedSourceForEveryDuplicateQueueInstance() = runBlocking {
+        var phaseStart = System.nanoTime()
+        fun completedPhase(name: String) {
+            val now = System.nanoTime()
+            println("MELOX_CUE_BACKUP_PHASE name=$name elapsedMillis=${(now - phaseStart) / 1_000_000L}")
+            phaseStart = now
+        }
+        println("MELOX_CUE_BACKUP_PHASE name=begin elapsedMillis=0")
         val original = scan("old")
+        completedPhase("scan-original")
         seedRelations(original)
+        completedPhase("seed-relations")
         val sourceCueId = requireNotNull(original.first().cueReference).identity.cueId
         val archive = capture()
+        completedPhase("capture-archive")
         fixture.archiveInput = archive
         fixture.attachClosedPlayback()
         val restore = fixture.coordinator.previewRestore(input(), BackupMergeMode.REPLACE_SELECTED)
+        completedPhase("preview-restore")
         fixture.coordinator.confirmRestore(restore.token)
+        completedPhase("confirm-restore")
         for (track in original) {
             val pending = CueReferenceCodec.decode(requireNotNull(fixture.database.libraryDao().currentTrack(track.trackKey.trackId)?.cueReference))
             assertFalse(pending.isBound)
@@ -90,20 +102,27 @@ class CueBackupRoundTripTest {
             assertEquals(requireNotNull(track.cueReference).portable().identity, pending.identity)
         }
         assertTrue(requireNotNull(fixture.database.cueDao().documentById(sourceCueId)).reassociationPending)
+        completedPhase("verify-pending")
         val next = scan("new")
+        completedPhase("scan-target")
         assertNotEquals(original.first().trackKey, next.first().trackKey)
         val missing = fixture.coordinator.missingRelinks().items.filter { it.isCue }
         assertEquals(original.map { it.trackKey.trackId }.toSet(), missing.map { it.trackId }.toSet())
+        completedPhase("missing-relinks")
         val preview = fixture.coordinator.previewCueRelink(original.first().trackKey.trackId, next.first().trackKey)
+        completedPhase("preview-relink")
         assertEquals(BackupRelinkMatch.VERIFIED_MATCH, preview.match)
         assertTrue(requireNotNull(preview.cueDifferences).identityChanged)
         assertEquals(2, preview.cueOriginalMembers);
         assertEquals(2, preview.cueTargetMembers)
         assertEquals(10_003L, preview.affectedQueueEntries)
         assertThrows(BackupException::class.java) { runBlocking { fixture.coordinator.confirmRelink(preview.token) } }
+        completedPhase("reject-unconfirmed-relink")
         // 真实存储收束可能推进检查点围栏；显式重新预览后须单独确认。
         val reviewed = fixture.coordinator.previewCueRelink(original.first().trackKey.trackId, next.first().trackKey)
+        completedPhase("preview-reviewed-relink")
         val committed = fixture.coordinator.confirmRelink(reviewed.token, allowCueDifferences = true)
+        completedPhase("confirm-relink")
         assertEquals(10_003L, committed.repairedQueueEntries)
         for (old in original) {
             val read = fixture.library.resolveCueRead(old.trackKey)
@@ -127,6 +146,7 @@ class CueBackupRoundTripTest {
         }
         assertEquals(0, provider.activeCursors.get())
         assertTrue(provider.opened.any { it == "new-cue" } && provider.opened.any { it == "new-wave" })
+        completedPhase("verify-restored-relations")
     }
     @Test(timeout = 30_000L)
     fun cueReassociationRejectsBareAudioAndLatePermissionLossWithoutWritingTheMapping() = runBlocking {
@@ -232,14 +252,17 @@ class CueBackupRoundTripTest {
             queue.insertGeneration(QueueGenerationEntity("cue-source-queue", "cue-source-queue-op", old.activeGenerationId,
                 old.queueRevision, "cue-source-view", 0L, 10_003L, true, "LIST", 7, 0L, 777L, false))
             var first = 0L
+            // Duplicate queue instances share these two immutable scan references.
+            val encodedReferences = tracks.map { CueReferenceCodec.encode(requireNotNull(it.cueReference)) }
+            val locations = tracks.map { requireNotNull(requireNotNull(it.cueReference).binding).audio.location }
             while (first < 10_003L) {
                 val page = (first until minOf(first + 100L, 10_003L)).map { ordinal ->
-                    val track = tracks[(ordinal % 2L).toInt()]
-                    val cue = requireNotNull(track.cueReference)
-                    val location = requireNotNull(cue.binding).audio.location
+                    val index = (ordinal % 2L).toInt()
+                    val track = tracks[index]
+                    val location = locations[index]
                     QueueEntryEntity("cue-source-queue", "q-$ordinal", "local", track.trackKey.trackId, ordinal, 10_002L - ordinal,
                         track.title, track.metadata.durationMs, null, location.locationId, location.uri, location.grantUri,
-                        location.grantFlags, location.access.name, location.contentRevision, CueReferenceCodec.encode(cue))
+                        location.grantFlags, location.access.name, location.contentRevision, encodedReferences[index])
                 }
                 queue.insertEntries(page);
                 first += page.size

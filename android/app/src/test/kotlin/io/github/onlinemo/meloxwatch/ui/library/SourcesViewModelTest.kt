@@ -96,6 +96,37 @@ class SourcesViewModelTest {
     }
 
     @Test
+    fun scanFilterDefaultsStayInTheDraftUntilSaveAndCancelPreservesTheSavedRule() = runBlocking {
+        app.library.setShortAudioFilter(app.library.rules().revision, true)
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules?.shortAudioFilter == true }
+        val trackCount = app.library.overview().totalTracks
+        viewModel.restoreFilterDefaults()
+        assertEquals(false, viewModel.uiState.value.filterDraft)
+        assertTrue(app.library.rules().shortAudioFilter)
+        viewModel.cancelFilter()
+        assertNull(viewModel.uiState.value.filterDraft)
+        assertTrue(app.library.rules().shortAudioFilter)
+        viewModel.restoreFilterDefaults()
+        viewModel.saveFilter()
+        awaitState { !it.working && it.filterDraft == null && it.rules?.shortAudioFilter == false }
+        assertFalse(app.library.rules().shortAudioFilter)
+        assertEquals(trackCount, app.library.overview().totalTracks)
+    }
+
+    @Test
+    fun anUnownedPermissionReturnAndAnUnavailablePrimaryVolumeDoNotRegisterAMediaSource() = runBlocking {
+        viewModel.onVisible()
+        awaitState { !it.working && it.page != null }
+        val sources = app.library.overview().sourceCount
+        assertFalse(viewModel.prepareMediaStore(primary = true))
+        viewModel.addMediaStore()
+        awaitState { !it.working }
+        assertEquals(sources, app.library.overview().sourceCount)
+        assertNull(viewModel.uiState.value.sourceIssue)
+    }
+
+    @Test
     fun latestSelectionWaitsForAnIgnoringReaderAndDiscardsTheIntermediateRequest() = runBlocking {
         val old = fixture("old")
         val intermediate = fixture("intermediate")

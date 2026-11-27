@@ -11,6 +11,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.R
@@ -27,13 +28,13 @@ import io.github.onlinemo.meloxwatch.ui.watch.WatchLyricsFontSettings
 import io.github.onlinemo.meloxwatch.ui.watch.WatchText
 import kotlinx.coroutines.launch
 
-/** Configuration recreation retains only the display proposal; its event coroutine belongs to UI. */
+/** SavedState retains only a reviewable display proposal; its event coroutine belongs to the exact UI. */
 internal class ProbeLyricsDisplayViewModel internal constructor(
     application: Application,
     val editor: LyricsDisplayEditor,
 ) : AndroidViewModel(application) {
-    constructor(application: Application) : this(application,
-        LyricsDisplayEditor((application as MeloXApplication).lyricsDisplay))
+    constructor(application: Application, saved: SavedStateHandle) : this(application,
+        LyricsDisplayEditor((application as MeloXApplication).lyricsDisplay, saved))
 
     val events = ProbeLyricsDisplayEvents(editor)
 

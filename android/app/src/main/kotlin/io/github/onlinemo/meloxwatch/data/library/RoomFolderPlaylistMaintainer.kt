@@ -18,7 +18,6 @@ import io.github.onlinemo.meloxwatch.data.playlists.PlaylistOperationResult
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistSnapshot
 import io.github.onlinemo.meloxwatch.data.playlists.playlistDigest
 import io.github.onlinemo.meloxwatch.data.playlists.requirePlaylistIdentifier
-import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.data.scan.ScanState
 import io.github.onlinemo.meloxwatch.data.scan.ScanToken
@@ -67,7 +66,7 @@ class RoomFolderPlaylistMaintainer internal constructor(
     init { require(closeTimeoutMs > 0L) }
 
     suspend fun afterScan(state: ScanState): FolderPlaylistMaintenanceResult {
-        if (state.phase != ScanPhase.COMPLETED || state.token.mode != ScanMode.FULL ||
+        if (state.phase != ScanPhase.COMPLETED ||
             !state.coverage.permitsAbsence || state.counters.failed != 0L || state.issue != null) {
             return FolderPlaylistMaintenanceResult()
         }
@@ -81,7 +80,7 @@ class RoomFolderPlaylistMaintainer internal constructor(
         }
     }
 
-    /** Startup/foreground recovery reads the latest real full scan for each binding, once. */
+    /** Startup/foreground recovery reads each binding's latest complete scan once. */
     suspend fun resume(): FolderPlaylistMaintenanceResult = playlistControllerAction(owner) { sweep() }
 
     /** Failed release retains the exact token; a later explicit close/resume retries it first. */
@@ -244,7 +243,8 @@ class RoomFolderPlaylistMaintainer internal constructor(
         if ((expectedScanId != null && expectedScanId != scanId) || expectedToken != null &&
             (expectedToken.sourceId != sourceId || expectedToken.scanId != scanId ||
                 expectedToken.sourceRevision != source.revision || expectedToken.authEpoch != source.authEpoch ||
-                expectedToken.rulesRevision != meta.rulesRevision)) fail(PlaylistIssue.SOURCE_CHANGED)
+                expectedToken.rulesRevision != meta.rulesRevision ||
+                dao.scan(scanId)?.mode != expectedToken.mode.name)) fail(PlaylistIssue.SOURCE_CHANGED)
         val fence = PlaylistCatalogFence(meta.revision, meta.rulesRevision, sourceId, source.revision, source.authEpoch, scanId)
         fences.verify(fence)
         if (binding != null) {

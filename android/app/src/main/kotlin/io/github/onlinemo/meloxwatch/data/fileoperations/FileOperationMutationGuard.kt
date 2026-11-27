@@ -22,6 +22,7 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.scan.MetadataOutcome
+import io.github.onlinemo.meloxwatch.data.scan.MediaScanCheckpoint
 import io.github.onlinemo.meloxwatch.data.scan.ScanCounters
 import io.github.onlinemo.meloxwatch.data.scan.ScanCoverage
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
@@ -122,8 +123,10 @@ class FileOperationGuardedMutationStore(
         mutate(token.sourceId) { delegate.commitSeen(token, candidates) }
     override suspend fun commitMetadata(token: ScanToken, outcomes: List<MetadataOutcome>) =
         mutate(token.sourceId) { delegate.commitMetadata(token, outcomes) }
-    override suspend fun completeDirectory(token: ScanToken, objectId: String, successful: Boolean): ScanState =
-        mutate(token.sourceId) { delegate.completeDirectory(token, objectId, successful) }
+    override suspend fun scanCheckpoint(sourceId: String, expectedAuthEpoch: Long, expectedRulesRevision: Long): MediaScanCheckpoint? =
+        mutate(sourceId) { delegate.scanCheckpoint(sourceId, expectedAuthEpoch, expectedRulesRevision) }
+    override suspend fun completeDirectory(token: ScanToken, objectId: String, successful: Boolean, fullEnumeration: Boolean): ScanState =
+        mutate(token.sourceId) { delegate.completeDirectory(token, objectId, successful, fullEnumeration) }
     override suspend fun setCoverage(token: ScanToken, coverage: ScanCoverage): ScanState =
         mutate(token.sourceId) { delegate.setCoverage(token, coverage) }
     override suspend fun setWatermark(token: ScanToken, watermark: String?): ScanState =

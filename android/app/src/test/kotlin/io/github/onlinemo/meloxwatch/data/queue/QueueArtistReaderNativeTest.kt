@@ -205,20 +205,28 @@ class QueueArtistReaderNativeTest {
         "content://queue-label-fixture/document/synthetic-$index", "root", "same.mp3", "audio/mpeg",
         LocalNodeKind.AUDIO, sizeBytes = 128L, providerContentToken = "synthetic-content-$index:1")
 
-    private suspend fun begin(): ScanToken = library.beginScan(source.spec.sourceId,
-        checkNotNull(library.source(source.spec.sourceId)).authEpoch, library.rules().revision, ScanMode.INCREMENTAL)
+    private suspend fun begin(mode: ScanMode = ScanMode.INCREMENTAL): ScanToken = library.beginScan(source.spec.sourceId,
+        checkNotNull(library.source(source.spec.sourceId)).authEpoch, library.rules().revision, mode)
 
     private suspend fun finish(token: ScanToken) {
         library.nextDirectory(token)?.let { library.completeDirectory(token, it.objectId, true) }
         check(library.nextDirectory(token) == null)
-        val coverage = ScanCoverage(true, true, true, true, false)
+        val coverage = ScanCoverage(token.mode == ScanMode.FULL, true, true, true, false)
         library.setCoverage(token, coverage)
+        if (coverage.permitsAbsence) {
+            var after: String? = null
+            while (true) {
+                val page = library.stageAbsence(token, after)
+                if (page.complete) break
+                after = checkNotNull(page.nextAliasId)
+            }
+        }
         library.finishScan(token, ScanCounters(), coverage)
     }
 
     private suspend fun addTracks(artists: List<String?>): List<LibraryTrack> {
         check(artists.size in 1..101) // This fixture is deliberately small; no product queue cap is introduced.
-        val token = begin()
+        val token = begin(ScanMode.FULL)
         library.commitSeen(token, listOf(root()))
         val candidates = artists.map { audio(nextObject++) }
         candidates.chunked(LibraryLimits.PAGE_SIZE).forEach { library.commitSeen(token, it) }

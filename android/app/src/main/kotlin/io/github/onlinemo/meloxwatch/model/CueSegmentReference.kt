@@ -61,7 +61,8 @@ data class CueTrackReference(
     val startUs: Long get() = CueTiming.microseconds(startFrame)
     val durationUs: Long get() = endUsExclusive - startUs
     val timelineOriginMs: Long get() = startUs / 1000L
-    val trackKey: TrackKey get() = cueTrackKey(sourceId, cueId, trackNumber)
+    // Stable identity depends only on this immutable triple; duplicate queue rows reuse its hash.
+    val trackKey: TrackKey by lazy(LazyThreadSafetyMode.PUBLICATION) { cueTrackKey(sourceId, cueId, trackNumber) }
     override fun toString(): String = "CueTrackReference(track=$trackNumber, revision=$groupRevision)"
 }
 

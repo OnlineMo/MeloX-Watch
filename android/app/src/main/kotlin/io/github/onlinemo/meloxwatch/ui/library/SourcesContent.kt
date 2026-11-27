@@ -1,5 +1,6 @@
 package io.github.onlinemo.meloxwatch.ui.library
 
+import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.lazy.LazyListScope
@@ -16,6 +17,7 @@ import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
+import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.ui.fileoperations.fileIssueText
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import java.util.Locale
@@ -61,7 +63,14 @@ internal fun LazyListScope.sourcesContent(
     } else item(key = "sources:add") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             LibraryText(stringResource(R.string.library_offline))
-            LibraryButton(stringResource(R.string.library_add_media), !state.working, onMediaStore)
+            LibraryButton(stringResource(R.string.library_add_media), !state.working) {
+                if (model.prepareMediaStore(primary = false)) onMediaStore()
+            }
+            if (Build.VERSION.SDK_INT >= 30) {
+                LibraryButton(stringResource(R.string.library_add_primary_media_store), !state.working) {
+                    if (model.prepareMediaStore(primary = true)) onMediaStore()
+                }
+            }
             LibraryText(stringResource(R.string.library_media_permission))
             LibraryButton(stringResource(R.string.library_choose_file), !state.working, onChooseFile)
             LibraryButton(stringResource(R.string.library_choose_folder), !state.working, onChooseTree)
@@ -121,6 +130,8 @@ internal fun LazyListScope.sourcesContent(
     state.scan?.let { scan -> item(key = "sources:scan") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             LibraryText(stringResource(scanPhaseText(scan.phase)), primary = true)
+            LibraryText(stringResource(if (scan.token.mode == ScanMode.INCREMENTAL) R.string.library_scan_incremental
+                else R.string.library_scan_recheck))
             val count = scan.counters
             LibraryText(stringResource(R.string.library_scan_counts, count.seen, count.processed, count.added, count.skipped, count.failed))
             if (scan.phase in setOf(ScanPhase.PREPARING, ScanPhase.RUNNING, ScanPhase.STAGING_ABSENCE)) {
@@ -146,6 +157,7 @@ internal fun LazyListScope.sourcesContent(
             LibraryText(stringResource(if (source.grant.persistedRead == ObservedCapability.AVAILABLE) R.string.library_access_persisted
                 else if (source.spec.kind == LocalSourceKind.APP_OWNED) R.string.library_access_owned else R.string.library_access_temporary))
             LibraryButton(stringResource(R.string.library_scan_source), !state.working && source.state != LibrarySourceState.REMOVED) { model.scan(source) }
+            LibraryButton(stringResource(R.string.library_update_source), !state.working && source.state == LibrarySourceState.ACTIVE) { model.update(source) }
             if (source.spec.kind == LocalSourceKind.TREE) {
                 LibraryText(stringResource(R.string.cue_scan_utf8))
                 LibraryText(stringResource(R.string.cue_scan_gb18030_explanation))
@@ -166,6 +178,7 @@ internal fun LazyListScope.sourcesContent(
             val requested = state.filterDraft ?: rules.shortAudioFilter
             LibraryText(stringResource(R.string.library_filter_value, stringResource(if (requested) R.string.prefs_on else R.string.prefs_off)))
             LibraryButton(stringResource(R.string.library_edit_filter), !state.working, model::editFilter)
+            LibraryButton(stringResource(R.string.prefs_reset), !state.working, model::restoreFilterDefaults)
             if (state.filterDraft != null) {
                 LibraryButton(stringResource(R.string.prefs_save), !state.working, model::saveFilter)
                 LibraryButton(stringResource(R.string.prefs_cancel_edit), !state.working, model::cancelFilter)

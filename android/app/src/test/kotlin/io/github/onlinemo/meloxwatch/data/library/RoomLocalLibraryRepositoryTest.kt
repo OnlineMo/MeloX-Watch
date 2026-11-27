@@ -622,7 +622,8 @@ class RoomLocalLibraryRepositoryTest {
     }
     private suspend fun finish(token: ScanToken) {
         finishDirectories(token)
-        library.setCoverage(token, coverage())
+        val observed = coverage().copy(enumerationComplete = token.mode == ScanMode.FULL)
+        library.setCoverage(token, observed)
         if (token.mode == ScanMode.FULL) {
             var after: String? = null
             while (true) {
@@ -631,7 +632,7 @@ class RoomLocalLibraryRepositoryTest {
                 after = page.nextAliasId
             }
         }
-        library.finishScan(token, ScanCounters(), coverage())
+        library.finishScan(token, ScanCounters(), observed)
     }
     private suspend fun append(source: LibrarySource, candidates: List<ObservedCandidate>,
         metadata: Map<String, LocalAudioMetadata> = emptyMap(), mode: ScanMode = ScanMode.INCREMENTAL): Long {

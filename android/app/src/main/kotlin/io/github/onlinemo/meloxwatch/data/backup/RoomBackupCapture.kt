@@ -156,8 +156,9 @@ internal class RoomBackupCapture(private val database: MeloXDatabase,
             if (projection.kind.scope !in scopes) continue
             var after: String? = null
             while (true) {
-                val page = reader.usePrepared(projection.sql) { statement ->
-                    statement.bindNullableText(1, after); statement.bindNullableText(2, after)
+                val cursor = after
+                val page = reader.usePrepared(projection.sql(cursor)) { statement ->
+                    if (cursor != null) statement.bindText(1, cursor)
                     val result = ArrayList<Pair<String, BackupRecord>>()
                     var bytes = 0
                     while (statement.step()) {
@@ -184,8 +185,13 @@ internal class RoomBackupCapture(private val database: MeloXDatabase,
     private data class Column(val name: String, val expression: String, val type: Type)
     private class Projection(val kind: BackupRecordKind, key: String, from: String, where: String,
         val columns: List<Column>, val transform: (String, Map<String, BackupCell>) -> BackupRecord = { id, values -> BackupRecord(kind, id, values) }) {
-        val sql: String = "SELECT $key,typeof($key)," + columns.joinToString(",") { "${it.expression},typeof(${it.expression})" } +
-            " FROM $from WHERE ($where) AND (? IS NULL OR ($key) COLLATE BINARY>?) ORDER BY ($key) COLLATE BINARY LIMIT 100"
+        private val select = "SELECT $key,typeof($key)," + columns.joinToString(",") { "${it.expression},typeof(${it.expression})" } +
+            " FROM $from WHERE ($where)"
+        private val order = " ORDER BY ($key) COLLATE BINARY LIMIT 100"
+        private val firstPage = select + order
+        private val continuedPage = select + " AND ($key) COLLATE BINARY>?" + order
+        // Expose the continuation key range while each digest reads its own full snapshot.
+        fun sql(after: String?): String = if (after == null) firstPage else continuedPage
     }
     private fun t(name: String, expression: String = name) = Column(name, expression, Type.TEXT)
     private fun n(name: String, expression: String = name) = Column(name, expression, Type.INTEGER)

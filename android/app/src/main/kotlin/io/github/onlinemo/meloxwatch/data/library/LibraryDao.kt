@@ -116,6 +116,8 @@ interface LibraryDao {
     @Insert suspend fun insertNodeVersion(value: LibraryNodeVersionEntity)
     @Update suspend fun updateNodeVersion(value: LibraryNodeVersionEntity)
     @Query("SELECT * FROM scan_generations WHERE scanId = :id") suspend fun scan(id: String): LibraryScanEntity?
+    @Query("SELECT t.* FROM local_track_versions t JOIN local_track_locations r ON r.trackId = t.trackId WHERE r.locationId = :locationId AND r.validTo IS NULL AND t.validTo IS NULL AND t.cueReference IS NULL ORDER BY t.trackId LIMIT 1")
+    suspend fun physicalTrackAtLocation(locationId: String): LibraryTrackVersionEntity?
     @Query("SELECT * FROM scan_generations WHERE scanId = :id") fun observeScan(id: String): Flow<LibraryScanEntity?>
     @Insert suspend fun insertScan(value: LibraryScanEntity)
     @Update suspend fun updateScan(value: LibraryScanEntity)

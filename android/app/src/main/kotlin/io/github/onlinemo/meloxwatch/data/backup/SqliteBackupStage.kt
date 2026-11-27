@@ -107,8 +107,10 @@ internal class SqliteBackupStage private constructor(
 
     fun metadataBeforePage(purpose: MetadataPurpose, after: String?): List<MetadataAssociation> {
         requireMetadataBefore()
-        val ids = connection.prepare("SELECT trackId FROM main.$METADATA_BEFORE WHERE purpose=? AND (? IS NULL OR trackId>?) ORDER BY trackId COLLATE BINARY LIMIT 100").use {
-            it.bindText(1, purpose.name); it.bindNullableText(2, after); it.bindNullableText(3, after)
+        val continuation = if (after == null) "" else " AND trackId>?"
+        val ids = connection.prepare("SELECT trackId FROM main.$METADATA_BEFORE WHERE purpose=?$continuation ORDER BY trackId COLLATE BINARY LIMIT 100").use {
+            it.bindText(1, purpose.name)
+            if (after != null) it.bindText(2, after)
             buildList { while (it.step()) { checkCancelled(); add(it.getText(0)) } }
         }
         return ids.map { id -> metadataBefore(TrackKey(TrackKey.LOCAL_PROVIDER, id), purpose)
@@ -170,32 +172,54 @@ internal class SqliteBackupStage private constructor(
         resetDerived("relink_reference_tracks", "CREATE TABLE main.relink_reference_tracks(trackId TEXT NOT NULL PRIMARY KEY,missingQueue INTEGER NOT NULL,cueReference TEXT) WITHOUT ROWID")
     }
     fun referenceTrack(trackId: String, missingQueue: Boolean, reference: LocalCueReference? = null) {
-        checkCancelled()
-        if (trackId.isBlank() || trackId.length > 128 || trackId.any(Char::isISOControl)) throw BackupException(BackupIssue.INVALID_REFERENCE)
-        val encoded = reference?.portable()?.let(CueReferenceCodec::encode)
-        reserveDerived("relink_reference_tracks", 128L + trackId.toByteArray(Charsets.UTF_8).size +
-            (encoded?.toByteArray(Charsets.UTF_8)?.size ?: 0))
-        val previous = connection.prepare("SELECT cueReference FROM main.relink_reference_tracks WHERE trackId=?").use {
-            it.bindText(1, trackId);
-            if (it.step() && !it.isNull(0)) it.getText(0) else null
-        }
-        if (previous != null && encoded != null && previous != encoded) throw BackupException(BackupIssue.INVALID_REFERENCE)
-        connection.prepare("INSERT INTO main.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use {
-            it.bindText(1, trackId);
-            it.bindLong(2, if (missingQueue) 1L else 0L);
-            it.bindNullableText(3, encoded);
-            it.step()
+        referenceTracks(sequenceOf(BackupRelinkTrack(trackId, missingQueue, reference)))
+    }
+
+    /** Reuse statements within one input page; every row still spends its original input budget. */
+    fun referenceTracks(references: Sequence<BackupRelinkTrack>) {
+        val iterator = references.iterator()
+        if (!iterator.hasNext()) return
+        connection.prepare("SELECT missingQueue,cueReference FROM main.relink_reference_tracks WHERE trackId=?").use { select ->
+            connection.prepare("INSERT INTO main.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use { insert ->
+                var count = 0
+                while (iterator.hasNext()) {
+                    checkCancelled()
+                    if (++count > BackupLimits.ROWS_PER_CHUNK) throw BackupException(BackupIssue.INVALID_INPUT)
+                    val (trackId, missingQueue, reference) = iterator.next()
+                    if (trackId.isBlank() || trackId.length > 128 || trackId.any(Char::isISOControl)) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    val encoded = reference?.portable()?.let(CueReferenceCodec::encode)
+                    reserveDerived("relink_reference_tracks", 128L + trackId.toByteArray(Charsets.UTF_8).size +
+                        (encoded?.toByteArray(Charsets.UTF_8)?.size ?: 0))
+                    select.reset()
+                    select.bindText(1, trackId)
+                    val exists = select.step()
+                    val previousMissing = if (exists) select.getLong(0) else 0L
+                    if (previousMissing !in 0L..1L) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    val previous = if (exists && !select.isNull(1)) select.getText(1) else null
+                    select.reset()
+                    if (previous != null && encoded != null && previous != encoded) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    if (exists && (previousMissing == 1L || !missingQueue) && (previous != null || encoded == null)) continue
+                    insert.reset()
+                    insert.bindText(1, trackId)
+                    insert.bindLong(2, if (missingQueue) 1L else 0L)
+                    insert.bindNullableText(3, encoded)
+                    insert.step()
+                }
+            }
         }
     }
-    fun referenceTrackPage(after: String?): List<BackupRelinkTrack> = connection.prepare(
-        "SELECT trackId,missingQueue,cueReference FROM main.relink_reference_tracks WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100",
-    ).use {
-        it.bindNullableText(1, after); it.bindNullableText(2, after)
-        buildList {
-            while (it.step()) {
-                checkCancelled();
-                add(BackupRelinkTrack(it.getText(0), it.getLong(1) == 1L,
-                    if (it.isNull(2)) null else CueReferenceCodec.decode(it.getText(2), portableOnly = true)))
+    fun referenceTrackPage(after: String?): List<BackupRelinkTrack> {
+        val continuation = if (after == null) "" else " WHERE trackId>?"
+        return connection.prepare(
+            "SELECT trackId,missingQueue,cueReference FROM main.relink_reference_tracks$continuation ORDER BY trackId LIMIT 100",
+        ).use {
+            if (after != null) it.bindText(1, after)
+            buildList {
+                while (it.step()) {
+                    checkCancelled();
+                    add(BackupRelinkTrack(it.getText(0), it.getLong(1) == 1L,
+                        if (it.isNull(2)) null else CueReferenceCodec.decode(it.getText(2), portableOnly = true)))
+                }
             }
         }
     }
@@ -439,9 +463,12 @@ internal class SqliteBackupStage private constructor(
         checkCancelled()
         val result = ArrayList<BackupRecord>()
         var bytes = 0
-        connection.prepare("SELECT recordKey,payload,scope,bytes FROM logical_records WHERE kind=? AND (? IS NULL OR recordKey>?) ORDER BY recordKey COLLATE BINARY LIMIT ?").use {
-            it.bindLong(1, kind.ordinal.toLong()); it.bindNullableText(2, afterKey); it.bindNullableText(3, afterKey)
-            it.bindLong(4, BackupLimits.ROWS_PER_CHUNK.toLong())
+        // A direct key range lets subsequent chunks seek past already visited rows.
+        val continuation = if (afterKey == null) "" else " AND recordKey>?"
+        connection.prepare("SELECT recordKey,payload,scope,bytes FROM logical_records WHERE kind=?$continuation ORDER BY recordKey COLLATE BINARY LIMIT ?").use {
+            it.bindLong(1, kind.ordinal.toLong())
+            if (afterKey != null) it.bindText(2, afterKey)
+            it.bindLong(if (afterKey == null) 2 else 3, BackupLimits.ROWS_PER_CHUNK.toLong())
             while (it.step()) {
                 checkCancelled()
                 val payload = it.getBlob(1)
@@ -464,9 +491,11 @@ internal class SqliteBackupStage private constructor(
     fun orderedPage(kind: BackupRecordKind, family: String, owner: String, after: Long?): List<BackupRecord> {
         val result = ArrayList<BackupRecord>()
         var bytes = 0
-        connection.prepare("SELECT r.recordKey,r.payload,r.scope,r.bytes,o.ordinal FROM logical_ordinals o JOIN logical_records r ON r.kind=? AND r.recordKey=o.recordKey WHERE o.family=? AND o.owner=? AND (? IS NULL OR o.ordinal>?) ORDER BY o.ordinal LIMIT ?").use {
+        val continuation = if (after == null) "" else " AND o.ordinal>?"
+        connection.prepare("SELECT r.recordKey,r.payload,r.scope,r.bytes,o.ordinal FROM logical_ordinals o JOIN logical_records r ON r.kind=? AND r.recordKey=o.recordKey WHERE o.family=? AND o.owner=?$continuation ORDER BY o.ordinal LIMIT ?").use {
             it.bindLong(1, kind.ordinal.toLong()); it.bindText(2, family); it.bindText(3, owner)
-            it.bindNullableLong(4, after); it.bindNullableLong(5, after); it.bindLong(6, BackupLimits.ROWS_PER_CHUNK.toLong())
+            if (after != null) it.bindLong(4, after)
+            it.bindLong(if (after == null) 4 else 5, BackupLimits.ROWS_PER_CHUNK.toLong())
             while (it.step()) {
                 checkCancelled()
                 val payload = it.getBlob(1)
@@ -527,11 +556,15 @@ internal class SqliteBackupStage private constructor(
         it.bindLong(1, kind.ordinal.toLong()); it.bindText(2, incoming); if (it.step()) it.getText(0) else incoming
     }
 
-    fun bindingPage(family: BackupBindingFamily, after: String?): List<BackupStoredBinding> = connection.prepare(
-        "SELECT incomingId,actualId,verified,fences FROM restore_bindings WHERE family=? AND (? IS NULL OR incomingId>?) ORDER BY incomingId LIMIT 100",
-    ).use {
-        it.bindLong(1, family.ordinal.toLong()); it.bindNullableText(2, after); it.bindNullableText(3, after)
-        buildList { while (it.step()) { checkCancelled(); add(decodeBinding(family, it)) } }
+    fun bindingPage(family: BackupBindingFamily, after: String?): List<BackupStoredBinding> {
+        val continuation = if (after == null) "" else " AND incomingId>?"
+        return connection.prepare(
+            "SELECT incomingId,actualId,verified,fences FROM restore_bindings WHERE family=?$continuation ORDER BY incomingId LIMIT 100",
+        ).use {
+            it.bindLong(1, family.ordinal.toLong())
+            if (after != null) it.bindText(2, after)
+            buildList { while (it.step()) { checkCancelled(); add(decodeBinding(family, it)) } }
+        }
     }
 
     private fun decodeBinding(family: BackupBindingFamily, statement: SQLiteStatement): BackupStoredBinding = BackupStoredBinding(
