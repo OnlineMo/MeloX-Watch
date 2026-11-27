@@ -10,12 +10,10 @@ import io.github.onlinemo.meloxwatch.data.storage.StorageIssue
 import io.github.onlinemo.meloxwatch.data.storage.StorageReport
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 data class StorageUiState(
     val report: StorageReport? = null,
@@ -63,7 +61,6 @@ class StorageViewModel(application: Application) : AndroidViewModel(application)
                 throw cancelled }
             catch (failure: Exception) { mutableState.update { it.copy(issue = (failure as? StorageException)?.issue ?: StorageIssue.UNAVAILABLE) } }
             finally {
-                withContext(NonCancellable) { app.localProviderIo.awaitIdle() }
                 val observed = app.fileStorage.clearState.value
                 mutableState.update { it.copy(clear = observed ?: it.clear, report = if (observed != null && observed !== priorClear) null else it.report,
                     working = false, stopping = false) }

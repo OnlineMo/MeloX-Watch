@@ -28,6 +28,11 @@ import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationsRuntime
 import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontBackupAccess
 import io.github.onlinemo.meloxwatch.data.fonts.BackupFontOwner
 import io.github.onlinemo.meloxwatch.data.storage.FileStorageRepository
+import io.github.onlinemo.meloxwatch.data.storage.FileStoragePhysical
+import io.github.onlinemo.meloxwatch.data.storage.StorageException
+import io.github.onlinemo.meloxwatch.data.storage.StorageIssue
+import io.github.onlinemo.meloxwatch.data.storage.StoragePrivateInventory
+import io.github.onlinemo.meloxwatch.data.storage.StoragePrivateReport
 import io.github.onlinemo.meloxwatch.playback.dsp.DspRuntime
 import io.github.onlinemo.meloxwatch.playback.dsp.DspSettingsStore
 import io.github.onlinemo.meloxwatch.playback.dsp.DspSettingsStoreFactory
@@ -265,7 +270,24 @@ class MeloXApplication : Application() {
     val fileStorage by lazy {
         FileStorageRepository(this, localProviderIo, fileOperations,
             artworkMeasure = { artworks.measureDiskCache() }, artworkClear = { artworks.clearDiskCache() },
-            lyricsMeasure = { onlineLyrics.measureDiskCache() }, lyricsClear = { onlineLyrics.clearDiskCache() })
+            lyricsMeasure = { onlineLyrics.measureDiskCache() }, lyricsClear = { onlineLyrics.clearDiskCache() },
+            privateMeasure = ::measurePrivateStorage)
+    }
+
+    private val storageInventory by lazy { StoragePrivateInventory(this, localProviderIo) }
+
+    private suspend fun measurePrivateStorage(): StoragePrivateReport {
+        requireBackupStorageReady()
+        return backupMutationBarrier.mutation({ StorageException(StorageIssue.BUSY) }) {
+            backups.withStorageInventory { backupSpecification ->
+                storageInventory.measure {
+                    FileStoragePhysical.privateAudioSpecifications(this) + listOf(lyricsCopies.storageDirectorySpecOnWorker(),
+                        metadataArtworkFiles.storageDirectorySpecOnWorker(), lyricsFontFiles.storageDirectorySpecOnWorker(),
+                        themes.storageDirectorySpecOnWorker(), playbackBackgrounds.storageDirectorySpecOnWorker(),
+                        backupSpecification())
+                }
+            }
+        }
     }
     private val themeBitmapOwner = lazy { ThemeBitmapOwner() }
     val themeBitmaps get() = themeBitmapOwner.value

@@ -11,18 +11,44 @@ import android.system.Os
 import android.system.OsConstants
 import io.github.onlinemo.meloxwatch.data.fileoperations.WrittenDocument
 import io.github.onlinemo.meloxwatch.data.library.LocalReadDescriptor
+import io.github.onlinemo.meloxwatch.data.imports.AudioCopyQuota
+import io.github.onlinemo.meloxwatch.data.imports.OwnedAudioProvider
+import io.github.onlinemo.meloxwatch.data.transfer.TransferLimits
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.LinkOption
-import java.nio.file.NoSuchFileException
-import java.nio.file.attribute.BasicFileAttributes
 import java.util.UUID
 
 /** 这里只观察容量；不读完整音频摘要、不取写 FD、不枚举外部目录或删除文件。 */
 internal object FileStoragePhysical {
     fun available(context: Context): Long? = try { StatFs(context.noBackupFilesDir.absolutePath).availableBytes.takeIf { it >= 0L } }
         catch (_: Exception) { null }
+
+    /** Incoming audio and theme bytes share one directory and are observed exactly once. */
+    fun privateAudioSpecifications(context: Context): List<StorageDirectorySpec> {
+        check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        val parent = context.noBackupFilesDir.canonicalFile
+        fun valid(name: String, suffix: String): Boolean {
+            if (!name.endsWith(suffix)) return false
+            val token = name.removeSuffix(suffix)
+            return token.length == 36 && try { UUID.fromString(token).toString() == token } catch (_: IllegalArgumentException) { false }
+        }
+        return listOf(
+            StorageDirectorySpec(File(parent, OwnedAudioProvider.DIRECTORY), StorageArea.AUDIO, 1, null,
+                classify = { parts, directory ->
+                    val name = parts.singleOrNull()
+                    when {
+                        directory || name == null -> null
+                        valid(name, ".audio") -> StorageArea.AUDIO
+                        valid(name, ".part") -> StorageArea.RECOVERY
+                        else -> null
+                    }
+                }, mutableFile = { it.last().endsWith(".part") }, requireNonEmpty = { it.last().endsWith(".audio") }),
+            StorageDirectorySpec(File(parent, AudioCopyQuota.TRANSFER_DIRECTORY), StorageArea.RECOVERY, 1,
+                TransferLimits.PAGE_SIZE.toLong(), classify = { parts, directory ->
+                    if (!directory && parts.size == 1 && valid(parts.single(), ".partial")) StorageArea.RECOVERY else null
+                }, mutableFile = { true }),
+        )
+    }
 
     fun reference(context: Context, descriptor: LocalReadDescriptor, signal: CancellationSignal): Long? {
         val uri = descriptor.location.uri.toUri()
@@ -62,36 +88,4 @@ internal object FileStoragePhysical {
         }
     }
 
-    /** 仅统计私有直接子项；链接、未知名或不可读项保留未知状态。 */
-    fun privateAudio(context: Context, directoryName: String, suffix: String, signal: CancellationSignal): StorageCategory {
-        val parent = context.noBackupFilesDir.canonicalFile
-        val directory = File(parent, directoryName)
-        try {
-            val root = Files.readAttributes(directory.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            if (!root.isDirectory || root.isSymbolicLink || directory.canonicalFile.parentFile != parent) throw StorageException(StorageIssue.UNAVAILABLE)
-        } catch (_: NoSuchFileException) {
-            val parentFacts = Files.readAttributes(parent.toPath(), BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-            if (!parentFacts.isDirectory || parentFacts.isSymbolicLink) throw StorageException(StorageIssue.UNAVAILABLE)
-            return StorageCategory(0L, 0L)
-        }
-        var bytes = 0L
-        var files = 0L
-        var unknown = 0L
-        Files.newDirectoryStream(directory.toPath()).use { entries ->
-            for (entry in entries) {
-                signal.throwIfCanceled()
-                val name = entry.fileName.toString()
-                if (!name.endsWith(suffix)) continue
-                try {
-                    val token = name.removeSuffix(suffix)
-                    if (token.length != 36 || UUID.fromString(token).toString() != token) throw StorageException(StorageIssue.INCOMPLETE)
-                    val facts = Files.readAttributes(entry, BasicFileAttributes::class.java, LinkOption.NOFOLLOW_LINKS)
-                    if (!facts.isRegularFile || facts.isSymbolicLink) throw StorageException(StorageIssue.INCOMPLETE)
-                    bytes = Math.addExact(bytes, facts.size())
-                    files = Math.addExact(files, 1L)
-                } catch (_: Exception) { unknown = Math.addExact(unknown, 1L) }
-            }
-        }
-        return StorageCategory(bytes, files, unknown, StorageIssue.INCOMPLETE.takeIf { unknown > 0L })
-    }
 }

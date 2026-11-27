@@ -5,11 +5,20 @@
     <string name="storage_unmeasured">暂无当前统计，请选择“统计存储”。</string>
     <string name="storage_originals">原文件引用</string>
     <string name="storage_copies">导入及传入的音频副本</string>
+    <string name="storage_lyrics_copies">已保存的歌词文档</string>
+    <string name="storage_saved_artwork">已保存的封面素材</string>
+    <string name="storage_fonts">字体副本</string>
+    <string name="storage_themes">主题文件</string>
+    <string name="storage_backgrounds">背景图副本</string>
     <string name="storage_artwork">封面缓存</string>
     <string name="storage_lyrics">已获取的歌词缓存</string>
     <string name="storage_recovery">恢复及传输暂存</string>
     <string name="storage_category">%1$s：%2$s · 已观察 %3$d 个文件</string>
-    <string name="storage_unknown_files">另有 %1$d 个引用或项目的容量未知。</string>
+    <plurals name="storage_unknown_files">
+        <item quantity="other">至少 %1$d 个引用或项目的容量尚未计量。</item>
+    </plurals>
+    <string name="storage_known_subtotal">已知小计：%1$s</string>
+    <string name="storage_cleanup_required">上次统计尚未完成关闭，请重试统计存储。</string>
     <string name="storage_incomplete">部分容量无法统计。恢复访问权限或处理待完成操作后重试。</string>
     <string name="storage_available">实际观察的可用空间：%1$s</string>
     <string name="storage_available_change">实际观察的可用空间：%1$s → %2$s</string>
@@ -17,6 +26,6 @@
     <string name="storage_clear_observed">清理后的缓存观察值</string>
     <string name="storage_clear">清理派生缓存</string>
     <string name="storage_clear_confirm">确认清理缓存</string>
-    <string name="storage_clear_scope">清理缓存封面及已获取的歌词文件。保留原音频、副本、已保存歌词文档、字体、主题、收藏、歌单及恢复文件。当前播放可继续。</string>
+    <string name="storage_clear_scope">清理缓存封面及已获取的歌词文件。保留原音频、副本、已保存歌词文档及封面素材、字体、主题、背景、收藏、歌单及恢复文件。当前播放可继续。</string>
     <string name="storage_copy_delete_scope">删除音频副本时，请打开曲目详情，另行确认“删除应用音频副本”。</string>
 </resources>

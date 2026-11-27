@@ -17,6 +17,8 @@ import io.github.onlinemo.meloxwatch.data.local.AndroidLocalSources
 import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapOwner
+import io.github.onlinemo.meloxwatch.data.storage.StorageArea
+import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.InputStream
@@ -53,6 +55,19 @@ internal class LocalMetadataArtworkFiles(
     private val pinLock = Any()
     private val pins = HashSet<String>()
     private val backupPins = HashSet<String>()
+
+    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+        check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        return StorageDirectorySpec(application.noBackupFilesDir.canonicalFile.resolve(DIRECTORY), StorageArea.ARTWORK, 1,
+            MAX_ENTRIES.toLong(), classify = { parts, directory ->
+                val name = parts.singleOrNull()
+                if (directory || name == null || !validMetadataAssetId(name.substringBeforeLast('.'))) null else when (name.substringAfterLast('.')) {
+                    "image" -> StorageArea.ARTWORK
+                    "part" -> StorageArea.RECOVERY
+                    else -> null
+                }
+            }, mutableFile = { it.last().endsWith(".part") }, requireNonEmpty = { it.last().endsWith(".image") })
+    }
 
     internal class Asset internal constructor(
         val assetId: String,

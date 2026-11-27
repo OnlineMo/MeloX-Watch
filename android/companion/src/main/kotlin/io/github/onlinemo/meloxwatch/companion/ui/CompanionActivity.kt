@@ -16,26 +16,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import io.github.onlinemo.meloxwatch.companion.MeloXCompanionApplication
-import io.github.onlinemo.meloxwatch.companion.data.CompanionIconRole
 import io.github.onlinemo.meloxwatch.companion.ui.about.CompanionLicensesViewModel
 
 class CompanionActivity : ComponentActivity() {
     private lateinit var model: CompanionViewModel
     private lateinit var licenses: CompanionLicensesViewModel
-    private var pendingIcon: IconSelection? = null
-
-    private class IconSelection(val role: CompanionIconRole, val licenseName: String, val licenseText: String) {
-        override fun toString(): String = "<local-icon-selection>"
-    }
-
     private val selectAudio = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) model.prepareAudio(uri)
+        val ticket = model.pickerTicket(CompanionPickerKind.AUDIO)
+        if (ticket != null) model.pickerReturned(ticket, uri) else if (uri != null) model.pickerUnavailable()
     }
     private val selectIcon = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        val selection = pendingIcon
-        pendingIcon = null
-        if (uri != null && selection != null) model.prepareIcon(uri, selection.role, selection.licenseName, selection.licenseText)
-        else if (uri != null) model.pickerUnavailable()
+        val ticket = model.pickerTicket(CompanionPickerKind.ICON)
+        if (ticket != null) model.pickerReturned(ticket, uri) else if (uri != null) model.pickerUnavailable()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,21 +47,18 @@ class CompanionActivity : ComponentActivity() {
             val state by model.state.collectAsStateWithLifecycle()
             val licenseState by licenses.state.collectAsStateWithLifecycle()
             CompanionUi(state, model, licenseState, licenses, onExit = ::finish, selectAudio = {
-                try { selectAudio.launch(arrayOf("audio/*")) }
-                catch (_: ActivityNotFoundException) { model.pickerUnavailable() }
-                catch (_: SecurityException) { model.pickerUnavailable() }
+                model.requestAudioPicker()?.let { ticket ->
+                    try { selectAudio.launch(arrayOf("audio/*")) }
+                    catch (_: ActivityNotFoundException) { model.pickerLaunchFailed(ticket) }
+                    catch (_: SecurityException) { model.pickerLaunchFailed(ticket) }
+                }
             }, onBluetoothLyrics = {
                 startActivity(Intent(this, BluetoothLyricsReceiverActivity::class.java))
             }, selectIcon = { role, licenseName, licenseText ->
-                pendingIcon = IconSelection(role, licenseName, licenseText)
-                try { selectIcon.launch(arrayOf("image/*")) }
-                catch (_: ActivityNotFoundException) {
-                    pendingIcon = null
-                    model.pickerUnavailable()
-                }
-                catch (_: SecurityException) {
-                    pendingIcon = null
-                    model.pickerUnavailable()
+                model.requestIconPicker(role, licenseName, licenseText)?.let { ticket ->
+                    try { selectIcon.launch(arrayOf("image/*")) }
+                    catch (_: ActivityNotFoundException) { model.pickerLaunchFailed(ticket) }
+                    catch (_: SecurityException) { model.pickerLaunchFailed(ticket) }
                 }
             })
         }
@@ -84,6 +73,6 @@ class CompanionActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         if (::licenses.isInitialized) licenses.foreground()
-        if (::model.isInitialized) model.reloadLocal()
+        if (::model.isInitialized) model.foreground()
     }
 }
