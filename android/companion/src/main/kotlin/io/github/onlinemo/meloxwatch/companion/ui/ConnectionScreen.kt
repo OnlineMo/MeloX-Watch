@@ -33,7 +33,11 @@ internal fun LazyListScope.connectionItems(state: CompanionUiState, model: Compa
                 enabled = state.available && state.form.requested.isNotEmpty() && state.form.code.length == 8, prominent = true)
         }
     }
-    if (state.connection.phase == CompanionConnectionPhase.WAITING_FOR_WATCH || state.connection.phase == CompanionConnectionPhase.READY) item(key = "pairing-confirmation") {
+    // OFF retains an in-memory pairing after a picker stop; a saved target alone cannot authenticate.
+    val retainedPairing = state.connection.phase == CompanionConnectionPhase.OFF && state.connection.target != null &&
+        state.connection.sessionId != null && state.connection.phoneFingerprint != null
+    if (retainedPairing || state.connection.phase == CompanionConnectionPhase.WAITING_FOR_WATCH ||
+        state.connection.phase == CompanionConnectionPhase.READY) item(key = "pairing-confirmation") {
         MeloXCard {
             MeloXText(stringResource(R.string.confirm_phone_on_watch))
             state.connection.phoneFingerprint?.let { MeloXText(it.forLocalDisplay().chunked(8).joinToString(" "), mono = true) }
