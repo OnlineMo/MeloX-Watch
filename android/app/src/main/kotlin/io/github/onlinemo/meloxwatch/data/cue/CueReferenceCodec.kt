@@ -21,6 +21,7 @@ import java.nio.charset.CodingErrorAction
 /** 原生行与可移植提示共用严格封装；只有原生行携带绑定围栏。 */
 object CueReferenceCodec {
     const val MAX_BYTES = 64 * 1024
+    private val nonNegativeInteger = Regex("0|[1-9][0-9]*")
     private val rootFields = setOf("schema", "state", "identity", "binding")
     private val identityFields = setOf("sourceId", "cueId", "trackNumber", "groupRevision", "startFrame",
         "endFrameExclusive", "endUsExclusive", "index00Frame", "cueContentToken", "boundaryVersion", "audioContentTokenHint")
@@ -128,7 +129,7 @@ object CueReferenceCodec {
     }
     private fun long(node: JsonObject, name: String): Long {
         val raw = (node[name] as? JsonNumber)?.value ?: throw IllegalArgumentException("Invalid CUE reference number")
-        require(raw.matches(Regex("0|[1-9][0-9]*")))
+        require(nonNegativeInteger.matches(raw))
         return raw.toLongOrNull() ?: throw IllegalArgumentException("Invalid CUE reference extent")
     }
     private fun integer(node: JsonObject, name: String): Int = long(node, name).also { require(it <= Int.MAX_VALUE) }.toInt()
