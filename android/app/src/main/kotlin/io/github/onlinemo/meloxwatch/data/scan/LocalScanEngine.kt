@@ -67,22 +67,50 @@ class LocalScanEngine(
         mode: ScanMode = ScanMode.FULL,
         sinceMediaGeneration: Long? = null,
         cueEncoding: CueEncoding = CueEncoding.UTF8,
-    ): ScanToken {
+    ): ScanToken = begin(source, rulesRevision, mode, sinceMediaGeneration, cueEncoding)
+
+    /** Updates are explicit. Only a current committed MediaStore checkpoint permits a generation query. */
+    suspend fun update(source: LibrarySource, rulesRevision: Long): ScanToken =
+        begin(source, rulesRevision, null, null, CueEncoding.UTF8)
+
+    private suspend fun begin(source: LibrarySource, rulesRevision: Long, requestedMode: ScanMode?,
+        requestedGeneration: Long?, cueEncoding: CueEncoding): ScanToken {
         synchronized(activeLock) {
             active?.let {
-                return reusableToken(it, source, rulesRevision, mode, cueEncoding)
+                return reusableToken(it, source, rulesRevision, requestedMode ?: it.token.mode, cueEncoding,
+                    if (requestedMode == null) it.sinceGeneration else requestedGeneration)
             }
         }
         if (!startLock.tryLock()) throw SourceReadException(SourceReadIssue.BUSY)
         try {
             synchronized(activeLock) {
                 active?.let {
-                    return reusableToken(it, source, rulesRevision, mode, cueEncoding)
+                    return reusableToken(it, source, rulesRevision, requestedMode ?: it.token.mode, cueEncoding,
+                        if (requestedMode == null) it.sinceGeneration else requestedGeneration)
                 }
             }
+            var mode = requestedMode ?: ScanMode.FULL
+            var sinceGeneration = requestedGeneration
+            var checkpoint: MediaScanCheckpoint? = null
+            if (requestedMode == null || requestedMode == ScanMode.INCREMENTAL) {
+                val observed = provider { sources.observe(source.spec) }
+                if (observed.identity != AndroidLocalSources.sourceIdentity(source.spec)) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+                val saved = store.scanCheckpoint(source.spec.sourceId, source.authEpoch, rulesRevision)?.takeIf { saved ->
+                    source.spec.kind == LocalSourceKind.MEDIA_STORE && source.spec.mediaVolume != "external" &&
+                        saved.sourceRevision == source.revision && saved.providerVersion == observed.providerVersion &&
+                        observed.mediaGeneration?.let { it >= saved.generation } == true
+                }
+                if (saved != null && (requestedMode == null || requestedGeneration == saved.generation)) {
+                    checkpoint = saved
+                    mode = ScanMode.INCREMENTAL
+                    sinceGeneration = saved.generation
+                } else if (requestedMode == ScanMode.INCREMENTAL) {
+                    throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+                } else sinceGeneration = null
+            }
             val token = store.beginScan(source.spec.sourceId, source.authEpoch, rulesRevision, mode)
-            val task = Active(token, cueEncoding)
-            task.job = scope.launch(start = CoroutineStart.LAZY) { task.entered.set(true); run(task, source, sinceMediaGeneration) }
+            val task = Active(token, cueEncoding, sinceGeneration, checkpoint)
+            task.job = scope.launch(start = CoroutineStart.LAZY) { task.entered.set(true); run(task, source, sinceGeneration) }
             synchronized(activeLock) { active = task }
             publish(task, ScanState(token, ScanPhase.PREPARING))
             task.job.invokeOnCompletion {
@@ -118,9 +146,11 @@ class LocalScanEngine(
         }
     }
 
-    private fun reusableToken(task: Active, source: LibrarySource, rulesRevision: Long, mode: ScanMode, encoding: CueEncoding): ScanToken {
+    private fun reusableToken(task: Active, source: LibrarySource, rulesRevision: Long, mode: ScanMode, encoding: CueEncoding,
+        sinceGeneration: Long?): ScanToken {
         val token = task.token
-        if (task.stopping.get() || token.sourceId != source.spec.sourceId || token.mode != mode || task.cueEncoding != encoding) {
+        if (task.stopping.get() || token.sourceId != source.spec.sourceId || token.mode != mode || task.cueEncoding != encoding ||
+            task.sinceGeneration != sinceGeneration) {
             throw SourceReadException(SourceReadIssue.BUSY)
         }
         if (token.sourceRevision != source.revision || token.authEpoch != source.authEpoch || token.rulesRevision != rulesRevision) {
@@ -161,6 +191,7 @@ class LocalScanEngine(
         var excluded = false
         var complete = true
         var authorizationValid = true
+        var mediaFactsValid = true
         try {
             if (backgrounded || task.stopping.get()) {
                 task.terminal = if (backgrounded) ScanPhase.PAUSED_BACKGROUND else task.terminal
@@ -168,23 +199,34 @@ class LocalScanEngine(
             }
             val first = provider { sources.observe(source.spec) }
             if (first.identity != AndroidLocalSources.sourceIdentity(source.spec)) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+            val checkpoint = task.checkpoint
             if (task.token.mode == ScanMode.INCREMENTAL &&
-                (source.spec.kind != LocalSourceKind.MEDIA_STORE || sinceGeneration == null || first.mediaGeneration == null)
+                (source.spec.kind != LocalSourceKind.MEDIA_STORE || sinceGeneration == null ||
+                    checkpoint == null || !checkpoint.matches(task.token) || checkpoint.providerVersion != first.providerVersion ||
+                    first.mediaGeneration?.let { it >= sinceGeneration } != true)
             ) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
             counters = store.setScanState(task.token, ScanPhase.RUNNING).counters
 
             suspend fun consume(candidates: List<ObservedCandidate>) {
                 currentCoroutineContext().ensureActive()
                 if (backgrounded || task.stopping.get()) throw CancellationException("Scan paused at batch boundary")
-                store.commitSeen(task.token, candidates)
+                if (first.mediaGeneration != null) {
+                    for (candidate in candidates) if (!candidate.directory && candidate.mayContainAudio) {
+                        val generation = candidate.generationModified
+                        if (candidate.providerVersion != first.providerVersion || generation == null ||
+                            generation !in 0L..first.mediaGeneration) mediaFactsValid = false
+                    }
+                }
+                val seen = store.commitSeen(task.token, candidates)
                 val outcomes = ArrayList<MetadataOutcome>(candidates.size)
-                for (candidate in candidates) {
+                for (candidate in candidates.distinctBy { it.objectId }) {
                     currentCoroutineContext().ensureActive()
                     if (candidate.directory) continue
                     val isExcluded = store.isExcluded(task.token, candidate.objectId, candidate.parentObjectId)
                     if (isExcluded || candidate.mayContainCue || !candidate.mayContainAudio) {
                         continue
                     }
+                    if (seen.metadataObjectIds != null && candidate.objectId !in seen.metadataObjectIds) continue
                     try {
                         val hasProviderProof = candidate.providerContentToken?.let { !it.startsWith("sha256:") } == true
                         if (hasProviderProof) provider { verifyMetadataCandidate(first.source, candidate) }
@@ -237,6 +279,25 @@ class LocalScanEngine(
                     counters = store.completeDirectory(task.token, directory.objectId, false).counters
                 }
             }
+            if (task.token.mode == ScanMode.INCREMENTAL && complete) {
+                // MediaStore has no deletion tombstones. A second bounded cursor proves the complete
+                // existence set; commitSeen reuses only metadata bound to the successful checkpoint.
+                try {
+                    val cursor = provider { sources.open(first.source, first.root.objectId, null) }
+                    try {
+                        while (!cursor.exhausted) {
+                            val batch = provider { cursor.nextBatch(LocalInputLimits.BATCH_SIZE) }
+                            if (batch.isEmpty() && !cursor.exhausted) throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
+                            if (batch.isNotEmpty()) consume(batch)
+                        }
+                    } finally { withContext(NonCancellable) { cursor.closeAndAwait() } }
+                    counters = store.completeDirectory(task.token, first.root.objectId, true, fullEnumeration = true).counters
+                } catch (error: SourceReadException) {
+                    complete = false
+                    if (error.issue == SourceReadIssue.PERMISSION_DENIED || error.issue == SourceReadIssue.PERMISSION_REVOKED) authorizationValid = false
+                    counters = store.completeDirectory(task.token, first.root.objectId, false, fullEnumeration = true).counters
+                }
+            }
             // 全部枚举游标释放后，CUE 查询才开启自己的游标。
             val cues = store as? CueScanStore
             if (cues != null) while (true) {
@@ -267,12 +328,13 @@ class LocalScanEngine(
                 publish(task, ScanState(task.token, ScanPhase.RUNNING, counters))
             }
             val last = provider { sources.observe(first.source) }
-            val same = first.identity == last.identity && first.providerVersion == last.providerVersion
+            val same = first.identity == last.identity && first.providerVersion == last.providerVersion &&
+                first.mediaGeneration == last.mediaGeneration && mediaFactsValid
             val accessible = last.access.read == ObservedCapability.AVAILABLE || last.access.enumerate == ObservedCapability.AVAILABLE
             val acknowledged = store.setCoverage(task.token, ScanCoverage(complete, authorizationValid && accessible, true, same, excluded))
             val coverage = acknowledged.coverage
             counters = acknowledged.counters
-            if (task.token.mode == ScanMode.FULL && coverage.permitsAbsence) {
+            if (coverage.permitsAbsence) {
                 publish(task, ScanState(task.token, ScanPhase.STAGING_ABSENCE, counters, coverage))
                 var after: String? = null
                 while (true) {
@@ -283,8 +345,11 @@ class LocalScanEngine(
                     after = page.nextAliasId
                 }
             }
-            if (same && first.providerVersion != null && first.mediaGeneration != null) {
-                store.setWatermark(task.token, "${first.providerVersion}|${first.mediaGeneration}")
+            if (source.spec.kind == LocalSourceKind.MEDIA_STORE && source.spec.mediaVolume != "external" &&
+                coverage.permitsAbsence && counters.failed == 0L && first.providerVersion?.isNotBlank() == true && first.mediaGeneration != null) {
+                val checkpoint = MediaScanCheckpoint(task.token.sourceId, task.token.scanId, task.token.sourceRevision,
+                    task.token.authEpoch, task.token.rulesRevision, first.providerVersion, first.mediaGeneration, task.token.mode)
+                store.setWatermark(task.token, checkpoint.encode())
             }
             val final = store.finishScan(task.token, counters, coverage)
             publish(task, final)
@@ -337,7 +402,7 @@ class LocalScanEngine(
         synchronized(activeLock) { if (active === task && (!task.stopping.get() || value.phase != ScanPhase.RUNNING)) mutableState.value = value }
     }
 
-    private class Active(val token: ScanToken, val cueEncoding: CueEncoding) {
+    private class Active(val token: ScanToken, val cueEncoding: CueEncoding, val sinceGeneration: Long?, val checkpoint: MediaScanCheckpoint?) {
         lateinit var job: Job
         val stopping = AtomicBoolean(false)
         val entered = AtomicBoolean(false)

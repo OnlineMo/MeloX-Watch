@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.library
 
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.local.LocalProviderIo
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistMutation
@@ -9,14 +10,38 @@ import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
 import io.github.onlinemo.meloxwatch.data.queue.QueueReplacementRequest
 import io.github.onlinemo.meloxwatch.data.queue.RoomQueueStore
+import io.github.onlinemo.meloxwatch.data.scan.IncrementalLocalScanEngineTest
+import io.github.onlinemo.meloxwatch.data.scan.LocalScanEngine
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
+import io.github.onlinemo.meloxwatch.data.scan.ScanState
+import io.github.onlinemo.meloxwatch.data.scan.ScanToken
 import io.github.onlinemo.meloxwatch.model.FrozenQueueView
 import io.github.onlinemo.meloxwatch.model.QueueCheckpoint
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.ui.playlists.KeywordPlaylistCreateRequest
 import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistFolderChoice
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -189,9 +214,13 @@ class RoomFolderPlaylistMaintenanceTest : FolderPlaylistMaintenanceRoomFixture()
             coverage = completeCoverage.copy(enumerationComplete = false))
         assertEquals(0L, maintenance.afterScan(partial).examined)
         assertEquals(1L, maintenance.resume().deferred)
-        val incremental = refresh(listOf(root(), audio("selected-object", "Same.mp3")), mode = ScanMode.INCREMENTAL)
+        val incremental = refresh(listOf(root(), audio("selected-object", "Same.mp3")),
+            coverage = completeCoverage.copy(enumerationComplete = false), mode = ScanMode.INCREMENTAL)
         assertEquals(0L, maintenance.afterScan(incremental).examined)
         assertEquals(1L, maintenance.resume().deferred)
+        val forgedCoverage = maintenance.afterScan(incremental.copy(coverage = completeCoverage))
+        assertEquals(0L, forgedCoverage.examined)
+        assertEquals(PlaylistIssue.SOURCE_CHANGED, forgedCoverage.issue)
         val current = checkNotNull(library.source(source.spec.sourceId))
         library.setSourceIssue(current.spec.sourceId, current.authEpoch, SourceReadIssue.PERMISSION_REVOKED)
         val revoked = maintenance.resume()
@@ -261,5 +290,114 @@ class RoomFolderPlaylistMaintenanceTest : FolderPlaylistMaintenanceRoomFixture()
         assertEquals(1L, synchronizedReceipts())
         assertEquals(0, database.libraryDao().views().size)
         integrity()
+    }
+
+    @Test(timeout = 60_000L)
+    @Config(sdk = [30])
+    fun aPublishedIncrementalCompletionRestartsTheTreeSweepCancelledByItsNewScanState() = runBlocking {
+        val folder = createFolder("coalesced-tree")
+        val retained = members(folder)
+        val media = IncrementalLocalScanEngineTest.MediaGraph().apply { put("1", 1L, "Media original") }
+        library.registerSource(media.spec, media.grant)
+        val scanScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val deltaEntered = CompletableDeferred<Unit>()
+        val releaseDelta = CompletableDeferred<Unit>()
+        val oldViewRetired = CompletableDeferred<Unit>()
+        val scanner = LocalScanEngine(media, { candidate ->
+            if (candidate.objectId == media.id("2")) {
+                deltaEntered.complete(Unit)
+                releaseDelta.await()
+            }
+            LocalAudioMetadata(title = media.titles.getValue(candidate.objectId), durationMs = 60_000L, mimeType = "audio/mpeg")
+        }, library, LocalProviderIo(), scanScope, verifyMetadataCandidate = { _, candidate -> media.verify(candidate) })
+        val recorded = recordingIndex()
+        val maintenance = maintainer(recorded, closer = { viewId ->
+            library.closePlaylistView(viewId, 5_000L)
+            oldViewRetired.complete(Unit)
+        })
+        var observer: Job? = null
+        var relay: Job? = null
+        suspend fun complete(token: ScanToken): ScanState = withTimeout(20_000L) {
+            val result = scanner.state.filterNotNull().first { it.token == token && it.phase in setOf(
+                ScanPhase.COMPLETED, ScanPhase.FAILED, ScanPhase.CANCELLED, ScanPhase.PAUSED_BACKGROUND) }
+            scanScope.coroutineContext[Job]!!.children.toList().joinAll()
+            assertEquals(ScanPhase.COMPLETED, result.phase)
+            result
+        }
+        try {
+            complete(scanner.start(checkNotNull(library.source(media.spec.sourceId)), library.rules().revision))
+            val treeCompletion = refresh(originalCandidates() + audio("coalesced-added", "Added.mp3"))
+            val forgedMode = maintenance.afterScan(treeCompletion.copy(token = treeCompletion.token.copy(mode = ScanMode.INCREMENTAL)))
+            assertEquals(0L, forgedMode.examined)
+            assertEquals(PlaylistIssue.SOURCE_CHANGED, forgedMode.issue)
+            val paused = CompletableDeferred<Unit>()
+            val cancelled = CompletableDeferred<Unit>()
+            var holdFirstPage = true
+            recorded.onPage = { _, _ ->
+                if (holdFirstPage) {
+                    holdFirstPage = false
+                    paused.complete(Unit)
+                    try { awaitCancellation() } finally { cancelled.complete(Unit) }
+                }
+            }
+            val events = MutableStateFlow<ScanState?>(treeCompletion)
+            val resumed = CompletableDeferred<FolderPlaylistMaintenanceResult>()
+            observer = launch(start = CoroutineStart.UNDISPATCHED) {
+                events.collectLatest { event ->
+                    if (event?.phase == ScanPhase.COMPLETED && event.coverage.permitsAbsence &&
+                        event.counters.failed == 0L && event.issue == null) {
+                        val result = maintenance.afterScan(event)
+                        if (event.token.sourceId == media.spec.sourceId && event.token.mode == ScanMode.INCREMENTAL) {
+                            resumed.complete(result)
+                        }
+                    }
+                }
+            }
+            withTimeout(10_000L) { paused.await() }
+            assertEquals(1, database.libraryDao().views().size)
+            assertEquals(folder, playlists.snapshot(folder.playlistId))
+            assertEquals(0L, synchronizedReceipts())
+            relay = launch(start = CoroutineStart.UNDISPATCHED) {
+                scanner.state.drop(1).collect { events.value = it }
+            }
+            media.put("2", 2L, "Media added")
+            media.generation = 2L
+            val updateToken = scanner.update(checkNotNull(library.source(media.spec.sourceId)), library.rules().revision)
+            withTimeout(10_000L) { deltaEntered.await(); cancelled.await(); oldViewRetired.await() }
+            assertEquals(ScanPhase.RUNNING, scanner.state.value?.phase)
+            assertEquals(0, database.libraryDao().views().size)
+            assertEquals(folder, playlists.snapshot(folder.playlistId))
+            assertEquals(0L, synchronizedReceipts())
+            releaseDelta.complete(Unit)
+            val completion = complete(updateToken)
+            assertEquals(ScanMode.INCREMENTAL, completion.token.mode)
+            assertTrue(completion.coverage.permitsAbsence)
+            val result = withTimeout(20_000L) { resumed.await() }
+            assertTrue(cancelled.isCompleted)
+            assertEquals(1L, result.synchronized)
+            assertEquals(0L, result.deferred)
+            assertNull(result.issue)
+            assertFalse(result.cleanupPending)
+            val updated = checkNotNull(playlists.snapshot(folder.playlistId))
+            val updatedMembers = members(updated)
+            assertEquals(retained.map { it.memberId }, updatedMembers.take(retained.size).map { it.memberId })
+            assertEquals(retained.map { it.reference.trackKey } + track("coalesced-added"),
+                updatedMembers.map { it.reference.trackKey })
+            assertEquals(ScanMode.FULL.name, checkNotNull(database.libraryDao().scan(treeCompletion.token.scanId)).mode)
+            assertEquals(1L, synchronizedReceipts())
+            assertEquals(2, recorded.opened)
+            assertEquals(2, recorded.read)
+            assertEquals(0, database.libraryDao().views().size)
+            integrity()
+        } finally {
+            withContext(NonCancellable) {
+                releaseDelta.complete(Unit)
+                relay?.cancelAndJoin()
+                observer?.cancelAndJoin()
+                scanScope.cancel()
+                withTimeout(10_000L) { scanScope.coroutineContext[Job]!!.children.toList().joinAll() }
+                maintenance.close()
+            }
+        }
     }
 }

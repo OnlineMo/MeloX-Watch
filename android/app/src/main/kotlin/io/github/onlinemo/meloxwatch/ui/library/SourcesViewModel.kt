@@ -4,6 +4,7 @@ import android.app.Application
 import io.github.onlinemo.meloxwatch.data.backup.BackupException
 import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
@@ -90,6 +91,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     private val app = application as MeloXApplication
     private val mutableState = MutableStateFlow(SourcesUiState())
     val uiState = mutableState.asStateFlow()
+    private var requestedMediaVolume: String? = null
     private var visible = false
     private var observer: Job? = null
     private var action: Job? = null
@@ -227,9 +229,17 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         mutableState.update { it.copy(page = page) }
     }
 
+    fun prepareMediaStore(primary: Boolean): Boolean {
+        if (mutableState.value.working || primary && Build.VERSION.SDK_INT < 30) return false
+        requestedMediaVolume = if (primary) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"
+        return true
+    }
+
     fun addMediaStore() = runAction {
+        val volume = requestedMediaVolume ?: return@runAction
+        requestedMediaVolume = null
         val source = LocalSourceSpec(UUID.randomUUID().toString(), LocalSourceKind.MEDIA_STORE,
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI.toString())
+            MediaStore.Audio.Media.getContentUri(volume).toString(), mediaVolume = volume)
         val observed = app.localSources.observe(source)
         val registered = app.fileOperations.mutations.registerSource(observed.source, observed.access)
         val rules = app.library.rules()
@@ -242,6 +252,11 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         val latest = app.library.source(source.spec.sourceId) ?: throw LibraryException(LibraryIssue.SOURCE_UNAVAILABLE)
         val rules = app.library.rules()
         app.scans.start(latest, rules.revision)
+    }
+
+    fun update(source: LibrarySource) = runAction {
+        val latest = app.library.source(source.spec.sourceId) ?: throw LibraryException(LibraryIssue.SOURCE_UNAVAILABLE)
+        app.scans.update(latest, app.library.rules().revision)
     }
 
     fun retryCueGb18030(source: LibrarySource) = runAction {
@@ -327,6 +342,11 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
 
     fun cancelFilter() { mutableState.update { it.copy(filterDraft = null) } }
 
+    fun restoreFilterDefaults() {
+        if (mutableState.value.rules == null || mutableState.value.working) return
+        mutableState.update { it.copy(filterDraft = false) }
+    }
+
     fun saveFilter() = runAction {
         val state = mutableState.value
         val rules = state.rules ?: return@runAction
@@ -356,7 +376,10 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
 
     fun pickerCancelled() { mutableState.update { it.copy(notice = SourcesNotice.CANCELLED) } }
     fun noPicker(tree: Boolean) { mutableState.update { it.copy(notice = if (tree) SourcesNotice.NO_TREE_PICKER else SourcesNotice.NO_FILE_PICKER) } }
-    fun permissionDenied() { mutableState.update { it.copy(sourceIssue = SourceReadIssue.PERMISSION_DENIED) } }
+    fun permissionDenied() {
+        requestedMediaVolume = null
+        mutableState.update { it.copy(sourceIssue = SourceReadIssue.PERMISSION_DENIED) }
+    }
     fun invalidSelection() { mutableState.update { it.copy(sourceIssue = SourceReadIssue.INVALID_SOURCE) } }
 
     fun cancelRead() {

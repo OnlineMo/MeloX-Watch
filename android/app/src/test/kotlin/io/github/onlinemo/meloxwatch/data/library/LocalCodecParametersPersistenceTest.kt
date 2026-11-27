@@ -110,7 +110,7 @@ class LocalCodecParametersPersistenceTest {
 
     private suspend fun scan(library: RoomLocalLibraryRepository, source: LibrarySource, outcome: MetadataOutcome) {
         val token = library.beginScan(source.spec.sourceId, checkNotNull(library.source(source.spec.sourceId)).authEpoch,
-            library.rules().revision, ScanMode.INCREMENTAL)
+            library.rules().revision, ScanMode.FULL)
         library.commitSeen(token, listOf(
             ObservedCandidate(source.spec.sourceId, "root", source.spec.uri, null, "Root", "vnd.android.document/directory", LocalNodeKind.DIRECTORY),
             ObservedCandidate(source.spec.sourceId, "audio", "content://codec-fixture/document/audio", "root", "Track.ape",
@@ -123,6 +123,12 @@ class LocalCodecParametersPersistenceTest {
         }
         val coverage = ScanCoverage(true, true, true, true, false)
         library.setCoverage(token, coverage)
+        var after: String? = null
+        while (true) {
+            val page = library.stageAbsence(token, after)
+            if (page.complete) break
+            after = checkNotNull(page.nextAliasId)
+        }
         library.finishScan(token, ScanCounters(), coverage)
     }
 }

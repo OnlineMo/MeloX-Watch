@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.data.library
 
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
 import io.github.onlinemo.meloxwatch.data.database.hasCurrentWriterTransaction
+import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
 import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistCatalogFence
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistException
@@ -9,6 +10,7 @@ import io.github.onlinemo.meloxwatch.data.playlists.PlaylistIssue
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLibraryRevision
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLibraryTransactionFenceVerifier
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistTransactionFenceVerifier
+import io.github.onlinemo.meloxwatch.data.scan.MediaScanCheckpoint
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 
@@ -42,7 +44,16 @@ class RoomPlaylistFences(private val database: MeloXDatabase) :
             scan.authEpoch != fence.authEpoch || scan.rulesRevision != fence.rulesRevision) {
             fail(PlaylistIssue.SOURCE_CHANGED)
         }
-        if (scan.phase != ScanPhase.COMPLETED.name || scan.mode != ScanMode.FULL.name ||
+        val mode = ScanMode.entries.firstOrNull { it.name == scan.mode }
+        val checkpoint = MediaScanCheckpoint.decode(source.watermark)
+        val publishedScan = mode != null && observed.spec.kind == LocalSourceKind.MEDIA_STORE &&
+            observed.spec.mediaVolume != "external" && scan.watermark == source.watermark &&
+            checkpoint?.matchesScan(scan.token()) == true
+        // A generation delta is eligible only after the full presence proof was atomically published.
+        // A checkpoint for this exact scan also binds its original mode, including a later FULL forgery.
+        val eligibleMode = mode == ScanMode.INCREMENTAL && publishedScan ||
+            mode == ScanMode.FULL && (checkpoint?.scanId != scan.scanId || publishedScan)
+        if (scan.phase != ScanPhase.COMPLETED.name || !eligibleMode ||
             !scan.enumerationComplete || !scan.authorizationValid || !scan.rulesUnchanged || !scan.sourceUnchanged ||
             scan.excludedSubtrees || !scan.absenceDone || scan.failed != 0L || scan.issue != null ||
             source.absenceScanSequence != scan.sequence || dao.incompleteFrontier(scan.scanId) != 0L) {

@@ -37,6 +37,11 @@
     <string name="library_play_preview">播放所选文件</string>
     <string name="library_search_hint">标题、艺人、专辑或文件名</string>
     <string name="library_search_submit">搜索音乐库</string>
+    <string name="library_search_clear">清空搜索</string>
+    <string name="library_search_cancel">取消并返回来源</string>
+    <string name="library_search_idle">输入关键词后开始搜索。</string>
+    <string name="library_search_no_results">没有匹配歌曲。请修改关键词或返回来源。</string>
+    <string name="library_search_too_long">搜索词最多 4096 个字符，请缩短后重试。</string>
     <string name="library_recent_scope">显示最近 30 天首次加入的歌曲。全部歌曲可在“全部歌曲”中查看。</string>
     <string name="library_index">跳转到区段</string>
     <string name="library_sort">排序</string>
@@ -97,6 +102,7 @@
     <string name="library_system_library">系统音频库</string>
     <string name="library_offline">本地音乐无需账号、网络或手机连接。</string>
     <string name="library_add_media">添加系统音频来源</string>
+    <string name="library_add_primary_media_store">添加系统音频来源 · 主存储</string>
     <string name="library_media_permission">系统音频来源需要读取音频权限。所选文件和文件夹使用各自的授权。</string>
     <string name="library_choose_file">选择音频文件</string>
     <string name="library_choose_folder">选择文件夹</string>
@@ -132,6 +138,9 @@
     <string name="library_recover_import">恢复待完成导入</string>
     <string name="library_recover_import_required">此导入需要恢复，请重试以检查保存的字节并完成入库。</string>
     <string name="library_scan_source">扫描或刷新来源</string>
+    <string name="library_update_source">更新索引</string>
+    <string name="library_scan_incremental">增量更新</string>
+    <string name="library_scan_recheck">完整来源核对</string>
     <string name="library_scan_preparing">正在准备扫描…</string>
     <string name="library_scanning">正在扫描来源…</string>
     <string name="library_scan_reconciling">正在核对未找到的库内项目…</string>

@@ -221,16 +221,26 @@ class LocalScanEngineTest {
         val spec = LocalSourceSpec("media", LocalSourceKind.MEDIA_STORE, "content://media/external_primary/audio/media",
             authority = "media", rootObjectId = "media-root", mediaVolume = "external_primary", providerIncarnation = "db1")
         val access = Graph(spec).apply { providerVersion = "db1"; mediaGeneration = 1 }
-        access.children["media-root"] = listOf(access.node("one", "media-root"))
+        val first = access.node("one", "media-root").copy(providerVersion = "db1", generationAdded = 1L,
+            generationModified = 1L, providerContentToken = "db1:1")
+        access.children["media-root"] = listOf(first)
         val source = library.registerSource(spec, access.grant)
-        val engine = engine(access)
+        val reads = mutableListOf<String>()
+        val engine = engine(access, metadata = { reads += it.objectId; LocalAudioMetadata(title = it.displayName, mimeType = "audio/mpeg") },
+            verify = { _, expected ->
+                if (access.children["media-root"].orEmpty().singleOrNull { it.objectId == expected.objectId } != expected)
+                    throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+            })
         completed(engine, engine.start(source, library.rules().revision))
-        access.children["media-root"] = listOf(access.node("two", "media-root"))
+        val second = access.node("two", "media-root").copy(providerVersion = "db1", generationAdded = 2L,
+            generationModified = 2L, providerContentToken = "db1:2")
+        access.children["media-root"] = listOf(first, second)
         access.mediaGeneration = 2
         val state = completed(engine, engine.start(library.source(spec.sourceId)!!, library.rules().revision,
             ScanMode.INCREMENTAL, sinceMediaGeneration = 1))
         assertEquals(ScanMode.INCREMENTAL, state.token.mode)
         assertEquals(1L, state.counters.added)
+        assertEquals(listOf("one", "two"), reads)
         assertEquals(2L, library.overview().totalTracks)
         val view = library.openView()
         try { assertTrue(library.page(view).tracks.all { it.availability == LibraryAvailability.AVAILABLE }) }
@@ -319,7 +329,8 @@ class LocalScanEngineTest {
             val parent = parentObjectId ?: spec.rootObjectId!!
             opened += parent
             if (parent in failParents) throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
-            val rows = children[parent].orEmpty()
+            val rows = children[parent].orEmpty().filter { sinceMediaGeneration == null ||
+                it.generationModified?.let { generation -> generation > sinceMediaGeneration } != false }
             return object : LocalCandidateCursor {
                 var offset = 0
                 override var exhausted = false

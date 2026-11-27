@@ -156,7 +156,8 @@ class LyricsDisplayEditorTest {
         val store = Store()
         val editor = LyricsDisplayEditor(store)
         assertTrue(editor.begin())
-        assertTrue(editor.preview(store.actual().copy(legacyKeepScreenOn = true)))
+        val proposal = store.actual().copy(legacyKeepScreenOn = true)
+        assertTrue(editor.preview(proposal))
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         store.attempt = { expected, next ->
@@ -181,12 +182,16 @@ class LyricsDisplayEditorTest {
             write.join()
             assertFalse(editor.state.value.working)
             assertNull(editor.state.value.draft)
-            assertNull(editor.state.value.retry)
+            assertEquals(proposal, editor.state.value.retry)
             assertEquals(LyricsDisplayNotice.READ_REQUIRED, editor.state.value.notice)
             assertEquals(1L, store.actual().revision)
             assertTrue(store.actual().legacyKeepScreenOn)
             editor.save()
             assertEquals(1, store.saves)
+            assertFalse(editor.begin())
+            assertTrue(editor.reviewRetry())
+            assertEquals(LyricsDisplayNotice.SAVED, editor.state.value.notice)
+            assertNull(editor.state.value.retry)
             assertTrue(editor.begin())
             assertEquals(store.actual(), editor.state.value.draft)
         } finally {
@@ -194,6 +199,33 @@ class LyricsDisplayEditorTest {
             write.cancel()
             withContext(NonCancellable) { write.join() }
         }
+    }
+
+    @Test(timeout = 30_000)
+    fun aCancelledStoreResultRetainsOnlyAProposalUntilExplicitReviewOrDiscard() = runBlocking {
+        val store = Store(LyricsDisplayPreferences(revision = 6L))
+        val actual = store.actual()
+        val editor = LyricsDisplayEditor(store)
+        assertTrue(editor.begin())
+        val proposal = actual.copy(blockSpacingDp = 20f)
+        assertTrue(editor.preview(proposal))
+        store.attempt = { _, _ -> LyricsDisplayWriteResult.Cancelled(store.actual()) }
+        editor.save()
+        assertEquals(proposal, editor.state.value.retry)
+        assertNull(editor.state.value.draft)
+        assertFalse(editor.state.value.working)
+        assertEquals(LyricsDisplayNotice.READ_REQUIRED, editor.state.value.notice)
+        editor.save()
+        assertEquals(1, store.saves)
+        assertEquals(actual, store.actual())
+        assertTrue(editor.reviewRetry())
+        assertEquals(proposal, editor.state.value.draft)
+        assertNull(editor.state.value.retry)
+        assertTrue(editor.cancel())
+        assertNull(editor.state.value.draft)
+        assertNull(editor.state.value.retry)
+        assertEquals(actual, store.actual())
+        assertEquals(1, store.saves)
     }
 
     @Test(timeout = 30_000)

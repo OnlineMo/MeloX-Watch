@@ -172,21 +172,40 @@ internal class SqliteBackupStage private constructor(
         resetDerived("relink_reference_tracks", "CREATE TABLE main.relink_reference_tracks(trackId TEXT NOT NULL PRIMARY KEY,missingQueue INTEGER NOT NULL,cueReference TEXT) WITHOUT ROWID")
     }
     fun referenceTrack(trackId: String, missingQueue: Boolean, reference: LocalCueReference? = null) {
-        checkCancelled()
-        if (trackId.isBlank() || trackId.length > 128 || trackId.any(Char::isISOControl)) throw BackupException(BackupIssue.INVALID_REFERENCE)
-        val encoded = reference?.portable()?.let(CueReferenceCodec::encode)
-        reserveDerived("relink_reference_tracks", 128L + trackId.toByteArray(Charsets.UTF_8).size +
-            (encoded?.toByteArray(Charsets.UTF_8)?.size ?: 0))
-        val previous = connection.prepare("SELECT cueReference FROM main.relink_reference_tracks WHERE trackId=?").use {
-            it.bindText(1, trackId);
-            if (it.step() && !it.isNull(0)) it.getText(0) else null
-        }
-        if (previous != null && encoded != null && previous != encoded) throw BackupException(BackupIssue.INVALID_REFERENCE)
-        connection.prepare("INSERT INTO main.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use {
-            it.bindText(1, trackId);
-            it.bindLong(2, if (missingQueue) 1L else 0L);
-            it.bindNullableText(3, encoded);
-            it.step()
+        referenceTracks(sequenceOf(BackupRelinkTrack(trackId, missingQueue, reference)))
+    }
+
+    /** Reuse statements within one input page; every row still spends its original input budget. */
+    fun referenceTracks(references: Sequence<BackupRelinkTrack>) {
+        val iterator = references.iterator()
+        if (!iterator.hasNext()) return
+        connection.prepare("SELECT missingQueue,cueReference FROM main.relink_reference_tracks WHERE trackId=?").use { select ->
+            connection.prepare("INSERT INTO main.relink_reference_tracks(trackId,missingQueue,cueReference) VALUES(?,?,?) ON CONFLICT(trackId) DO UPDATE SET missingQueue=MAX(missingQueue,excluded.missingQueue),cueReference=COALESCE(cueReference,excluded.cueReference)").use { insert ->
+                var count = 0
+                while (iterator.hasNext()) {
+                    checkCancelled()
+                    if (++count > BackupLimits.ROWS_PER_CHUNK) throw BackupException(BackupIssue.INVALID_INPUT)
+                    val (trackId, missingQueue, reference) = iterator.next()
+                    if (trackId.isBlank() || trackId.length > 128 || trackId.any(Char::isISOControl)) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    val encoded = reference?.portable()?.let(CueReferenceCodec::encode)
+                    reserveDerived("relink_reference_tracks", 128L + trackId.toByteArray(Charsets.UTF_8).size +
+                        (encoded?.toByteArray(Charsets.UTF_8)?.size ?: 0))
+                    select.reset()
+                    select.bindText(1, trackId)
+                    val exists = select.step()
+                    val previousMissing = if (exists) select.getLong(0) else 0L
+                    if (previousMissing !in 0L..1L) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    val previous = if (exists && !select.isNull(1)) select.getText(1) else null
+                    select.reset()
+                    if (previous != null && encoded != null && previous != encoded) throw BackupException(BackupIssue.INVALID_REFERENCE)
+                    if (exists && (previousMissing == 1L || !missingQueue) && (previous != null || encoded == null)) continue
+                    insert.reset()
+                    insert.bindText(1, trackId)
+                    insert.bindLong(2, if (missingQueue) 1L else 0L)
+                    insert.bindNullableText(3, encoded)
+                    insert.step()
+                }
+            }
         }
     }
     fun referenceTrackPage(after: String?): List<BackupRelinkTrack> {

@@ -117,3 +117,13 @@ P0同版本`androidx.compose.runtime:runtime-android:1.9.3`实际直依赖在run
 [run43805805052](https://github.com/OnlineMo/MeloX-Watch/actions/runs/43805805052)/attempt1绑定source `ef56f06592fa016e745a6a8343546861689cf0cc`、原日志checkout `e6c46f0c8af18e4a28c12cbb95acccf91d870fb4`、compile job `133096243034`；完整tree相同，tree为`a688ff2b17eb41f85bd6237387b38029a0729add`。严格Debug测试Kotlin编译在`File(sqlite.path)`失败：实际路径类型为`String?`，Java构造器要求非空，`-Werror`按合同拒绝该警告。该轮没有运行227项测试、没有JUnit/lint报告或APK，稳定签名跳过。原日志SHA-256 `230dca27c462080c77539bee10a6d73ed18148d789cb3a734e1c73a441b70e67`，失败独审SHA-256 `16972fe994f996d9ce72e054d021bd191dfbdcae41ab91afb6d5fd76f756c56f`；不沿用旧226项结果作为本轮通过。
 
 修正只以`requireNotNull(sqlite.path)`要求真实文件路径，保留canonicalPath同文件断言、旧字段与reopen验证，不放宽编译或改生产迁移。修正后测试源码SHA-256 `4b7a828f2494a1679795a780c1f2ad9794084d0a4e7384fef869904648ce8611`；资源、原226项及生产/依赖输入保持原字节。新快照仍待云端验证；本地未执行Android/Kotlin/Java编译、迁移SQL或应用测试，readiness及256原AC保持未通过。
+
+## 增量核对、搜索退休与过滤草稿后继（2026-11-28）
+
+F-009 的“更新索引”入口与完整刷新分别表达实际扫描模式。API30 起可明确加入具体主存储卷；聚合 external 不推定可靠 generation。已成功发布且与来源/授权/规则一致的 checkpoint 才能作为增量起点，旧时间戳、损坏水位、提供方版本变化或 generation 回退要求完整核对。增量变化后仍有界枚举完整存在性，只有本轮完整 DONE、absenceDone 和来源/授权/规则证明齐全才原子发布缺失结果；单项元数据失败保留其已见身份，不否定已经完成的存在性证明。新水位前推和歌单成员同步还要求零失败；增量同步另核 checkpoint 的本轮身份与实际模式。未变对象只有可靠内容信号、成功元数据和全部旧围栏一致才复用；取消、失败和来源代次变化不前推成功水位。checkpoint 仍使用已有字符串列，主 Room schema 和依赖基线不扩张。
+
+视图在真实 Room 分配之后、可取消结果交付之前登记精确 token。UI 与 QUEUE 分配采用相同接管，计数保持可取消；异常退出在独立 metadata 路径退休原 token，关闭等待位于 worker 之外。退休失败继续保留精确身份，受既有 lease 配额约束并在下次分配前重试，不能以新 token 代替旧 owner 的关闭证明。
+
+根据 F-016 默认不保存搜索词的合同，输入编辑立即取消旧查询和页面请求，撤销旧结果与播放能力；新查询必须等待单一 lease 退休边界。显式提交、清空和取消分别可用，取消回到原浏览来源。搜索词只留当前 ViewModel 内存，旧 SavedState 搜索字段清除，新进程恢复浏览而不重放历史查询。空态与错误分开，超长输入有可读提示；实际输入法、圆方布局和大字体仍须设备验证。
+
+F-089 恢复默认仅生成关闭短音频过滤的草稿，确认保存前不改持久规则，取消回到真实已保存值。合格增量完成经实际 Room checkpoint/fence 验证后重新触发全局文件夹歌单维护，避免合并事件取消旧 TREE 维护后搁置；各 TREE 绑定仍依自己的完整扫描和目录 DONE 授权成员同步。新增回归定义覆盖真实 SQLite/Room 更新、未变元数据复用、取消与失效水位、实际 token 交付取消，以及搜索退休/恢复；历史种子按部分追加或完整替换的真实范围修正，不以伪造完整 coverage 清库。这批源码、云端执行、精确 APK、性能和原 AC 分别记录；当前新字节全部待完整云验，全部原 AC 继续未验收。

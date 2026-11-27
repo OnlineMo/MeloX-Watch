@@ -594,7 +594,7 @@ class BackupCoordinator internal constructor(
             while (true) {
                 val page = stage.pageNow(kind, cursor)
                 if (page.isEmpty()) break
-                for (row in page) {
+                val references = page.asSequence().mapNotNull { row ->
                     val track = when (kind) {
                         BackupRecordKind.TRACK, BackupRecordKind.LYRICS_TRACK,
                         BackupRecordKind.METADATA_LYRICS, BackupRecordKind.METADATA_ARTWORK -> row.key
@@ -603,11 +603,12 @@ class BackupCoordinator internal constructor(
                         BackupRecordKind.QUEUE_ENTRY, BackupRecordKind.HISTORY_ENTRY, BackupRecordKind.TRACK_TOTAL ->
                             row.text("trackId").takeIf { row.text("providerId") == TrackKey.LOCAL_PROVIDER }
                         else -> null
-                    } ?: continue
+                    } ?: return@mapNotNull null
                     val queueMissing = kind == BackupRecordKind.QUEUE_ENTRY && stage.binding(BackupBindingFamily.QUEUE, row.key)?.verified != true
                     val cue = stage.row(BackupRecordKind.TRACK, track)?.portableCueReference() ?: row.portableCueReference()
-                    stage.referenceTrack(track, queueMissing, cue)
+                    BackupRelinkTrack(track, queueMissing, cue)
                 }
+                stage.referenceTracks(references)
                 cursor = page.last().key
             }
         }

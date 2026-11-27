@@ -1,5 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.backup
 
+import io.github.onlinemo.meloxwatch.model.CueTrackReference
+import io.github.onlinemo.meloxwatch.model.LocalCueReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -15,6 +17,42 @@ import org.robolectric.annotation.SQLiteMode
 @SQLiteMode(SQLiteMode.Mode.NATIVE)
 class BackupStagePaginationTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test(timeout = 30_000L)
+    fun streamedDuplicateReferencesKeepMissingFlagsAndRejectConflictingCueHints() {
+        fun reference(number: Int) = LocalCueReference(CueTrackReference(
+            "source", "document", number, 1L, 0L, 75L, 1_000_000L, null, "sha256:" + "a".repeat(64),
+        ))
+        val first = reference(1)
+        val second = reference(2)
+        val firstId = first.trackKey.trackId
+        val secondId = second.trackKey.trackId
+        SqliteBackupStage.create(BackupPrivateDirectory.open(temporary.newFolder())) {}.use { stage ->
+            stage.begin(BackupTestFixtures.header(BackupScope.QUEUE))
+            stage.record(BackupTestFixtures.queueMeta(0L))
+            stage.sealSnapshot()
+            stage.beginRelinkReferences()
+            stage.referenceTracks((0 until 100).asSequence().map { index ->
+                val cue = if (index % 2 == 0) first else second
+                BackupRelinkTrack(cue.trackKey.trackId, index == 99, cue)
+            })
+            stage.referenceTracks((0 until 100).asSequence().map { index ->
+                BackupRelinkTrack(if (index % 2 == 0) secondId else firstId, false, null)
+            })
+            val actual = stage.referenceTrackPage(null).associateBy { it.trackId }
+            assertEquals(2, actual.size)
+            assertEquals(BackupRelinkTrack(firstId, false, first), actual[firstId])
+            assertEquals(BackupRelinkTrack(secondId, true, second), actual[secondId])
+            val conflicting = LocalCueReference(second.identity.copy(groupRevision = 2L))
+            try {
+                stage.referenceTracks(sequenceOf(BackupRelinkTrack(secondId, true, conflicting)))
+                throw AssertionError("Expected conflicting portable CUE hints")
+            } catch (failure: BackupException) {
+                assertEquals(BackupIssue.INVALID_REFERENCE, failure.issue)
+            }
+            assertEquals(actual, stage.referenceTrackPage(null).associateBy { it.trackId })
+        }
+    }
 
     @Test(timeout = 30_000L)
     fun prefixKeysMissingCursorsAndBothQueueOrdersRemainCompleteAcrossChunks() {

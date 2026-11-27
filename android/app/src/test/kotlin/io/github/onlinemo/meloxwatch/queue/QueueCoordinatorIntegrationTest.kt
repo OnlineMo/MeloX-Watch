@@ -1282,7 +1282,7 @@ class QueueCoordinatorIntegrationTest {
             "content://producer-fixture/tree/root", authority = "producer-fixture", rootObjectId = "root",
             providerIncarnation = "fixture-instance"), LocalGrantObservation(
                 read = ObservedCapability.AVAILABLE, enumerate = ObservedCapability.AVAILABLE))
-        val token = library.beginScan(source.spec.sourceId, source.authEpoch, library.rules().revision, ScanMode.INCREMENTAL)
+        val token = library.beginScan(source.spec.sourceId, source.authEpoch, library.rules().revision, ScanMode.FULL)
         val root = ObservedCandidate(source.spec.sourceId, "root", source.spec.uri, null, "Root",
             "vnd.android.document/directory", LocalNodeKind.DIRECTORY)
         val audio = List(4) { ordinal -> ObservedCandidate(source.spec.sourceId, "audio-$ordinal",
@@ -1295,6 +1295,12 @@ class QueueCoordinatorIntegrationTest {
         }
         val coverage = ScanCoverage(true, true, true, true, false)
         library.setCoverage(token, coverage)
+        var after: String? = null
+        while (true) {
+            val page = library.stageAbsence(token, after)
+            if (page.complete) break
+            after = checkNotNull(page.nextAliasId)
+        }
         library.finishScan(token, ScanCounters(), coverage)
         return CountingLibrary(library)
     }

@@ -21,6 +21,10 @@ import java.nio.charset.CodingErrorAction
 /** 原生行与可移植提示共用严格封装；只有原生行携带绑定围栏。 */
 object CueReferenceCodec {
     const val MAX_BYTES = 64 * 1024
+    private const val MEMO_BYTES = 128 * 1024
+    private const val MEMO_ENTRIES = 8
+    private val decoded = ReferenceMemo<String, LocalCueReference>()
+    private val encoded = ReferenceMemo<LocalCueReference, String>()
     private val nonNegativeInteger = Regex("0|[1-9][0-9]*")
     private val rootFields = setOf("schema", "state", "identity", "binding")
     private val identityFields = setOf("sourceId", "cueId", "trackNumber", "groupRevision", "startFrame",
@@ -31,6 +35,11 @@ object CueReferenceCodec {
     private val pcmFields = setOf("fileBytes", "dataOffset", "dataBytes", "sampleRateHz", "channels", "bitsPerSample")
 
     fun encode(reference: LocalCueReference): String {
+        encoded[reference]?.let { return it }
+        return encodeUncached(reference).also { encoded.remember(reference, it, it.length) }
+    }
+
+    private fun encodeUncached(reference: LocalCueReference): String {
         val identity = reference.identity
         val node = JsonObject(linkedMapOf(
             "schema" to number(1), "state" to JsonText(if (reference.isBound) "BOUND" else "PENDING"),
@@ -53,6 +62,15 @@ object CueReferenceCodec {
 
     fun decode(value: String, portableOnly: Boolean = false): LocalCueReference {
         require(value.length <= MAX_BYTES)
+        decoded[value]?.let {
+            // Parsed values are immutable hints. A hit never grants portable access to a native binding.
+            require(!portableOnly || !it.isBound)
+            return it
+        }
+        return decodeUncached(value, portableOnly).also { decoded.remember(value, it, value.length) }
+    }
+
+    private fun decodeUncached(value: String, portableOnly: Boolean): LocalCueReference {
         val encoded = Charsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
             .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(value))
         require(encoded.remaining() <= MAX_BYTES)
@@ -140,4 +158,27 @@ object CueReferenceCodec {
     private fun number(value: Number): JsonNumber = JsonNumber(value.toString())
     private fun nullableNumber(value: Long?): JsonValue = value?.let(::number) ?: JsonNull
     private fun nullableText(value: String?): JsonValue = value?.let(::JsonText) ?: JsonNull
+
+    /** Exact values only; current source, permission and content fences remain the caller's responsibility. */
+    private class ReferenceMemo<K, V> {
+        private data class Entry<V>(val value: V, val bytes: Int)
+        private val values = LinkedHashMap<K, Entry<V>>(MEMO_ENTRIES, 0.75f, true)
+        private var retainedBytes = 0
+
+        @Synchronized operator fun get(key: K): V? = values[key]?.value
+
+        @Synchronized fun remember(key: K, value: V, textChars: Int) {
+            // Both UTF-16 representations plus a fixed allowance for this bounded immutable model.
+            val bytes = textChars.toLong() * 4L + 8192L
+            if (bytes > MEMO_BYTES) return
+            values.remove(key)?.let { retainedBytes -= it.bytes }
+            while (values.size >= MEMO_ENTRIES || retainedBytes + bytes > MEMO_BYTES) {
+                val iterator = values.entries.iterator()
+                retainedBytes -= iterator.next().value.bytes
+                iterator.remove()
+            }
+            values[key] = Entry(value, bytes.toInt())
+            retainedBytes += bytes.toInt()
+        }
+    }
 }

@@ -369,7 +369,7 @@ internal class ProbeActivityUiIntegrationTest : LyricsDisplayFileFixture() {
                 initializer { display.vm }
             })[ProbeLyricsDisplayViewModel::class.java]
             assertSame(display.vm, retained)
-            display.propose()
+            val proposal = display.propose()
             ack.arm()
             val saving = async { retained.save(page) }
             try {
@@ -381,6 +381,11 @@ internal class ProbeActivityUiIntegrationTest : LyricsDisplayFileFixture() {
                 assertTrue(saving.isCancelled)
                 assertFalse(display.vm.editor.state.value.working)
                 display.session.ready()
+                assertEquals(proposal, display.vm.editor.state.value.retry)
+                assertFalse(display.vm.editor.begin())
+                assertTrue(display.vm.editor.reviewRetry())
+                assertEquals(LyricsDisplayNotice.SAVED, display.vm.editor.state.value.notice)
+                assertNull(display.vm.editor.state.value.retry)
                 assertTrue(display.vm.editor.begin())
                 val draft = checkNotNull(display.vm.editor.state.value.draft)
                 val explicit = draft.copy(textSizeSp = 26f)

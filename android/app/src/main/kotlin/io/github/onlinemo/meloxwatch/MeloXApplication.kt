@@ -110,7 +110,6 @@ import io.github.onlinemo.meloxwatch.data.playlistsexchange.RoomPlaylistExchange
 import io.github.onlinemo.meloxwatch.data.queue.QueueStore
 import io.github.onlinemo.meloxwatch.data.queue.RoomQueueStore
 import io.github.onlinemo.meloxwatch.data.scan.LocalScanEngine
-import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.data.themes.AppearancePreferencesStore
 import io.github.onlinemo.meloxwatch.data.themes.AppearancePreferencesStoreFactory
@@ -580,7 +579,7 @@ class MeloXApplication : Application() {
                     mutableFolderMaintenanceIssue.value = folderPlaylistMaintainer.resume().issue
                 }
                 scans.state.collectLatest { state ->
-                    if (state?.phase == ScanPhase.COMPLETED && state.token.mode == ScanMode.FULL &&
+                    if (state?.phase == ScanPhase.COMPLETED &&
                         state.coverage.permitsAbsence && state.counters.failed == 0L && state.issue == null) attempt {
                         mutableFolderMaintenanceIssue.value = folderPlaylistMaintainer.afterScan(state).issue
                     }
