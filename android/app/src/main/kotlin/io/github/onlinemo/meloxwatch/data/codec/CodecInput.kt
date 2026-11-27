@@ -102,6 +102,8 @@ internal data class LocalCodecFormat(
     val version: Int? = null,
     val compressionLevel: Int? = null,
     val tagOffset: Long? = null,
+    val tagEndExclusive: Long? = null,
+    val apeTagMinimumOffset: Long? = null,
 ) {
     val durationMs: Long get() = codecAdd(codecMultiply(sourceFrames / inputSampleRate, 1000),
         codecMultiply(sourceFrames % inputSampleRate, 1000) / inputSampleRate)

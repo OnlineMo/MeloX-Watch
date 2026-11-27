@@ -3,6 +3,7 @@ package io.github.onlinemo.meloxwatch.ui.dsp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -13,13 +14,19 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.stringResource
@@ -32,6 +39,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import io.github.onlinemo.meloxwatch.R
+import io.github.onlinemo.meloxwatch.ui.DspNamedTextRole
+import io.github.onlinemo.meloxwatch.ui.DspVisibleFontText
 import io.github.onlinemo.meloxwatch.playback.dsp.BuiltinDspPresets
 import io.github.onlinemo.meloxwatch.playback.dsp.DspActualState
 import io.github.onlinemo.meloxwatch.playback.dsp.DspLimits
@@ -58,11 +67,12 @@ private enum class DspSection { OVERVIEW, EQUALIZER, PRESETS, REPLAY_GAIN, CHANN
 
 /** 外层提供圆屏安全区及滚动；所有设置均复用完整触区的 Foundation 控件。 */
 @Composable
-fun WatchDspSettings(
+internal fun WatchDspSettings(
     state: DspEditorState,
     actual: DspActualState,
     model: DspViewModel,
     visible: Boolean,
+    fontText: DspVisibleFontText? = null,
     onBack: () -> Unit,
 ) {
     if (!visible) return
@@ -105,7 +115,7 @@ fun WatchDspSettings(
                     WatchActionRow(stringResource(R.string.dsp_limiter), onClick = { sectionName = DspSection.LIMITER.name })
                 }
                 DspSection.EQUALIZER -> EqualizerSettings(draft, actual, state.editable, model)
-                DspSection.PRESETS -> PresetSettings(state, model)
+                DspSection.PRESETS -> PresetSettings(state, model, fontText)
                 DspSection.REPLAY_GAIN -> ReplayGainSettings(draft, actual, state.editable, model)
                 DspSection.CHANNELS -> ChannelSettings(draft, actual, state.editable, model)
                 DspSection.LIMITER -> LimiterSettings(draft, state.editable, model)
@@ -163,7 +173,7 @@ private fun EqualizerSettings(draft: DspSettings, actual: DspActualState, editab
 }
 
 @Composable
-private fun PresetSettings(state: DspEditorState, model: DspViewModel) {
+private fun PresetSettings(state: DspEditorState, model: DspViewModel, fontText: DspVisibleFontText?) {
     WatchSettingTitle(stringResource(R.string.dsp_presets))
     val draft = state.draft ?: return
     var name by remember { mutableStateOf("") }
@@ -178,26 +188,38 @@ private fun PresetSettings(state: DspEditorState, model: DspViewModel) {
             }), draft.selectedPresetId == preset.id, state.editable, onSelect = { model.selectPreset(preset.id) })
         }
         for (preset in state.presets) {
-            WatchChoiceRow(preset.name, draft.selectedPresetId == preset.id, state.editable,
-                onSelect = { model.selectPreset(preset.id) })
-            WatchActionRow(stringResource(R.string.dsp_rename_preset, preset.name), state.editable, onClick = {
-                renameTarget = preset
-                name = preset.name
-            })
-            WatchActionRow(stringResource(R.string.dsp_replace_curve, preset.name), state.editable,
-                onClick = { model.saveNamedPreset(preset.name, preset.id) })
-            if (deleteId == preset.id) {
-                WatchText(stringResource(R.string.dsp_delete_confirm, preset.name))
-                WatchActionRow(stringResource(R.string.dsp_delete_yes), state.editable, onClick = {
-                    model.deletePreset(preset.id)
-                    deleteId = null
-                })
-                WatchActionRow(stringResource(R.string.dsp_keep), state.editable, onClick = { deleteId = null })
-            } else WatchActionRow(stringResource(R.string.dsp_delete_preset, preset.name), state.editable,
-                onClick = { deleteId = preset.id })
+            key(preset.id) {
+                VisibleDspPresetText(fontText, preset.id, DspNamedTextRole.CHOICE, preset.name) {
+                    WatchChoiceRow(preset.name, draft.selectedPresetId == preset.id, state.editable,
+                        onSelect = { model.selectPreset(preset.id) })
+                }
+                VisibleDspPresetText(fontText, preset.id, DspNamedTextRole.RENAME, preset.name) {
+                    WatchActionRow(stringResource(R.string.dsp_rename_preset, preset.name), state.editable, onClick = {
+                        renameTarget = preset
+                        name = preset.name
+                    })
+                }
+                VisibleDspPresetText(fontText, preset.id, DspNamedTextRole.REPLACE, preset.name) {
+                    WatchActionRow(stringResource(R.string.dsp_replace_curve, preset.name), state.editable,
+                        onClick = { model.saveNamedPreset(preset.name, preset.id) })
+                }
+                if (deleteId == preset.id) {
+                    VisibleDspPresetText(fontText, preset.id, DspNamedTextRole.DELETE, preset.name) {
+                        WatchText(stringResource(R.string.dsp_delete_confirm, preset.name))
+                    }
+                    WatchActionRow(stringResource(R.string.dsp_delete_yes), state.editable, onClick = {
+                        model.deletePreset(preset.id)
+                        deleteId = null
+                    })
+                    WatchActionRow(stringResource(R.string.dsp_keep), state.editable, onClick = { deleteId = null })
+                } else VisibleDspPresetText(fontText, preset.id, DspNamedTextRole.DELETE, preset.name) {
+                    WatchActionRow(stringResource(R.string.dsp_delete_preset, preset.name), state.editable,
+                        onClick = { deleteId = preset.id })
+                }
+            }
         }
     }
-    PresetNameInput(name, state.editable) { if (it.length <= DspLimits.MAX_NAME_CHARACTERS) name = it }
+    PresetNameInput(name, state.editable, fontText) { if (it.length <= DspLimits.MAX_NAME_CHARACTERS) name = it }
     val renaming = renameTarget
     if (renaming != null) {
         WatchActionRow(stringResource(R.string.dsp_rename), state.editable && name.isNotBlank(), onClick = {
@@ -236,6 +258,7 @@ private fun ReplayGainSettings(draft: DspSettings, actual: DspActualState, edita
         ReplayGainTagSource.NONE -> R.string.dsp_tag_none
         ReplayGainTagSource.ID3 -> R.string.dsp_tag_id3
         ReplayGainTagSource.VORBIS -> R.string.dsp_tag_vorbis
+        ReplayGainTagSource.APE -> R.string.dsp_tag_ape
         ReplayGainTagSource.MIXED -> R.string.dsp_tag_mixed
     }))
     actual.replayGainTags.trackGainDb?.let { WatchText(stringResource(R.string.dsp_track_tag, realDbText(it))) }
@@ -296,11 +319,13 @@ private fun LimiterSettings(draft: DspSettings, editable: Boolean, model: DspVie
 }
 
 @Composable
-private fun PresetNameInput(value: String, enabled: Boolean, onValue: (String) -> Unit) {
+private fun PresetNameInput(value: String, enabled: Boolean, fontText: DspVisibleFontText?, onValue: (String) -> Unit) {
     val colors = LocalWatchThemeColors.current
     val fonts = LocalWatchThemeFonts.current
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
+    val registration = remember(fontText) { fontText?.input() }
+    val visibleText = rememberDspTextModifier(registration, value)
     val label = stringResource(R.string.dsp_preset_name)
     WatchText(label, primary = true)
     BasicTextField(value, onValueChange = onValue, enabled = enabled, singleLine = true,
@@ -315,8 +340,41 @@ private fun PresetNameInput(value: String, enabled: Boolean, onValue: (String) -
         modifier = Modifier.fillMaxWidth().heightIn(min = watchRowMinimum()).semantics { contentDescription = label }
             .background(colors.surface, RoundedCornerShape(watchSpacing(10.dp)))
             .border(1.dp, colors.outline, RoundedCornerShape(watchSpacing(10.dp)))
-            .padding(watchSpacing(12.dp)))
+            .padding(watchSpacing(12.dp)).then(visibleText))
 }
+
+@Composable
+private fun VisibleDspPresetText(
+    fontText: DspVisibleFontText?,
+    presetId: String,
+    role: DspNamedTextRole,
+    text: String,
+    content: @Composable () -> Unit,
+) {
+    if (fontText == null) { content(); return }
+    val registration = remember(fontText, presetId, role) { fontText.preset(presetId, role) }
+    Box(rememberDspTextModifier(registration, text)) { content() }
+}
+
+/** Clipped layout visibility drives updates; media/scroll clocks create no font work. */
+@Composable
+private fun rememberDspTextModifier(registration: DspVisibleFontText.Registration?, text: String): Modifier {
+    val currentText by rememberUpdatedState(text)
+    val visibility = remember(registration) { DspTextVisibility() }
+    DisposableEffect(registration) {
+        registration?.attach()
+        onDispose { registration?.close() }
+    }
+    SideEffect { registration?.present(text, visibility.displayed) }
+    return if (registration == null) Modifier else Modifier.onGloballyPositioned { coordinates ->
+        val bounds = if (coordinates.isAttached) coordinates.boundsInWindow() else null
+        visibility.displayed = bounds != null && bounds.width.isFinite() && bounds.height.isFinite() &&
+            bounds.width > 0f && bounds.height > 0f
+        registration.present(currentText, visibility.displayed)
+    }
+}
+
+private class DspTextVisibility(var displayed: Boolean = false)
 
 private fun dbText(value: Int): String = realDbText(value / 10.0)
 private fun realDbText(value: Double): String = String.format(Locale.ROOT, "%+.1f dB", value)

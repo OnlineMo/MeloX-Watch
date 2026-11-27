@@ -174,8 +174,9 @@ tasks.withType<Test>().configureEach {
         nativeCrashDirectory.get().asFile.mkdirs()
         maxParallelForks = 1
         val workerLimit = gradle.startParameter.maxWorkerCount
+        // Ordinary PRs use temporary Debug signing; that flag does not determine test resources.
         val eligible = System.getenv("GITHUB_ACTIONS") == "true" &&
-            System.getenv("CI_UNSIGNED_APK") == "true" && System.getenv("GITHUB_EVENT_NAME") == "pull_request"
+            System.getenv("GITHUB_EVENT_NAME") == "pull_request" && nativeCrashPhase == "package-test-debug"
         var probeStatus = if (eligible) "unavailable" else "not-requested"
         var resources: Map<*, *>? = null
         var interrupted: InterruptedException? = null

@@ -270,7 +270,9 @@ class MainActivity : ComponentActivity() {
         aboutViewModel = ViewModelProvider(this)[AboutViewModel::class.java]
         queueViewModel = ViewModelProvider(this)[QueueViewModel::class.java]
         libraryViewModel = ViewModelProvider(this)[LibraryViewModel::class.java]
-        sourcesViewModel = ViewModelProvider(this)[SourcesViewModel::class.java]
+        sourcesViewModel = ViewModelProvider(this, viewModelFactory {
+            initializer { SourcesViewModel(this@MainActivity.application, createSavedStateHandle()) }
+        })[SourcesViewModel::class.java]
         fileOperationsViewModel = ViewModelProvider(this)[FileOperationsViewModel::class.java]
         listeningViewModel = ViewModelProvider(this)[ListeningViewModel::class.java]
         val app = application as MeloXApplication
@@ -945,6 +947,14 @@ private fun ProbeApp(
     val renderPage: @Composable (ProbePage, Boolean, ProbePageRuntime.SelectionBinding?) -> Unit = { page, active, selection ->
         val exactPage = rememberProbePresentedPage(pageRuntime, page.presentationKind(), selection, active && presented)
         val visiblePage = exactPage?.visibleNow == true
+        val dspFontText = remember(exactPage, page) {
+            if (page == ProbePage.DSP && exactPage != null) DspVisibleFontText { exactPage.visibleNow } else null
+        }
+        DisposableEffect(dspFontText) {
+            onDispose { dspFontText?.close() }
+        }
+        val dspText = dspFontText?.snapshot ?: DspFontTextSnapshot.EMPTY
+        val retireDspText = remember(dspFontText) { { dspFontText?.close(); Unit } }
         DisposableEffect(exactPage, metadataLookupViewModel, page) {
             val kind = when (page) {
                 ProbePage.LOCAL_LYRICS_LOOKUP -> LocalMetadataKind.LYRICS
@@ -1255,7 +1265,7 @@ private fun ProbeApp(
                                 }
                             }
                             ProbePage.DSP -> item(key = "dsp:settings") {
-                                WatchDspSettings(dsp, dspActual, dspViewModel, visiblePage, onBack = back)
+                                WatchDspSettings(dsp, dspActual, dspViewModel, visiblePage, fontText = dspFontText, onBack = back)
                             }
                             ProbePage.QUEUE -> queueContent(
                                 state = queue,
@@ -1320,7 +1330,8 @@ private fun ProbeApp(
             if (page in setOf(ProbePage.LYRICS, ProbePage.LYRICS_FONTS, ProbePage.APPEARANCE)) renderContent()
             else ProbeThemeUiFonts(app, exactPage, appearance.theme,
                 probePageVisibleText(page, state, library, queue, playlists, playlistEntry, visibleKeys,
-                    online = online, meting = meting, about = about), renderContent)
+                    online = online, meting = meting, about = about, dspText = dspText),
+                textIssue = dspText.issue, onRetireText = retireDspText, content = renderContent)
         }
     }
     if (state.page in setOf(ProbePage.QUEUE, ProbePage.PLAYBACK, ProbePage.LYRICS)) {

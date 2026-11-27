@@ -3,7 +3,10 @@ package io.github.onlinemo.meloxwatch.ui.library
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Looper
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.lifecycle.ViewModelStore
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.data.backup.BackupStartupState
@@ -59,6 +62,7 @@ import org.robolectric.shadows.util.DataSource
 class SourcesViewModelTest {
     private lateinit var app: MeloXApplication
     private lateinit var store: ViewModelStore
+    private lateinit var savedState: SavedStateHandle
     private lateinit var viewModel: SourcesViewModel
     private var beforeMetadata: (() -> Unit)? = null
     private val releases = mutableListOf<CountDownLatch>()
@@ -76,7 +80,8 @@ class SourcesViewModelTest {
         }
         assertTrue(app.backups.startup.value is BackupStartupState.Ready)
         store = ViewModelStore()
-        viewModel = ViewModelProvider(store, ViewModelProvider.AndroidViewModelFactory(app))[SourcesViewModel::class.java]
+        savedState = SavedStateHandle()
+        viewModel = createSourcesModel()
         // Only the platform decoder is controlled; source identity, file bytes and proof use production code.
         DataSource.setFileDescriptorTransform { _, _ -> beforeMetadata?.invoke(); METADATA_SOURCE }
         ShadowMediaMetadataRetriever.addMetadata(METADATA_SOURCE, MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO, "yes")
@@ -112,6 +117,140 @@ class SourcesViewModelTest {
         awaitState { !it.working && it.filterDraft == null && it.rules?.shortAudioFilter == false }
         assertFalse(app.library.rules().shortAudioFilter)
         assertEquals(trackCount, app.library.overview().totalTracks)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aFilterProposalSurvivesAFreshOwnerButCannotWriteUntilExplicitReview(): Unit = runBlocking {
+        val original = app.library.rules()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        val scan = app.scans.state.value
+        viewModel.editFilter()
+        val draft = requireNotNull(viewModel.uiState.value.filterDraft)
+        recreateFilterEditor()
+        val restored = viewModel.uiState.value
+        assertEquals(draft, restored.filterDraft)
+        assertEquals(original.revision, restored.filterBaseRevision)
+        assertTrue(restored.filterRequiresReview)
+        assertFalse(restored.canSaveFilter)
+        viewModel.saveFilter()
+        assertEquals(original, app.library.rules())
+        assertEquals(scan, app.scans.state.value)
+
+        viewModel.reviewFilter()
+        awaitState { !it.working && it.canSaveFilter }
+        assertEquals(original, app.library.rules())
+        viewModel.saveFilter()
+        awaitState { !it.working && it.filterDraft == null }
+        assertEquals(draft, app.library.rules().shortAudioFilter)
+        assertEquals(scan, app.scans.state.value)
+        assertTrue(savedState.keys().isEmpty())
+    }
+
+    @Test(timeout = 30_000L)
+    fun leavingOrBackgroundingThePageRetiresReadinessButKeepsTheFilterDraft(): Unit = runBlocking {
+        val original = app.library.rules()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        viewModel.restoreFilterDefaults()
+        val draft = viewModel.uiState.value.filterDraft
+        assertNotNull(draft)
+        viewModel.onBackground()
+        viewModel.saveFilter()
+        assertEquals(original, app.library.rules())
+        assertTrue(viewModel.uiState.value.filterRequiresReview)
+        viewModel.onHidden()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        assertEquals(draft, viewModel.uiState.value.filterDraft)
+        assertFalse(viewModel.uiState.value.canSaveFilter)
+        viewModel.reviewFilter()
+        awaitState { !it.working && it.canSaveFilter }
+        assertEquals(original, app.library.rules())
+    }
+
+    @Test(timeout = 30_000L)
+    fun aRulesChangeAfterReviewKeepsTheDraftAndRequiresANewExplicitRead(): Unit = runBlocking {
+        val original = app.library.rules()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        viewModel.editFilter()
+        val draft = requireNotNull(viewModel.uiState.value.filterDraft)
+        recreateFilterEditor()
+        val changed = app.library.setShortAudioFilter(original.revision, draft)
+        viewModel.reload()
+        awaitState { !it.working && it.rules?.revision == changed.revision }
+        assertEquals(original.revision, viewModel.uiState.value.filterBaseRevision)
+        assertTrue(viewModel.uiState.value.filterRequiresReview)
+        viewModel.saveFilter()
+        assertEquals(changed, app.library.rules())
+        viewModel.reviewFilter()
+        awaitState { !it.working && it.canSaveFilter }
+
+        val newer = app.library.setShortAudioFilter(changed.revision, !draft)
+        viewModel.saveFilter()
+        val conflicted = awaitState { !it.working && it.notice == SourcesNotice.RULES_CONFLICT }
+        assertEquals(draft, conflicted.filterDraft)
+        assertTrue(conflicted.filterRequiresReview)
+        assertFalse(conflicted.canSaveFilter)
+        assertEquals(newer, app.library.rules())
+        viewModel.reviewFilter()
+        awaitState { !it.working && it.canSaveFilter && it.filterBaseRevision == newer.revision }
+        viewModel.saveFilter()
+        awaitState { !it.working && it.filterDraft == null }
+        assertEquals(draft, app.library.rules().shortAudioFilter)
+    }
+
+    @Test(timeout = 30_000L)
+    fun reviewingThenBackgroundingTheDraftDoesNotDrainAnUnrelatedProviderRead(): Unit = runBlocking {
+        val original = app.library.rules()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        viewModel.restoreFilterDefaults()
+        viewModel.onBackground()
+        viewModel.onVisible()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val shared = sharedReader(scope, "filter-review-provider-reader")
+        try {
+            assertTrue(shared.entered.await(5L, TimeUnit.SECONDS))
+            viewModel.reviewFilter()
+            awaitState { !it.working && it.canSaveFilter }
+            assertFalse(shared.job.isCompleted)
+            assertFalse(shared.closed.get())
+            assertEquals(original, app.library.rules())
+            viewModel.onBackground()
+            viewModel.saveFilter()
+            assertNotNull(viewModel.uiState.value.filterDraft)
+            assertTrue(viewModel.uiState.value.filterRequiresReview)
+            assertEquals(original, app.library.rules())
+            assertFalse(shared.job.isCompleted)
+        } finally {
+            shared.release.countDown()
+            shared.job.await()
+            scope.cancel()
+        }
+    }
+
+    @Test(timeout = 30_000L)
+    fun cancellingAndRejectingCorruptRestorationLeaveTheSavedRulesUntouched(): Unit = runBlocking {
+        val original = app.library.rules()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        viewModel.editFilter()
+        val key = savedState.keys().single()
+        viewModel.cancelFilter()
+        recreateFilterEditor()
+        assertNull(viewModel.uiState.value.filterDraft)
+        assertTrue(savedState.keys().isEmpty())
+        assertEquals(original, app.library.rules())
+
+        savedState[key] = arrayListOf<Any>(1, -1L, true)
+        recreateFilterEditor()
+        assertTrue(viewModel.uiState.value.filterDraftRejected)
+        assertNull(viewModel.uiState.value.filterDraft)
+        assertFalse(viewModel.uiState.value.canSaveFilter)
+        assertTrue(savedState.keys().isEmpty())
+        assertEquals(original, app.library.rules())
     }
 
     @Test
@@ -512,6 +651,22 @@ class SourcesViewModelTest {
             shared.job.await()
             scope.cancel()
         }
+    }
+
+    private fun createSourcesModel(): SourcesViewModel = ViewModelProvider(store, viewModelFactory {
+        initializer { SourcesViewModel(app, savedState) }
+    })[SourcesViewModel::class.java]
+
+    private suspend fun recreateFilterEditor() {
+        val restored = SavedStateHandle(savedState.keys().associateWith { savedState.get<Any?>(it) })
+        store.clear()
+        awaitState { !it.working }
+        withTimeout(10_000L) { app.localProviderIo.awaitIdle() }
+        savedState = restored
+        store = ViewModelStore()
+        viewModel = createSourcesModel()
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
     }
 
     private fun sharedReader(scope: CoroutineScope, name: String, startImmediately: Boolean = true): SharedRead {

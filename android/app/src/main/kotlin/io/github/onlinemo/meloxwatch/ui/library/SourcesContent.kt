@@ -177,11 +177,18 @@ internal fun LazyListScope.sourcesContent(
             LibraryText(stringResource(R.string.library_filter_scope))
             val requested = state.filterDraft ?: rules.shortAudioFilter
             LibraryText(stringResource(R.string.library_filter_value, stringResource(if (requested) R.string.prefs_on else R.string.prefs_off)))
-            LibraryButton(stringResource(R.string.library_edit_filter), !state.working, model::editFilter)
-            LibraryButton(stringResource(R.string.prefs_reset), !state.working, model::restoreFilterDefaults)
+            if (state.filterDraftRejected) LibraryText(stringResource(R.string.library_filter_draft_rejected))
+            LibraryButton(stringResource(R.string.library_edit_filter), state.filterEditable, model::editFilter)
+            LibraryButton(stringResource(R.string.prefs_reset), state.filterEditable, model::restoreFilterDefaults)
             if (state.filterDraft != null) {
-                LibraryButton(stringResource(R.string.prefs_save), !state.working, model::saveFilter)
-                LibraryButton(stringResource(R.string.prefs_cancel_edit), !state.working, model::cancelFilter)
+                LibraryText(stringResource(R.string.library_filter_saved_value,
+                    stringResource(if (rules.shortAudioFilter) R.string.prefs_on else R.string.prefs_off)))
+                if (state.filterRequiresReview) {
+                    LibraryText(stringResource(R.string.library_filter_review_required))
+                    LibraryButton(stringResource(R.string.library_filter_review), state.canReviewFilter, model::reviewFilter)
+                }
+                LibraryButton(stringResource(R.string.prefs_save), state.canSaveFilter, model::saveFilter)
+                LibraryButton(stringResource(R.string.prefs_cancel_edit), state.filterEditable, model::cancelFilter)
             }
         }
     } }

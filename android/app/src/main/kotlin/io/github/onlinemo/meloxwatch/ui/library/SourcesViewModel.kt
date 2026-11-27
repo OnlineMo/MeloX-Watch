@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.data.fileoperations.FileOperationConfirmation
@@ -76,6 +77,10 @@ data class SourcesUiState(
     val rules: LibraryRules? = null,
     val exclusions: LibraryExclusionPage? = null,
     val filterDraft: Boolean? = null,
+    val filterBaseRevision: Long? = null,
+    val filterRequiresReview: Boolean = false,
+    val filterDraftRejected: Boolean = false,
+    val filterForeground: Boolean = false,
     val working: Boolean = false,
     val stopping: Boolean = false,
     val waitingForFileOperation: Boolean = false,
@@ -84,12 +89,25 @@ data class SourcesUiState(
     val importIssue: ImportIssue? = null,
     val fileIssue: FileOperationIssue? = null,
     val notice: SourcesNotice? = null,
-)
+) {
+    val filterEditable: Boolean get() = filterForeground && !working && !stopping && rules != null
+    val canReviewFilter: Boolean get() = filterEditable && filterDraft != null && filterRequiresReview
+    val canSaveFilter: Boolean get() = filterEditable && filterDraft != null && !filterRequiresReview &&
+        filterBaseRevision != null && filterBaseRevision >= 0L && filterBaseRevision < Long.MAX_VALUE &&
+        filterBaseRevision == rules?.revision
+}
 
 /** Selecting a document only previews it. Grant retention, indexing and copying are separate actions. */
-class SourcesViewModel(application: Application) : AndroidViewModel(application) {
+class SourcesViewModel(application: Application, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
     private val app = application as MeloXApplication
-    private val mutableState = MutableStateFlow(SourcesUiState())
+    private val restoredFilter = restoreFilterProposal()
+    @Volatile private var filterIntent = Any()
+    private val mutableState = MutableStateFlow(SourcesUiState(
+        filterDraft = restoredFilter.proposal?.second,
+        filterBaseRevision = restoredFilter.proposal?.first,
+        filterRequiresReview = restoredFilter.proposal != null,
+        filterDraftRejected = restoredFilter.rejected,
+    ))
     val uiState = mutableState.asStateFlow()
     private var requestedMediaVolume: String? = null
     private var visible = false
@@ -100,6 +118,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     private var selectionRevision = 0L
 
     fun onVisible() {
+        mutableState.update { it.copy(filterForeground = true) }
         if (visible) return
         visible = true
         observer = viewModelScope.launch {
@@ -120,6 +139,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onHidden() {
+        retireFilterReadiness()
         visible = false
         observer?.cancel(); observer = null
         cancelRead()
@@ -127,6 +147,7 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun onBackground() {
+        retireFilterReadiness()
         cancelRead()
         copyJob?.cancel()
     }
@@ -137,7 +158,10 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         val page = app.library.sourcesPage()
         val rules = app.library.rules()
         val exclusions = app.library.exclusionPage()
-        mutableState.update { it.copy(page = page, rules = rules, exclusions = exclusions, filterDraft = null) }
+        currentCoroutineContext().ensureActive()
+        mutableState.update { state -> state.copy(page = page, rules = rules, exclusions = exclusions,
+            filterRequiresReview = state.filterDraft != null &&
+                (state.filterRequiresReview || state.filterBaseRevision != rules.revision)) }
         val issue = app.recoverLocalState()
         val recoveredPage = app.library.sourcesPage()
         mutableState.update { it.copy(page = recoveredPage, importIssue = issue) }
@@ -336,23 +360,127 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     }
 
     fun editFilter() {
-        val current = mutableState.value.rules ?: return
-        mutableState.update { it.copy(filterDraft = !current.shortAudioFilter) }
+        val state = mutableState.value
+        if (!state.filterEditable) return
+        val rules = requireNotNull(state.rules)
+        filterIntent = Any()
+        mutableState.update { it.copy(filterDraft = !rules.shortAudioFilter,
+            filterBaseRevision = state.filterBaseRevision ?: rules.revision, filterDraftRejected = false) }
+        recordFilterProposal()
     }
 
-    fun cancelFilter() { mutableState.update { it.copy(filterDraft = null) } }
+    fun cancelFilter() {
+        filterIntent = Any()
+        mutableState.update { it.copy(filterDraft = null, filterBaseRevision = null,
+            filterRequiresReview = false, filterDraftRejected = false) }
+        recordFilterProposal()
+    }
 
     fun restoreFilterDefaults() {
-        if (mutableState.value.rules == null || mutableState.value.working) return
-        mutableState.update { it.copy(filterDraft = false) }
+        val state = mutableState.value
+        if (!state.filterEditable) return
+        filterIntent = Any()
+        mutableState.update { it.copy(filterDraft = false,
+            filterBaseRevision = state.filterBaseRevision ?: requireNotNull(state.rules).revision,
+            filterDraftRejected = false) }
+        recordFilterProposal()
     }
 
-    fun saveFilter() = runAction {
+    /** A restored proposal becomes ready only after an explicit, successful read of current rules. */
+    fun reviewFilter() {
         val state = mutableState.value
-        val rules = state.rules ?: return@runAction
-        val draft = state.filterDraft ?: return@runAction
-        val saved = app.fileOperations.withExclusiveLibraryMutation { app.library.setShortAudioFilter(rules.revision, draft) }
-        mutableState.update { it.copy(rules = saved, filterDraft = null, notice = SourcesNotice.RULES_SAVED) }
+        if (!state.canReviewFilter) return
+        val draft = requireNotNull(state.filterDraft)
+        val base = requireNotNull(state.filterBaseRevision)
+        val intent = filterIntent
+        runFilterAction {
+            app.requireBackupStorageReady()
+            val rules = app.library.rules()
+            currentCoroutineContext().ensureActive()
+            if (!currentFilterIntent(intent, draft, base)) return@runFilterAction
+            if (rules.revision == Long.MAX_VALUE) throw LibraryException(LibraryIssue.RECOVERY_REQUIRED)
+            mutableState.update { it.copy(rules = rules, filterBaseRevision = rules.revision,
+                filterRequiresReview = false) }
+            recordFilterProposal()
+        }
+    }
+
+    fun saveFilter() {
+        val state = mutableState.value
+        if (!state.canSaveFilter) return
+        val draft = requireNotNull(state.filterDraft)
+        val base = requireNotNull(state.filterBaseRevision)
+        val intent = filterIntent
+        runFilterAction {
+            app.requireBackupStorageReady()
+            val rules = app.library.rules()
+            currentCoroutineContext().ensureActive()
+            if (!currentFilterIntent(intent, draft, base) || mutableState.value.filterRequiresReview) return@runFilterAction
+            if (rules.revision != base) {
+                mutableState.update { it.copy(rules = rules, filterRequiresReview = true) }
+                throw LibraryException(LibraryIssue.CONFLICT)
+            }
+            val saved = app.fileOperations.withExclusiveLibraryMutation {
+                currentCoroutineContext().ensureActive()
+                if (!currentFilterIntent(intent, draft, base) || mutableState.value.filterRequiresReview) {
+                    throw CancellationException("Filter proposal retired")
+                }
+                app.library.setShortAudioFilter(base, draft)
+            }
+            currentCoroutineContext().ensureActive()
+            if (!currentFilterIntent(intent, draft, base)) return@runFilterAction
+            mutableState.update { it.copy(rules = saved, filterDraft = null, filterBaseRevision = null,
+                filterRequiresReview = false, notice = SourcesNotice.RULES_SAVED) }
+            recordFilterProposal()
+        }
+    }
+
+    /** Rules tasks retire only provider reads they actually acquire, including journal checks. */
+    private fun runFilterAction(block: suspend () -> Unit) {
+        val retirement = app.localProviderIo.trackReads()
+        runAction(awaitReadRetirement = { retirement.awaitRetired() }) {
+            withContext(retirement) { block() }
+        }
+    }
+
+    private fun currentFilterIntent(intent: Any, draft: Boolean, base: Long): Boolean {
+        val state = mutableState.value
+        return filterIntent === intent && state.filterForeground && state.filterDraft == draft &&
+            state.filterBaseRevision == base
+    }
+
+    private fun retireFilterReadiness() {
+        filterIntent = Any()
+        mutableState.update { it.copy(filterForeground = false, filterRequiresReview = it.filterDraft != null) }
+    }
+
+    /** Only a format number, original revision and Boolean survive; no task or access ticket does. */
+    private fun recordFilterProposal() {
+        val state = mutableState.value
+        val base = state.filterBaseRevision
+        val draft = state.filterDraft
+        if (base == null || draft == null) savedState.remove<Any?>(KEY_FILTER_PROPOSAL)
+        else savedState[KEY_FILTER_PROPOSAL] = arrayListOf<Any>(FILTER_PROPOSAL_VERSION, base, draft)
+    }
+
+    private fun restoreFilterProposal(): RestoredFilter {
+        if (!savedState.contains(KEY_FILTER_PROPOSAL)) return RestoredFilter(null, false)
+        val fields = savedState.get<Any?>(KEY_FILTER_PROPOSAL) as? List<*>
+        val revision = if (fields?.size == 3) fields[1] as? Long else null
+        val enabled = if (fields?.size == 3) fields[2] as? Boolean else null
+        if (fields?.size == 3 && fields[0] as? Int == FILTER_PROPOSAL_VERSION &&
+            revision != null && revision >= 0L && enabled != null) {
+            return RestoredFilter(revision to enabled, false)
+        }
+        savedState.remove<Any?>(KEY_FILTER_PROPOSAL)
+        return RestoredFilter(null, true)
+    }
+
+    private data class RestoredFilter(val proposal: Pair<Long, Boolean>?, val rejected: Boolean)
+
+    override fun onCleared() {
+        retireFilterReadiness()
+        super.onCleared()
     }
 
     fun excludeTrack(sourceId: String, nodeId: String) = runAction {
@@ -425,6 +553,8 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
         mutableState.update { state -> when (error) {
             is SourceReadException -> state.copy(sourceIssue = error.issue)
             is LibraryException -> state.copy(libraryIssue = error.issue,
+                filterRequiresReview = state.filterRequiresReview ||
+                    error.issue == LibraryIssue.CONFLICT && state.filterDraft != null,
                 notice = if (error.issue == LibraryIssue.CONFLICT && state.filterDraft != null) SourcesNotice.RULES_CONFLICT else null)
             is ImportException -> state.copy(importIssue = error.issue)
             is FileOperationException -> state.copy(fileIssue = error.issue)
@@ -522,6 +652,8 @@ class SourcesViewModel(application: Application) : AndroidViewModel(application)
     )
 
     private companion object {
+        const val KEY_FILTER_PROPOSAL = "sources:filter-proposal-v1"
+        const val FILTER_PROPOSAL_VERSION = 1
         // 与 DEV-005 单文件检查同用八秒初值，仅计算等待而非重设每个步骤的期限。
         const val SELECTION_WAIT_MS = 8_000L
         const val SELECTION_ADMISSION_COLLISIONS = 8
