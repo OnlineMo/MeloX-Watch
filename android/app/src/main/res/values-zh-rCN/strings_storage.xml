@@ -14,7 +14,9 @@
     <string name="storage_lyrics">已获取的歌词缓存</string>
     <string name="storage_recovery">恢复及传输暂存</string>
     <string name="storage_category">%1$s：%2$s · 已观察 %3$d 个文件</string>
-    <string name="storage_unknown_files">至少 %1$d 个引用或项目的容量尚未计量。</string>
+    <plurals name="storage_unknown_files">
+        <item quantity="other">至少 %1$d 个引用或项目的容量尚未计量。</item>
+    </plurals>
     <string name="storage_known_subtotal">已知小计：%1$s</string>
     <string name="storage_cleanup_required">上次统计尚未完成关闭，请重试统计存储。</string>
     <string name="storage_incomplete">部分容量无法统计。恢复访问权限或处理待完成操作后重试。</string>

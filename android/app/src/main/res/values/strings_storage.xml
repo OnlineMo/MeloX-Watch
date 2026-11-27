@@ -14,7 +14,10 @@
     <string name="storage_lyrics">Fetched lyrics cache</string>
     <string name="storage_recovery">Recovery and transfer staging</string>
     <string name="storage_category">%1$s: %2$s · Files observed: %3$d</string>
-    <string name="storage_unknown_files">At least %1$d references or entries have unmeasured capacity.</string>
+    <plurals name="storage_unknown_files">
+        <item quantity="one">At least %1$d reference or entry has unmeasured capacity.</item>
+        <item quantity="other">At least %1$d references or entries have unmeasured capacity.</item>
+    </plurals>
     <string name="storage_known_subtotal">Known subtotal: %1$s</string>
     <string name="storage_cleanup_required">The previous measurement has not finished closing. Retry storage measurement.</string>
     <string name="storage_incomplete">Some capacities could not be measured. Retry after access or pending work is resolved.</string>

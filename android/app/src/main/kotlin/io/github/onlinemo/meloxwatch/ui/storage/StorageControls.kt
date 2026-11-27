@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -74,7 +75,11 @@ fun StorageControls(model: StorageViewModel = rememberWatchViewModel(StorageView
 @Composable
 private fun Category(name: String, category: StorageCategory) {
     WatchText(stringResource(R.string.storage_category, name, observedBytes(category), category.files))
-    if (category.unknownFiles > 0L) WatchText(stringResource(R.string.storage_unknown_files, category.unknownFiles))
+    if (category.unknownFiles > 0L) {
+        // The plural selector uses Int; the displayed count retains the full Long subtotal.
+        val quantity = category.unknownFiles.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        WatchText(pluralStringResource(R.plurals.storage_unknown_files, quantity, category.unknownFiles))
+    }
     category.issue?.let { WatchText(stringResource(storageIssueText(it)), error = true) }
 }
 
