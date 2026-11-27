@@ -76,7 +76,7 @@ class IncrementalLocalScanEngineTest {
     private val metadataReads = mutableListOf<String>()
     private val badMetadata = mutableSetOf<String>()
 
-    @Before fun create() = runBlocking {
+    @Before fun create(): Unit = runBlocking {
         openDatabase()
         io = LocalProviderIo()
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -290,7 +290,7 @@ class IncrementalLocalScanEngineTest {
         assertEquals("Kept", tracks().single().metadata.title)
     }
 
-    @Test(timeout = 30_000L) fun guardedCheckpointAndFullPresenceCallsUseTheSameOriginalMutationFence() = runBlocking {
+    @Test(timeout = 30_000L) fun guardedCheckpointAndFullPresenceCallsUseTheSameOriginalMutationFence(): Unit = runBlocking {
         graph.put("1", 1L, "Kept"); full()
         val journal = SqliteFileOperationJournal.open(File(temporary.root, "file-guard.db"))
         try {
