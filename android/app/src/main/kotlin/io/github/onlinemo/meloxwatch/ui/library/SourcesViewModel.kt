@@ -127,6 +127,8 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     private var visible = false
     private var observer: Job? = null
     private var action: Job? = null
+    private var indexReloadAction: Job? = null
+    private var filterReviewRequest: Job? = null
     private var copyJob: Job? = null
     private var selectionRequest: Job? = null
     private var selectionRevision = 0L
@@ -151,7 +153,8 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
             launch { app.imports.progress.collect { progress -> mutableState.update { it.copy(importProgress = progress) } } }
             launch { app.library.observeOverview().collect { if (mutableState.value.page == null) reload() } }
         }
-        reload()
+        // Cached foreground returns refresh the index independently of journal recovery.
+        reloadSources(recoverLocal = mutableState.value.page == null)
         consumeIncoming()
     }
 
@@ -282,19 +285,27 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
         copyJob?.cancel()
     }
 
-    fun reload() = runTrackedReadAction(quietIfBusy = true) {
-        app.requireBackupStorageReady()
-        app.library.initialize()
-        val page = app.library.sourcesPage()
-        val rules = app.library.rules()
-        val exclusions = app.library.exclusionPage()
-        currentCoroutineContext().ensureActive()
-        mutableState.update { state -> state.copy(page = page, rules = rules, exclusions = exclusions,
-            filterRequiresReview = state.filterDraft != null &&
-                (state.filterRequiresReview || state.filterBaseRevision != rules.revision)) }
-        val issue = app.recoverLocalState()
-        val recoveredPage = app.library.sourcesPage()
-        mutableState.update { it.copy(page = recoveredPage, importIssue = issue) }
+    fun reload() = reloadSources(recoverLocal = true)
+
+    private fun reloadSources(recoverLocal: Boolean) {
+        if (action?.isCompleted == false) return
+        runTrackedReadAction(quietIfBusy = true) {
+            app.requireBackupStorageReady()
+            app.library.initialize()
+            val page = app.library.sourcesPage()
+            val rules = app.library.rules()
+            val exclusions = app.library.exclusionPage()
+            currentCoroutineContext().ensureActive()
+            mutableState.update { state -> state.copy(page = page, rules = rules, exclusions = exclusions,
+                filterRequiresReview = state.filterDraft != null &&
+                    (state.filterRequiresReview || state.filterBaseRevision != rules.revision)) }
+            if (recoverLocal) {
+                val issue = app.recoverLocalState()
+                val recoveredPage = app.library.sourcesPage()
+                mutableState.update { it.copy(page = recoveredPage, importIssue = issue) }
+            }
+        }
+        indexReloadAction = action.takeIf { !recoverLocal }
     }
 
     fun nextSources() {
@@ -597,19 +608,31 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     /** A restored proposal becomes ready only after an explicit, successful read of current rules. */
     fun reviewFilter() {
         val state = mutableState.value
-        if (!state.canReviewFilter) return
+        val indexReload = indexReloadAction?.takeIf { it === action && !it.isCompleted }
+        if (!state.canReviewFilter && (indexReload == null || !state.copy(working = false).canReviewFilter)) return
         val draft = requireNotNull(state.filterDraft)
         val base = requireNotNull(state.filterBaseRevision)
         val intent = filterIntent
-        runTrackedReadAction {
-            app.requireBackupStorageReady()
-            val rules = app.library.rules()
+        filterReviewRequest?.cancel()
+        if (indexReload != null) {
+            mutableState.update { it.copy(stopping = true) }
+            indexReload.cancel()
+        }
+        // The exact index refresh yields to explicit review; recovery keeps its original owner.
+        filterReviewRequest = viewModelScope.launch {
+            indexReload?.join()
             currentCoroutineContext().ensureActive()
-            if (!currentFilterIntent(intent, draft, base)) return@runTrackedReadAction
-            if (rules.revision == Long.MAX_VALUE) throw LibraryException(LibraryIssue.RECOVERY_REQUIRED)
-            mutableState.update { it.copy(rules = rules, filterBaseRevision = rules.revision,
-                filterRequiresReview = false) }
-            recordFilterProposal()
+            if (!currentFilterIntent(intent, draft, base) || !mutableState.value.canReviewFilter) return@launch
+            runTrackedReadAction {
+                app.requireBackupStorageReady()
+                val rules = app.library.rules()
+                currentCoroutineContext().ensureActive()
+                if (!currentFilterIntent(intent, draft, base)) return@runTrackedReadAction
+                if (rules.revision == Long.MAX_VALUE) throw LibraryException(LibraryIssue.RECOVERY_REQUIRED)
+                mutableState.update { it.copy(rules = rules, filterBaseRevision = rules.revision,
+                    filterRequiresReview = false) }
+                recordFilterProposal()
+            }
         }
     }
 
@@ -724,6 +747,7 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     fun cancelRead() {
         selectionRevision++
         selectionRequest?.cancel(); selectionRequest = null
+        filterReviewRequest?.cancel(); filterReviewRequest = null
         if (action?.isActive != true) return
         mutableState.update { it.copy(stopping = true) }
         action?.cancel()

@@ -131,12 +131,16 @@ class RoomCompanionTransferBackendTest {
     @Test(timeout = 30_000L)
     fun explicitPreviewRevalidationRejectsAChangedBaseBeforeReplacingTheOriginalTicket(): Unit = runBlocking {
         val source = seed(3)
-        val group = fixture.group(TransferDisplayKind.ALBUM, "Album", "Artist")
+        // Album subtitles use albumArtist, which this seed leaves absent rather than copying artist.
+        val group = fixture.group(TransferDisplayKind.ALBUM, "Album", "")
         val context = fixture.state(TransferDisplayKind.ALBUM, group.entityId)
+        assertEquals("Album", context.currentName)
+        assertEquals(3L, context.trackCount)
         val patch = TransferDisplayPatch.Rename("Original proposal")
         val preview = fixture.preview(context, patch)
-        val stored = fixture.database.transferRoomDao().preview(preview.previewId)
+        val stored = checkNotNull(fixture.database.transferRoomDao().preview(preview.previewId))
         fixture.append(source, listOf("later-preview" to LocalAudioMetadata(title = "Later", album = "Other", artist = "Artist")))
+        assertTrue(fixture.library.overview().revision > context.revision)
         val request = TransferRequest.PreviewDisplay(preview.previewId, fixture.scope, context.kind, context.entityId,
             context.revision, context.libraryRevision, patch)
         expectTransferIssue(TransferIssue.CONFLICT) { fixture.backend.previewDisplay(request, fixture.permit(TransferCapability.WRITE_DISPLAY_METADATA)) }

@@ -305,7 +305,10 @@ class LocalScanStopRecoveryTest {
         val fixture = fixture()
         val gate = blockNextBatch(fixture.access)
         driver.failPhases = setOf(ScanPhase.CANCELLED)
-        val token = fixture.engine.start(currentSource(), library.rules().revision)
+        // Start arguments must be ready before the blocked writer owns the repository mutex.
+        val source = currentSource()
+        val rulesRevision = library.rules().revision
+        val token = fixture.engine.start(source, rulesRevision)
         try {
             assertTrue(gate.entered.await(5L, TimeUnit.SECONDS))
             fixture.engine.cancel(token.scanId)
@@ -322,7 +325,7 @@ class LocalScanStopRecoveryTest {
             assertEquals(1L, driver.releaseWrite.count)
             assertEquals(countBefore + 1, driver.attempts(ScanPhase.CANCELLED))
             expect(SourceReadIssue.BUSY) { fixture.engine.retryStop(token.scanId) }
-            expect(SourceReadIssue.BUSY) { fixture.engine.start(currentSource(), library.rules().revision) }
+            expect(SourceReadIssue.BUSY) { fixture.engine.start(source, rulesRevision) }
             assertEquals(countBefore + 1, driver.attempts(ScanPhase.CANCELLED))
             driver.releaseWrite.countDown()
             withTimeout(5_000L) { fixture.engine.state.filterNotNull().first { it.token == token && it.phase == ScanPhase.CANCELLED } }
