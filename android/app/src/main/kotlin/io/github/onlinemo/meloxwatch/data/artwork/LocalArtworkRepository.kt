@@ -41,6 +41,7 @@ class LocalArtworkRepository(
     private val io: LocalProviderIo,
     private val validateRead: suspend (LocalReadDescriptor) -> LocalReadDescriptor,
     private val bitmaps: ThemeBitmapOwner = ThemeBitmapOwner(),
+    private val confirmedArtwork: (suspend (LocalReadDescriptor, Int) -> ThemeBitmapLease?)? = null,
 ) {
     private val sourceReader = AndroidArtworkReader(context)
     private val disk = ArtworkDiskCache(File(context.cacheDir, "artwork-v1"))
@@ -70,6 +71,8 @@ class LocalArtworkRepository(
     ): ThemeBitmapLease? {
         require(targetPx in 1..ArtworkLimits.OUTPUT_EDGE)
         currentCoroutineContext().ensureActive()
+        // Explicit local associations precede rebuildable covers; this callback accesses no HTTP.
+        confirmedArtwork?.invoke(descriptor, targetPx)?.let { return it }
         val baseKey = artworkKey(descriptor, path, targetPx)
         // Unknown content facts expire by request time; hidden UI does not run a refresh timer.
         val key = if (descriptor.providerContentToken != null || descriptor.verifiedContentToken != null) baseKey else

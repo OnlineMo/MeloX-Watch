@@ -1,6 +1,7 @@
 package io.github.onlinemo.meloxwatch.ui.lyrics.options
 
 import androidx.annotation.MainThread
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDisplayIssue
 import io.github.onlinemo.meloxwatch.data.lyrics.store.LyricsDisplayPreferences
@@ -14,7 +15,6 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 
 enum class LyricsDisplayNotice { SAVED, CANCELLED, CONFLICT, READ_REQUIRED }
 
@@ -27,13 +27,20 @@ data class LyricsDisplayEditorState(
 )
 
 /**
- * Preview is memory-only and keeps its original revision. Only an explicit save calls durable CAS.
+ * A preview keeps its original revision; only an explicit save calls durable CAS. SavedState retains
+ * the bounded proposal for review after process recreation, never a pending write or page event.
  * The caller owns the coroutine; admission remains occupied until the store's real write returns.
  */
 @MainThread
-class LyricsDisplayEditor(private val store: LyricsDisplayStore) : ViewModel() {
+class LyricsDisplayEditor private constructor(
+    private val store: LyricsDisplayStore,
+    private val drafts: LyricsDisplaySavedDrafts?,
+) : ViewModel() {
+    constructor(store: LyricsDisplayStore) : this(store, null)
+    internal constructor(store: LyricsDisplayStore, saved: SavedStateHandle) : this(store, LyricsDisplaySavedDrafts(saved))
+
     private val occupied = AtomicBoolean(false)
-    private val mutable = MutableStateFlow(LyricsDisplayEditorState())
+    private val mutable = MutableStateFlow(drafts?.restore() ?: LyricsDisplayEditorState())
     val state = mutable.asStateFlow()
     val settings = store.state
 
@@ -41,18 +48,18 @@ class LyricsDisplayEditor(private val store: LyricsDisplayStore) : ViewModel() {
         if (occupied.get() || mutable.value.draft != null || mutable.value.retry != null) return false
         val actual = store.state.value as? LyricsDisplayState.Ready
         if (actual == null) {
-            mutable.update { it.copy(issue = (store.state.value as? LyricsDisplayState.Unavailable)?.issue
-                ?: LyricsDisplayIssue.BUSY, notice = null) }
+            publish(mutable.value.copy(issue = (store.state.value as? LyricsDisplayState.Unavailable)?.issue
+                ?: LyricsDisplayIssue.BUSY, notice = null))
             return false
         }
-        mutable.value = LyricsDisplayEditorState(draft = actual.preferences)
+        publish(LyricsDisplayEditorState(draft = actual.preferences))
         return true
     }
 
     fun preview(next: LyricsDisplayPreferences): Boolean {
         val draft = mutable.value.draft ?: return false
         if (occupied.get() || next.revision != draft.revision) return false
-        mutable.value = LyricsDisplayEditorState(draft = next)
+        publish(LyricsDisplayEditorState(draft = next))
         return true
     }
 
@@ -61,30 +68,30 @@ class LyricsDisplayEditor(private val store: LyricsDisplayStore) : ViewModel() {
         return preview(LyricsDisplayPreferences(revision = draft.revision))
     }
 
-    /** A failed proposal is reviewed against verified storage before it can become a new preview. */
+    /** A retained proposal is reviewed against verified storage before it can become a new preview. */
     fun reviewRetry(): Boolean {
         if (occupied.get() || mutable.value.draft != null) return false
         val proposal = mutable.value.retry ?: return false
         val actual = store.state.value as? LyricsDisplayState.Ready
         if (actual == null) {
-            mutable.update { it.copy(issue = (store.state.value as? LyricsDisplayState.Unavailable)?.issue
-                ?: LyricsDisplayIssue.BUSY, notice = LyricsDisplayNotice.READ_REQUIRED) }
+            publish(mutable.value.copy(issue = (store.state.value as? LyricsDisplayState.Unavailable)?.issue
+                ?: LyricsDisplayIssue.BUSY, notice = LyricsDisplayNotice.READ_REQUIRED))
             return false
         }
         when {
             actual.preferences.revision > proposal.revision &&
                 actual.preferences == proposal.copy(revision = actual.preferences.revision) ->
-                mutable.value = LyricsDisplayEditorState(notice = LyricsDisplayNotice.SAVED)
+                publish(LyricsDisplayEditorState(notice = LyricsDisplayNotice.SAVED))
             actual.preferences.revision != proposal.revision ->
-                mutable.value = LyricsDisplayEditorState(notice = LyricsDisplayNotice.CONFLICT)
-            else -> mutable.value = LyricsDisplayEditorState(draft = proposal)
+                publish(LyricsDisplayEditorState(notice = LyricsDisplayNotice.CONFLICT))
+            else -> publish(LyricsDisplayEditorState(draft = proposal))
         }
         return true
     }
 
     fun cancel(): Boolean {
         if (occupied.get()) return false
-        mutable.value = LyricsDisplayEditorState(notice = LyricsDisplayNotice.CANCELLED)
+        publish(LyricsDisplayEditorState(notice = LyricsDisplayNotice.CANCELLED))
         return true
     }
 
@@ -97,35 +104,42 @@ class LyricsDisplayEditor(private val store: LyricsDisplayStore) : ViewModel() {
             occupied.set(false)
             return
         }
-        mutable.update { it.copy(working = true, issue = null, notice = null) }
         try {
+            publish(mutable.value.copy(working = true, issue = null, notice = null))
             // A changed companion/restore revision is a conflict, never permission to rebase a draft.
             val result = store.save(proposal.revision, proposal)
             currentCoroutineContext().ensureActive()
             when (result) {
                 is LyricsDisplayWriteResult.Saved, is LyricsDisplayWriteResult.Unchanged ->
-                    mutable.value = LyricsDisplayEditorState(working = true, notice = LyricsDisplayNotice.SAVED)
+                    publish(LyricsDisplayEditorState(working = true, notice = LyricsDisplayNotice.SAVED))
                 is LyricsDisplayWriteResult.Conflict ->
-                    mutable.value = LyricsDisplayEditorState(working = true, notice = LyricsDisplayNotice.CONFLICT)
+                    publish(LyricsDisplayEditorState(working = true, notice = LyricsDisplayNotice.CONFLICT))
                 is LyricsDisplayWriteResult.Cancelled ->
-                    mutable.value = LyricsDisplayEditorState(working = true, notice = LyricsDisplayNotice.READ_REQUIRED)
+                    publish(LyricsDisplayEditorState(retry = proposal, working = true,
+                        notice = LyricsDisplayNotice.READ_REQUIRED))
                 is LyricsDisplayWriteResult.Failed ->
-                    mutable.value = LyricsDisplayEditorState(retry = proposal, working = true, issue = result.issue)
+                    publish(LyricsDisplayEditorState(retry = proposal, working = true, issue = result.issue))
             }
         } catch (cancelled: CancellationException) {
-            // The store may have committed before cancellation. Render its verified state on return;
-            // retain no action that can be replayed automatically after Activity recreation.
-            mutable.value = LyricsDisplayEditorState(working = true, notice = LyricsDisplayNotice.READ_REQUIRED)
+            // Cancellation can precede or follow a commit. Retain only the proposal for explicit
+            // review against verified storage; no pending write or command survives recreation.
+            publish(LyricsDisplayEditorState(retry = proposal, working = true,
+                notice = LyricsDisplayNotice.READ_REQUIRED))
             throw cancelled
         } catch (_: IOException) {
-            mutable.value = LyricsDisplayEditorState(retry = proposal, working = true, issue = LyricsDisplayIssue.IO)
+            publish(LyricsDisplayEditorState(retry = proposal, working = true, issue = LyricsDisplayIssue.IO))
         } catch (_: RuntimeException) {
-            mutable.value = LyricsDisplayEditorState(retry = proposal, working = true, issue = LyricsDisplayIssue.IO)
+            publish(LyricsDisplayEditorState(retry = proposal, working = true, issue = LyricsDisplayIssue.IO))
         } catch (_: OutOfMemoryError) {
-            mutable.value = LyricsDisplayEditorState(retry = proposal, working = true, issue = LyricsDisplayIssue.LOW_MEMORY)
+            publish(LyricsDisplayEditorState(retry = proposal, working = true, issue = LyricsDisplayIssue.LOW_MEMORY))
         } finally {
-            mutable.update { it.copy(working = false) }
-            occupied.set(false)
+            try { publish(mutable.value.copy(working = false)) }
+            finally { occupied.set(false) }
         }
+    }
+
+    private fun publish(next: LyricsDisplayEditorState) {
+        drafts?.record(next.draft ?: next.retry)
+        mutable.value = next
     }
 }

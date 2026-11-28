@@ -79,6 +79,10 @@ class RoomCompanionTransferBackend(
         require(processId.isNotBlank() && processId.length <= TransferLimits.IDENTIFIER_CHARACTERS)
     }
 
+    override suspend fun readReceipt(binding: TransferOperationBinding, permit: TransferPermit): TransferReceipt? = storage {
+        library.transferTransaction { ledger.committedInCurrentTransaction(binding, permit) }
+    }
+
     override suspend fun committed(binding: TransferOperationBinding, permit: TransferPermit): TransferReceipt? = storage {
         val original = library.transferTransaction { ledger.committedInCurrentTransaction(binding, permit) }
         if (original != null) return@storage original
@@ -150,6 +154,19 @@ class RoomCompanionTransferBackend(
                 throw error
             }
         }
+    }
+
+    /** Retire the exact peer-owned view before its successor may acquire a slot. */
+    override suspend fun closeCatalogView(request: TransferRequest.CloseCatalogView, permit: TransferPermit) = storage {
+        checkScope(request.scope, permit)
+        checkPageCapability(request.kind, permit)
+        viewMutex.withLock {
+            val lease = views[request.viewId] ?: return@withLock
+            if (lease.kind != request.kind || !lease.permit.sameGrant(permit)) fail(TransferIssue.WRONG_TARGET)
+            lease.retiring = true
+            withContext(NonCancellable) { releaseLease(lease) }
+        }
+        permit.checkActive()
     }
 
     /** Both native snapshots open under the same writer; a later scan cannot replace either fence. */
@@ -346,16 +363,18 @@ class RoomCompanionTransferBackend(
         requireDisplayCapability(permit)
         library.transferTransaction { meta ->
             val hash = TransferProtocolCodec.displayPreviewHash(request).forLocalStorage()
-            transfer.preview(request.requestId)?.let { existing ->
-                val preview = decodePreview(existing, permit)
-                if (existing.payloadHash != hash || preview.kind != request.kind || preview.entityId != request.entityId ||
+            val existing = transfer.preview(request.requestId)
+            existing?.let {
+                // Explicit revalidation can refresh an expired ticket, only with its original input.
+                val preview = decodePreview(it, permit, checkExpiry = false)
+                if (it.payloadHash != hash || preview.kind != request.kind || preview.entityId != request.entityId ||
                     preview.revision != request.expectedRevision || !preview.libraryRevision.sameAs(request.expectedLibraryRevision) ||
                     !preview.patch.sameAs(request.patch)) fail(TransferIssue.CONFLICT)
-                return@transferTransaction preview.also { permit.checkActive() }
             }
             checkFence(meta, request.expectedLibraryRevision)
             val (entity, record) = currentGroup(request.kind, request.entityId, meta)
             validatePatch(entity, request.patch, meta)
+            if (existing != null && transfer.deletePreview(existing.previewId) != 1) fail(TransferIssue.RECOVERY_REQUIRED)
             transfer.expirePreviews(processId, now())
             if (transfer.previewCount() >= MAX_PREVIEWS) fail(TransferIssue.BUSY)
             val currentName = groupName(groupKind(request.kind), record.title)
@@ -472,13 +491,13 @@ class RoomCompanionTransferBackend(
         return entity
     }
 
-    private fun decodePreview(row: TransferDisplayPreviewEntity, permit: TransferPermit): TransferDisplayPreview {
+    private fun decodePreview(row: TransferDisplayPreviewEntity, permit: TransferPermit, checkExpiry: Boolean = true): TransferDisplayPreview {
         permit.checkActive()
         if (row.targetFingerprint != permit.target.forLocalDisplay() || row.peerFingerprint != permit.peer.forLocalDisplay() ||
             row.sessionId != permit.sessionId || row.grantId != permit.grant.grantId || row.grantEpoch != permit.grant.epoch) {
             fail(TransferIssue.WRONG_TARGET)
         }
-        if (row.processId != processId || row.expiresElapsedMs <= now()) fail(TransferIssue.EXPIRED)
+        if (row.processId != processId || checkExpiry && row.expiresElapsedMs <= now()) fail(TransferIssue.EXPIRED)
         if (row.protocolSchema != TransferLimits.SCHEMA || row.patchTrackIds.length > TransferLimits.PAGE_SIZE * 129) {
             fail(TransferIssue.RECOVERY_REQUIRED)
         }
@@ -512,6 +531,14 @@ class RoomCompanionTransferBackend(
                     }
                 } catch (_: Exception) { failure = true }
                 if (failure) fail(TransferIssue.RECOVERY_REQUIRED)
+            }
+        }
+    }
+
+    override suspend fun closePeerPreviews(peer: TransferFingerprint, sessionId: String) = storage {
+        withContext(NonCancellable) {
+            library.transferTransaction {
+                if (transfer.deletePeerPreviews(peer.forLocalDisplay(), sessionId) >= 100) fail(TransferIssue.RECOVERY_REQUIRED)
             }
         }
     }

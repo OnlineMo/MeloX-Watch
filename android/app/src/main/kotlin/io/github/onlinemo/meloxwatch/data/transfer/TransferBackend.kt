@@ -10,7 +10,15 @@ import java.io.File
  */
 interface TransferBackend {
     suspend fun committed(binding: TransferOperationBinding, permit: TransferPermit): TransferReceipt?
+    /** Read only an existing canonical completion; missing/pending operations cannot resume uploads. */
+    suspend fun readReceipt(binding: TransferOperationBinding, permit: TransferPermit): TransferReceipt? {
+        throw TransferException(TransferIssue.UNSUPPORTED_TYPE)
+    }
     suspend fun readPage(request: TransferRequest.ReadPage, permit: TransferPermit): TransferCatalogPage
+    /** An exact logical view handoff; failure retains its slot and cannot authorize a fresh view. */
+    suspend fun closeCatalogView(request: TransferRequest.CloseCatalogView, permit: TransferPermit) {
+        throw TransferException(TransferIssue.UNSUPPORTED_TYPE)
+    }
     suspend fun readDisplay(request: TransferRequest.ReadDisplay, permit: TransferPermit): TransferDisplayState
     suspend fun editPlaylist(binding: TransferOperationBinding, request: TransferRequest.EditPlaylist, permit: TransferPermit): TransferReceipt
     suspend fun previewDisplay(request: TransferRequest.PreviewDisplay, permit: TransferPermit): TransferDisplayPreview
@@ -27,6 +35,9 @@ interface TransferBackend {
 
     /** Release only this peer/session's bounded leases; never clear music, queues or other views. */
     suspend fun closePeerViews(peer: TransferFingerprint, sessionId: String)
+
+    /** Socket retirement clears ephemeral confirmation tickets, while logical catalog views remain. */
+    suspend fun closePeerPreviews(peer: TransferFingerprint, sessionId: String) = Unit
 }
 
 /** Other reservations exclude this transfer's own active .partial file. Never substitute unknown with zero. */

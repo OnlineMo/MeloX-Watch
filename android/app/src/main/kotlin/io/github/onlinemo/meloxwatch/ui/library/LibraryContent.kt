@@ -92,7 +92,7 @@ fun LazyListScope.libraryContent(
     onPlayPreview: (QueueEntry) -> Unit,
     onChooseFile: () -> Unit,
     onChooseTree: () -> Unit,
-    onMediaStore: () -> Unit,
+    onMediaStore: (Boolean) -> Unit,
     listening: ListeningUiState,
     listeningModel: ListeningViewModel,
     onPermissionSettings: () -> Unit,
@@ -100,15 +100,19 @@ fun LazyListScope.libraryContent(
     playlistEntryModel: PlaylistEntryViewModel,
     onPlaylists: () -> Unit,
     onAddToPlaylist: (LibraryViewToken, TrackKey?, String?) -> Unit,
+    onSourceHelp: () -> Unit,
+    onSourceTransfer: () -> Unit,
 ) {
     item(key = "library:navigation") {
         LibraryNavigation(state, model)
         LibraryButton(stringResource(R.string.playlist_entry_browse), true, onPlaylists)
         PlaylistEntryStatus(playlistEntry, playlistEntryModel)
-        FileOperationsControls(if (state.screen !in setOf(LibraryScreen.SOURCES, LibraryScreen.HISTORY, LibraryScreen.STATISTICS)) state.page?.view?.viewId else null)
+        FileOperationsControls(if (state.canPlay && state.screen !in setOf(LibraryScreen.SOURCES, LibraryScreen.HISTORY,
+            LibraryScreen.STATISTICS)) state.page?.view?.viewId else null)
     }
     if (state.screen == LibraryScreen.SOURCES) {
-        sourcesContent(sources, sourceModel, commandPending, onPlayPreview, onChooseFile, onChooseTree, onMediaStore, onPermissionSettings)
+        sourcesContent(sources, sourceModel, commandPending, onPlayPreview, onChooseFile, onChooseTree, onMediaStore,
+            onPermissionSettings, onSourceHelp, onSourceTransfer)
         return
     }
     if (state.screen in setOf(LibraryScreen.HISTORY, LibraryScreen.STATISTICS)) {
@@ -118,8 +122,12 @@ fun LazyListScope.libraryContent(
     item(key = "library:state") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (state.loading) LibraryText(stringResource(R.string.library_loading))
+            if (state.screen == LibraryScreen.SEARCH && state.searchIdle && state.issue == null) {
+                LibraryText(stringResource(R.string.library_search_idle))
+            }
             if (state.showingPreviousData) LibraryText(stringResource(R.string.library_previous_data))
-            state.issue?.let { LibraryText(stringResource(libraryIssueText(it)), error = true) }
+            if (!state.searchInputValid) LibraryText(stringResource(R.string.library_search_too_long), error = true)
+            else state.issue?.let { LibraryText(stringResource(libraryIssueText(it)), error = true) }
             if (state.importRecoveryIssue != null) {
                 LibraryText(stringResource(R.string.library_recover_import_required), error = true)
                 LibraryButton(stringResource(R.string.library_sources)) { model.show(LibraryScreen.SOURCES) }
@@ -128,7 +136,7 @@ fun LazyListScope.libraryContent(
                 LibraryText(stringResource(R.string.library_overview, overview.visibleTracks, overview.totalTracks))
             }
             if (state.hasNewData) LibraryText(stringResource(R.string.library_new_data))
-            LibraryButton(stringResource(R.string.library_reload), !state.loading, model::reload)
+            LibraryButton(stringResource(R.string.library_reload), state.canReload, model::reload)
         }
     }
     if (state.playPreparing || state.playDraft != null || state.playIssue != null) {
@@ -191,7 +199,9 @@ fun LazyListScope.libraryContent(
         }
         state.sortEdit?.let { item(key = "library:sort-editor") { SortEditor(state, model) } }
         if (state.sections.isNotEmpty()) item(key = "library:index") { Sections(state, model) }
-        if (page.tracks.isEmpty() && !state.loading && state.issue == null) item { LibraryText(stringResource(R.string.library_empty)) }
+        if (page.tracks.isEmpty() && !state.loading && state.issue == null) item {
+            LibraryText(stringResource(if (state.screen == LibraryScreen.SEARCH) R.string.library_search_no_results else R.string.library_empty))
+        }
         if (state.layout == LibraryLayout.GRID) {
             items(page.tracks.chunked(2), key = { "pair:${it.first().trackKey.trackId}" }) { pair ->
                 TrackPair(pair, state, model, pair.first() == page.tracks.firstOrNull(), commandPending, onPlay)
@@ -258,7 +268,7 @@ internal fun LibraryNavigation(state: LibraryUiState, model: LibraryViewModel) {
         LibraryButton(stringResource(R.string.library_browse), true) { expanded = !expanded }
         if (expanded) {
             for (screen in LibraryScreen.entries.filter { it != LibraryScreen.DETAIL }) {
-                LibraryButton(stringResource(libraryScreenTitle(screen)), !state.loading) { expanded = false; model.show(screen) }
+                LibraryButton(stringResource(libraryScreenTitle(screen)), true) { expanded = false; model.show(screen) }
             }
         }
         if (state.screen == LibraryScreen.SEARCH) {
@@ -266,10 +276,15 @@ internal fun LibraryNavigation(state: LibraryUiState, model: LibraryViewModel) {
                 value = state.searchDraft, onValueChange = model::updateSearch,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
                 label = { Text(stringResource(R.string.library_search_hint)) }, maxLines = 4,
+                isError = !state.searchInputValid,
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = { model.submitSearch(); keyboard?.hide() }),
             )
-            LibraryButton(stringResource(R.string.library_search_submit), !state.loading) { model.submitSearch(); keyboard?.hide() }
+            LibraryButton(stringResource(R.string.library_search_submit),
+                !state.loading && state.searchInputValid && state.searchDraft.isNotBlank()) { model.submitSearch(); keyboard?.hide() }
+            LibraryButton(stringResource(R.string.library_search_clear),
+                state.searchDraft.isNotEmpty() || state.searchSubmitted || !state.searchInputValid, model::clearSearch)
+            LibraryButton(stringResource(R.string.library_search_cancel), true) { model.cancelSearch(); keyboard?.hide() }
         }
         if (state.screen == LibraryScreen.RECENT) {
             LibraryText(stringResource(R.string.library_recent_scope))

@@ -201,7 +201,7 @@ data class LibraryExclusion(
 )
 data class LibraryExclusionPage(val exclusions: List<LibraryExclusion>, val nextRuleId: String?)
 data class LibraryRules(val revision: Long, val shortAudioFilter: Boolean)
-data class SeenBatchCommit(val revision: Long, val seen: Long, val added: Long)
+data class SeenBatchCommit(val revision: Long, val seen: Long, val added: Long, val metadataObjectIds: Set<String>? = null)
 data class MetadataBatchCommit(val revision: Long, val processed: Long, val failed: Long)
 data class AbsencePage(val nextAliasId: String?, val stagedCount: Long, val complete: Boolean)
 

@@ -397,6 +397,7 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
     val sleepSummary = stringResource(R.string.prefs_sleep_summary)
     val help = stringResource(R.string.help_title)
     val bluetoothLyrics = stringResource(R.string.bluetooth_lyrics_title)
+    val metadataLookup = stringResource(R.string.metadata_lookup_enabled)
     val separator = stringResource(R.string.prefs_field_separator)
     return PreferencesField.entries.filter { field -> field in fields }.joinToString(separator) { field ->
         when (field) {
@@ -422,6 +423,7 @@ private fun recoveryFields(fields: Set<PreferencesField>): String {
             PreferencesField.SLEEP_SUMMARY -> sleepSummary
             PreferencesField.HELP -> help
             PreferencesField.BLUETOOTH_LYRICS -> bluetoothLyrics
+            PreferencesField.METADATA_LOOKUP -> metadataLookup
         }
     }
 }

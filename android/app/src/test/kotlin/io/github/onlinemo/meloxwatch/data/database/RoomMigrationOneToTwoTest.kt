@@ -45,7 +45,7 @@ import org.robolectric.RuntimeEnvironment
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.SQLiteMode
 
-/** 冻结的 1→2、历史 v3 观察与生产 v8 仓储行为保持独立。 */
+/** 冻结的 1→2、历史 v3 观察与生产 v9 仓储行为保持独立。 */
 @RunWith(RobolectricTestRunner::class)
 // 迁移夹具独占其生产文件名，避免 Application 异步恢复初始化抢先打开同一库。
 @Config(sdk = [26], application = Application::class, manifest = Config.NONE)
@@ -78,7 +78,7 @@ class RoomMigrationOneToTwoTest {
     }
 
     @Test(timeout = 30000L)
-    fun applicationOpenMigratesASeededV1FileThroughV2ToV8AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
+    fun applicationOpenMigratesASeededV1FileThroughV2ToV9AndReopenPreservesQueueReferencesAndNewRows() = runBlocking(Dispatchers.IO) {
         val context = RuntimeEnvironment.getApplication() as Context
         // Robolectric owns this application's database directory; the production filename and
         // applicationContext path are used so the test cannot bypass MeloXDatabase.open.
@@ -302,10 +302,10 @@ class RoomMigrationOneToTwoTest {
             requireNotNull(path)
         }
         assertEquals(file.canonicalPath, File(mainPath).canonicalPath)
-        assertEquals(8L, scalarLong("PRAGMA user_version"))
+        assertEquals(9L, scalarLong("PRAGMA user_version"))
         assertEquals(
             VERSION_THREE_TABLES + setOf("lyrics_track_preferences", "transferred_import_operations") +
-                VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES,
+                VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES + VERSION_NINE_METADATA_TABLES,
             query(TABLES_QUERY, block = ::applicationTables),
         )
         val identity = query(IDENTITY_QUERY) { rows ->
@@ -319,7 +319,7 @@ class RoomMigrationOneToTwoTest {
         }
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM lyrics_track_preferences"))
         assertEquals(0L, scalarLong("SELECT COUNT(*) FROM transferred_import_operations"))
-        for (table in VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES) {
+        for (table in VERSION_SIX_NEW_TABLES + VERSION_EIGHT_CUE_TABLES + VERSION_NINE_METADATA_TABLES) {
             assertEquals(0L, scalarLong("SELECT COUNT(*) FROM `$table`"))
         }
         query("PRAGMA foreign_key_check", block = ::assertNoForeignKeyViolations)
@@ -541,5 +541,6 @@ class RoomMigrationOneToTwoTest {
         )
         val VERSION_EIGHT_CUE_TABLES = setOf("local_cue_documents", "local_cue_group_versions", "local_cue_native_segments",
             "local_cue_aliases", "local_cue_alias_versions", "local_cue_alias_segments")
+        val VERSION_NINE_METADATA_TABLES = setOf("local_metadata_associations")
     }
 }

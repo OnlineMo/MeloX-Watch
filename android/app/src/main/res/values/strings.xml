@@ -147,7 +147,8 @@
     <string name="dsp_tag_none">No recognized ReplayGain tags</string>
     <string name="dsp_tag_id3">Source: ID3 ReplayGain tags</string>
     <string name="dsp_tag_vorbis">Source: Vorbis ReplayGain tags</string>
-    <string name="dsp_tag_mixed">Source: ID3 and Vorbis tags</string>
+    <string name="dsp_tag_ape">Source: APE ReplayGain tags</string>
+    <string name="dsp_tag_mixed">Source: multiple tag formats</string>
     <string name="dsp_track_tag">Original track gain: %1$s</string>
     <string name="dsp_album_tag">Original album gain: %1$s</string>
     <string name="dsp_track_peak">Original track peak: %1$s</string>

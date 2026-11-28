@@ -9,6 +9,7 @@ import androidx.compose.ui.res.stringResource
 import io.github.onlinemo.meloxwatch.MeloXApplication
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.themes.ThemeSnapshot
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontIssue
 import io.github.onlinemo.meloxwatch.ui.fonts.LyricsFontPresentationKind
 import io.github.onlinemo.meloxwatch.ui.fonts.ThemeUiFontText
 import io.github.onlinemo.meloxwatch.ui.fonts.WatchFontHostValue
@@ -41,9 +42,10 @@ private fun rememberProbePageFontHost(
     page: ProbePageRuntime.PageBinding,
     request: WatchFontRequest,
     retry: Any = Unit,
+    onRetireText: () -> Unit = {},
 ): WatchFontHostValue {
     val visibleNow = remember(page) { { page.visibleNow } }
-    val install = remember(page) {
+    val install = remember(page, onRetireText) {
         { kind: LyricsFontPresentationKind, memory: () -> Unit, cancel: () -> Unit ->
             val slot = when (kind) {
                 LyricsFontPresentationKind.THEME_UI -> ProbeFontSlot.THEME_UI
@@ -51,7 +53,11 @@ private fun rememberProbePageFontHost(
                 LyricsFontPresentationKind.EDITOR -> ProbeFontSlot.EDITOR
                 LyricsFontPresentationKind.PREVIEW -> ProbeFontSlot.THEME_PREVIEW
             }
-            page.installFont(slot, memory, cancel)
+            page.installFont(slot, {
+                // Same-page text rebinds keep their corpus; a retired Page/Window clears its own text.
+                try { if (!page.visibleNow) onRetireText() }
+                finally { memory() }
+            }, cancel)
         }
     }
     return rememberWatchFontHost(app.lyricsFontRuntime, app.lyricsFontPresentationOwner, app.lyricsFontEditor,
@@ -65,16 +71,18 @@ internal fun ProbeThemeUiFonts(
     page: ProbePageRuntime.PageBinding?,
     snapshot: ThemeSnapshot,
     visibleText: List<String>,
+    textIssue: LyricsFontIssue? = null,
+    onRetireText: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     val host = if (page != null && page.visibleNow) {
         val resources = LocalResources.current
         val localeKey = LocalConfiguration.current.locales.toLanguageTags()
-        val captured = remember(visibleText, localeKey) { ThemeUiFontText.capture(visibleText) }
+        val captured = remember(visibleText, localeKey, textIssue) { ThemeUiFontText.capture(visibleText, textIssue) }
         val request = remember(snapshot, resources, localeKey, captured) {
             WatchFontRequest.ThemeUi(snapshot, resources, localeKey, captured)
         }
-        rememberProbePageFontHost(app, page, request)
+        rememberProbePageFontHost(app, page, request, onRetireText = onRetireText)
     } else null
     val fonts = host?.fonts ?: LocalWatchThemeFonts.current
     // State within the page stays at one call site while its hidden font host is disposed.

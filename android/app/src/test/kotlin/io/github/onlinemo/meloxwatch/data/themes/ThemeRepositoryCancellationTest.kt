@@ -467,17 +467,30 @@ internal suspend fun awaitThemeLatch(latch: CountDownLatch) = withContext(Dispat
     check(latch.await(5, TimeUnit.SECONDS)) { "Theme test checkpoint was not reached" }
 }
 
-/** worker 完整返回后才放行测试观察，避免 awaitIdle 与最后一次结果 resume 之间的竞争。 */
+/** 可在首次 scheduler drain 后启动 worker，完成通知仍等待结果 resume 完整返回。 */
 internal class ThemeDeliveryIoDispatcher : CoroutineDispatcher() {
-    private val nextCompletion = AtomicReference<CountDownLatch?>(null)
-    fun arm(latch: CountDownLatch) { check(nextCompletion.compareAndSet(null, latch)) }
+    private data class Checkpoint(val completed: CountDownLatch, val beforeStart: CountDownLatch?,
+        val startedAfterRelease: AtomicBoolean = AtomicBoolean(false))
+    private val nextCompletion = AtomicReference<Checkpoint?>(null)
+    fun arm(latch: CountDownLatch, beforeStart: CountDownLatch? = null): AtomicBoolean {
+        val checkpoint = Checkpoint(latch, beforeStart)
+        check(nextCompletion.compareAndSet(null, checkpoint))
+        return checkpoint.startedAfterRelease
+    }
     override fun dispatch(context: CoroutineContext, block: Runnable) {
-        val completion = nextCompletion.getAndSet(null)
+        val checkpoint = nextCompletion.getAndSet(null)
         Dispatchers.IO.dispatch(context, Runnable {
             try {
-                block.run()
+                try {
+                    checkpoint?.let { current ->
+                        current.startedAfterRelease.set(current.beforeStart?.await(5, TimeUnit.SECONDS) ?: true)
+                    }
+                } finally {
+                    // Even an interrupted or timed-out test gate must retire the admitted real worker.
+                    block.run()
+                }
             } finally {
-                completion?.countDown()
+                checkpoint?.completed?.countDown()
             }
         })
     }

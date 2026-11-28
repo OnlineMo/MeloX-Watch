@@ -6,14 +6,22 @@ import androidx.room.useReaderConnection
 import androidx.room.useWriterConnection
 import androidx.sqlite.SQLiteStatement
 import io.github.onlinemo.meloxwatch.data.database.MeloXDatabase
+import io.github.onlinemo.meloxwatch.data.cue.CueReferenceCodec
 import io.github.onlinemo.meloxwatch.data.library.LibraryCodec
 import io.github.onlinemo.meloxwatch.data.local.LocalSourceKind
+import io.github.onlinemo.meloxwatch.data.metadata.LocalMetadataAssociationRow
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataProvenance
+import io.github.onlinemo.meloxwatch.data.metadata.MetadataPurpose
+import io.github.onlinemo.meloxwatch.data.metadata.decode
+import io.github.onlinemo.meloxwatch.data.metadata.validMetadataAssetId
 import io.github.onlinemo.meloxwatch.data.playlists.PlaylistLimits
+import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.security.MessageDigest
 import java.nio.ByteBuffer
 
 /** Named current logical projections, never SELECT * or a copy of grant/operation tables. */
-internal class RoomBackupCapture(private val database: MeloXDatabase) {
+internal class RoomBackupCapture(private val database: MeloXDatabase,
+    private val ownedLyricsUri: (String) -> String? = { null }) {
     suspend fun sourceDatabaseVersion(): Int = database.useReaderConnection { reader ->
         reader.usePrepared("PRAGMA user_version") { statement ->
             if (!statement.step()) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
@@ -23,7 +31,7 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
     }
     suspend fun captureMain(stage: SqliteBackupStage, includeResourceReferences: Boolean = true) {
         database.useReaderConnection { reader -> reader.deferredTransaction {
-            capture(reader, stage.header.scopes, includeResourceReferences, stage::checkActive, stage::record)
+            capture(reader, stage.header.scopes, includeResourceReferences, true, stage::checkActive, stage::record)
         } }
     }
 
@@ -31,7 +39,7 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
     suspend fun captureInsideWriter(stage: SqliteBackupStage) {
         database.useWriterConnection { writer ->
             if (!writer.inTransaction()) throw BackupException(BackupIssue.INVALID_INPUT)
-            capture(writer, stage.header.scopes, false, stage::checkActive, stage::record)
+            capture(writer, stage.header.scopes, false, true, stage::checkActive, stage::record)
         }
     }
 
@@ -43,7 +51,7 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
                 hash.update(ByteBuffer.allocate(4).putInt(bytes.size).array())
                 hash.update(bytes)
             }
-            capture(reader, MAIN_SCOPES, false, checkCancelled) { row ->
+            capture(reader, MAIN_SCOPES, false, false, checkCancelled) { row ->
                 add(BackupJsonCodec.record(row, checkCancelled))
             }
             // Epochs and revisions distinguish a logical no-op from an uncertain native COMMIT.
@@ -64,7 +72,8 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
             }
             var afterLyrics: String? = null
             while (true) {
-                val last = reader.usePrepared("SELECT trackId,revision,typeof(revision) FROM lyrics_track_preferences WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100") { statement ->
+                val last = reader.usePrepared("SELECT trackId,revision,typeof(revision),substr(primarySourceId,1,129)," +
+                    "substr(primaryUri,1,8193) FROM lyrics_track_preferences WHERE (? IS NULL OR trackId>?) ORDER BY trackId LIMIT 100") { statement ->
                     statement.bindNullableText(1, afterLyrics); statement.bindNullableText(2, afterLyrics)
                     var last: String? = null
                     while (statement.step()) {
@@ -73,12 +82,17 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
                         last = statement.getText(0)
                         add(BackupJsonCodec.encodeValues(mapOf("track" to BackupCell.Text(checkNotNull(last)),
                             "lyricsRevision" to BackupCell.Integer(statement.getLong(1))), checkCancelled))
+                        val sourceId = if (statement.isNull(3)) null else statement.getText(3)
+                        if (metadataSourceAsset(sourceId) != null) add(BackupJsonCodec.encodeValues(mapOf(
+                            "track" to BackupCell.Text(checkNotNull(last)), "metadataPrimarySource" to backupText(sourceId),
+                            "metadataPrimaryUri" to backupText(if (statement.isNull(4)) null else statement.getText(4))), checkCancelled))
                     }
                     last
                 }
                 if (last == null) break
                 afterLyrics = last
             }
+            captureMetadataIdentities(reader, checkCancelled, ::add)
             return backupHex(hash.digest())
         }
         return if (insideWriter) database.useWriterConnection {
@@ -87,7 +101,40 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
         } else database.useReaderConnection { reader -> reader.deferredTransaction { digest(reader) } }
     }
 
-    private suspend fun capture(reader: PooledConnection, scopes: Set<BackupScope>, includeResourceReferences: Boolean,
+    /** Native asset UUIDs affect COMMIT identity but never become portable archive fields. */
+    private suspend fun captureMetadataIdentities(reader: PooledConnection, checkCancelled: () -> Unit,
+        add: (ByteArray) -> Unit) {
+        val version = reader.usePrepared("PRAGMA user_version") {
+            if (!it.step()) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+            it.getLong(0)
+        }
+        if (version < 9L) return
+        for (purpose in MetadataPurpose.entries) {
+            var after: String? = null
+            while (true) {
+                val last = reader.usePrepared("SELECT substr(trackId,1,129),revision,typeof(revision),substr(assetId,1,37),typeof(assetId) " +
+                    "FROM local_metadata_associations WHERE purpose=? AND (? IS NULL OR trackId>?) ORDER BY trackId COLLATE BINARY LIMIT 100") {
+                    it.bindText(1, purpose.name); it.bindNullableText(2, after); it.bindNullableText(3, after)
+                    var last: String? = null
+                    while (it.step()) {
+                        checkCancelled()
+                        if (it.getText(2) != "integer" || it.getLong(1) < 0L || it.getText(4) !in setOf("text", "null")) {
+                            throw BackupException(BackupIssue.RECOVERY_REQUIRED)
+                        }
+                        last = it.getText(0)
+                        add(BackupJsonCodec.encodeValues(mapOf("track" to BackupCell.Text(checkNotNull(last)),
+                            "purpose" to BackupCell.Text(purpose.name), "metadataRevision" to BackupCell.Integer(it.getLong(1)),
+                            "metadataAssetId" to backupText(if (it.isNull(3)) null else it.getText(3))), checkCancelled))
+                    }
+                    last
+                }
+                if (last == null) break
+                after = last
+            }
+        }
+    }
+
+    private suspend fun capture(reader: PooledConnection, scopes: Set<BackupScope>, includeResourceReferences: Boolean, includePrimaryLinks: Boolean,
         checkCancelled: () -> Unit, accept: (BackupRecord) -> Unit) {
         val schema = reader.usePrepared("PRAGMA user_version") { statement ->
             if (!statement.step()) throw BackupException(BackupIssue.RECOVERY_REQUIRED)
@@ -99,12 +146,19 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
         ) { statement ->
             if (!statement.step() || statement.getLong(0) != 0L) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
         }
-        for (projection in projections(includeResourceReferences, schema >= 7L, schema >= 8L)) {
+        if (schema >= 9L && (BackupScope.LYRICS in scopes || BackupScope.LIBRARY in scopes)) reader.usePrepared(
+            "SELECT COUNT(*) FROM local_metadata_associations WHERE typeof(trackId)!='text' OR typeof(purpose)!='text' " +
+                "OR purpose NOT IN ('LYRICS','ARTWORK') OR typeof(schemaVersion)!='integer' OR schemaVersion!=1",
+        ) {
+            if (!it.step() || it.getLong(0) != 0L) throw BackupException(BackupIssue.UNSUPPORTED_VERSION)
+        }
+        for (projection in projections(includeResourceReferences, schema >= 7L, schema >= 8L, schema >= 9L, includePrimaryLinks)) {
             if (projection.kind.scope !in scopes) continue
             var after: String? = null
             while (true) {
-                val page = reader.usePrepared(projection.sql) { statement ->
-                    statement.bindNullableText(1, after); statement.bindNullableText(2, after)
+                val cursor = after
+                val page = reader.usePrepared(projection.sql(cursor)) { statement ->
+                    if (cursor != null) statement.bindText(1, cursor)
                     val result = ArrayList<Pair<String, BackupRecord>>()
                     var bytes = 0
                     while (statement.step()) {
@@ -131,8 +185,13 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
     private data class Column(val name: String, val expression: String, val type: Type)
     private class Projection(val kind: BackupRecordKind, key: String, from: String, where: String,
         val columns: List<Column>, val transform: (String, Map<String, BackupCell>) -> BackupRecord = { id, values -> BackupRecord(kind, id, values) }) {
-        val sql: String = "SELECT $key,typeof($key)," + columns.joinToString(",") { "${it.expression},typeof(${it.expression})" } +
-            " FROM $from WHERE ($where) AND (? IS NULL OR ($key) COLLATE BINARY>?) ORDER BY ($key) COLLATE BINARY LIMIT 100"
+        private val select = "SELECT $key,typeof($key)," + columns.joinToString(",") { "${it.expression},typeof(${it.expression})" } +
+            " FROM $from WHERE ($where)"
+        private val order = " ORDER BY ($key) COLLATE BINARY LIMIT 100"
+        private val firstPage = select + order
+        private val continuedPage = select + " AND ($key) COLLATE BINARY>?" + order
+        // Expose the continuation key range while each digest reads its own full snapshot.
+        fun sql(after: String?): String = if (after == null) firstPage else continuedPage
     }
     private fun t(name: String, expression: String = name) = Column(name, expression, Type.TEXT)
     private fun n(name: String, expression: String = name) = Column(name, expression, Type.INTEGER)
@@ -140,7 +199,8 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
     private fun simple(kind: BackupRecordKind, key: String, from: String, where: String = "1", vararg columns: Column) =
         Projection(kind, key, from, where, columns.toList())
 
-    private fun projections(includeResources: Boolean, includeCodecParameters: Boolean, includeCue: Boolean): List<Projection> = buildList {
+    private fun projections(includeResources: Boolean, includeCodecParameters: Boolean, includeCue: Boolean,
+        includeMetadata: Boolean, includePrimaryLinks: Boolean): List<Projection> = buildList {
         add(simple(BackupRecordKind.LIBRARY_META, "'library'", "library_meta m", "m.id=1", f("shortAudioFilter", "m.shortAudioFilter")))
         add(Projection(BackupRecordKind.TRACK, "v.trackId", "local_track_versions v", "v.validTo IS NULL", listOf(
             t("providerId", "v.providerId"), f("member", "v.member"), n("firstAddedEpochMs", "v.firstAddedEpochMs"),
@@ -253,8 +313,12 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
             lyricColumns += listOf(t(prefix + "DocumentIdHint", "p.${prefix}DocumentId"), t(prefix + "SourceIdHint", "p.${prefix}SourceId"),
                 t(prefix + "UriHint", "p.${prefix}Uri"), t(prefix + "Encoding", "p.${prefix}Encoding"), t(prefix + "Sha256", "p.${prefix}ConfirmedContentSha256"))
         }
-        add(Projection(BackupRecordKind.LYRICS_TRACK, "p.trackId", "lyrics_track_preferences p", "p.schemaVersion=1", lyricColumns) { key, raw ->
+        lyricColumns += t("metadataAssetOwner", if (includeMetadata) "substr(m.assetId,1,37)" else "NULL")
+        val lyricFrom = "lyrics_track_preferences p" + if (includeMetadata)
+            " LEFT JOIN local_metadata_associations m ON m.trackId=p.trackId AND m.purpose='LYRICS'" else ""
+        add(Projection(BackupRecordKind.LYRICS_TRACK, "p.trackId", lyricFrom, "p.schemaVersion=1", lyricColumns) { key, raw ->
             BackupRecord(BackupRecordKind.LYRICS_TRACK, key, raw.toMutableMap().apply {
+                remove("metadataAssetOwner")
                 for (prefix in listOf("primary", "translation")) {
                     val uri = BackupLogicalSchema.portableUri(raw.optionalTextValue(prefix + "UriHint"))
                     val document = BackupLogicalSchema.portableHint(raw.optionalTextValue(prefix + "DocumentIdHint"))
@@ -268,13 +332,47 @@ internal class RoomBackupCapture(private val database: MeloXDatabase) {
                         continue
                     }
                     // Content survives a nonportable document ID; hints can never restore a grant.
-                    put(prefix + "DocumentIdHint", backupText(document)); put(prefix + "SourceIdHint", backupText(source))
-                    put(prefix + "UriHint", backupText(uri))
+                    val assetOwner = raw.optionalTextValue("metadataAssetOwner")?.takeIf(::validMetadataAssetId)
+                    val metadataOwned = metadataSourceAsset(raw.optionalTextValue(prefix + "SourceIdHint")) != null ||
+                        includePrimaryLinks && assetOwner?.let { ownedLyricsUri(it) }
+                            ?.let { it == raw.optionalTextValue(prefix + "UriHint") } == true
+                    put(prefix + "DocumentIdHint", backupText(document?.takeUnless { metadataOwned }))
+                    put(prefix + "SourceIdHint", backupText(source?.takeUnless { metadataOwned }))
+                    put(prefix + "UriHint", backupText(uri?.takeUnless { metadataOwned }))
                     put(prefix + "ResourceId", if (includeResources) BackupCell.Text(BackupLogicalSchema.resourceId(BackupResourceKind.LYRICS, hash)) else BackupCell.Null)
                 }
             })
         })
+        if (includeMetadata) for (purpose in MetadataPurpose.entries) {
+            val kind = BackupMetadataAssociations.kind(purpose)
+            val primary = if (purpose == MetadataPurpose.LYRICS) listOf(
+                t("linkedPrimaryUri", "substr(p.primaryUri,1,8193)"), t("linkedPrimarySource", "substr(p.primarySourceId,1,129)"),
+                t("linkedPrimarySha256", "substr(p.primaryConfirmedContentSha256,1,65)"), t("linkedPrimaryEncoding", "substr(p.primaryEncoding,1,33)")) else emptyList()
+            add(Projection(kind, "substr(m.trackId,1,129)",
+                "local_metadata_associations m LEFT JOIN local_track_versions v ON v.trackId=m.trackId AND v.validTo IS NULL" +
+                    if (purpose == MetadataPurpose.LYRICS) " LEFT JOIN lyrics_track_preferences p ON p.trackId=m.trackId AND p.schemaVersion=1" else "",
+                "m.purpose='${purpose.name}'", listOf(n("schemaVersion", "m.schemaVersion"), n("revision", "m.revision"),
+                    t("assetId", "substr(m.assetId,1,37)"), t("sha256", "substr(m.sha256,1,65)"), n("bytes", "m.byteCount"),
+                    t("provenance", "substr(m.provenance,1,${MetadataProvenance.PROVENANCE_BYTES + 1})"),
+                    t("cueReference", "substr(v.cueReference,1,${CueReferenceCodec.MAX_BYTES + 1})")) + primary) { key, raw ->
+                val native = try {
+                    LocalMetadataAssociationRow(true, raw.integerValue("schemaVersion"), raw.integerValue("revision"),
+                        raw.optionalTextValue("assetId"), raw.optionalTextValue("sha256"), raw.optionalIntegerValue("bytes"),
+                        raw.optionalTextValue("provenance")).decode(TrackKey(TrackKey.LOCAL_PROVIDER, key), purpose)
+                } catch (failure: Exception) { throw BackupException(BackupIssue.INVALID_INPUT, failure) }
+                val linked = includePrimaryLinks && purpose == MetadataPurpose.LYRICS && native.assetId?.let { assetId ->
+                    val expected = ownedLyricsUri(assetId)
+                    expected != null && raw.optionalTextValue("linkedPrimaryUri") == expected &&
+                        raw.optionalTextValue("linkedPrimarySource") == "metadata-v1:$assetId" &&
+                        raw.optionalTextValue("linkedPrimarySha256") == native.sha256 && raw.optionalTextValue("linkedPrimaryEncoding") == "UTF8"
+                } == true
+                BackupMetadataAssociations.record(native, portableCueCell(raw.optionalTextValue("cueReference")), includeResources, linked)
+            })
+        }
     }
+
+    private fun metadataSourceAsset(sourceId: String?): String? = sourceId?.takeIf { it.startsWith("metadata-v1:") }
+        ?.removePrefix("metadata-v1:")?.takeIf(::validMetadataAssetId)
 
     private fun cell(statement: SQLiteStatement, index: Int, type: Type): BackupCell {
         return when (statement.getText(index + 1)) {
@@ -324,5 +422,12 @@ private fun Map<String, BackupCell>.textValue(name: String): String = (this[name
 private fun Map<String, BackupCell>.optionalTextValue(name: String): String? = when (val value = this[name]) {
     BackupCell.Null -> null
     is BackupCell.Text -> value.value
+    else -> throw BackupException(BackupIssue.INVALID_INPUT)
+}
+private fun Map<String, BackupCell>.integerValue(name: String): Long = (this[name] as? BackupCell.Integer)?.value
+    ?: throw BackupException(BackupIssue.INVALID_INPUT)
+private fun Map<String, BackupCell>.optionalIntegerValue(name: String): Long? = when (val value = this[name]) {
+    BackupCell.Null -> null
+    is BackupCell.Integer -> value.value
     else -> throw BackupException(BackupIssue.INVALID_INPUT)
 }

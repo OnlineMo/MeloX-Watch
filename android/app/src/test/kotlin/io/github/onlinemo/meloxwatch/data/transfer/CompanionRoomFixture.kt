@@ -110,7 +110,8 @@ internal class CompanionRoomFixture(private val context: Context, private val fi
             val directory = library.nextDirectory(token) ?: break
             library.completeDirectory(token, directory.objectId, true)
         }
-        val coverage = ScanCoverage(true, true, true, true, false)
+        // Appending supplied rows does not enumerate the rest of this source.
+        val coverage = ScanCoverage(false, true, true, true, false)
         library.setCoverage(token, coverage)
         library.finishScan(token, ScanCounters(), coverage)
     }

@@ -337,7 +337,7 @@ private fun LazyListScope.backupRelink(state: BackupUiState, actions: BackupUiAc
 
 private fun LazyListScope.backupScopes(scopes: List<BackupScope>, state: BackupUiState, actions: BackupUiActions, left: Dp, width: Dp) {
     for (scope in scopes) backupItem("scope:$scope", left, width) {
-        val resourcesAllowed = BackupScope.PREFERENCES in state.scopes || BackupScope.LYRICS in state.scopes
+        val resourcesAllowed = BackupScope.LIBRARY in state.scopes || BackupScope.PREFERENCES in state.scopes || BackupScope.LYRICS in state.scopes
         WatchCheckRow(stringResource(scopeLabel(scope)), scope in state.scopes,
             enabled = state.canEdit && (scope != BackupScope.RESOURCES || resourcesAllowed), onChange = { actions.scope(scope, it) })
         if (scope == BackupScope.RESOURCES && !resourcesAllowed) WatchText(stringResource(R.string.backup_ui_resource_dependency))

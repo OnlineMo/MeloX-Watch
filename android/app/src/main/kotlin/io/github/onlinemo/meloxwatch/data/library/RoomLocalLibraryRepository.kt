@@ -32,11 +32,13 @@ import io.github.onlinemo.meloxwatch.data.local.ObservedCapability
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.local.allowsFileReadValidation
 import io.github.onlinemo.meloxwatch.data.scan.MetadataOutcome
+import io.github.onlinemo.meloxwatch.data.scan.MediaScanCheckpoint
 import io.github.onlinemo.meloxwatch.data.scan.ScanCounters
 import io.github.onlinemo.meloxwatch.data.scan.ScanCoverage
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.data.scan.ScanState
+import io.github.onlinemo.meloxwatch.data.scan.ScanStopAcknowledgement
 import io.github.onlinemo.meloxwatch.data.scan.ScanToken
 import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
@@ -47,6 +49,8 @@ import io.github.onlinemo.meloxwatch.model.FrozenQueueView
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
 import org.json.JSONException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -78,6 +82,7 @@ class RoomLocalLibraryRepository(
     private val mutex = Mutex()
     private val sessionId = id()
     private val liveViews = linkedMapOf<String, LibraryViewToken>()
+    private val undeliveredViews = ConcurrentHashMap.newKeySet<String>()
     private var initialized = false
 
     override suspend fun initialize(): LibraryOverview = access {
@@ -134,7 +139,7 @@ class RoomLocalLibraryRepository(
         }
     }
 
-    override suspend fun openView(query: LibraryQuery, sort: LibrarySort, owner: LibraryViewOwner): LibraryViewToken = access {
+    override suspend fun openView(query: LibraryQuery, sort: LibrarySort, owner: LibraryViewOwner): LibraryViewToken = allocateView { created ->
         database.withPreservedTransaction {
             expireViews()
             val current = meta()
@@ -148,18 +153,21 @@ class RoomLocalLibraryRepository(
             val draft = LibraryViewToken(id(), current.revision, current.rulesRevision, 0L, query, sort, current.shortAudioFilter, owner,
                 statisticsEpoch = current.statisticsEpoch)
             val token = draft.copy(totalCount = dao.scalar(LibrarySql.count(draft)))
+            currentCoroutineContext().ensureActive()
             storeView(token)
+            created(token)
             token
         }
     }
 
-    override suspend fun openQueueView(fromViewId: String): LibraryViewToken = access {
+    override suspend fun openQueueView(fromViewId: String): LibraryViewToken = allocateView { created ->
         database.withPreservedTransaction {
             val original = liveViews[fromViewId] ?: fail(LibraryIssue.VIEW_EXPIRED)
             checkView(original)
             if (original.owner != LibraryViewOwner.UI) fail(LibraryIssue.INVALID_INPUT)
             val token = original.copy(viewId = id(), owner = LibraryViewOwner.QUEUE)
             storeView(token)
+            created(token)
             token
         }
     }
@@ -346,6 +354,46 @@ class RoomLocalLibraryRepository(
     private suspend fun releaseViewMetadata(viewId: String) = access {
         database.withPreservedTransaction { dao.deleteView(viewId) }
         liveViews.remove(viewId)
+        undeliveredViews.remove(viewId)
+    }
+
+    /** IO can finish registration before prompt cancellation rejects its return value. Keep that exact lease locally owned. */
+    private suspend fun allocateView(action: suspend ((LibraryViewToken) -> Unit) -> LibraryViewToken): LibraryViewToken {
+        val created = AtomicReference<LibraryViewToken?>(null)
+        try {
+            return access {
+                for (viewId in undeliveredViews.toList()) {
+                    currentCoroutineContext().ensureActive()
+                    database.withPreservedTransaction { dao.deleteView(viewId) }
+                    liveViews.remove(viewId)
+                    undeliveredViews.remove(viewId)
+                }
+                action { created.set(it) }
+            }
+        } catch (failure: Throwable) {
+            created.get()?.let { token ->
+                // Failed retirement stays bounded by the existing live-lease quotas and is retried before another allocation.
+                undeliveredViews.add(token.viewId)
+                try { retireUndeliveredView(token.viewId) }
+                catch (cleanup: Throwable) { if (cleanup !== failure) failure.addSuppressed(cleanup) }
+            }
+            throw failure
+        }
+    }
+
+    private suspend fun retireUndeliveredView(viewId: String) = withContext(NonCancellable) {
+        supervisorScope {
+            val metadata = async { releaseViewMetadata(viewId) }
+            try {
+                // Keep TimeoutCancellationException outside Room's worker; a plain cancellation retires its actual wait.
+                withTimeout(5_000L) { metadata.await() }
+            } catch (failure: Throwable) {
+                metadata.cancel(CancellationException("Undelivered library view retirement did not complete", failure))
+                throw failure
+            } finally {
+                metadata.cancelAndJoin()
+            }
+        }
     }
 
     override fun queueSource(view: LibraryViewToken): QueuePageSource {
@@ -546,17 +594,32 @@ class RoomLocalLibraryRepository(
         }
     }
 
+    override suspend fun scanCheckpoint(sourceId: String, expectedAuthEpoch: Long, expectedRulesRevision: Long): MediaScanCheckpoint? = access {
+        database.withPreservedTransaction {
+            val source = checkedSource(sourceId, expectedAuthEpoch)
+            checkedRules(expectedRulesRevision)
+            MediaScanCheckpoint.decode(source.watermark)?.takeIf {
+                it.sourceId == sourceId && it.sourceRevision == source.revision && it.authEpoch == expectedAuthEpoch &&
+                    it.rulesRevision == expectedRulesRevision
+            }
+        }
+    }
+
     override suspend fun commitSeen(token: ScanToken, candidates: List<ObservedCandidate>): SeenBatchCommit = access {
         batch(candidates.size)
         database.withPreservedTransaction {
             var scan = checkedScan(token, allowStaging = false)
             val source = dao.source(token.sourceId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
             val spec = LibraryCodec.source(source.spec)
+            val checkpoint = MediaScanCheckpoint.decode(source.watermark)?.takeIf {
+                token.mode == ScanMode.INCREMENTAL && it.matches(token)
+            }
             var current = meta()
             val revision = increment(current.revision)
             var seen = 0L
             var added = 0L
             var skipped = 0L
+            val metadataObjectIds = HashSet<String>()
             for (observed in candidates) {
                 val candidate = if (spec.kind == LocalSourceKind.APP_OWNED) ownedObservation(spec, observed) else observed
                 validateCandidate(token.sourceId, candidate)
@@ -564,6 +627,8 @@ class RoomLocalLibraryRepository(
                 val node = writeNode(candidate, revision)
                 // New ancestry belongs to this pending revision, before the batch publishes library_meta.
                 val excluded = excludedUnlocked(token, candidate.objectId, candidate.parentObjectId, revision)
+                val reuseMetadata = !excluded && candidate.mayContainAudio &&
+                    canReuseScanMetadata(spec, candidate, checkpoint)
                 val alias = when {
                     excluded -> null
                     candidate.mayContainCue -> writeAccess(spec, candidate, node.nodeId, scan.sequence, revision).also {
@@ -577,15 +642,16 @@ class RoomLocalLibraryRepository(
                     }
                     else -> null
                 }
-                dao.insertSeen(LibrarySeenEntity(token.scanId, candidate.objectId, node.nodeId, alias?.aliasId, false))
+                dao.insertSeen(LibrarySeenEntity(token.scanId, candidate.objectId, node.nodeId, alias?.aliasId, reuseMetadata))
+                if (!excluded && candidate.mayContainAudio && !reuseMetadata) metadataObjectIds += candidate.objectId
                 if (candidate.directory && !excluded) dao.insertFrontier(LibraryFrontierEntity(token.scanId, candidate.objectId, LibraryCodec.candidate(candidate), "QUEUED"))
-                if (excluded || (!candidate.directory && !candidate.mayContainAudio && !candidate.mayContainCue)) skipped++
+                if (reuseMetadata || excluded || (!candidate.directory && !candidate.mayContainAudio && !candidate.mayContainCue)) skipped++
                 if (excluded) scan = scan.copy(excludedSubtrees = true)
                 seen++
             }
             if (seen > 0L) dao.updateMeta(current.copy(revision = revision))
             dao.updateScan(scan.copy(phase = ScanPhase.RUNNING.name, seen = add(scan.seen, seen), added = add(scan.added, added), skipped = add(scan.skipped, skipped)))
-            SeenBatchCommit(if (seen == 0L) current.revision else revision, seen, added)
+            SeenBatchCommit(if (seen == 0L) current.revision else revision, seen, added, metadataObjectIds)
         }.also { cleanVersions() }
     }
 
@@ -651,13 +717,13 @@ class RoomLocalLibraryRepository(
         }
     }
 
-    override suspend fun completeDirectory(token: ScanToken, objectId: String, successful: Boolean): ScanState = access {
+    override suspend fun completeDirectory(token: ScanToken, objectId: String, successful: Boolean, fullEnumeration: Boolean): ScanState = access {
         database.withPreservedTransaction {
             val scan = checkedScan(token, allowStaging = false)
             val entry = dao.frontier(token.scanId, objectId) ?: fail(LibraryIssue.INVALID_INPUT)
             if (entry.state == "DONE" || entry.state == "FAILED") return@withPreservedTransaction scan.model()
-            if (entry.state != "RUNNING") fail(LibraryIssue.CONFLICT)
-            dao.updateFrontier(entry.copy(state = if (successful) "DONE" else "FAILED"))
+            if (entry.state != "RUNNING" && !(entry.state == "DELTA_DONE" && fullEnumeration)) fail(LibraryIssue.CONFLICT)
+            dao.updateFrontier(entry.copy(state = if (!successful) "FAILED" else if (fullEnumeration) "DONE" else "DELTA_DONE"))
             val next = if (successful) scan else scan.copy(failed = increment(scan.failed))
             dao.updateScan(next)
             next.model()
@@ -686,7 +752,7 @@ class RoomLocalLibraryRepository(
         pageLimit(limit)
         database.withPreservedTransaction {
             val scan = checkedScan(token)
-            if (token.mode != ScanMode.FULL || !scan.coverage().permitsAbsence || dao.incompleteFrontier(token.scanId) != 0L) fail(LibraryIssue.INCOMPLETE)
+            if (!scan.coverage().permitsAbsence || dao.incompleteFrontier(token.scanId) != 0L) fail(LibraryIssue.INCOMPLETE)
             if (scan.absenceAfterAliasId != afterAliasId) fail(LibraryIssue.CONFLICT)
             if (scan.absenceDone) return@withPreservedTransaction AbsencePage(scan.absenceAfterAliasId, dao.absenceCount(token.scanId), true)
             val aliases = dao.aliasRows(LibrarySql.absentAliases(token.sourceId, token.scanId, afterAliasId, limit))
@@ -708,13 +774,13 @@ class RoomLocalLibraryRepository(
                 if (stored.phase == ScanPhase.COMPLETED.name) return@withPreservedTransaction stored.model()
                 val old = checkedScan(token)
                 val finalCoverage = coverage.copy(excludedSubtrees = coverage.excludedSubtrees || old.excludedSubtrees)
-                val canReconcile = token.mode == ScanMode.FULL && finalCoverage.permitsAbsence
+                val canReconcile = finalCoverage.permitsAbsence
                 if (canReconcile && (!old.absenceDone || !old.coverage().permitsAbsence || dao.incompleteFrontier(token.scanId) != 0L)) fail(LibraryIssue.INCOMPLETE)
                 val source = dao.source(token.sourceId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
                 val nextSource = source.copy(activeScanId = null,
                     absenceScanId = if (canReconcile) token.scanId else source.absenceScanId,
                     absenceScanSequence = if (canReconcile) old.sequence else source.absenceScanSequence,
-                    watermark = if (finalCoverage.permitsAbsence) old.watermark ?: source.watermark else source.watermark)
+                    watermark = if (finalCoverage.permitsAbsence && old.failed == 0L) old.watermark ?: source.watermark else source.watermark)
                 if (canReconcile) {
                     val current = meta()
                     val revision = increment(current.revision)
@@ -745,6 +811,20 @@ class RoomLocalLibraryRepository(
             dao.updateScan(next)
             if (isTerminal && source != null && source.activeScanId == token.scanId) dao.putSource(source.copy(activeScanId = null))
             next.model()
+        }
+    }
+    override suspend fun acknowledgeScanStop(token: ScanToken): ScanStopAcknowledgement? = access {
+        database.withPreservedTransaction {
+            val scan = dao.scan(token.scanId)
+            if (scan != null && scan.token() != token) fail(LibraryIssue.SOURCE_CHANGED)
+            if (scan != null && terminal(scan.phase)) {
+                return@withPreservedTransaction ScanStopAcknowledgement.Terminal(scan.model())
+            }
+            val source = dao.source(token.sourceId)
+            // A changed revision alone leaves the old active pointer occupied. Only its actual
+            // removal/replacement, or a stored terminal row above, acknowledges retirement.
+            if (source == null || source.activeScanId != token.scanId) ScanStopAcknowledgement.ReplacedFence(token)
+            else null
         }
     }
     override suspend fun latestScan(sourceId: String): ScanState? = access { dao.source(sourceId)?.latestScanId?.let { dao.scan(it)?.model() } }
@@ -1171,6 +1251,20 @@ class RoomLocalLibraryRepository(
             added = true
         }
         return alias to added
+    }
+
+    /** A successful checkpoint and a strong unchanged row are both required; a cancelled parse is not a cache hit. */
+    private suspend fun canReuseScanMetadata(spec: LocalSourceSpec, candidate: ObservedCandidate, checkpoint: MediaScanCheckpoint?): Boolean {
+        if (checkpoint == null || spec.kind != LocalSourceKind.MEDIA_STORE || candidate.providerVersion != checkpoint.providerVersion ||
+            candidate.generationModified?.let { it in 0L..checkpoint.generation } != true || candidate.providerContentToken == null) return false
+        val alias = dao.alias(spec.sourceId, candidate.objectId) ?: return false
+        val previous = dao.currentAlias(alias.aliasId) ?: return false
+        val location = dao.location(alias.locationId) ?: fail(LibraryIssue.RECOVERY_REQUIRED)
+        if (previous.readIssue != null || previous.uri != candidate.uri || previous.filename != candidate.displayName ||
+            previous.contentRevision != location.contentRevision || previous.providerContentToken != candidate.providerContentToken ||
+            location.contentToken != candidate.providerContentToken || previous.sizeBytes != candidate.sizeBytes) return false
+        val track = dao.physicalTrackAtLocation(alias.locationId) ?: return false
+        return track.metadataIssue == null
     }
 
     /** 文档访问共用位置与别名围栏，但不生成音轨。 */

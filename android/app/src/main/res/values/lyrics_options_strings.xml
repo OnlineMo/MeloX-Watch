@@ -13,7 +13,7 @@
     <string name="lyrics_settings_save_failed">Save failed. Review your preview before trying again.</string>
     <string name="lyrics_saved_preview">Last confirmed appearance</string>
     <string name="lyrics_unsaved_preview">Preview · not saved</string>
-    <string name="lyrics_settings_review_retry">Review failed preview</string>
+    <string name="lyrics_settings_review_retry">Review unsaved preview</string>
     <string name="lyrics_settings_edit">Edit appearance</string>
     <string name="lyrics_settings_retry_read">Read settings again</string>
     <string name="lyrics_settings_defaults_preview">Preview defaults</string>

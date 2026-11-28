@@ -8,7 +8,9 @@ import java.util.UUID
 
 /** Engineering limits for LP-13; none of these values represents device acceptance. */
 object TransferLimits {
-    const val SCHEMA = 2
+    const val SCHEMA = 3
+    // Control-frame extensions must not change durable mutation or preview identities.
+    const val PAYLOAD_IDENTITY_SCHEMA = 2
     const val CONNECTIONS = 2
     const val FRAME_BYTES = 64 * 1024
     const val CHUNK_BYTES = 60 * 1024
@@ -217,6 +219,18 @@ sealed interface TransferRequest {
         init { requireTransferUuid(requestId); requireTransferUuid(sessionId) }
     }
     sealed interface Authorized : TransferRequest { val scope: TransferScope }
+    class ReadReceipt(
+        override val requestId: String, override val scope: TransferScope,
+        val operationId: String, val kind: TransferOperationKind, val payloadHash: TransferHash,
+    ) : Authorized {
+        init { requireTransferUuid(requestId); requireTransferUuid(operationId) }
+    }
+    class CloseCatalogView(
+        override val requestId: String, override val scope: TransferScope,
+        val kind: TransferCatalogKind, val viewId: String,
+    ) : Authorized {
+        init { requireTransferUuid(requestId); requireTransferUuid(viewId) }
+    }
     class ReadPage(
         override val requestId: String,
         override val scope: TransferScope,
@@ -436,6 +450,7 @@ sealed interface TransferResponse {
     class UploadReady(override val requestId: String, val ticket: String) : TransferResponse
     class ChunkAccepted(override val requestId: String, val ticket: String, val nextOffset: Long) : TransferResponse
     class Completed(override val requestId: String, val receipt: TransferReceipt, val replay: Boolean) : TransferResponse
+    class ReceiptState(override val requestId: String, val receipt: TransferReceipt?) : TransferResponse
     class Cancelled(override val requestId: String) : TransferResponse
     class Failure(override val requestId: String, val issue: TransferIssue) : TransferResponse
 }

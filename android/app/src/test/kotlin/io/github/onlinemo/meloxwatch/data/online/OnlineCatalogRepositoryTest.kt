@@ -424,6 +424,88 @@ class OnlineCatalogRepositoryTest {
         assertEquals(listOf("v6/playlist/detail", "v3/song/detail"), requests.toList())
     }
 
+    @Test(timeout = 30_000L)
+    fun malformedLikedIndexesPreserveThePublishedRowsTimeAndQueueWhileExplicitEmptyRemainsValid(): Unit = runBlocking {
+        verifyRequiredIndexRefresh(OnlineCatalogKind.LIKED, "song/like/get",
+            "{\"code\":200,\"ids\":[201,202]}",
+            listOf("{\"code\":200}", "{\"code\":200,\"ids\":null}", "{\"code\":200,\"ids\":{}}"),
+            "{\"code\":200,\"ids\":[]}")
+    }
+
+    @Test(timeout = 30_000L)
+    fun malformedDailyIndexesPreserveThePublishedRowsTimeAndQueueWhileExplicitEmptyRemainsValid(): Unit = runBlocking {
+        verifyRequiredIndexRefresh(OnlineCatalogKind.DAILY, "v3/discovery/recommend/songs",
+            "{\"code\":200,\"data\":{\"dailySongs\":[${catalogSong(201)},${catalogSong(202)}]}}",
+            listOf("{\"code\":200,\"data\":{}}", "{\"code\":200,\"data\":{\"dailySongs\":null}}",
+                "{\"code\":200,\"data\":{\"dailySongs\":{}}}"),
+            "{\"code\":200,\"data\":{\"dailySongs\":[]}}")
+    }
+
+    /** Malformed index replies pass through the actual parser and Room staging/removal path. */
+    private suspend fun verifyRequiredIndexRefresh(kind: OnlineCatalogKind, indexPath: String,
+        initialBody: String, invalidBodies: List<String>, emptyBody: String) {
+        var indexBody = initialBody
+        val requests = CopyOnWriteArrayList<String>()
+        val eapi = NeteaseEapi(HttpExchange { request ->
+            val path = request.url.substringAfter("/eapi/")
+            requests.add(path)
+            when (path) {
+                indexPath -> catalogJson(indexBody)
+                "v3/song/detail" -> {
+                    val ids = (StrictJson.decode(catalogFields(request)["c"].jsonString().toByteArray()) as JsonArray)
+                        .values.map { it.jsonObject()["id"].jsonLong() }
+                    assertEquals(listOf(201L, 202L), ids)
+                    catalogJson("{\"code\":200,\"songs\":[${ids.joinToString(",") { catalogSong(it) }}]}")
+                }
+                else -> error("Unexpected required-index fixture endpoint")
+            }
+        })
+        val catalog = OnlineCatalogRepository(sessions, NeteaseAuthApi(eapi), NeteaseCatalogApi(eapi),
+            RoomOnlineCatalogCache(database), { now })
+        val selected = OnlineCatalogQuery(kind)
+        val original = catalog.load(selected)
+        assertEquals(2L, original.count)
+        assertTrue(original.complete)
+        val originalRows = catalog.page(original, 0L)
+        assertEquals(listOf("201", "202"), originalRows.map { it.id })
+        val originalStored = database.catalog().view(original.id)
+        val originalStoredRows = database.catalog().rows(original.id, 0L, 100)
+        val originalViewCount = database.catalog().viewCount()
+        catalog.freeze(original).use { lease ->
+            val queueRows = lease.read(0L, 100).entries
+            for (invalid in invalidBodies) {
+                now += 1_000L
+                indexBody = invalid
+                val before = requests.size
+                assertEquals(OnlineCatalogIssue.INVALID_RESPONSE, failure { catalog.load(selected, refresh = true) })
+                assertEquals(before + 1, requests.size)
+                assertEquals(original, catalog.load(selected))
+                assertEquals(original, catalog.current(original.id))
+                assertEquals(original.cachedAtEpochMs, catalog.load(selected).cachedAtEpochMs)
+                assertEquals(originalRows, catalog.page(original, 0L))
+                assertEquals(originalStored, database.catalog().view(original.id))
+                assertEquals(originalStoredRows, database.catalog().rows(original.id, 0L, 100))
+                assertEquals(originalViewCount, database.catalog().viewCount())
+                assertEquals(queueRows, lease.read(0L, 100).entries)
+                assertEquals(SessionValidity.VERIFIED, sessions.snapshot.value.validity)
+                assertEquals(before + 1, requests.size)
+            }
+            now += 1_000L
+            indexBody = emptyBody
+            val beforeEmpty = requests.size
+            val empty = catalog.load(selected, refresh = true)
+            assertTrue(empty.id != original.id)
+            assertEquals(0L, empty.count)
+            assertEquals(0L, empty.reportedTotal)
+            assertTrue(empty.complete)
+            assertEquals(now, empty.cachedAtEpochMs)
+            assertEquals(empty, catalog.load(selected))
+            assertTrue(catalog.page(empty, 0L).isEmpty())
+            assertEquals(beforeEmpty + 1, requests.size)
+            assertEquals(queueRows, lease.read(0L, 100).entries)
+        }
+    }
+
     private suspend fun failure(action: suspend () -> Unit): OnlineCatalogIssue? = try {
         action()
         null

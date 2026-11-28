@@ -1,5 +1,8 @@
 package io.github.onlinemo.meloxwatch.data.themes
 
+import io.github.onlinemo.meloxwatch.data.storage.StorageArea
+import io.github.onlinemo.meloxwatch.data.storage.StorageDirectorySpec
+
 import android.content.Context
 import android.os.CancellationSignal
 import io.github.onlinemo.meloxwatch.data.artwork.ArtworkLimits
@@ -99,6 +102,26 @@ class LocalThemeRepository private constructor(
     init { require(sharedBudget == null || sharedBudget.uses(io)) { "Theme storage must use the shared physical channel" } }
 
     private val occupied = AtomicBoolean(false)
+
+    /** Files are counted under the existing shared file lock, without parsing a package or catalog. */
+    internal fun storageDirectorySpecOnWorker(): StorageDirectorySpec {
+        check(android.os.Looper.myLooper() != android.os.Looper.getMainLooper())
+        return StorageDirectorySpec(directoryProvider().absoluteFile, StorageArea.THEMES, ThemeLimits.OWNED_DEPTH,
+            ThemeLimits.OWNED_NODES.toLong(), classify = { parts, directory ->
+                val first = parts.first()
+                when {
+                    first == "installed" && (parts.size == 1 && directory || parts.size >= 2 && isThemeOperationId(parts[1])) -> StorageArea.THEMES
+                    first in setOf("staging", "received") && (parts.size == 1 && directory ||
+                        parts.size >= 2 && isThemeOperationId(parts[1])) -> StorageArea.RECOVERY
+                    first in setOf("transaction", "retired-transaction") && (parts.size > 1 || directory) -> StorageArea.RECOVERY
+                    parts.size == 1 && !directory && first in setOf("owner.lock", "catalog.bin") -> StorageArea.THEMES
+                    parts.size == 1 && !directory && (first == "transfer-apply.bin" || first.startsWith("catalog-next-") &&
+                        isThemeOperationId(first.removePrefix("catalog-next-"))) -> StorageArea.RECOVERY
+                    else -> null
+                }
+            }, lockFile = "owner.lock", mutableFile = { it.first() != "installed" && it.first() != "catalog.bin" && it.first() != "owner.lock" },
+            sentinels = listOf("catalog.bin", "installed", "staging", "received", "transaction", "retired-transaction", "transfer-apply.bin"))
+    }
     private val previewLock = Any()
     private var heldPreview: PreviewRecord? = null
     private val invalidInstalled = HashMap<ThemeRef, ThemeIssue>()

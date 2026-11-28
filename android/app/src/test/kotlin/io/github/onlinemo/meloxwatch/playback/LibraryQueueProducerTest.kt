@@ -209,7 +209,7 @@ class LibraryQueueProducerTest {
         val source = library.registerSource(spec, LocalGrantObservation(
             read = ObservedCapability.AVAILABLE, enumerate = ObservedCapability.AVAILABLE,
         ))
-        val scan = library.beginScan(source.spec.sourceId, source.authEpoch, library.rules().revision, ScanMode.INCREMENTAL)
+        val scan = library.beginScan(source.spec.sourceId, source.authEpoch, library.rules().revision, ScanMode.FULL)
         library.commitSeen(scan, listOf(ObservedCandidate(source.spec.sourceId, "root", source.spec.uri, null,
             "Root", "vnd.android.document/directory", LocalNodeKind.DIRECTORY)))
         for (start in 0 until count step LibraryLimits.PAGE_SIZE) {
@@ -226,6 +226,12 @@ class LibraryQueueProducerTest {
         }
         val coverage = ScanCoverage(true, true, true, true, false)
         library.setCoverage(scan, coverage)
+        var after: String? = null
+        while (true) {
+            val page = library.stageAbsence(scan, after)
+            if (page.complete) break
+            after = checkNotNull(page.nextAliasId)
+        }
         library.finishScan(scan, ScanCounters(), coverage)
     }
 

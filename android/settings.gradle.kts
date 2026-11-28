@@ -10,9 +10,18 @@ pluginManagement {
     }
 
     repositories {
-        google()
+        // The admitted Kotlin Android marker bytes are the Maven Central publication.
+        google {
+            content { excludeModule("org.jetbrains.kotlin.android", "org.jetbrains.kotlin.android.gradle.plugin") }
+        }
+        // Strict checksum verification also applies to the Central mirror.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/") {
+            content { includeGroupByRegex("org\\.jetbrains\\.kotlin(\\..*)?") }
+        }
         mavenCentral()
-        gradlePluginPortal()
+        gradlePluginPortal {
+            content { excludeModule("org.jetbrains.kotlin.android", "org.jetbrains.kotlin.android.gradle.plugin") }
+        }
     }
     plugins {
         id("com.android.application") version toolchain.getProperty("agp.version")
@@ -25,6 +34,10 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
+        // Strict checksum verification also applies to the Central mirror.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/") {
+            content { includeGroupByRegex("org\\.jetbrains\\.kotlin(\\..*)?") }
+        }
         mavenCentral()
     }
 }

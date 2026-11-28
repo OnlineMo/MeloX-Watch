@@ -206,7 +206,7 @@ class RoomLocalLibraryExclusionRegressionTest {
             val next = library.nextDirectory(token) ?: break
             library.completeDirectory(token, next.objectId, true)
         }
-        val coverage = ScanCoverage(true, true, true, true, false)
+        val coverage = ScanCoverage(false, true, true, true, false)
         library.setCoverage(token, coverage)
         library.finishScan(token, ScanCounters(), coverage)
     }

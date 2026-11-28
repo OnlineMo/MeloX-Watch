@@ -27,6 +27,7 @@ enum class PreferencesField {
     SLEEP_SUMMARY,
     HELP,
     BLUETOOTH_LYRICS,
+    METADATA_LOOKUP,
 }
 
 enum class PreferencesRecoveryReason {

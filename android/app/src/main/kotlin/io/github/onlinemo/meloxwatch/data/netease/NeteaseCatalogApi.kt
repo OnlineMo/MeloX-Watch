@@ -42,6 +42,30 @@ internal data class NativeCatalogIndex(val ids: List<String>, val seed: List<Nat
 
 /** One bounded call per page; pagination/account/ordered snapshots belong to the repository. */
 internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
+    /** Explicit local metadata lookup has no account scope and never sends a saved credential. */
+    suspend fun searchMetadata(words: String, offset: Long, limit: Int = 20): NativeCatalogPage = checked {
+        if (words.isBlank() || words.length > 512 || words.any { it.code < 32 } ||
+            limit !in 1..PAGE_SIZE || offset < 0L || offset > Long.MAX_VALUE - limit) invalid()
+        val response = post("/api/search/get", mapOf("s" to JsonText(words), "type" to JsonNumber("1"),
+            "limit" to JsonNumber(limit.toString()), "offset" to JsonNumber(offset.toString())), null)
+        checkCode(response)
+        val result = response["result"].jsonObject()
+        val songs = array(result["songs"], emptyAllowed = true)
+        val total = result["songCount"].jsonLong()
+        if (songs.size > limit || total < 0L || offset + songs.size > total) invalid()
+        val more = offset + songs.size < total
+        if (more && songs.isEmpty()) throw OnlineCatalogException(OnlineCatalogIssue.INCOMPLETE)
+        val records = songs.mapIndexed { index, value ->
+            currentCoroutineContext().ensureActive()
+            track(value.jsonObject(), offset + index)
+        }
+        if (records.map { it.entry.id }.distinct().size != records.size) invalid()
+        NativeCatalogPage(records, songs.size, total, more)
+    }
+
+    suspend fun metadataDetails(id: String): NativeCatalogEntry? =
+        readDetails(listOf(id), null).singleOrNull()
+
     suspend fun page(query: OnlineCatalogQuery, accountId: String, offset: Long, credential: SessionCredential): NativeCatalogPage = checked {
         if (offset < 0L || offset > Long.MAX_VALUE - PAGE_SIZE) invalid()
         if (!onlineCanonicalId(accountId)) invalid()
@@ -110,14 +134,14 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
                 NativeCatalogIndex(ids, seed, total)
             }
             OnlineCatalogKind.LIKED -> {
-                val ids = array(response["ids"], emptyAllowed = true).map {
+                val ids = array(response["ids"], emptyAllowed = false).map {
                     currentCoroutineContext().ensureActive()
                     id(it)
                 }
                 NativeCatalogIndex(ids, emptyList(), ids.size.toLong())
             }
             OnlineCatalogKind.DAILY -> {
-                val songs = array(response["data"].jsonObject()["dailySongs"], emptyAllowed = true)
+                val songs = array(response["data"].jsonObject()["dailySongs"], emptyAllowed = false)
                     .mapIndexed { order, value -> track(value.jsonObject(), order.toLong()) }
                 NativeCatalogIndex(songs.map { it.entry.id }, songs, songs.size.toLong())
             }
@@ -125,7 +149,10 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
         }
     }
 
-    suspend fun details(ids: List<String>, credential: SessionCredential): List<NativeCatalogEntry> = checked {
+    suspend fun details(ids: List<String>, credential: SessionCredential): List<NativeCatalogEntry> =
+        readDetails(ids, credential)
+
+    private suspend fun readDetails(ids: List<String>, credential: SessionCredential?): List<NativeCatalogEntry> = checked {
         if (ids.isEmpty() || ids.size > PAGE_SIZE || ids.any { !onlineCanonicalId(it) }) invalid()
         val requested = ids.distinct()
         val body = StrictJson.encode(JsonArray(requested.map { JsonObject(mapOf("id" to JsonNumber(it))) }))
@@ -138,8 +165,8 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
         songs
     }
 
-    private suspend fun post(path: String, fields: Map<String, JsonValue>, credential: SessionCredential): JsonObject =
-        eapi.post(path, fields, NeteaseCookie.fromCredential(credential), MetadataCallBudget(),
+    private suspend fun post(path: String, fields: Map<String, JsonValue>, credential: SessionCredential?): JsonObject =
+        eapi.post(path, fields, credential?.let { NeteaseCookie.fromCredential(it) }, MetadataCallBudget(),
             // The byte bound controls large ID indexes; a 10,000-element parser cap would become a product cap.
             JsonBounds(bytes = NetworkLimits.RESPONSE_BYTES, nodes = NetworkLimits.RESPONSE_BYTES / 2 + 1,
                 members = NetworkLimits.RESPONSE_BYTES / 2 + 1, stringChars = 4096)).json
@@ -187,6 +214,7 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
         if (!onlineCanonicalId(result)) invalid()
         return result
     }
+    // Only optional lists may be absent or null; an explicit empty array remains a valid empty result.
     private fun array(value: JsonValue?, emptyAllowed: Boolean): List<JsonValue> = when (value) {
         is JsonArray -> value.values
         null, JsonNull -> if (emptyAllowed) emptyList() else invalid()

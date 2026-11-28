@@ -196,10 +196,11 @@ def current_schemas(root=ROOT, revision=None):
 
 
 def historical_schema_paths(main_version):
-    """实际主库8保留7原件；旧单库首次6的准入门槛继续使用原tuple。"""
+    """Retain admitted predecessors; the first single-current6 contract stays unchanged."""
     require(type(main_version) is int and 0 < main_version <= 2147483647,
             'Watch history requires one actual integer main schema version')
-    versions = HISTORICAL_SCHEMA_VERSIONS + ((7,) if main_version >= 8 else ())
+    versions = (HISTORICAL_SCHEMA_VERSIONS + ((7,) if main_version >= 8 else ()) +
+                ((8,) if main_version >= 9 else ()))
     return {SCHEMA_DIRECTORY + '/' + str(version) + '.json' for version in versions}
 
 

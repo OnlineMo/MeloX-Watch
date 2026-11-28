@@ -73,6 +73,7 @@ internal class CompanionTransferClient(
     private var endpoint: CompanionEndpoint? = null
     private var pending: Pending? = null
     private var session: Session? = null
+    private var catalogView: CatalogView? = null
     private var stopping: CompletableDeferred<Unit>? = null
     private var retryingRetirement = false
     private var retirementWork: Deferred<Unit>? = null
@@ -91,6 +92,8 @@ internal class CompanionTransferClient(
         val pending: Pending, val capabilities: Set<TransferCapability>, var bearer: TransferBearer,
         var tokenDeadline: Long, var sessionDeadline: Long, var deadlineConnection: CompanionWireConnection,
     )
+    private class CatalogView(val id: String, val kind: TransferCatalogKind, val target: TransferFingerprint,
+        val sessionId: String, val peer: TransferFingerprint)
 
     suspend fun pair(address: CompanionEndpoint, target: CompanionTarget, code: String, requested: Set<TransferCapability>) = operation { ticket ->
         require(requested.isNotEmpty())
@@ -99,6 +102,7 @@ internal class CompanionTransferClient(
             session?.bearer?.erase()
             session = null
             pending = null
+            catalogView = null
             endpoint = address
             publish(CompanionConnectionPhase.CONNECTING, target)
         }
@@ -152,11 +156,31 @@ internal class CompanionTransferClient(
         if (kind == TransferCatalogKind.PLAYLIST_MEMBERS && search.isNotEmpty()) throw TransferException(TransferIssue.INVALID_INPUT)
         val selected = requireSession(TransferCapability.READ_LIBRARY)
         val connection = connection(selected.pending, ticket)
-        val scope = scope(connection, selected, TransferCapability.READ_LIBRARY, ticket)
-        val request = TransferRequest.ReadPage(id(), scope, kind, previous?.viewId, previous?.revision, previous?.libraryRevision, previous?.nextCursor, parentId, search, TransferLimits.PAGE_SIZE)
+        val currentScope = scope(connection, selected, TransferCapability.READ_LIBRARY, ticket)
+        val previousView = synchronized(lock) { catalogView }
+        if (previous == null && previousView != null) {
+            if (previousView.target != selected.pending.target.fingerprint || previousView.sessionId != selected.pending.sessionId ||
+                previousView.peer != connection.peer) throw TransferException(TransferIssue.WRONG_TARGET)
+            val close = TransferRequest.CloseCatalogView(id(), currentScope, previousView.kind, previousView.id)
+            if (CompanionResponseValidator.response(close.requestId, connection.exchange(close)) !is TransferResponse.Cancelled) {
+                throw TransferException(TransferIssue.INVALID_INPUT)
+            }
+            checkEpoch(ticket)
+            synchronized(lock) { if (catalogView === previousView) catalogView = null }
+        } else if (previous != null && (previousView == null || previousView.id != previous.viewId || previousView.kind != kind ||
+                previousView.target != selected.pending.target.fingerprint || previousView.sessionId != selected.pending.sessionId || previousView.peer != connection.peer)) {
+            throw TransferException(TransferIssue.CONFLICT)
+        }
+        val request = TransferRequest.ReadPage(id(), scope(connection, selected, TransferCapability.READ_LIBRARY, ticket), kind,
+            previous?.viewId, previous?.revision, previous?.libraryRevision, previous?.nextCursor, parentId, search, TransferLimits.PAGE_SIZE)
         val page = connection.page(request)
         checkEpoch(ticket)
-        CompanionResponseValidator.page(request, page, previous?.let { it.firstOrdinal + it.rows.size } ?: 0L, previous?.totalCount)
+        val verified = CompanionResponseValidator.page(request, page, previous?.let { it.firstOrdinal + it.rows.size } ?: 0L, previous?.totalCount)
+        synchronized(lock) {
+            checkEpoch(ticket)
+            catalogView = CatalogView(verified.viewId, kind, selected.pending.target.fingerprint, selected.pending.sessionId, connection.peer)
+        }
+        verified
     }
 
     suspend fun editPlaylist(draft: CompanionPlaylistDraft): TransferReceipt = operation { ticket ->
@@ -200,7 +224,24 @@ internal class CompanionTransferClient(
         val request = TransferRequest.ApplyDisplay(draft.operationId, scope(connection, selected, TransferCapability.WRITE_DISPLAY_METADATA, ticket),
             draft.previewId ?: throw TransferException(TransferIssue.CONFLICT), draft.expectedRevision, confirmed = true)
         val binding = TransferProtocolCodec.operationBinding(connection.peer, request)
-        val result = CompanionResponseValidator.completed(request.requestId, binding, connection.exchange(request))
+        val lookup = TransferRequest.ReadReceipt(id(), scope(connection, selected, TransferCapability.WRITE_DISPLAY_METADATA, ticket),
+            binding.operationId, binding.kind, binding.payloadHash)
+        CompanionResponseValidator.receipt(lookup.requestId, binding, connection.exchange(lookup))?.let { original ->
+            checkEpoch(ticket)
+            if (original.resultId != draft.entityId) throw TransferException(TransferIssue.CONFLICT)
+            return@operation original
+        }
+        // The exact original proposal must still match before a missing/retired ticket is recreated.
+        val preview = TransferRequest.PreviewDisplay(draft.operationId,
+            scope(connection, selected, TransferCapability.WRITE_DISPLAY_METADATA, ticket), draft.kind, draft.entityId,
+            draft.expectedRevision, draft.libraryRevision, draft.patch)
+        val current = CompanionResponseValidator.preview(preview, connection.exchange(preview)).preview
+        draft.withPhase(CompanionEditPhase.DRAFT).withPreview(current)
+        checkEpoch(ticket)
+        val confirmed = TransferRequest.ApplyDisplay(draft.operationId,
+            scope(connection, selected, TransferCapability.WRITE_DISPLAY_METADATA, ticket), checkNotNull(draft.previewId), draft.expectedRevision, confirmed = true)
+        if (!binding.sameOperation(TransferProtocolCodec.operationBinding(connection.peer, confirmed))) throw TransferException(TransferIssue.CONFLICT)
+        val result = CompanionResponseValidator.completed(confirmed.requestId, binding, connection.exchange(confirmed))
         checkEpoch(ticket)
         if (result.resultId != draft.entityId) throw TransferException(TransferIssue.CONFLICT)
         result
@@ -270,7 +311,7 @@ internal class CompanionTransferClient(
         val result: CompletableDeferred<Unit>
         val work: Admission?
         synchronized(lock) {
-            if (forget) pending = null
+            if (forget) { pending = null; catalogView = null }
             stopping?.let { return it }
             epoch = Math.addExact(epoch, 1L)
             session?.bearer?.erase()

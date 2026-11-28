@@ -114,6 +114,7 @@ internal object BackupPreferencesCodec {
     fun player(record: BackupRecord): UserPreferences = UserPreferences(
         // A portable restore cannot re-enable disclosure to an old or different device.
         bluetoothLyricsEnabled = false,
+        metadataLookupEnabled = false,
         restorePosition = record.flag("restorePosition"), screenShape = enum(record.text("screenShape")),
         libraryLayout = enum<LibraryLayout>(record.text("libraryLayout")), artworkReadPath = enum<ArtworkReadPath>(record.text("artworkReadPath")),
         librarySorts = LibraryListContext.entries.associateWith { LibrarySort(enum<LibrarySortField>(record.text("sort" + it.name + "Field")), record.flag("sort" + it.name + "Descending")) },

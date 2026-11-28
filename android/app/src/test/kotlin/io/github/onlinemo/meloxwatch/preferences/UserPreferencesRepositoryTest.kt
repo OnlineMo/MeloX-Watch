@@ -832,6 +832,7 @@ class UserPreferencesRepositoryTest {
             this[stringPreferencesKey("privacy_notice_choice")] = "UNANSWERED"
         }
         if (schema >= 6) this[booleanPreferencesKey("bluetooth_lyrics_enabled")] = false
+        if (schema >= 7) this[booleanPreferencesKey("metadata_lookup_enabled")] = false
         sorts.forEach { (context, sort) ->
             val suffix = context.name.lowercase(java.util.Locale.ROOT)
             this[stringPreferencesKey("library_sort_" + suffix)] = sort.field.name

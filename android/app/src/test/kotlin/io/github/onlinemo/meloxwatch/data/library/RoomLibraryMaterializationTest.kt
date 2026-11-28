@@ -57,7 +57,7 @@ class RoomLibraryMaterializationTest {
         fixture.database.withTestReaderSql {
             val version = checkNotNull(scalarText("SELECT sqlite_version()")).split('.').map { it.toInt() }
             assertTrue(version[0] > 3 || version[0] == 3 && version[1] >= 35)
-            assertEquals(8L, scalarLong("PRAGMA user_version"))
+            assertEquals(9L, scalarLong("PRAGMA user_version"))
         }
         val view = fixture.library.openView()
         try {
@@ -163,7 +163,7 @@ class RoomLibraryMaterializationTest {
             val directory = library.nextDirectory(token) ?: break
             library.completeDirectory(token, directory.objectId, true)
         }
-        val coverage = ScanCoverage(true, true, true, true, false)
+        val coverage = ScanCoverage(false, true, true, true, false)
         library.setCoverage(token, coverage)
         library.finishScan(token, ScanCounters(), coverage)
     }

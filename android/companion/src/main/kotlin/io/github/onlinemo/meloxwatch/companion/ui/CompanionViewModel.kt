@@ -21,6 +21,7 @@ import io.github.onlinemo.meloxwatch.companion.data.CompanionThemePreview
 import io.github.onlinemo.meloxwatch.companion.data.CompanionUploadPhase
 import io.github.onlinemo.meloxwatch.companion.data.CompanionUploadProgress
 import io.github.onlinemo.meloxwatch.companion.data.localFingerprint
+import io.github.onlinemo.meloxwatch.companion.data.requireLocalText
 import io.github.onlinemo.meloxwatch.companion.transfer.CompanionTransferClient
 import io.github.onlinemo.meloxwatch.data.transfer.TransferCapability
 import io.github.onlinemo.meloxwatch.data.transfer.TransferCatalogKind
@@ -44,6 +45,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -54,6 +57,21 @@ import kotlinx.coroutines.withTimeout
 
 internal enum class CompanionScreen { CONNECTION, LIBRARY, PLAYLIST, DISPLAY, THEME, LICENSES }
 internal enum class CompanionTrackSelection { NONE, PLAYLIST_ADD, DISPLAY_ADD, DISPLAY_REMOVE }
+internal enum class CompanionPickerKind { AUDIO, ICON }
+
+/** An outstanding system result survives Activity replacement only in this ViewModel. */
+internal class CompanionPickerTicket internal constructor(
+    val kind: CompanionPickerKind,
+    internal val generation: Long,
+    internal val screen: CompanionScreen,
+    internal val target: TransferFingerprint?,
+    internal val themeRevision: Long?,
+    internal val role: CompanionIconRole? = null,
+    internal val licenseName: String = "",
+    internal val licenseText: String = "",
+) {
+    override fun toString(): String = "<local-document-picker-ticket>"
+}
 
 /** 连接输入只留内存，不进入实例恢复或本地记录。 */
 internal class CompanionConnectionForm(
@@ -88,6 +106,7 @@ internal data class CompanionUiState(
     val documentIssue: TransferIssue? = null,
     val issue: TransferIssue? = null,
     val pickerUnavailable: Boolean = false,
+    val pickerPending: Boolean = false,
     val pageWindow: CompanionPageWindow = emptyWindow(TransferCatalogKind.TRACKS),
     val playlist: CompanionPlaylistSelection? = null,
     val group: CompanionGroupSelection? = null,
@@ -98,7 +117,7 @@ internal data class CompanionUiState(
     val themePreview: CompanionThemePreview? = null,
 ) {
     fun allowed(capability: TransferCapability): Boolean = connection.phase == CompanionConnectionPhase.READY && capability in connection.capabilities
-    val available: Boolean get() = local != null && !busy && !stopping && !recovering && documentIssue != TransferIssue.RECOVERY_REQUIRED && connection.phase != CompanionConnectionPhase.RECOVERY_REQUIRED
+    val available: Boolean get() = local != null && !busy && !stopping && !recovering && !pickerPending && documentIssue != TransferIssue.RECOVERY_REQUIRED && connection.phase != CompanionConnectionPhase.RECOVERY_REQUIRED
     override fun toString(): String = "<companion-ui-state>"
 }
 
@@ -122,11 +141,136 @@ internal class CompanionViewModel(
     private var recoveryWork: Job? = null
     private var forgetAfterStop = false
     private var viewGeneration = 0L
+    private var foreground = false
+    private var cleared = false
+    private var picker: PendingPicker? = null
+
+    /** One URI is held until real retirement permits the original local preparation action. */
+    private class PendingPicker(val ticket: CompanionPickerTicket) {
+        var returned = false
+        var cancelled = false
+        var uri: Uri? = null
+        override fun toString(): String = "<pending-local-document>"
+    }
 
     init {
-        viewModelScope.launch { transfer.state.collect { connection -> mutableState.update { it.copy(connection = connection) } } }
-        viewModelScope.launch { documents.issue.collect { issue -> mutableState.update { it.copy(documentIssue = issue) } } }
+        viewModelScope.launch { transfer.state.collect { connection ->
+            mutableState.update { it.copy(connection = connection) }
+            drainPicker()
+        } }
+        viewModelScope.launch { documents.issue.collect { issue ->
+            mutableState.update { it.copy(documentIssue = issue) }
+            drainPicker()
+        } }
+        viewModelScope.launch { documents.working.collect { occupied -> if (!occupied) drainPicker() } }
         reloadLocal()
+    }
+
+    fun foreground() {
+        if (cleared || !viewModelScope.isActive) return
+        foreground = true
+        reloadLocal()
+        drainPicker()
+    }
+
+    fun requestAudioPicker(): CompanionPickerTicket? = requestPicker(CompanionPickerKind.AUDIO)
+
+    fun requestIconPicker(role: CompanionIconRole, licenseName: String, licenseText: String): CompanionPickerTicket? {
+        try {
+            requireLocalText(licenseName, 512)
+            requireLocalText(licenseText, 16 * 1024, multiline = true)
+        } catch (error: Exception) { show(error); return null }
+        return requestPicker(CompanionPickerKind.ICON, role, licenseName, licenseText)
+    }
+
+    private fun requestPicker(kind: CompanionPickerKind, role: CompanionIconRole? = null,
+        licenseName: String = "", licenseText: String = ""): CompanionPickerTicket? {
+        val current = state.value
+        val expectedScreen = if (kind == CompanionPickerKind.AUDIO) CompanionScreen.CONNECTION else CompanionScreen.THEME
+        if (cleared || !viewModelScope.isActive || !foreground || !current.available || picker != null || current.screen != expectedScreen) {
+            if (!cleared) show(TransferException(TransferIssue.BUSY))
+            return null
+        }
+        if (kind == CompanionPickerKind.AUDIO && current.local?.upload != null) {
+            show(TransferException(TransferIssue.BUSY))
+            return null
+        }
+        val ticket = CompanionPickerTicket(kind, viewGeneration, current.screen, current.local?.target?.fingerprint,
+            current.local?.theme?.revision.takeIf { kind == CompanionPickerKind.ICON }, role, licenseName, licenseText)
+        picker = PendingPicker(ticket)
+        mutableState.update { it.copy(pickerPending = true, pickerUnavailable = false, issue = null) }
+        return ticket
+    }
+
+    /** The registry has one outstanding result per kind; a retired ticket still owns its callback slot. */
+    fun pickerTicket(kind: CompanionPickerKind): CompanionPickerTicket? = picker?.takeIf {
+        it.ticket.kind == kind && !it.returned
+    }?.ticket
+
+    fun pickerReturned(ticket: CompanionPickerTicket, uri: Uri?): Boolean {
+        val pending = picker?.takeIf { it.ticket === ticket && !it.returned } ?: return false
+        pending.returned = true
+        if (pending.cancelled || uri == null) {
+            picker = null
+            publishPickerState()
+            return true
+        }
+        if (uri.scheme != "content" || uri.authority.isNullOrBlank() || uri.toString().length > 16 * 1024) {
+            picker = null
+            publishPickerState()
+            show(TransferException(TransferIssue.INVALID_INPUT))
+            return true
+        }
+        pending.uri = uri
+        publishPickerState()
+        drainPicker()
+        return true
+    }
+
+    fun pickerLaunchFailed(ticket: CompanionPickerTicket) {
+        val pending = picker?.takeIf { it.ticket === ticket && !it.returned } ?: return
+        picker = null
+        pending.uri = null
+        publishPickerState()
+        pickerUnavailable()
+    }
+
+    private fun cancelPicker(releaseCallback: Boolean = false) {
+        picker?.let { pending ->
+            pending.cancelled = true
+            pending.uri = null
+            // An unreturned launch is retained so its late result cannot belong to a newer request.
+            if (releaseCallback || pending.returned) picker = null
+        }
+        publishPickerState()
+    }
+
+    private fun publishPickerState() {
+        val pending = picker
+        mutableState.update { it.copy(pickerPending = pending != null,
+            busy = work != null || pending?.let { item -> item.returned && !item.cancelled } == true) }
+    }
+
+    private fun drainPicker() {
+        val pending = picker ?: return
+        val uri = pending.uri ?: return
+        if (cleared || !viewModelScope.isActive || !foreground || pending.cancelled || !pending.returned) return
+        val ticket = pending.ticket
+        val current = state.value
+        val targetChanged = ticket.target != current.local?.target?.fingerprint
+        if (targetChanged || ticket.generation != viewGeneration || ticket.screen != current.screen ||
+            ticket.kind == CompanionPickerKind.ICON && ticket.themeRevision != current.local?.theme?.revision) {
+            cancelPicker()
+            show(TransferException(if (targetChanged) TransferIssue.WRONG_TARGET else TransferIssue.CONFLICT))
+            return
+        }
+        // Stop completion, the document worker and explicit recovery must all truly release admission.
+        launchWork(pickerOwner = pending) {
+            when (ticket.kind) {
+                CompanionPickerKind.AUDIO -> prepareAudio(uri)
+                CompanionPickerKind.ICON -> prepareIcon(uri, checkNotNull(ticket.role), ticket.licenseName, ticket.licenseText)
+            }
+        }
     }
 
     fun reloadLocal() {
@@ -139,10 +283,14 @@ internal class CompanionViewModel(
     }
 
     fun editConnection(change: (CompanionConnectionForm) -> CompanionConnectionForm) {
-        mutableState.update { it.copy(form = change(it.form), issue = null) }
+        val old = state.value.form
+        val edited = change(old)
+        if (edited.fingerprint != old.fingerprint) cancelPicker()
+        mutableState.update { it.copy(form = edited, issue = null) }
     }
 
     fun navigate(screen: CompanionScreen) {
+        cancelPicker()
         viewGeneration = Math.addExact(viewGeneration, 1L)
         if (work != null || recoveryWork != null) stop()
         val kind = when (screen) {
@@ -191,6 +339,12 @@ internal class CompanionViewModel(
 
     /** 本地撤配对立即清缓存；持久草稿仍绑定原目标。 */
     fun stop(forget: Boolean = false) {
+        if (cleared) return
+        cancelPicker()
+        retireWork(forget)
+    }
+
+    private fun retireWork(forget: Boolean = false) {
         forgetAfterStop = forgetAfterStop || forget
         if (forget) clearCatalog()
         recoveryWork?.cancel(CancellationException("Companion recovery stopped"))
@@ -227,18 +381,26 @@ internal class CompanionViewModel(
               catch (error: Exception) { show(error) }
             finally {
                 mutableState.update { it.copy(stopping = false, form = it.form.edited(address = "", port = "", code = "")) }
-                stopWork = null
             }
         }
         stopWork = control
+        control.invokeOnCompletion {
+            if (stopWork === control) {
+                stopWork = null
+                publishPickerState()
+                drainPicker()
+            }
+        }
         control.start()
     }
 
     fun background() {
+        foreground = false
         mutableState.update {
             it.copy(themePreview = null)
         }
-        stop()
+        // A system picker temporarily stops the Activity; its result is still an explicit local intent.
+        retireWork()
     }
 
     fun retryRecovery() {
@@ -264,17 +426,23 @@ internal class CompanionViewModel(
               catch (error: CancellationException) { throw error }
               catch (error: Exception) { show(error) }
             finally {
-                recoveryWork = null
                 mutableState.update {
                     it.copy(recovering = false)
                 }
             }
         }
         recoveryWork = control
+        control.invokeOnCompletion {
+            if (recoveryWork === control) {
+                recoveryWork = null
+                publishPickerState()
+                drainPicker()
+            }
+        }
         control.start()
     }
 
-    fun prepareAudio(uri: Uri) = launchWork {
+    private suspend fun prepareAudio(uri: Uri) {
         val draft = documents.prepareAudio(uri)
         local(documents.update {
             old -> if (old.upload?.operationId != draft.operationId) throw TransferException(TransferIssue.CONFLICT)
@@ -283,7 +451,7 @@ internal class CompanionViewModel(
         mutableState.update { it.copy(uploadProgress = null, pickerUnavailable = false) }
     }
 
-    fun prepareIcon(uri: Uri, role: CompanionIconRole, licenseName: String, licenseText: String) = launchWork {
+    private suspend fun prepareIcon(uri: Uri, role: CompanionIconRole, licenseName: String, licenseText: String) {
         documents.prepareIcon(uri, role, licenseName, licenseText)
         local(documents.update { it })
         mutableState.update { it.copy(pickerUnavailable = false, themePreview = null) }
@@ -692,9 +860,12 @@ internal class CompanionViewModel(
         mutableState.update { it.copy(issue = issue) }
     }
 
-    private fun launchWork(action: suspend () -> Unit) {
-        if (work != null || stopWork?.isActive == true || recoveryWork != null || documents.working.value || transfer.state.value.phase == CompanionConnectionPhase.RECOVERY_REQUIRED || documents.issue.value == TransferIssue.RECOVERY_REQUIRED) {
-            show(TransferException(TransferIssue.BUSY))
+    private fun launchWork(pickerOwner: PendingPicker? = null, action: suspend () -> Unit) {
+        if (cleared || !viewModelScope.isActive) return
+        if (work != null || stopWork?.isActive == true || recoveryWork != null || documents.working.value ||
+            picker != null && picker !== pickerOwner ||
+            transfer.state.value.phase == CompanionConnectionPhase.RECOVERY_REQUIRED || documents.issue.value == TransferIssue.RECOVERY_REQUIRED) {
+            if (pickerOwner == null) show(TransferException(TransferIssue.BUSY))
             return
         }
         mutableState.update { it.copy(busy = true, issue = null) }
@@ -710,17 +881,31 @@ internal class CompanionViewModel(
                 coroutineContext.ensureActive()
                 if (generation == viewGeneration) show(TransferException(TransferIssue.STORAGE_UNAVAILABLE))
             }
-            finally {
-                if (work === coroutineContext[Job]) work = null
-                mutableState.update { it.copy(busy = false) }
-            }
         }
         work = job
+        if (pickerOwner != null) {
+            check(picker === pickerOwner)
+            pickerOwner.uri = null
+            picker = null
+            publishPickerState()
+        }
+        // An already cancelled lazy job can complete synchronously while this callback is registered.
+        job.invokeOnCompletion {
+            if (work === job) {
+                work = null
+                publishPickerState()
+                drainPicker()
+            }
+        }
         job.start()
     }
 
     override fun onCleared() {
+        cleared = true
+        cancelPicker(releaseCallback = true)
         background()
+        val retiring = stopWork
+        if (retiring == null) controlScope.cancel() else retiring.invokeOnCompletion { controlScope.cancel() }
         super.onCleared()
     }
 }

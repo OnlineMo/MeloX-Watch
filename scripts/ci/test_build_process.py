@@ -498,6 +498,69 @@ class TestProgressTests(unittest.TestCase):
             process.assert_not_called()
 
 
+class OutputSinkTests(unittest.TestCase):
+    def test_slow_writes_keep_admission_bounded_and_separate_overflow_from_close(self):
+        sink = monitor._OutputSink(io.StringIO())
+        sink.descriptor = 17
+        emitted, blocked_writes, write_attempts = bytearray(), 0, 0
+        def slow_write(descriptor, raw):
+            nonlocal blocked_writes, write_attempts
+            self.assertEqual(descriptor, 17)
+            write_attempts += 1
+            if write_attempts % 2 == 0:
+                blocked_writes += 1
+                raise BlockingIOError(errno.EAGAIN, 'Slow output fixture')
+            emitted.extend(raw[:1])
+            return 1
+        chunk = b'x' * 4096
+        with patch.object(monitor.os, 'write', side_effect=slow_write):
+            for _ in range(32):
+                sink.pump()
+                sink.enqueue(chunk)
+                self.assertLessEqual(len(sink.pending), monitor.MAX_PENDING_OUTPUT_BYTES)
+            sink.pump()
+        before_close = sink.snapshot()
+        overflow = 32 * len(chunk) - len(emitted) - len(sink.pending)
+        self.assertGreater(overflow, 0)
+        self.assertEqual(before_close['overflow_dropped_bytes'], overflow)
+        self.assertEqual(before_close['close_dropped_bytes'], 0)
+        self.assertEqual(before_close['dropped_bytes'], overflow)
+        self.assertEqual(before_close['blocked_writes'], blocked_writes)
+        with patch.object(monitor.os, 'write', side_effect=BlockingIOError(errno.EAGAIN, 'Full output fixture')) as write:
+            sink.close()
+        write.assert_called_once()
+        final = sink.snapshot()
+        self.assertEqual(final['pending_bytes'], 0)
+        self.assertEqual(final['overflow_dropped_bytes'], overflow)
+        self.assertEqual(final['close_dropped_bytes'], before_close['pending_bytes'])
+        self.assertEqual(final['dropped_bytes'], 32 * len(chunk) - len(emitted))
+        self.assertEqual(final['dropped_bytes'], final['overflow_dropped_bytes'] + final['close_dropped_bytes'])
+        self.assertEqual(final['blocked_writes'], blocked_writes + 1)
+
+    def test_blocked_close_classifies_only_pending_abandonment_with_one_write_attempt(self):
+        sink = monitor._OutputSink(io.StringIO())
+        sink.descriptor = 17
+        sink.enqueue(b'x' * 2819)
+        with patch.object(monitor.os, 'write', side_effect=BlockingIOError(errno.EAGAIN, 'Full output fixture')) as write:
+            sink.close()
+        write.assert_called_once_with(17, b'x' * 2819)
+        self.assertEqual(sink.snapshot(), {'dropped_bytes': 2819, 'overflow_dropped_bytes': 0,
+            'close_dropped_bytes': 2819, 'blocked_writes': 1, 'pending_bytes': 0,
+            'maximum_pending_bytes': 65536})
+
+    def test_writable_close_keeps_its_eight_write_budget_and_classifies_the_remaining_tail(self):
+        sink = monitor._OutputSink(io.StringIO())
+        sink.descriptor = 17
+        sink.enqueue(b'x' * monitor.MAX_PENDING_OUTPUT_BYTES)
+        with patch.object(monitor.os, 'write', side_effect=lambda _descriptor, raw: len(raw)) as write:
+            sink.close()
+        self.assertEqual(write.call_count, 8)
+        self.assertTrue(all(len(call.args[1]) == 4096 for call in write.call_args_list))
+        self.assertEqual(sink.snapshot(), {'dropped_bytes': 32768, 'overflow_dropped_bytes': 0,
+            'close_dropped_bytes': 32768, 'blocked_writes': 0, 'pending_bytes': 0,
+            'maximum_pending_bytes': 65536})
+
+
 class OverallBuildBudgetTests(unittest.TestCase):
     """Exercise the real deadline/report loop with a clock and no launched process or Linux syscalls."""
     def setUp(self):
@@ -539,6 +602,33 @@ class OverallBuildBudgetTests(unittest.TestCase):
 
     def report(self, phase='strict-debug'):
         return json.loads((self.root / 'app/build/reports/ci-process' / phase / 'process.json').read_text())
+
+    def test_writable_stdout_keeps_large_read_batches_and_the_original_binary_log(self):
+        for size in (68355, 131072):
+            with self.subTest(size=size):
+                self.now, self.finish_at, self.exit_code = 1000.0, 1001.0, 0
+                tail = b'\x00\xff-tail\n'
+                payload = (b'watch-log-' * (size // 10 + 1))[:size - len(tail)] + tail
+                chunks = [payload[index:index + 4096] for index in range(0, len(payload), 4096)]
+                forwarded, read_counts = io.StringIO(), []
+                phase = 'stdout-burst-' + str(size)
+                with patch.object(monitor.os, 'read', side_effect=chunks + [b'']) as read, \
+                        patch.object(self.owner, 'refresh', side_effect=lambda: read_counts.append(read.call_count) or []):
+                    monitor.run_gradle(['unexecuted-output-fixture'], cwd=self.root, env={}, phase=phase,
+                                       output=forwarded, diagnostics=lambda *_: {'status': 'fixture'})
+                record = self.report(phase)
+                self.assertEqual(record['status'], 'completed')
+                self.assertEqual(record['stdout']['dropped_bytes'], 0)
+                self.assertEqual(record['stdout']['overflow_dropped_bytes'], 0)
+                self.assertEqual(record['stdout']['close_dropped_bytes'], 0)
+                self.assertEqual(record['stdout']['blocked_writes'], 0)
+                self.assertEqual(record['stdout']['pending_bytes'], 0)
+                self.assertEqual(record['stdout']['maximum_pending_bytes'], 65536)
+                self.assertEqual(record['captured_log_bytes'], size)
+                self.assertFalse(record['log_truncated'])
+                self.assertEqual((self.root / 'app/build/reports/ci-process' / phase / 'process-output.log').read_bytes(), payload)
+                self.assertEqual(forwarded.getvalue(), payload.decode('utf-8', errors='replace'))
+                self.assertEqual(read_counts[0], min(32, len(chunks) + 1))
 
     def test_default_total_limit_and_independent_limits_stay_unchanged(self):
         self.run_phase()

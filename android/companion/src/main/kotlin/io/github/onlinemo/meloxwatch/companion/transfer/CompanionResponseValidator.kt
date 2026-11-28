@@ -36,7 +36,15 @@ internal object CompanionResponseValidator {
 
     fun completed(requestId: String, binding: TransferOperationBinding, response: TransferResponse, actualBytes: Long? = null): TransferReceipt {
         val result = response(requestId, response) as? TransferResponse.Completed ?: fail(TransferIssue.INVALID_INPUT)
-        val receipt = result.receipt
+        return validateReceipt(binding, result.receipt, actualBytes)
+    }
+
+    fun receipt(requestId: String, binding: TransferOperationBinding, response: TransferResponse): TransferReceipt? {
+        val result = response(requestId, response) as? TransferResponse.ReceiptState ?: fail(TransferIssue.INVALID_INPUT)
+        return result.receipt?.let { validateReceipt(binding, it, null) }
+    }
+
+    private fun validateReceipt(binding: TransferOperationBinding, receipt: TransferReceipt, actualBytes: Long?): TransferReceipt {
         if (!binding.sameOperation(receipt.binding)) fail(TransferIssue.CONFLICT)
         val expectedKind = when (binding.kind) {
             TransferOperationKind.AUDIO -> TransferReceiptKind.AUDIO_COMMITTED
