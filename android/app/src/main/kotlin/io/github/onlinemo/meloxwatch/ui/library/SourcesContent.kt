@@ -22,6 +22,12 @@ import io.github.onlinemo.meloxwatch.ui.fileoperations.fileIssueText
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import java.util.Locale
 
+private fun entryAvailabilityText(availability: SourcesEntryAvailability): Int = when (availability) {
+    SourcesEntryAvailability.UNKNOWN -> R.string.library_entry_not_checked
+    SourcesEntryAvailability.AVAILABLE -> R.string.library_entry_available
+    SourcesEntryAvailability.UNAVAILABLE -> R.string.library_entry_unavailable
+}
+
 internal fun LazyListScope.sourcesContent(
     state: SourcesUiState,
     model: SourcesViewModel,
@@ -29,8 +35,10 @@ internal fun LazyListScope.sourcesContent(
     onPlayPreview: (QueueEntry) -> Unit,
     onChooseFile: () -> Unit,
     onChooseTree: () -> Unit,
-    onMediaStore: () -> Unit,
+    onMediaStore: (Boolean) -> Unit,
     onPermissionSettings: () -> Unit,
+    onHelp: () -> Unit,
+    onTransfer: () -> Unit,
 ) {
     item(key = "sources:status") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -50,6 +58,28 @@ internal fun LazyListScope.sourcesContent(
             state.importIssue?.let { LibraryText(stringResource(importIssueText(it)), error = true) }
             state.fileIssue?.let { LibraryText(stringResource(fileIssueText(it)), error = true) }
             state.notice?.let { LibraryText(stringResource(noticeText(it))) }
+            if (state.awaitingPicker) LibraryText(stringResource(if (state.drainingPicker)
+                R.string.library_picker_draining else R.string.library_picker_waiting))
+            if (state.awaitingPickerForeground) LibraryText(stringResource(R.string.library_picker_foreground))
+            val capabilities = state.entryCapabilities
+            LibraryText(stringResource(R.string.library_entry_file, stringResource(entryAvailabilityText(capabilities.file))))
+            LibraryText(stringResource(R.string.library_entry_tree, stringResource(entryAvailabilityText(capabilities.tree))))
+            LibraryText(stringResource(R.string.library_entry_media, stringResource(entryAvailabilityText(capabilities.media))))
+            LibraryText(stringResource(when (state.mediaPermission) {
+                SourcesMediaPermission.UNKNOWN -> R.string.library_media_access_unknown
+                SourcesMediaPermission.REQUESTABLE -> R.string.library_media_permission
+                SourcesMediaPermission.GRANTED -> R.string.library_media_access_granted
+                SourcesMediaPermission.SETTINGS_ONLY -> R.string.library_media_access_settings
+            }))
+            val blocked = capabilities.file == SourcesEntryAvailability.UNAVAILABLE &&
+                capabilities.tree == SourcesEntryAvailability.UNAVAILABLE &&
+                (capabilities.media == SourcesEntryAvailability.UNAVAILABLE ||
+                    state.mediaPermission == SourcesMediaPermission.SETTINGS_ONLY || state.mediaReadIssue != null)
+            if (blocked) LibraryText(stringResource(R.string.library_entry_blocked))
+            if (SourcesEntryAvailability.UNKNOWN in listOf(capabilities.file, capabilities.tree, capabilities.media)) {
+                LibraryText(stringResource(R.string.library_entry_unknown))
+            }
+            LibraryButton(stringResource(R.string.library_check_entries), !state.working, model::refreshEntryCapabilities)
             if (state.working) LibraryButton(stringResource(R.string.probe_cancel), !state.stopping, model::cancelRead)
             LibraryButton(stringResource(R.string.library_reload_sources), !state.working, model::reload)
         }
@@ -57,24 +87,37 @@ internal fun LazyListScope.sourcesContent(
     if (state.reauthorization != null) item(key = "sources:reauthorize") {
         LibraryText(stringResource(R.string.library_reauthorize_scope, sourceName(state.reauthorization)))
         val isTree = state.reauthorization.spec.kind == LocalSourceKind.TREE
-        LibraryButton(stringResource(if (isTree) R.string.library_choose_original_folder else R.string.library_choose_original_file), !state.working,
+        val availability = if (isTree) state.entryCapabilities.tree else state.entryCapabilities.file
+        LibraryButton(stringResource(if (isTree) R.string.library_choose_original_folder else R.string.library_choose_original_file),
+            state.canChooseSource && availability == SourcesEntryAvailability.AVAILABLE,
             if (isTree) onChooseTree else onChooseFile)
         LibraryButton(stringResource(R.string.probe_cancel), !state.working, model::cancelReauthorization)
     } else item(key = "sources:add") {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             LibraryText(stringResource(R.string.library_offline))
-            LibraryButton(stringResource(R.string.library_add_media), !state.working) {
-                if (model.prepareMediaStore(primary = false)) onMediaStore()
-            }
-            if (Build.VERSION.SDK_INT >= 30) {
-                LibraryButton(stringResource(R.string.library_add_primary_media_store), !state.working) {
-                    if (model.prepareMediaStore(primary = true)) onMediaStore()
+            if (state.entryCapabilities.media == SourcesEntryAvailability.AVAILABLE) {
+                if (state.mediaPermission == SourcesMediaPermission.SETTINGS_ONLY) {
+                    LibraryButton(stringResource(R.string.probe_permission_settings), true, onPermissionSettings)
+                } else {
+                    LibraryButton(stringResource(R.string.library_add_media), state.canChooseSource) {
+                        onMediaStore(false)
+                    }
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        LibraryButton(stringResource(R.string.library_add_primary_media_store), state.canChooseSource) {
+                            onMediaStore(true)
+                        }
+                    }
                 }
             }
-            LibraryText(stringResource(R.string.library_media_permission))
-            LibraryButton(stringResource(R.string.library_choose_file), !state.working, onChooseFile)
-            LibraryButton(stringResource(R.string.library_choose_folder), !state.working, onChooseTree)
-            LibraryText(stringResource(R.string.library_no_picker_alternative))
+            if (state.entryCapabilities.file == SourcesEntryAvailability.AVAILABLE) {
+                LibraryButton(stringResource(R.string.library_choose_file), state.canChooseSource, onChooseFile)
+            }
+            if (state.entryCapabilities.tree == SourcesEntryAvailability.AVAILABLE) {
+                LibraryButton(stringResource(R.string.library_choose_folder), state.canChooseSource, onChooseTree)
+            }
+            LibraryText(stringResource(R.string.library_external_entry))
+            LibraryButton(stringResource(R.string.help_title), true, onHelp)
+            LibraryButton(stringResource(R.string.transfer_title), true, onTransfer)
         }
     }
     val selected = state.selected
@@ -137,6 +180,10 @@ internal fun LazyListScope.sourcesContent(
             if (scan.phase in setOf(ScanPhase.PREPARING, ScanPhase.RUNNING, ScanPhase.STAGING_ABSENCE)) {
                 LibraryText(stringResource(R.string.library_scan_unknown_total))
                 LibraryButton(stringResource(R.string.probe_cancel), true, model::cancelScan)
+            }
+            if (scan.phase == ScanPhase.STOPPING) {
+                LibraryText(stringResource(R.string.library_stopping))
+                if (scan.issue != null) LibraryButton(stringResource(R.string.library_retry_scan_stop), !state.working, model::retryScanStop)
             }
             scan.issue?.let { LibraryText(stringResource(sourceIssueText(it)), error = true) }
             if (scan.phase == ScanPhase.COMPLETED && !scan.coverage.permitsAbsence) LibraryText(stringResource(R.string.library_partial))

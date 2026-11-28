@@ -59,6 +59,14 @@ import kotlinx.coroutines.sync.withLock
 
 enum class LibraryScreen { ALL, SEARCH, ALBUMS, ARTISTS, FOLDERS, RECENT, DETAIL, SOURCES, HISTORY, STATISTICS }
 
+/** A real navigation retires this owner; Activity STOP/recreation does not grant a new route. */
+class LibraryNavigationOwner internal constructor() {
+    @Volatile var isCurrent: Boolean = true
+        private set
+    internal fun retire() { isCurrent = false }
+    override fun toString(): String = "LibraryNavigationOwner"
+}
+
 data class LibrarySortEdit(val base: UserPreferences, val context: LibraryListContext, val sort: LibrarySort)
 
 private data class LibrarySearchOrigin(
@@ -133,6 +141,8 @@ class LibraryViewModel internal constructor(
     private val app = application as MeloXApplication
     private val mutableState = MutableStateFlow(restoredState())
     val uiState = mutableState.asStateFlow()
+    private val mutableNavigation = MutableStateFlow(LibraryNavigationOwner())
+    internal val navigation = mutableNavigation.asStateFlow()
     private var visible = false
     private var visibilityRevision = 0L
     private var generation = 0L
@@ -254,7 +264,7 @@ class LibraryViewModel internal constructor(
             LibraryScreen.RECENT -> LibraryQuery(addedSinceEpochMs = System.currentTimeMillis() - RECENT_WINDOW_MS)
             else -> LibraryQuery()
         }
-        mutableState.update { it.copy(screen = screen, context = context, query = query, detail = null, folder = null,
+        selectScreen { it.copy(screen = screen, context = context, query = query, detail = null, folder = null,
             sortEdit = null, searchDraft = "", searchSubmitted = false, searchInputValid = true) }
         rememberNavigation()
         openView()
@@ -265,7 +275,7 @@ class LibraryViewModel internal constructor(
         if (state.screen == LibraryScreen.SEARCH) return
         stopArtworkForNavigation()
         if (searchOrigin != null) {
-            mutableState.update { it.copy(screen = LibraryScreen.SEARCH, detail = null, sortEdit = null) }
+            selectScreen { it.copy(screen = LibraryScreen.SEARCH, detail = null, sortEdit = null) }
             openView()
             return
         }
@@ -273,7 +283,7 @@ class LibraryViewModel internal constructor(
         searchOrigin = LibrarySearchOrigin(state.screen, state.context, state.query, state.folder, state.detail,
             parentScreen, state.page?.tracks?.firstOrNull()?.trackKey)
         retireView()
-        mutableState.update { it.copy(screen = LibraryScreen.SEARCH, context = LibraryListContext.SEARCH,
+        selectScreen { it.copy(screen = LibraryScreen.SEARCH, context = LibraryListContext.SEARCH,
             query = LibraryQuery(), searchSubmitted = false, detail = null, folder = null, sortEdit = null,
             page = null, pageStart = 0L, groupPage = null, folderPage = null, sections = emptyList(),
             loading = false, showingPreviousData = false, hasNewData = false, issue = null) }
@@ -309,7 +319,7 @@ class LibraryViewModel internal constructor(
         stopArtworkForNavigation()
         searchOrigin = null
         parentScreen = origin.parentScreen
-        mutableState.update { it.copy(screen = origin.screen, context = origin.context, query = origin.query,
+        selectScreen { it.copy(screen = origin.screen, context = origin.context, query = origin.query,
             folder = origin.folder, detail = origin.detail, searchDraft = "", searchSubmitted = false,
             searchInputValid = true, sortEdit = null, page = null, pageStart = 0L, groupPage = null,
             folderPage = null, sections = emptyList(), loading = false, showingPreviousData = false,
@@ -322,7 +332,7 @@ class LibraryViewModel internal constructor(
         stopArtworkForNavigation()
         parentScreen = if (kind == LibraryGroupKind.ALBUM) LibraryScreen.ALBUMS else LibraryScreen.ARTISTS
         val query = if (kind == LibraryGroupKind.ALBUM) LibraryQuery(albumKey = group.key) else LibraryQuery(artistKey = group.key)
-        mutableState.update { it.copy(screen = LibraryScreen.ALL, query = query,
+        selectScreen { it.copy(screen = LibraryScreen.ALL, query = query,
             context = if (kind == LibraryGroupKind.ALBUM) LibraryListContext.ALBUM else LibraryListContext.ARTIST,
             sortEdit = null, detail = null) }
         rememberNavigation()
@@ -331,7 +341,7 @@ class LibraryViewModel internal constructor(
 
     fun openFolder(folder: LibraryFolder) {
         stopArtworkForNavigation()
-        mutableState.update { it.copy(screen = LibraryScreen.FOLDERS, context = LibraryListContext.FOLDER,
+        selectScreen { it.copy(screen = LibraryScreen.FOLDERS, context = LibraryListContext.FOLDER,
             query = LibraryQuery(sourceId = folder.sourceId, folderNodeId = folder.nodeId), folder = folder, detail = null, sortEdit = null) }
         rememberNavigation()
         openView()
@@ -352,7 +362,7 @@ class LibraryViewModel internal constructor(
         if (!mutableState.value.canPlay) return
         stopArtworkForNavigation()
         parentScreen = mutableState.value.screen
-        mutableState.update { it.copy(screen = LibraryScreen.DETAIL, detail = track) }
+        selectScreen { it.copy(screen = LibraryScreen.DETAIL, detail = track) }
         if (searchOrigin == null) {
             saved["library.detail.provider"] = track.trackKey.providerId
             saved["library.detail.track"] = track.trackKey.trackId
@@ -365,7 +375,7 @@ class LibraryViewModel internal constructor(
         parentScreen = mutableState.value.screen
         saved["library.detail.provider"] = key.providerId
         saved["library.detail.track"] = key.trackId
-        mutableState.update { it.copy(screen = LibraryScreen.DETAIL, context = LibraryListContext.ALL,
+        selectScreen { it.copy(screen = LibraryScreen.DETAIL, context = LibraryListContext.ALL,
             query = LibraryQuery(), folder = null, detail = null, sortEdit = null) }
         rememberNavigation()
         openView(anchor = key)
@@ -377,7 +387,7 @@ class LibraryViewModel internal constructor(
         if (state.sortEdit != null) { cancelSort(); return true }
         if (state.screen == LibraryScreen.DETAIL) {
             stopArtworkForNavigation()
-            mutableState.update { it.copy(screen = parentScreen, detail = null) }
+            selectScreen { it.copy(screen = parentScreen, detail = null) }
             rememberNavigation()
             if (parentScreen in setOf(LibraryScreen.SOURCES, LibraryScreen.HISTORY, LibraryScreen.STATISTICS)) openView()
             return true
@@ -390,6 +400,23 @@ class LibraryViewModel internal constructor(
     }
 
     fun reload() = openView(anchor = mutableState.value.page?.tracks?.firstOrNull()?.trackKey)
+
+    @androidx.annotation.MainThread
+    private fun selectScreen(change: (LibraryUiState) -> LibraryUiState) {
+        val previous = mutableState.value
+        val next = change(previous)
+        if (previous.screen != next.screen) {
+            mutableNavigation.value.retire()
+            // Distinct owners preserve a leave/reenter even when StateFlow coalesces both screens.
+            mutableNavigation.value = LibraryNavigationOwner()
+        }
+        mutableState.value = next
+    }
+
+    override fun onCleared() {
+        mutableNavigation.value.retire()
+        super.onCleared()
+    }
 
     fun nextPage() {
         val state = mutableState.value

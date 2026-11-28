@@ -84,10 +84,10 @@ def v2_fixture(member="/job"):
     for node in nodes:
         files[node + "/cgroup.controllers"] = "cpu cpuset memory\n"
         files[node + "/cpuset.cpus.effective"] = "0-7\n"
-        files[node + "/memory.current"] = str(2 * GIB) + "\n"
         if node != "/sys/fs/cgroup":
             files[node + "/cpu.max"] = "max 100000\n"
             files[node + "/memory.max"] = "max\n"
+            files[node + "/memory.current"] = str(2 * GIB) + "\n"
     return FixtureEnvironment(files)
 
 
@@ -234,9 +234,42 @@ class ResourceProbeTests(unittest.TestCase):
             del environment.files["/sys/fs/cgroup/job/" + field]
             self.assert_single(probe.measure(environment, 2), "read_unavailable")
 
-    def test_missing_root_limit_is_exempt_but_its_memory_counter_is_required(self):
+    def test_verified_v2_root_has_neither_memory_limit_nor_current_interface(self):
         environment = v2_fixture()
-        del environment.files["/sys/fs/cgroup/memory.current"]
+        self.assertNotIn("/sys/fs/cgroup/memory.current", environment.files)
+        output = probe.measure(environment, 2)
+        self.assertTrue(output["measurement_complete"])
+        self.assertEqual(2, output["max_parallel_forks"])
+        self.assertEqual("unlimited", output["cgroup_memory_status"])
+        self.assertEqual(2 * GIB, output["cgroup_memory_leaf_current_bytes"])
+
+    def test_v2_root_only_uses_host_limits_and_still_requires_initial_namespace(self):
+        environment = v2_fixture("/")
+        self.assertNotIn("/sys/fs/cgroup/memory.current", environment.files)
+        output = probe.measure(environment, 2)
+        self.assertTrue(output["measurement_complete"])
+        self.assertEqual(2, output["max_parallel_forks"])
+        self.assertEqual(16 * GIB, output["effective_memory_total_bytes"])
+        self.assertEqual(10 * GIB, output["effective_memory_available_bytes"])
+        self.assertIsNone(output["cgroup_memory_leaf_current_bytes"])
+        self.assertEqual(1, output["cgroup_memory_ancestor_count"])
+        for namespace, status in ((False, "hidden_cgroup_ancestors"), (None, "read_unavailable")):
+            environment.namespace = namespace
+            self.assert_single(probe.measure(environment, 2), status)
+
+    def test_absent_root_memory_interfaces_do_not_hide_parent_or_child_limits(self):
+        environment = v2_fixture("/team/job")
+        self.assertNotIn("/sys/fs/cgroup/memory.current", environment.files)
+        environment.files["/sys/fs/cgroup/team/memory.max"] = str(8 * GIB)
+        environment.files["/sys/fs/cgroup/team/memory.current"] = str(6 * GIB)
+        output = probe.measure(environment, 2)
+        self.assert_single(output, "low_resources", complete=True)
+        self.assertEqual(8 * GIB, output["effective_memory_total_bytes"])
+        self.assertEqual(2 * GIB, output["effective_memory_available_bytes"])
+        environment.files["/sys/fs/cgroup/team/memory.current"] = str(4 * GIB)
+        environment.files["/sys/fs/cgroup/team/job/cpu.max"] = "150000 100000\n"
+        self.assert_single(probe.measure(environment, 2), "low_resources", complete=True)
+        del environment.files["/sys/fs/cgroup/team/job/memory.current"]
         self.assert_single(probe.measure(environment, 2), "read_unavailable")
 
     def test_hidden_mount_root_never_implies_unmeasured_ancestors_are_unlimited(self):

@@ -1,5 +1,8 @@
 package io.github.onlinemo.meloxwatch.ui.library
 
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Looper
@@ -18,9 +21,13 @@ import io.github.onlinemo.meloxwatch.data.local.SourceReadException
 import io.github.onlinemo.meloxwatch.data.local.SourceReadIssue
 import io.github.onlinemo.meloxwatch.data.local.fixtureAudioProvider
 import io.github.onlinemo.meloxwatch.data.local.fixtureDescriptor
+import io.github.onlinemo.meloxwatch.data.local.fixtureMediaProvider
+import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.model.QueueEntry
 import io.github.onlinemo.meloxwatch.playback.LocalQueueCommand
 import io.github.onlinemo.meloxwatch.playback.PlaybackCommands
+import io.github.onlinemo.meloxwatch.ui.ProbePage
+import io.github.onlinemo.meloxwatch.ui.ProbeViewModel
 import java.io.File
 import java.io.FileInputStream
 import java.io.RandomAccessFile
@@ -653,6 +660,222 @@ class SourcesViewModelTest {
         }
     }
 
+    @Test(timeout = 30_000L)
+    fun aLegalPickerReturnBeforeForegroundWaitsForTheRealPageAndDoesNotRegisterThePreview(): Unit = runBlocking {
+        visibleSources()
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        val file = fixture("picker-before-foreground")
+        val sources = app.library.overview().sourceCount
+        val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        viewModel.onBackground()
+        viewModel.pickerResult(ticket, Activity.RESULT_OK, file.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(viewModel.uiState.value.awaitingPickerForeground)
+        assertEquals(0, file.provider.queryReads)
+        assertNull(viewModel.uiState.value.selected)
+        assertEquals(sources, app.library.overview().sourceCount)
+
+        viewModel.onVisible()
+        val returned = awaitState { !it.working && it.selected?.observation?.source?.uri == file.uri.toString() }
+        assertTrue(file.provider.queryReads > 0)
+        assertNotNull(returned.selected?.verifiedContentToken)
+        assertEquals(ObservedCapability.UNAVAILABLE, returned.selected?.observation?.access?.persistedRead)
+        assertEquals(sources, app.library.overview().sourceCount)
+        assertFalse(returned.awaitingPickerForeground)
+    }
+
+    @Test(timeout = 30_000L)
+    fun rapidRealLibraryNavigationRetiresTheOwnerBeforeAnyStateCollectorCanCoalesceIt(): Unit = runBlocking {
+        visibleSources()
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        val library = libraryModel()
+        library.show(LibraryScreen.SOURCES)
+        val oldOwner = library.navigation.value
+        viewModel.onVisible(oldOwner)
+        val file = fixture("picker-library-round-trip")
+        val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        library.show(LibraryScreen.ALL)
+        library.show(LibraryScreen.SOURCES)
+        assertFalse(oldOwner.isCurrent)
+        viewModel.pickerResult(ticket, Activity.RESULT_OK, file.uri, 0)
+        viewModel.notePageSelected(true, library.navigation.value)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(0, file.provider.queryReads)
+        assertNull(viewModel.uiState.value.selected)
+        assertFalse(viewModel.uiState.value.awaitingPicker)
+        assertNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+    }
+
+    @Test(timeout = 30_000L)
+    fun synchronousOuterPageNavigationDrainsAnOldPickerEvenWhenTheLibraryScreenStaysSources(): Unit = runBlocking {
+        visibleSources()
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        val library = libraryModel()
+        val probe = ViewModelProvider(store, viewModelFactory {
+            initializer { ProbeViewModel(app, SavedStateHandle()) }
+        })[ProbeViewModel::class.java]
+        val binding = probe.bindUiPresentation(update = { state ->
+            viewModel.notePageSelected(state.page == ProbePage.LIBRARY &&
+                library.uiState.value.screen == LibraryScreen.SOURCES, library.navigation.value)
+        }, retire = {})
+        try {
+            library.show(LibraryScreen.SOURCES)
+            probe.showPage(ProbePage.LIBRARY)
+            viewModel.onVisible(library.navigation.value)
+            val owner = library.navigation.value
+            val file = fixture("picker-outer-round-trip")
+            val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+            probe.showPage(ProbePage.PLAYBACK)
+            assertTrue(viewModel.uiState.value.drainingPicker)
+            probe.showPage(ProbePage.LIBRARY)
+            assertSame(owner, library.navigation.value)
+            assertEquals(LibraryScreen.SOURCES, library.uiState.value.screen)
+            viewModel.pickerResult(ticket, Activity.RESULT_OK, file.uri, 0)
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(0, file.provider.queryReads)
+            assertNull(viewModel.uiState.value.selected)
+            assertNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        } finally { binding.close() }
+    }
+
+    @Test(timeout = 30_000L)
+    fun aFreshExternalInputWinsOverTheOldPickerAndTheOldCallbackCannotReplaceItsPreview(): Unit = runBlocking {
+        visibleSources()
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        val old = fixture("picker-old-external")
+        val fresh = fixture("picker-fresh-external")
+        val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        viewModel.selected(LocalSourceKind.DOCUMENT, fresh.uri, 0)
+        val preview = awaitState { !it.working && it.selected?.observation?.source?.uri == fresh.uri.toString() }
+        assertTrue(preview.drainingPicker)
+        viewModel.pickerResult(ticket, Activity.RESULT_OK, old.uri, 0)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(fresh.uri.toString(), viewModel.uiState.value.selected?.observation?.source?.uri)
+        assertEquals(0, old.provider.queryReads)
+        assertFalse(viewModel.uiState.value.awaitingPicker)
+        assertNull(viewModel.uiState.value.sourceIssue)
+    }
+
+    @Test(timeout = 30_000L)
+    fun anInvalidExternalInputStillRetiresTheOldPickerAndItsLateResultCannotClearTheError(): Unit = runBlocking {
+        visibleSources()
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        val file = fixture("picker-invalid-external")
+        val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        viewModel.selected(LocalSourceKind.DOCUMENT, null, 0)
+        assertEquals(SourceReadIssue.INVALID_SOURCE, viewModel.uiState.value.sourceIssue)
+        viewModel.pickerResult(ticket, Activity.RESULT_OK, file.uri, 0)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(SourceReadIssue.INVALID_SOURCE, viewModel.uiState.value.sourceIssue)
+        assertEquals(0, file.provider.queryReads)
+        assertNull(viewModel.uiState.value.selected)
+
+        val gate = blockQuery(file.provider)
+        val reading = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        viewModel.pickerResult(reading, Activity.RESULT_OK, file.uri, 0)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(gate.entered.await(5L, TimeUnit.SECONDS))
+        viewModel.selected(LocalSourceKind.DOCUMENT, null, 0)
+        file.provider.denied = true
+        gate.release.countDown()
+        val retired = awaitState { !it.working }
+        assertEquals(SourceReadIssue.INVALID_SOURCE, retired.sourceIssue)
+        assertNull(retired.selected)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aPickerRemovedAfterTheVisibleProbeIsCheckedAgainBeforeTheClickCanLaunch(): Unit = runBlocking {
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        visibleSources()
+        assertEquals(SourcesEntryAvailability.AVAILABLE, viewModel.uiState.value.entryCapabilities.file)
+        removeSourcesPicker(app, SourcesPickerKind.FILE)
+        assertNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        assertEquals(SourcesEntryAvailability.UNAVAILABLE, viewModel.uiState.value.entryCapabilities.file)
+        assertEquals(SourcesNotice.NO_FILE_PICKER, viewModel.uiState.value.notice)
+        assertFalse(viewModel.uiState.value.awaitingPicker)
+    }
+
+    @Test(timeout = 30_000L)
+    fun readableMediaStoreWorksWithoutEitherPickerAndAHiddenGrantCannotRegisterBeforeForeground(): Unit = runBlocking {
+        val emptyMedia = File(app.cacheDir, "sources-empty-media.mp3")
+        assertFalse(emptyMedia.exists())
+        fixtureMediaProvider(emptyMedia)
+        installSourcesMediaPresence(app)
+        visibleSources()
+        val before = app.library.overview().sourceCount
+        assertEquals(SourcesEntryAvailability.UNAVAILABLE, viewModel.uiState.value.entryCapabilities.file)
+        assertEquals(SourcesEntryAvailability.UNAVAILABLE, viewModel.uiState.value.entryCapabilities.tree)
+        assertEquals(SourcesEntryAvailability.AVAILABLE, viewModel.uiState.value.entryCapabilities.media)
+        assertEquals(SourcesMediaPermission.REQUESTABLE, viewModel.uiState.value.mediaPermission)
+        val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.MEDIA_ALL))
+        viewModel.onBackground()
+        Shadows.shadowOf(app).grantPermissions(Manifest.permission.READ_EXTERNAL_STORAGE)
+        viewModel.mediaPermissionResult(ticket, granted = true)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(viewModel.uiState.value.awaitingPickerForeground)
+        assertEquals(before, app.library.overview().sourceCount)
+
+        viewModel.onVisible()
+        val added = awaitState { !it.working && it.notice == SourcesNotice.ADDED && it.scan?.phase == ScanPhase.COMPLETED }
+        assertEquals(before + 1L, app.library.overview().sourceCount)
+        assertEquals(LocalSourceKind.MEDIA_STORE, added.page?.sources?.single()?.spec?.kind)
+        assertEquals("external", added.page?.sources?.single()?.spec?.mediaVolume)
+        assertEquals(SourcesMediaPermission.GRANTED, added.mediaPermission)
+        assertNull(added.sourceIssue)
+        viewModel.mediaPermissionResult(ticket, granted = true)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(before + 1L, app.library.overview().sourceCount)
+    }
+
+    @Test(timeout = 30_000L)
+    fun permanentMediaDenialKeepsTheSettingsPathAndANewRealGrantChangesOnlyPermissionState(): Unit = runBlocking {
+        installSourcesMediaPresence(app)
+        visibleSources()
+        val before = app.library.overview().sourceCount
+        val ticket = requireNotNull(viewModel.beginPicker(SourcesPickerKind.MEDIA_ALL))
+        viewModel.onBackground()
+        viewModel.mediaPermissionResult(ticket, granted = false, permanentlyDenied = true)
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+        assertEquals(SourcesEntryAvailability.AVAILABLE, viewModel.uiState.value.entryCapabilities.media)
+        assertEquals(SourcesMediaPermission.SETTINGS_ONLY, viewModel.uiState.value.mediaPermission)
+        assertNull(viewModel.beginPicker(SourcesPickerKind.MEDIA_ALL))
+        assertEquals(before, app.library.overview().sourceCount)
+        Shadows.shadowOf(app).grantPermissions(Manifest.permission.READ_EXTERNAL_STORAGE)
+        viewModel.refreshEntryCapabilities()
+        assertEquals(SourcesMediaPermission.GRANTED, viewModel.uiState.value.mediaPermission)
+        assertNull(viewModel.uiState.value.mediaReadIssue)
+        assertEquals(before, app.library.overview().sourceCount)
+    }
+
+    @Test(timeout = 30_000L)
+    fun aFreshProcessOwnerDrainsTheSavedPlatformSlotWithoutReadingTheReturnedFile(): Unit = runBlocking {
+        visibleSources()
+        installSourcesPicker(app, SourcesPickerKind.FILE)
+        val file = fixture("picker-new-process")
+        val old = requireNotNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        recreateFilterEditor()
+        assertTrue(viewModel.uiState.value.drainingPicker)
+        assertNull(viewModel.beginPicker(SourcesPickerKind.FILE))
+        val drain = requireNotNull(viewModel.awaitingPicker(SourcesPickerKind.FILE))
+        assertEquals(old.id, drain.id)
+        viewModel.pickerResult(drain, Activity.RESULT_OK, file.uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(0, file.provider.queryReads)
+        assertNull(viewModel.uiState.value.selected)
+        assertFalse(viewModel.uiState.value.awaitingPicker)
+        assertTrue(savedState.keys().isEmpty())
+    }
+
+    private suspend fun visibleSources() {
+        viewModel.onVisible()
+        awaitState { !it.working && it.rules != null }
+    }
+
+    private fun libraryModel(): LibraryViewModel = ViewModelProvider(store, viewModelFactory {
+        initializer { LibraryViewModel(app, SavedStateHandle()) }
+    })[LibraryViewModel::class.java]
+
     private fun createSourcesModel(): SourcesViewModel = ViewModelProvider(store, viewModelFactory {
         initializer { SourcesViewModel(app, savedState) }
     })[SourcesViewModel::class.java]
@@ -699,7 +922,8 @@ class SourcesViewModelTest {
         val job: Deferred<Unit>,
     )
 
-    private fun select(fixture: AudioFixture) {
+    private suspend fun select(fixture: AudioFixture) {
+        if (!viewModel.uiState.value.filterForeground) visibleSources()
         viewModel.selected(LocalSourceKind.DOCUMENT, fixture.uri, 0)
         Shadows.shadowOf(Looper.getMainLooper()).idle()
     }

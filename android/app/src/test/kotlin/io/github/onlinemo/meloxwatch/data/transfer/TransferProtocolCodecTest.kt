@@ -17,6 +17,51 @@ import org.junit.rules.TemporaryFolder
 class TransferProtocolCodecTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Test fun schemaThreeViewHandoffAndReceiptLookupRoundTripTheirExactBindings() {
+        val auth = TransferTestFixtures.authorized(setOf(TransferCapability.WRITE_DISPLAY_METADATA))
+        val operation = TransferRequest.ApplyDisplay(TransferTestFixtures.id(), auth.scope, TransferTestFixtures.id(), 7L, true)
+        val binding = TransferProtocolCodec.operationBinding(auth.peer, operation)
+        val lookup = TransferRequest.ReadReceipt(TransferTestFixtures.id(), auth.scope, binding.operationId, binding.kind, binding.payloadHash)
+        val close = TransferRequest.CloseCatalogView(TransferTestFixtures.id(), auth.scope, TransferCatalogKind.ALBUMS, TransferTestFixtures.id())
+        for (request in listOf(lookup, close)) {
+            val bytes = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, request) }.toByteArray()
+            assertTrue(bytes.size <= TransferLimits.FRAME_BYTES)
+            val decoded = TransferProtocolCodec.readRequest(ByteArrayInputStream(bytes)) as TransferRequest.Authorized
+            assertTrue(decoded.requestId == request.requestId && decoded.scope.target == auth.scope.target && decoded.scope.sessionId == auth.scope.sessionId)
+            when (decoded) {
+                is TransferRequest.ReadReceipt -> assertTrue(decoded.operationId == lookup.operationId && decoded.kind == lookup.kind && decoded.payloadHash == lookup.payloadHash)
+                is TransferRequest.CloseCatalogView -> assertTrue(decoded.viewId == close.viewId && decoded.kind == close.kind)
+                else -> fail("Unexpected control request")
+            }
+        }
+        val receipt = TransferReceipt(binding, TransferReceiptKind.DISPLAY_COMMITTED, 8L, "album:fixture", null)
+        for (value in listOf(receipt, null)) {
+            val bytes = ByteArrayOutputStream().also { TransferProtocolCodec.writeResponse(it, TransferResponse.ReceiptState(lookup.requestId, value)) }.toByteArray()
+            val decoded = TransferProtocolCodec.readResponse(ByteArrayInputStream(bytes)) as TransferResponse.ReceiptState
+            assertTrue(decoded.requestId == lookup.requestId)
+            assertTrue(if (value == null) decoded.receipt == null else binding.sameOperation(checkNotNull(decoded.receipt).binding))
+        }
+    }
+
+    @Test fun legacyWireHeadersAreRejectedWhileMutationIdentityRemainsInSchemaTwo() {
+        val auth = TransferTestFixtures.authorized()
+        val operation = TransferRequest.ApplyDisplay(TransferTestFixtures.id(), auth.scope, TransferTestFixtures.id(), 7L, true)
+        val legacy = ByteArrayOutputStream()
+        DataOutputStream(legacy).use { writer ->
+            writer.writeInt(2); writer.writeInt(TransferOperationKind.DISPLAY.wire)
+            writer.write(auth.scope.target.wireBytes()); writer.write(auth.peer.wireBytes())
+            for (id in listOf(operation.requestId, operation.previewId)) {
+                val uuid = java.util.UUID.fromString(id)
+                writer.writeLong(uuid.mostSignificantBits); writer.writeLong(uuid.leastSignificantBits)
+            }
+            writer.writeLong(operation.expectedRevision); writer.writeBoolean(operation.confirmed)
+        }
+        assertTrue(TransferProtocolCodec.operationBinding(auth.peer, operation).payloadHash == TransferHash.digest(legacy.toByteArray()))
+        val encoded = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, operation) }.toByteArray()
+        ByteBuffer.wrap(encoded).putShort(4, 2)
+        expect(TransferIssue.INCOMPATIBLE_SCHEMA) { TransferProtocolCodec.readRequest(ByteArrayInputStream(encoded)) }
+    }
+
     @Test fun maximumAudioBlockAndItsAuthenticatedEnvelopeFitOneSixtyFourKiBFrame() {
         val auth = TransferTestFixtures.authorized()
         val bytes = ByteArray(TransferLimits.CHUNK_BYTES) { (it % 251).toByte() }

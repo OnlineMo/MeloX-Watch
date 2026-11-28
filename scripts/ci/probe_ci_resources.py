@@ -299,9 +299,8 @@ def v2_samples(environment, nodes):
         if maximum is None:
             if not root and ("memory" in controllers or current is not None):
                 raise ProbeError("read_unavailable")
-            if "memory" in controllers and current is None:
-                raise ProbeError("read_unavailable")
-            # Root memory.current exists without memory.max: the root has no limit.
+            # Linux marks both memory.max and memory.current CFTYPE_NOT_ON_ROOT.
+            # Only the visible hierarchy root may omit both; child limits remain required above.
             memory.append((None, integer(current.strip(), zero=True) if current is not None else None))
         else:
             limit = None if maximum.strip() == "max" else integer(maximum.strip(), zero=True)

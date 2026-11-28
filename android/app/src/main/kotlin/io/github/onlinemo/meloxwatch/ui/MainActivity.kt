@@ -46,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -105,6 +106,7 @@ import io.github.onlinemo.meloxwatch.ui.library.LibraryScreen
 import io.github.onlinemo.meloxwatch.ui.library.LibraryViewModel
 import io.github.onlinemo.meloxwatch.ui.library.ListeningViewModel
 import io.github.onlinemo.meloxwatch.ui.library.SourcesViewModel
+import io.github.onlinemo.meloxwatch.ui.library.rememberSourcesEntryLaunchers
 import io.github.onlinemo.meloxwatch.ui.library.TrackArtwork
 import io.github.onlinemo.meloxwatch.ui.library.libraryContent
 import io.github.onlinemo.meloxwatch.ui.library.listeningIssueText
@@ -497,6 +499,8 @@ class MainActivity : ComponentActivity() {
         if (!::onlineViewModel.isInitialized || uiPresentationBinding?.isCurrent != true) return
         val visible = featureForeground && watchWindowRuntime?.visibility?.value?.visible == true
         val page = probeViewModel.uiState.value.page
+        sourcesViewModel.notePageSelected(page == ProbePage.LIBRARY && libraryViewModel.uiState.value.screen == LibraryScreen.SOURCES,
+            libraryViewModel.navigation.value)
         onlineViewModel.setVisible(visible && page == ProbePage.ONLINE)
         if (::metingSettingsViewModel.isInitialized) metingSettingsViewModel.setVisible(visible && page == ProbePage.METING)
         if (::metadataLookupViewModel.isInitialized && (!visible || page !in setOf(ProbePage.LOCAL_LYRICS_LOOKUP, ProbePage.LOCAL_ARTWORK_LOOKUP))) {
@@ -543,11 +547,12 @@ class MainActivity : ComponentActivity() {
             else if (android.os.Build.VERSION.SDK_INT >= 33) sourceIntent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
             else sourceIntent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
         } catch (_: RuntimeException) { null }
+        catch (_: OutOfMemoryError) { null }
         probeViewModel.showPage(ProbePage.LIBRARY)
         libraryViewModel.show(LibraryScreen.SOURCES)
         sourcesViewModel.cancelReauthorization()
-        if (uri == null || uri.scheme != "content" || uri.authority.isNullOrBlank()) sourcesViewModel.invalidSelection()
-        else sourcesViewModel.selected(LocalSourceKind.DOCUMENT, uri, sourceIntent.flags)
+        sourcesViewModel.notePageSelected(true, libraryViewModel.navigation.value)
+        sourcesViewModel.selected(LocalSourceKind.DOCUMENT, uri, sourceIntent.flags)
     }
 }
 
@@ -628,6 +633,7 @@ private fun ProbeApp(
     activity: MainActivity,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val libraryNavigation by libraryViewModel.navigation.collectAsStateWithLifecycle()
     val app = activity.application as MeloXApplication
     val windowVisibility by watchWindowRuntime.visibility.collectAsStateWithLifecycle()
     val appearance by appearanceViewModel.state.collectAsStateWithLifecycle()
@@ -720,11 +726,16 @@ private fun ProbeApp(
     LaunchedEffect(state.playback.mediaId) {
         if (activityBinding.isCurrent) playlistEntryViewModel.setPlayingEntry(state.playback.mediaId)
     }
-    LifecycleStartEffect(state.page, library.screen) {
+    val synchronizeSourcesRoute = {
+        sourcesViewModel.notePageSelected(viewModel.uiState.value.page == ProbePage.LIBRARY &&
+            libraryViewModel.uiState.value.screen == LibraryScreen.SOURCES, libraryViewModel.navigation.value)
+    }
+    SideEffect { synchronizeSourcesRoute() }
+    LifecycleStartEffect(state.page, library.screen, libraryNavigation) {
         val sourcesVisible = state.page == ProbePage.LIBRARY && library.screen == LibraryScreen.SOURCES
         val listeningVisible = state.page == ProbePage.LIBRARY &&
             library.screen in setOf(LibraryScreen.HISTORY, LibraryScreen.STATISTICS)
-        if (activityBinding.isCurrent && sourcesVisible) sourcesViewModel.onVisible()
+        if (activityBinding.isCurrent && sourcesVisible) sourcesViewModel.onVisible(libraryNavigation)
         if (activityBinding.isCurrent && listeningVisible) listeningViewModel.onVisible(library.screen)
         onStopOrDispose {
             if (activityBinding.isCurrent && sourcesVisible) sourcesViewModel.onHidden()
@@ -789,38 +800,8 @@ private fun ProbeApp(
             )
         }
     }
-    val libraryFilePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val data = result.data
-        val uri = data?.data
-        if (result.resultCode == Activity.RESULT_OK && data != null && uri != null)
-            sourcesViewModel.selected(LocalSourceKind.DOCUMENT, uri, data.flags)
-        else sourcesViewModel.pickerCancelled()
-    }
-    val libraryTreePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val data = result.data
-        val uri = data?.data
-        if (result.resultCode == Activity.RESULT_OK && data != null && uri != null)
-            sourcesViewModel.selected(LocalSourceKind.TREE, uri, data.flags)
-        else sourcesViewModel.pickerCancelled()
-    }
-    val libraryPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) sourcesViewModel.addMediaStore() else sourcesViewModel.permissionDenied()
-    }
-    val chooseLibraryFile = {
-        try {
-            libraryFilePicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("audio/*").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
-        } catch (_: ActivityNotFoundException) { sourcesViewModel.noPicker(tree = false) }
-    }
-    val chooseLibraryTree = {
-        try {
-            libraryTreePicker.launch(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION))
-        } catch (_: ActivityNotFoundException) { sourcesViewModel.noPicker(tree = true) }
-    }
-    val addLibraryMedia = {
-        if (viewModel.hasAudioPermission()) sourcesViewModel.addMediaStore()
-        else libraryPermission.launch(viewModel.audioPermission)
+    val sourceLaunchers = rememberSourcesEntryLaunchers(sourcesViewModel, activity, synchronizeSourcesRoute) {
+        activityBinding.isCurrent
     }
     val openDocument = {
         if (state.hasDocumentPicker) {
@@ -1282,9 +1263,11 @@ private fun ProbeApp(
                             ProbePage.LIBRARY -> libraryContent(library, libraryViewModel, sources, sourcesViewModel,
                                 state.playbackCommandPending || !state.playback.isConnected,
                                 viewModel::playLibraryView, viewModel::playTemporaryEntry,
-                                chooseLibraryFile, chooseLibraryTree, addLibraryMedia,
+                                sourceLaunchers.chooseFile, sourceLaunchers.chooseTree, sourceLaunchers.addMedia,
                                 listening, listeningViewModel, openSettings, playlistEntry, playlistEntryViewModel, openPlaylists,
-                                onAddToPlaylist = { view, track, label -> playlistEntryViewModel.addFromLibrary(view, track, label, showAddTargets) })
+                                onAddToPlaylist = { view, track, label -> playlistEntryViewModel.addFromLibrary(view, track, label, showAddTargets) },
+                                onSourceHelp = { viewModel.showPage(ProbePage.HELP) },
+                                onSourceTransfer = { viewModel.showPage(ProbePage.TRANSFER) })
                             ProbePage.PLAYLISTS -> {
                                 if (playlistEntry.screen != PlaylistPickerScreen.NONE) {
                                     playlistPickerContent(playlistEntry, playlistEntryViewModel, openLibrarySources,

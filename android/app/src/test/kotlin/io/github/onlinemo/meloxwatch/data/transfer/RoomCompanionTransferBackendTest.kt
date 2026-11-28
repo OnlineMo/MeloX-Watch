@@ -14,6 +14,7 @@ import io.github.onlinemo.meloxwatch.data.playlists.PlaylistViewOwner
 import io.github.onlinemo.meloxwatch.model.TrackKey
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -49,6 +50,98 @@ class RoomCompanionTransferBackendTest {
         fixture.initialize()
     }
     @After fun close() { fixture.close() }
+
+    @Test(timeout = 30_000L)
+    fun receiptQueriesReadOnlyMissingPendingAndSchemaTwoAudioCompletionsWithoutInvokingUploadRecovery(): Unit = runBlocking {
+        fixture.newSession(setOf(TransferCapability.UPLOAD_AUDIO))
+        val recoveryCalls = AtomicInteger()
+        val marker = File(temporary.root, "receipt-recovery-marker")
+        val uploads = object : TransferBackend by fixture.backend {
+            override suspend fun committed(binding: TransferOperationBinding, permit: TransferPermit): TransferReceipt? {
+                permit.checkActive()
+                recoveryCalls.incrementAndGet()
+                marker.writeBytes(byteArrayOf(1))
+                return null
+            }
+        }
+        val backend = fixture.backendWithUploadOwner(uploads)
+        val store = TransferTestFixtures.StoreFixture(temporary.newFolder())
+        val processor = TransferRequestProcessor(fixture.peer, fixture.authority, store.store, backend, fixture.clock)
+        val binding = TransferOperationBinding(CompanionRoomFixture.uuid(), TransferOperationKind.AUDIO,
+            fixture.target, fixture.peer, TransferHash.digest("synthetic-audio-receipt".toByteArray()))
+        suspend fun read(): TransferReceipt? {
+            val result = processor.process(TransferRequest.ReadReceipt(CompanionRoomFixture.uuid(), fixture.scope,
+                binding.operationId, binding.kind, binding.payloadHash))
+            result.checkActive()
+            return (result.response as TransferResponse.ReceiptState).receipt
+        }
+        try {
+            assertNull(read())
+            assertNull(fixture.database.transferRoomDao().operation(binding.operationId))
+            assertFalse(marker.exists())
+            assertEquals(0, recoveryCalls.get())
+            fixture.database.withTestWriterSql { execute("""
+                INSERT INTO transfer_room_operations
+                (operationId, protocolSchema, operationKind, targetFingerprint, peerFingerprint, payloadHash, resultKind, appliedRevision, resultId, actualBytes)
+                VALUES (?, 2, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+            """.trimIndent(), binding.operationId, binding.kind.wire, binding.target.forLocalDisplay(),
+                binding.peer.forLocalDisplay(), binding.payloadHash.forLocalStorage()) }
+            val pending = fixture.database.transferRoomDao().operation(binding.operationId)
+            assertNull(read())
+            assertEquals(pending, fixture.database.transferRoomDao().operation(binding.operationId))
+            assertFalse(marker.exists())
+            assertEquals(0, recoveryCalls.get())
+            fixture.database.withTestWriterSql { execute("""
+                UPDATE transfer_room_operations SET resultKind = ?, appliedRevision = 1,
+                resultId = 'synthetic-audio-result', actualBytes = 128 WHERE operationId = ?
+            """.trimIndent(), TransferReceiptKind.AUDIO_COMMITTED.wire, binding.operationId) }
+            val committed = fixture.database.transferRoomDao().operation(binding.operationId)
+            val receipt = checkNotNull(read())
+            assertTrue(binding.sameOperation(receipt.binding))
+            assertEquals(TransferReceiptKind.AUDIO_COMMITTED, receipt.result)
+            assertEquals("synthetic-audio-result", receipt.resultId)
+            assertEquals(128L, receipt.actualBytes)
+            assertEquals(committed, fixture.database.transferRoomDao().operation(binding.operationId))
+            assertEquals(2, committed?.protocolSchema)
+            assertFalse(marker.exists())
+            assertEquals(0, recoveryCalls.get())
+            // The existing explicit retry path still reaches the real selected upload owner.
+            val retry = TransferOperationBinding(CompanionRoomFixture.uuid(), binding.kind, binding.target, binding.peer, binding.payloadHash)
+            assertNull(backend.committed(retry, fixture.permit(TransferCapability.UPLOAD_AUDIO)))
+            assertTrue(marker.isFile)
+            assertEquals(1, recoveryCalls.get())
+        } finally { processor.close(); store.providerIo.awaitIdle() }
+    }
+
+    @Test(timeout = 30_000L)
+    fun exactCatalogRetirementIsIdempotentAndCannotReleaseAnotherKindOrLease(): Unit = runBlocking {
+        seed(3)
+        val first = fixture.firstPage(limit = 1)
+        val other = fixture.firstPage(limit = 1)
+        val wrong = TransferRequest.CloseCatalogView(CompanionRoomFixture.uuid(), fixture.scope, TransferCatalogKind.ALBUMS, first.viewId)
+        expectTransferIssue(TransferIssue.WRONG_TARGET) { fixture.backend.closeCatalogView(wrong, fixture.permit(TransferCapability.READ_LIBRARY)) }
+        assertEquals(1L, fixture.nextPage(first, limit = 1).firstOrdinal)
+        val close = TransferRequest.CloseCatalogView(CompanionRoomFixture.uuid(), fixture.scope, first.kind, first.viewId)
+        fixture.backend.closeCatalogView(close, fixture.permit(TransferCapability.READ_LIBRARY))
+        fixture.backend.closeCatalogView(close, fixture.permit(TransferCapability.READ_LIBRARY))
+        expectTransferIssue(TransferIssue.EXPIRED) { fixture.nextPage(first, limit = 1) }
+        assertEquals(1L, fixture.nextPage(other, limit = 1).firstOrdinal)
+    }
+
+    @Test(timeout = 30_000L)
+    fun explicitPreviewRevalidationRejectsAChangedBaseBeforeReplacingTheOriginalTicket(): Unit = runBlocking {
+        val source = seed(3)
+        val group = fixture.group(TransferDisplayKind.ALBUM, "Album", "Artist")
+        val context = fixture.state(TransferDisplayKind.ALBUM, group.entityId)
+        val patch = TransferDisplayPatch.Rename("Original proposal")
+        val preview = fixture.preview(context, patch)
+        val stored = fixture.database.transferRoomDao().preview(preview.previewId)
+        fixture.append(source, listOf("later-preview" to LocalAudioMetadata(title = "Later", album = "Other", artist = "Artist")))
+        val request = TransferRequest.PreviewDisplay(preview.previewId, fixture.scope, context.kind, context.entityId,
+            context.revision, context.libraryRevision, patch)
+        expectTransferIssue(TransferIssue.CONFLICT) { fixture.backend.previewDisplay(request, fixture.permit(TransferCapability.WRITE_DISPLAY_METADATA)) }
+        assertEquals(stored, fixture.database.transferRoomDao().preview(preview.previewId))
+    }
 
     @Test(timeout = 30_000L) fun allPagesUseOneRealFenceAndIncludeTracksBeyondTheFirstHundredAfterAConcurrentScan() = runBlocking {
         val source = seed(205)

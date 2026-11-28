@@ -1,6 +1,8 @@
 package io.github.onlinemo.meloxwatch.ui.library
 
 import android.app.Application
+import android.Manifest
+import android.content.pm.PackageManager
 import io.github.onlinemo.meloxwatch.data.backup.BackupException
 import io.github.onlinemo.meloxwatch.data.backup.BackupIssue
 import android.net.Uri
@@ -74,6 +76,12 @@ data class SourcesUiState(
     val importRecord: ImportRecord? = null,
     val importProgress: ImportProgress? = null,
     val scan: ScanState? = null,
+    val entryCapabilities: SourcesEntryCapabilities = SourcesEntryCapabilities(),
+    val mediaPermission: SourcesMediaPermission = SourcesMediaPermission.UNKNOWN,
+    val mediaReadIssue: SourceReadIssue? = null,
+    val awaitingPicker: Boolean = false,
+    val awaitingPickerForeground: Boolean = false,
+    val drainingPicker: Boolean = false,
     val rules: LibraryRules? = null,
     val exclusions: LibraryExclusionPage? = null,
     val filterDraft: Boolean? = null,
@@ -90,6 +98,7 @@ data class SourcesUiState(
     val fileIssue: FileOperationIssue? = null,
     val notice: SourcesNotice? = null,
 ) {
+    val canChooseSource: Boolean get() = filterForeground && !working && !stopping && !awaitingPicker && !awaitingPickerForeground
     val filterEditable: Boolean get() = filterForeground && !working && !stopping && rules != null
     val canReviewFilter: Boolean get() = filterEditable && filterDraft != null && filterRequiresReview
     val canSaveFilter: Boolean get() = filterEditable && filterDraft != null && !filterRequiresReview &&
@@ -101,15 +110,20 @@ data class SourcesUiState(
 class SourcesViewModel(application: Application, private val savedState: SavedStateHandle) : AndroidViewModel(application) {
     private val app = application as MeloXApplication
     private val restoredFilter = restoreFilterProposal()
+    private val fallbackNavigation = LibraryNavigationOwner()
+    private val pickerRequests = SourcesPickerRequests(savedState)
     @Volatile private var filterIntent = Any()
     private val mutableState = MutableStateFlow(SourcesUiState(
         filterDraft = restoredFilter.proposal?.second,
         filterBaseRevision = restoredFilter.proposal?.first,
         filterRequiresReview = restoredFilter.proposal != null,
         filterDraftRejected = restoredFilter.rejected,
+        awaitingPicker = pickerRequests.awaitingPlatform,
+        drainingPicker = pickerRequests.restoredDrain,
     ))
     val uiState = mutableState.asStateFlow()
-    private var requestedMediaVolume: String? = null
+    private var queuedExternalInput: SourcesReturnedInput? = null
+    private var selectionFence: () -> Boolean = { false }
     private var visible = false
     private var observer: Job? = null
     private var action: Job? = null
@@ -117,9 +131,11 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     private var selectionRequest: Job? = null
     private var selectionRevision = 0L
 
-    fun onVisible() {
+    fun onVisible(navigation: LibraryNavigationOwner = fallbackNavigation) {
+        notePageSelected(true, navigation)
         mutableState.update { it.copy(filterForeground = true) }
-        if (visible) return
+        refreshEntryCapabilities()
+        if (visible) { consumeIncoming(); return }
         visible = true
         observer = viewModelScope.launch {
             try { app.requireBackupStorageReady() }
@@ -136,6 +152,121 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
             launch { app.library.observeOverview().collect { if (mutableState.value.page == null) reload() } }
         }
         reload()
+        consumeIncoming()
+    }
+
+    /** Logical route changes retire picker intent; a platform STOP only retires provider work. */
+    internal fun notePageSelected(selected: Boolean, navigation: LibraryNavigationOwner) {
+        if (pickerRequests.selectPage(navigation.takeIf { selected && it.isCurrent })) {
+            queuedExternalInput = null
+            selectionFence = { false }
+            cancelRead()
+            discardPreview()
+            retireFilterReadiness()
+            mutableState.update { it.copy(selected = null, reauthorization = null) }
+        }
+        // A synchronous leave/return can coalesce before LifecycleStartEffect sees either route.
+        if (selected && navigation.isCurrent && visible) mutableState.update { it.copy(filterForeground = true) }
+        publishPickerState()
+    }
+
+    fun refreshEntryCapabilities() {
+        val capabilities = sourcesEntryCapabilities(app)
+        val permission = try {
+            if (hasMediaPermission()) SourcesMediaPermission.GRANTED
+            else mutableState.value.mediaPermission.takeIf { it == SourcesMediaPermission.SETTINGS_ONLY }
+                ?: SourcesMediaPermission.REQUESTABLE
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: RuntimeException) { SourcesMediaPermission.UNKNOWN }
+        catch (_: OutOfMemoryError) { SourcesMediaPermission.UNKNOWN }
+        mutableState.update { it.copy(entryCapabilities = capabilities, mediaPermission = permission,
+            mediaReadIssue = if (permission == SourcesMediaPermission.GRANTED &&
+                it.mediaReadIssue in setOf(SourceReadIssue.PERMISSION_DENIED, SourceReadIssue.PERMISSION_REVOKED)) null else it.mediaReadIssue) }
+    }
+
+    internal fun beginPicker(kind: SourcesPickerKind): SourcesPickerTicket? {
+        if (!visible || !mutableState.value.canChooseSource || !pickerRequests.currentFence()()) return null
+        if (kind == SourcesPickerKind.MEDIA_PRIMARY && Build.VERSION.SDK_INT < 30) return null
+        refreshEntryCapabilities()
+        if (!visible || !pickerRequests.currentFence()()) return null
+        val available = when (kind) {
+            SourcesPickerKind.FILE -> mutableState.value.entryCapabilities.file
+            SourcesPickerKind.TREE -> mutableState.value.entryCapabilities.tree
+            SourcesPickerKind.MEDIA_ALL, SourcesPickerKind.MEDIA_PRIMARY -> mutableState.value.entryCapabilities.media
+        }
+        if (available != SourcesEntryAvailability.AVAILABLE) {
+            if (available == SourcesEntryAvailability.UNAVAILABLE && (kind == SourcesPickerKind.FILE || kind == SourcesPickerKind.TREE)) {
+                noPicker(kind == SourcesPickerKind.TREE)
+            }
+            else mutableState.update { it.copy(sourceIssue = SourceReadIssue.SOURCE_UNAVAILABLE) }
+            return null
+        }
+        if (kind.isMedia && mutableState.value.mediaPermission in setOf(SourcesMediaPermission.UNKNOWN, SourcesMediaPermission.SETTINGS_ONLY)) {
+            mutableState.update { it.copy(sourceIssue = if (it.mediaPermission == SourcesMediaPermission.SETTINGS_ONLY)
+                SourceReadIssue.PERMISSION_DENIED else SourceReadIssue.SOURCE_UNAVAILABLE) }
+            return null
+        }
+        val ticket = pickerRequests.begin(kind)
+        if (ticket == null) mutableState.update { it.copy(sourceIssue = SourceReadIssue.BUSY) }
+        else mutableState.update { it.copy(sourceIssue = null, notice = null) }
+        publishPickerState()
+        return ticket
+    }
+
+    internal fun awaitingPicker(kind: SourcesPickerKind): SourcesPickerTicket? = pickerRequests.awaiting(kind)
+    internal fun awaitingMediaPicker(): SourcesPickerTicket? = pickerRequests.awaitingMedia()
+
+    internal fun pickerLaunchFailed(ticket: SourcesPickerTicket, definitelyNotLaunched: Boolean, denied: Boolean = false) {
+        if (pickerRequests.launchFailed(ticket, definitelyNotLaunched)) {
+            if (denied) mutableState.update { it.copy(sourceIssue = SourceReadIssue.PERMISSION_DENIED) }
+            else if (definitelyNotLaunched && (ticket.kind == SourcesPickerKind.FILE || ticket.kind == SourcesPickerKind.TREE)) {
+                noPicker(ticket.kind == SourcesPickerKind.TREE)
+            }
+            else mutableState.update { it.copy(sourceIssue = SourceReadIssue.SOURCE_UNAVAILABLE) }
+            refreshEntryCapabilities()
+        }
+        publishPickerState()
+    }
+
+    internal fun pickerResult(ticket: SourcesPickerTicket, resultCode: Int, uri: Uri?, flags: Int) {
+        receivedPickerOutcome(pickerRequests.documentResult(ticket, resultCode, uri, flags))
+    }
+
+    internal fun mediaPermissionResult(ticket: SourcesPickerTicket, granted: Boolean, permanentlyDenied: Boolean = false) {
+        val outcome = pickerRequests.mediaResult(ticket, granted)
+        if (outcome == SourcesPickerOutcome.PERMISSION_DENIED) {
+            mutableState.update { it.copy(mediaPermission = if (permanentlyDenied) SourcesMediaPermission.SETTINGS_ONLY
+                else SourcesMediaPermission.REQUESTABLE, mediaReadIssue = SourceReadIssue.PERMISSION_DENIED,
+                sourceIssue = SourceReadIssue.PERMISSION_DENIED) }
+        }
+        receivedPickerOutcome(outcome)
+    }
+
+    private fun receivedPickerOutcome(outcome: SourcesPickerOutcome) {
+        when (outcome) {
+            SourcesPickerOutcome.CANCELLED -> pickerCancelled()
+            SourcesPickerOutcome.INVALID -> invalidSelection()
+            SourcesPickerOutcome.DEFERRED -> consumeIncoming()
+            // Retired platform callbacks may drain their slot but cannot overwrite a new intent's UI.
+            SourcesPickerOutcome.IGNORED, SourcesPickerOutcome.EXPIRED, SourcesPickerOutcome.PERMISSION_DENIED -> Unit
+        }
+        publishPickerState()
+    }
+
+    private fun publishPickerState() {
+        mutableState.update { it.copy(awaitingPicker = pickerRequests.awaitingPlatform,
+            awaitingPickerForeground = pickerRequests.awaitingForeground || queuedExternalInput != null,
+            drainingPicker = pickerRequests.restoredDrain) }
+    }
+
+    private fun consumeIncoming() {
+        if (!visible) return
+        val input = queuedExternalInput?.also { queuedExternalInput = null } ?: pickerRequests.takeReturn() ?: return
+        publishPickerState()
+        if (!input.isCurrent()) return
+        if (input.kind.isMedia) addPreparedMedia(input)
+        else selectRead(if (input.kind == SourcesPickerKind.TREE) LocalSourceKind.TREE else LocalSourceKind.DOCUMENT,
+            requireNotNull(input.uri), input.flags, input.isCurrent)
     }
 
     fun onHidden() {
@@ -147,12 +278,11 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     }
 
     fun onBackground() {
-        retireFilterReadiness()
-        cancelRead()
+        onHidden()
         copyJob?.cancel()
     }
 
-    fun reload() = runAction(quietIfBusy = true) {
+    fun reload() = runTrackedReadAction(quietIfBusy = true) {
         app.requireBackupStorageReady()
         app.library.initialize()
         val page = app.library.sourcesPage()
@@ -178,18 +308,44 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     }
 
     fun beginReauthorization(source: LibrarySource) {
+        pickerRequests.newExternalIntent()
+        queuedExternalInput = null
+        selectionFence = { false }
         cancelRead()
         mutableState.value.selected?.let { discardPreview() }
         mutableState.update { it.copy(reauthorization = source, selected = null, notice = null) }
+        publishPickerState()
     }
 
     fun cancelReauthorization() {
+        pickerRequests.newExternalIntent()
+        queuedExternalInput = null
+        selectionFence = { false }
         cancelRead()
         discardPreview()
         mutableState.update { it.copy(reauthorization = null, selected = null, notice = SourcesNotice.CANCELLED) }
+        publishPickerState()
     }
 
-    fun selected(kind: LocalSourceKind, uri: Uri, flags: Int) {
+    fun selected(kind: LocalSourceKind, uri: Uri?, flags: Int) {
+        pickerRequests.newExternalIntent()
+        queuedExternalInput = null
+        cancelRead()
+        discardPreview()
+        selectionFence = { false }
+        mutableState.update { it.copy(selected = null, sourceIssue = null, notice = null) }
+        if (kind !in setOf(LocalSourceKind.DOCUMENT, LocalSourceKind.TREE) || uri == null || uri.scheme != "content" ||
+            uri.authority.isNullOrBlank() || uri.toString().length > io.github.onlinemo.meloxwatch.data.local.LocalInputLimits.URI_CHARACTERS) {
+            invalidSelection()
+        } else {
+            queuedExternalInput = SourcesReturnedInput(if (kind == LocalSourceKind.TREE) SourcesPickerKind.TREE else SourcesPickerKind.FILE,
+                uri, flags, pickerRequests.currentFence())
+            consumeIncoming()
+        }
+        publishPickerState()
+    }
+
+    private fun selectRead(kind: LocalSourceKind, uri: Uri, flags: Int, isCurrent: () -> Boolean) {
         cancelRead()
         val requestRevision = selectionRevision
         discardPreview()
@@ -199,9 +355,9 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
         selectionRequest = viewModelScope.launch {
             while (action?.isCompleted == false) action?.join()
             currentCoroutineContext().ensureActive()
-            if (requestRevision != selectionRevision) return@launch
-            val waitBudget = SelectionReadBudget(app.localProviderIo.trackReads())
-            runAction(awaitReadRetirement = { waitBudget.retirement.awaitRetired() }) {
+            if (requestRevision != selectionRevision || !isCurrent()) return@launch
+            val waitBudget = SelectionReadBudget(app.localProviderIo.trackReads(), isCurrent)
+            runAction(awaitReadRetirement = { waitBudget.retirement.awaitRetired() }, isCurrent = isCurrent) {
                 val spec = LocalSourceSpec(UUID.randomUUID().toString(), kind, uri.toString(), flags)
                 val observed = readSelectionProvider(waitBudget) {
                     if (original == null) app.localSources.observe(spec)
@@ -209,7 +365,8 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
                 }
                 val selection = readSelection(observed, original, waitBudget = waitBudget)
                 currentCoroutineContext().ensureActive()
-                if (requestRevision == selectionRevision && mutableState.value.reauthorization == original) {
+                if (requestRevision == selectionRevision && mutableState.value.reauthorization == original && isCurrent()) {
+                    selectionFence = isCurrent
                     mutableState.update { it.copy(selected = selection) }
                 }
             }
@@ -254,23 +411,60 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     }
 
     fun prepareMediaStore(primary: Boolean): Boolean {
-        if (mutableState.value.working || primary && Build.VERSION.SDK_INT < 30) return false
-        requestedMediaVolume = if (primary) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"
-        return true
+        return beginPicker(if (primary) SourcesPickerKind.MEDIA_PRIMARY else SourcesPickerKind.MEDIA_ALL) != null
     }
 
-    fun addMediaStore() = runAction {
-        val volume = requestedMediaVolume ?: return@runAction
-        requestedMediaVolume = null
+    fun addMediaStore() {
+        val ticket = awaitingMediaPicker() ?: return
+        val granted = try { hasMediaPermission() }
+        catch (cancelled: CancellationException) {
+            pickerLaunchFailed(ticket, definitelyNotLaunched = true)
+            throw cancelled
+        }
+        catch (_: RuntimeException) { pickerLaunchFailed(ticket, definitelyNotLaunched = true); return }
+        catch (_: OutOfMemoryError) { pickerLaunchFailed(ticket, definitelyNotLaunched = true); return }
+        mediaPermissionResult(ticket, granted)
+    }
+
+    private fun addPreparedMedia(input: SourcesReturnedInput) {
+        cancelRead()
+        val revision = selectionRevision
+        selectionRequest = viewModelScope.launch {
+            while (action?.isCompleted == false) action?.join()
+            currentCoroutineContext().ensureActive()
+            if (revision != selectionRevision || !input.isCurrent()) return@launch
+            val retirement = app.localProviderIo.trackReads()
+            runAction(awaitReadRetirement = { retirement.awaitRetired() }, isCurrent = input.isCurrent) {
+                withContext(retirement) { registerPreparedMedia(input) }
+            }
+        }
+    }
+
+    private suspend fun registerPreparedMedia(input: SourcesReturnedInput) {
+        if (!input.isCurrent()) return
+        val volume = if (input.kind == SourcesPickerKind.MEDIA_PRIMARY) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"
         val source = LocalSourceSpec(UUID.randomUUID().toString(), LocalSourceKind.MEDIA_STORE,
             MediaStore.Audio.Media.getContentUri(volume).toString(), mediaVolume = volume)
-        val observed = app.localSources.observe(source)
+        val observed = try { app.localSources.observe(source) }
+        catch (cancelled: CancellationException) { throw cancelled }
+        catch (failure: SourceReadException) {
+            if (input.isCurrent()) mutableState.update { it.copy(mediaReadIssue = failure.issue) }
+            throw failure
+        }
+        currentCoroutineContext().ensureActive()
+        if (!input.isCurrent()) return
         val registered = app.fileOperations.mutations.registerSource(observed.source, observed.access)
         val rules = app.library.rules()
         app.scans.start(registered, rules.revision)
         val page = app.library.sourcesPage()
-        mutableState.update { it.copy(page = page, rules = rules, notice = SourcesNotice.ADDED) }
+        if (input.isCurrent()) mutableState.update { it.copy(page = page, rules = rules, notice = SourcesNotice.ADDED,
+            mediaReadIssue = null, mediaPermission = SourcesMediaPermission.GRANTED) }
     }
+
+    internal val audioReadPermission: String get() = if (Build.VERSION.SDK_INT >= 33)
+        Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+
+    private fun hasMediaPermission(): Boolean = app.checkSelfPermission(audioReadPermission) == PackageManager.PERMISSION_GRANTED
 
     fun scan(source: LibrarySource) = runAction {
         val latest = app.library.source(source.spec.sourceId) ?: throw LibraryException(LibraryIssue.SOURCE_UNAVAILABLE)
@@ -292,7 +486,21 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
 
     fun cancelScan() {
         val id = mutableState.value.scan?.token?.scanId ?: return
-        viewModelScope.launch { app.scans.cancel(id) }
+        viewModelScope.launch {
+            try { app.scans.cancel(id) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (mutableState.value.scan?.token?.scanId == id) publishFailure(failure) }
+        }
+    }
+
+    fun retryScanStop() {
+        val scan = mutableState.value.scan ?: return
+        if (scan.phase != io.github.onlinemo.meloxwatch.data.scan.ScanPhase.STOPPING || scan.issue == null) return
+        viewModelScope.launch {
+            try { app.scans.retryStop(scan.token.scanId) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { if (mutableState.value.scan?.token?.scanId == scan.token.scanId) publishFailure(failure) }
+        }
     }
 
     fun previewCopy() = runAction {
@@ -393,11 +601,11 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
         val draft = requireNotNull(state.filterDraft)
         val base = requireNotNull(state.filterBaseRevision)
         val intent = filterIntent
-        runFilterAction {
+        runTrackedReadAction {
             app.requireBackupStorageReady()
             val rules = app.library.rules()
             currentCoroutineContext().ensureActive()
-            if (!currentFilterIntent(intent, draft, base)) return@runFilterAction
+            if (!currentFilterIntent(intent, draft, base)) return@runTrackedReadAction
             if (rules.revision == Long.MAX_VALUE) throw LibraryException(LibraryIssue.RECOVERY_REQUIRED)
             mutableState.update { it.copy(rules = rules, filterBaseRevision = rules.revision,
                 filterRequiresReview = false) }
@@ -411,11 +619,11 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
         val draft = requireNotNull(state.filterDraft)
         val base = requireNotNull(state.filterBaseRevision)
         val intent = filterIntent
-        runFilterAction {
+        runTrackedReadAction {
             app.requireBackupStorageReady()
             val rules = app.library.rules()
             currentCoroutineContext().ensureActive()
-            if (!currentFilterIntent(intent, draft, base) || mutableState.value.filterRequiresReview) return@runFilterAction
+            if (!currentFilterIntent(intent, draft, base) || mutableState.value.filterRequiresReview) return@runTrackedReadAction
             if (rules.revision != base) {
                 mutableState.update { it.copy(rules = rules, filterRequiresReview = true) }
                 throw LibraryException(LibraryIssue.CONFLICT)
@@ -428,17 +636,17 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
                 app.library.setShortAudioFilter(base, draft)
             }
             currentCoroutineContext().ensureActive()
-            if (!currentFilterIntent(intent, draft, base)) return@runFilterAction
+            if (!currentFilterIntent(intent, draft, base)) return@runTrackedReadAction
             mutableState.update { it.copy(rules = saved, filterDraft = null, filterBaseRevision = null,
                 filterRequiresReview = false, notice = SourcesNotice.RULES_SAVED) }
             recordFilterProposal()
         }
     }
 
-    /** Rules tasks retire only provider reads they actually acquire, including journal checks. */
-    private fun runFilterAction(block: suspend () -> Unit) {
+    /** Foreground tasks retire only provider reads they actually acquire, including journal checks. */
+    private fun runTrackedReadAction(quietIfBusy: Boolean = false, block: suspend () -> Unit) {
         val retirement = app.localProviderIo.trackReads()
-        runAction(awaitReadRetirement = { retirement.awaitRetired() }) {
+        runAction(quietIfBusy = quietIfBusy, awaitReadRetirement = { retirement.awaitRetired() }) {
             withContext(retirement) { block() }
         }
     }
@@ -479,6 +687,9 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     private data class RestoredFilter(val proposal: Pair<Long, Boolean>?, val rejected: Boolean)
 
     override fun onCleared() {
+        pickerRequests.selectPage(null)
+        queuedExternalInput = null
+        fallbackNavigation.retire()
         retireFilterReadiness()
         super.onCleared()
     }
@@ -505,8 +716,8 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     fun pickerCancelled() { mutableState.update { it.copy(notice = SourcesNotice.CANCELLED) } }
     fun noPicker(tree: Boolean) { mutableState.update { it.copy(notice = if (tree) SourcesNotice.NO_TREE_PICKER else SourcesNotice.NO_FILE_PICKER) } }
     fun permissionDenied() {
-        requestedMediaVolume = null
-        mutableState.update { it.copy(sourceIssue = SourceReadIssue.PERMISSION_DENIED) }
+        awaitingMediaPicker()?.let { mediaPermissionResult(it, granted = false) }
+            ?: mutableState.update { it.copy(sourceIssue = SourceReadIssue.PERMISSION_DENIED) }
     }
     fun invalidSelection() { mutableState.update { it.copy(sourceIssue = SourceReadIssue.INVALID_SOURCE) } }
 
@@ -521,6 +732,7 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     private fun runAction(
         quietIfBusy: Boolean = false,
         awaitReadRetirement: suspend () -> Unit = { app.localProviderIo.awaitIdle() },
+        isCurrent: () -> Boolean = { true },
         block: suspend () -> Unit,
     ) {
         if (action?.isCompleted == false) {
@@ -532,9 +744,9 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
         action = viewModelScope.launch {
             try { block() }
             catch (error: CancellationException) {
-                mutableState.update { it.copy(notice = SourcesNotice.CANCELLED, stopping = true) }
+                if (isCurrent()) mutableState.update { it.copy(notice = SourcesNotice.CANCELLED, stopping = true) }
                 throw error
-            } catch (error: Exception) { publishFailure(error) }
+            } catch (error: Exception) { if (isCurrent()) publishFailure(error) }
             finally {
                 withContext(NonCancellable) {
                     // 最新选择仅等待自己的未退休读；其它动作保持原全局退出契约。
@@ -569,6 +781,7 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
     }
 
     private suspend fun verifySelection(selection: SourceSelection) {
+        if (!selectionFence()) throw CancellationException("Source selection route retired")
         app.localSources.verifyObservedCandidate(selection.observation.source, selection.observation.root)
         selection.verifiedContentToken?.let { expected ->
             if (app.localMetadata.contentToken(selection.observation.root) != expected) {
@@ -576,6 +789,7 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
             }
         }
         currentCoroutineContext().ensureActive()
+        if (!selectionFence()) throw CancellationException("Source selection route retired")
     }
 
     private suspend fun readSelection(
@@ -617,6 +831,7 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
         if (budget == null) return block()
         while (true) {
             currentCoroutineContext().ensureActive()
+            if (!budget.isCurrent()) throw CancellationException("Source selection route retired")
             try {
                 return withContext(budget.retirement) { block() }
             } catch (cancelled: CancellationException) {
@@ -647,6 +862,7 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
 
     private class SelectionReadBudget(
         val retirement: LocalProviderIo.ReadRetirement,
+        val isCurrent: () -> Boolean,
         var remainingWaitMs: Long = SELECTION_WAIT_MS,
         var admissionCollisions: Int = 0,
     )

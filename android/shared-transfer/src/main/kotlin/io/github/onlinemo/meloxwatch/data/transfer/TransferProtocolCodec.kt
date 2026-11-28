@@ -29,6 +29,8 @@ object TransferProtocolCodec {
     private const val FINISH_UPLOAD = 9
     private const val CANCEL_UPLOAD = 10
     private const val READ_DISPLAY = 11
+    private const val READ_RECEIPT = 12
+    private const val CLOSE_CATALOG_VIEW = 13
     private const val GREETING = 64
     private const val PAIR_PENDING = 65
     private const val AUTHENTICATED = 66
@@ -42,6 +44,7 @@ object TransferProtocolCodec {
     private const val CANCELLED = 74
     private const val FAILURE = 75
     private const val DISPLAY_STATE = 76
+    private const val RECEIPT_STATE = 77
 
     private class Frame(val type: Int, val id: String, val body: ByteArray) {
         val encodedBytes: Int get() = HEADER_BYTES + body.size
@@ -58,6 +61,8 @@ object TransferProtocolCodec {
         return parse(frame) { reader -> when (frame.type) {
             PAIR -> TransferRequest.Pair(frame.id, reader.fingerprint(), reader.uuid(), reader.string(8, 8), capabilitiesFromMask(reader.int()))
             AUTHENTICATE -> TransferRequest.Authenticate(frame.id, reader.fingerprint(), reader.uuid())
+            READ_RECEIPT -> TransferRequest.ReadReceipt(frame.id, reader.scope(), reader.uuid(), reader.operationKind(), TransferHash.fromWire(reader.raw(32)))
+            CLOSE_CATALOG_VIEW -> TransferRequest.CloseCatalogView(frame.id, reader.scope(), reader.catalogKind(), reader.uuid())
             READ_PAGE -> TransferRequest.ReadPage(frame.id, reader.scope(), reader.catalogKind(), reader.optionalUuid(), reader.optionalLong(), reader.optionalLibraryRevision(), reader.optionalCursor(), reader.optionalIdentifier(), reader.field(), reader.int())
             EDIT_PLAYLIST -> TransferRequest.EditPlaylist(frame.id, reader.scope(), reader.identifier(), reader.long(), reader.optionalLibraryRevision(), reader.playlistEdit())
             READ_DISPLAY -> TransferRequest.ReadDisplay(frame.id, reader.scope(), reader.displayKind(), reader.identifier())
@@ -141,7 +146,7 @@ object TransferProtocolCodec {
             else -> throw TransferException(TransferIssue.INVALID_INPUT)
         }
         val writer = Writer()
-        writer.int(TransferLimits.SCHEMA); writer.int(kind.wire)
+        writer.int(TransferLimits.PAYLOAD_IDENTITY_SCHEMA); writer.int(kind.wire)
         writer.fingerprint(request.scope.target); writer.fingerprint(peer); writer.uuid(request.requestId)
         when (request) {
             is TransferRequest.BeginUpload -> writer.declaration(request.declaration)
@@ -164,7 +169,7 @@ object TransferProtocolCodec {
         requireTransferIdentifier(entityId)
         require(expectedRevision >= 0L && expectedRevision == expectedLibraryRevision.catalogRevision)
         val writer = Writer()
-        writer.int(TransferLimits.SCHEMA); writer.fingerprint(target)
+        writer.int(TransferLimits.PAYLOAD_IDENTITY_SCHEMA); writer.fingerprint(target)
         writer.int(kind.wire); writer.identifier(entityId); writer.long(expectedRevision)
         writer.libraryRevision(expectedLibraryRevision); writer.displayPatch(patch)
         return TransferHash.digest(writer.finish())
@@ -175,6 +180,8 @@ object TransferProtocolCodec {
         val type = when (request) {
             is TransferRequest.Pair -> { writer.fingerprint(request.target); writer.uuid(request.sessionId); writer.string(request.code, 8, 8); writer.int(capabilityMask(request.requested)); PAIR }
             is TransferRequest.Authenticate -> { writer.fingerprint(request.target); writer.uuid(request.sessionId); AUTHENTICATE }
+            is TransferRequest.ReadReceipt -> { writer.scope(request.scope); writer.uuid(request.operationId); writer.int(request.kind.wire); writer.raw(request.payloadHash.wireBytes()); READ_RECEIPT }
+            is TransferRequest.CloseCatalogView -> { writer.scope(request.scope); writer.int(request.kind.wire); writer.uuid(request.viewId); CLOSE_CATALOG_VIEW }
             is TransferRequest.ReadPage -> { writer.scope(request.scope); writer.int(request.kind.wire); writer.optionalUuid(request.viewId); writer.optionalLong(request.expectedRevision); writer.optionalLibraryRevision(request.expectedLibraryRevision); writer.optionalCursor(request.cursor); writer.optionalIdentifier(request.parentId); writer.field(request.search); writer.int(request.limit); READ_PAGE }
             is TransferRequest.EditPlaylist -> { writer.scope(request.scope); writer.identifier(request.playlistId); writer.long(request.expectedRevision); writer.optionalLibraryRevision(request.expectedLibraryRevision); writer.playlistEdit(request.edit); EDIT_PLAYLIST }
             is TransferRequest.ReadDisplay -> { writer.scope(request.scope); writer.int(request.kind.wire); writer.identifier(request.entityId); READ_DISPLAY }
@@ -202,6 +209,7 @@ object TransferProtocolCodec {
             is TransferResponse.UploadReady -> { writer.uuid(response.ticket); UPLOAD_READY }
             is TransferResponse.ChunkAccepted -> { require(response.nextOffset >= 0L); writer.uuid(response.ticket); writer.long(response.nextOffset); CHUNK_ACCEPTED }
             is TransferResponse.Completed -> { writer.receipt(response.receipt); writer.boolean(response.replay); COMPLETED }
+            is TransferResponse.ReceiptState -> { writer.boolean(response.receipt != null); response.receipt?.let(writer::receipt); RECEIPT_STATE }
             is TransferResponse.Cancelled -> CANCELLED
             is TransferResponse.Failure -> { writer.int(response.issue.ordinal); FAILURE }
             is TransferResponse.Page -> throw TransferException(TransferIssue.INVALID_INPUT)
@@ -222,6 +230,7 @@ object TransferProtocolCodec {
         UPLOAD_READY -> TransferResponse.UploadReady(frame.id, reader.uuid())
         CHUNK_ACCEPTED -> TransferResponse.ChunkAccepted(frame.id, reader.uuid(), reader.nonNegativeLong())
         COMPLETED -> TransferResponse.Completed(frame.id, reader.receipt(), reader.boolean())
+        RECEIPT_STATE -> TransferResponse.ReceiptState(frame.id, if (reader.boolean()) reader.receipt() else null)
         CANCELLED -> TransferResponse.Cancelled(frame.id)
         FAILURE -> TransferResponse.Failure(frame.id, TransferIssue.entries.getOrNull(reader.int()) ?: throw TransferException(TransferIssue.INVALID_INPUT))
         else -> throw TransferException(TransferIssue.INVALID_INPUT)
@@ -354,6 +363,7 @@ object TransferProtocolCodec {
         fun bytes(max: Int): ByteArray { val count = int(); require(count in 1..max); return raw(count) }
         fun catalogKind(): TransferCatalogKind { val value = int(); return TransferCatalogKind.entries.firstOrNull { it.wire == value } ?: throw TransferException(TransferIssue.INVALID_INPUT) }
         fun displayKind(): TransferDisplayKind { val value = int(); return TransferDisplayKind.entries.firstOrNull { it.wire == value } ?: throw TransferException(TransferIssue.INVALID_INPUT) }
+        fun operationKind(): TransferOperationKind { val value = int(); return TransferOperationKind.entries.firstOrNull { it.wire == value } ?: throw TransferException(TransferIssue.INVALID_INPUT) }
         fun declaration(): TransferUploadDeclaration {
             val kindCode = int()
             val kind = TransferUploadKind.entries.firstOrNull { it.wire == kindCode } ?: throw TransferException(TransferIssue.INVALID_INPUT)

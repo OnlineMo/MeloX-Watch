@@ -38,6 +38,7 @@ import io.github.onlinemo.meloxwatch.data.scan.ScanCoverage
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.data.scan.ScanState
+import io.github.onlinemo.meloxwatch.data.scan.ScanStopAcknowledgement
 import io.github.onlinemo.meloxwatch.data.scan.ScanToken
 import io.github.onlinemo.meloxwatch.data.queue.QueueInputPage
 import io.github.onlinemo.meloxwatch.data.queue.QueuePageSource
@@ -810,6 +811,20 @@ class RoomLocalLibraryRepository(
             dao.updateScan(next)
             if (isTerminal && source != null && source.activeScanId == token.scanId) dao.putSource(source.copy(activeScanId = null))
             next.model()
+        }
+    }
+    override suspend fun acknowledgeScanStop(token: ScanToken): ScanStopAcknowledgement? = access {
+        database.withPreservedTransaction {
+            val scan = dao.scan(token.scanId)
+            if (scan != null && scan.token() != token) fail(LibraryIssue.SOURCE_CHANGED)
+            if (scan != null && terminal(scan.phase)) {
+                return@withPreservedTransaction ScanStopAcknowledgement.Terminal(scan.model())
+            }
+            val source = dao.source(token.sourceId)
+            // A changed revision alone leaves the old active pointer occupied. Only its actual
+            // removal/replacement, or a stored terminal row above, acknowledges retirement.
+            if (source == null || source.activeScanId != token.scanId) ScanStopAcknowledgement.ReplacedFence(token)
+            else null
         }
     }
     override suspend fun latestScan(sourceId: String): ScanState? = access { dao.source(sourceId)?.latestScanId?.let { dao.scan(it)?.model() } }

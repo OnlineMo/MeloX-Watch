@@ -325,7 +325,7 @@ private fun PresetNameInput(value: String, enabled: Boolean, fontText: DspVisibl
     val keyboard = LocalSoftwareKeyboardController.current
     val focus = LocalFocusManager.current
     val registration = remember(fontText) { fontText?.input() }
-    val visibleText = rememberDspTextModifier(registration, value)
+    val visibleText = Modifier.rememberDspTextModifier(registration, value)
     val label = stringResource(R.string.dsp_preset_name)
     WatchText(label, primary = true)
     BasicTextField(value, onValueChange = onValue, enabled = enabled, singleLine = true,
@@ -353,12 +353,12 @@ private fun VisibleDspPresetText(
 ) {
     if (fontText == null) { content(); return }
     val registration = remember(fontText, presetId, role) { fontText.preset(presetId, role) }
-    Box(rememberDspTextModifier(registration, text)) { content() }
+    Box(Modifier.rememberDspTextModifier(registration, text)) { content() }
 }
 
 /** Clipped layout visibility drives updates; media/scroll clocks create no font work. */
 @Composable
-private fun rememberDspTextModifier(registration: DspVisibleFontText.Registration?, text: String): Modifier {
+private fun Modifier.rememberDspTextModifier(registration: DspVisibleFontText.Registration?, text: String): Modifier {
     val currentText by rememberUpdatedState(text)
     val visibility = remember(registration) { DspTextVisibility() }
     DisposableEffect(registration) {
@@ -366,7 +366,7 @@ private fun rememberDspTextModifier(registration: DspVisibleFontText.Registratio
         onDispose { registration?.close() }
     }
     SideEffect { registration?.present(text, visibility.displayed) }
-    return if (registration == null) Modifier else Modifier.onGloballyPositioned { coordinates ->
+    return if (registration == null) this else onGloballyPositioned { coordinates ->
         val bounds = if (coordinates.isAttached) coordinates.boundsInWindow() else null
         visibility.displayed = bounds != null && bounds.width.isFinite() && bounds.height.isFinite() &&
             bounds.width > 0f && bounds.height > 0f
