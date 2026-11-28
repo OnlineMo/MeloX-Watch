@@ -190,9 +190,12 @@ tasks.withType<Test>().configureEach {
         nativeCrashDirectory.get().asFile.mkdirs()
         maxParallelForks = 1
         val workerLimit = gradle.startParameter.maxWorkerCount
-        // Ordinary PRs use temporary Debug signing; that flag does not determine test resources.
+        // PRs and stable branch pushes share the isolated complete Debug test stage.
+        val event = System.getenv("GITHUB_EVENT_NAME")
+        val stablePush = event == "push" &&
+            System.getenv("GITHUB_REF") in setOf("refs/heads/main", "refs/heads/contribution")
         val eligible = System.getenv("GITHUB_ACTIONS") == "true" &&
-            System.getenv("GITHUB_EVENT_NAME") == "pull_request" && nativeCrashPhase == "package-test-debug"
+            nativeCrashPhase == "package-test-debug" && (event == "pull_request" || stablePush)
         var probeStatus = if (eligible) "unavailable" else "not-requested"
         var resources: Map<*, *>? = null
         var interrupted: InterruptedException? = null

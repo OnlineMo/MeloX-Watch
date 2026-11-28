@@ -66,4 +66,20 @@
     <string name="online_issue_closed">请重新打开音乐页面。</string>
     <string name="online_issue_response">音乐服务返回的数据不可用。</string>
     <string name="online_issue_playback">这首歌曲未能开始播放，请重试或选择其他歌曲。</string>
+    <string name="online_search_clear_input">清空输入</string>
+    <string name="online_search_history">最近搜索</string>
+    <string name="online_search_history_empty">本机暂无最近搜索。</string>
+    <string name="online_search_history_local">最近搜索仅保存在本机。选中后再点击搜索。</string>
+    <string name="online_search_history_clear">清空搜索历史</string>
+    <string name="online_search_history_clear_damaged">清空损坏的搜索历史</string>
+    <string name="online_search_history_retry">重新读取搜索历史</string>
+    <string name="online_search_history_cleanup_retry">重试历史清理</string>
+    <string name="online_search_history_cleanup_failed">上一账号的搜索历史未能清理。</string>
+    <string name="online_search_history_read_failed">无法读取搜索历史。</string>
+    <string name="online_search_history_write_failed">搜索历史未能保存，仍可继续搜索。</string>
+    <string name="online_search_history_clear_failed">搜索历史未能完整清理，请重试。</string>
+    <string name="online_search_history_corrupt">本机搜索历史已损坏，清空后可重新记录。</string>
+    <string name="online_search_history_busy">搜索历史正在处理，请稍后重试。</string>
+    <string name="online_search_history_stale">账号或搜索历史已变化，请重新打开搜索。</string>
+    <string name="online_search_history_clear_retry">重试搜索历史清理</string>
 </resources>

@@ -57,6 +57,7 @@ import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.auth.QrLoginPhase
 import io.github.onlinemo.meloxwatch.data.auth.SessionValidity
 import io.github.onlinemo.meloxwatch.data.online.OnlineQrGrid
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryIssue
 import io.github.onlinemo.meloxwatch.data.themes.ThemeBitmapLease
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogEntry
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogEntryKind
@@ -88,6 +89,16 @@ internal fun LazyListScope.onlineContent(state: OnlineUiState, model: OnlineView
         WatchActionRow(stringResource(R.string.online_cancel), onClick = model::cancel)
     }
     state.issue?.let { issue -> item(key = "online:issue") { WatchText(stringResource(onlineIssueText(issue)), error = true) } }
+    state.searchHistoryIssue?.let { issue -> item(key = "online:history-issue") {
+        WatchText(stringResource(searchHistoryIssueText(issue)), error = true)
+    } }
+    state.searchHistoryCleanup?.let { cleanup -> item(key = "online:history-cleanup") {
+        WatchText(stringResource(R.string.online_search_history_cleanup_failed), error = true)
+        WatchText(stringResource(searchHistoryIssueText(cleanup.issue)), error = true)
+        WatchActionRow(stringResource(R.string.online_search_history_cleanup_retry), enabled = !state.busy) {
+            model.retrySearchHistoryCleanup(cleanup)
+        }
+    } }
     state.submission?.playbackIssue?.let { issue -> item(key = "online:playback-issue") {
         WatchText(stringResource(onlinePlaybackIssueText(issue)), error = true)
     } }
@@ -121,7 +132,34 @@ internal fun LazyListScope.onlineContent(state: OnlineUiState, model: OnlineView
             item(key = "online:search") { WatchSearchField(state.searchDraft, model::editSearch, model::search, !state.busy) }
             item { WatchActionRow(stringResource(R.string.online_search), primary = true,
                 enabled = !state.busy && state.searchDraft.isNotBlank(), onClick = model::search) }
+            item { WatchActionRow(stringResource(R.string.online_search_clear_input),
+                enabled = !state.busy && state.searchDraft.isNotEmpty(), onClick = model::clearSearchDraft) }
             item { WatchText(stringResource(R.string.online_search_hint)) }
+            item(key = "online:history-heading") {
+                WatchText(stringResource(R.string.online_search_history), primary = true)
+                WatchText(stringResource(R.string.online_search_history_local))
+            }
+            state.searchHistory?.let { history ->
+                if (history.issue == null && history.queries.isEmpty() && state.searchHistoryIssue == null) item {
+                    WatchText(stringResource(R.string.online_search_history_empty))
+                }
+                history.queries.forEachIndexed { index, value -> item(key = "online:history:$index") {
+                    WatchContentRow(enabled = !state.busy && history.issue == null, onClick = { model.chooseSearchHistory(history, index) }) {
+                        OnlineLabel(value, primary = true)
+                    }
+                } }
+                if (history.clearToken != null) item {
+                    WatchActionRow(stringResource(R.string.online_search_history_clear_retry), enabled = !state.busy) { model.clearSearchHistory(history) }
+                } else if (history.queries.isNotEmpty()) item {
+                    WatchActionRow(stringResource(R.string.online_search_history_clear), enabled = !state.busy) { model.clearSearchHistory(history) }
+                }
+                if (history.issue == OnlineSearchHistoryIssue.CORRUPT) item {
+                    WatchActionRow(stringResource(R.string.online_search_history_clear_damaged), enabled = !state.busy) { model.clearSearchHistory(history) }
+                }
+            }
+            if (state.searchHistoryIssue != null) item {
+                WatchActionRow(stringResource(R.string.online_search_history_retry), enabled = !state.busy, onClick = model::showSearch)
+            }
         }
         OnlineScreen.CATALOG -> {
             state.title?.let { title -> item(key = "online:title") { WatchText(title, primary = true) } }
@@ -319,6 +357,15 @@ private fun onlineIssueText(issue: OnlineCatalogIssue): Int = when (issue) {
     OnlineCatalogIssue.STORAGE_UNAVAILABLE -> R.string.online_issue_storage
     OnlineCatalogIssue.CLOSED -> R.string.online_issue_closed
     OnlineCatalogIssue.INVALID_RESPONSE -> R.string.online_issue_response
+}
+
+private fun searchHistoryIssueText(issue: OnlineSearchHistoryIssue): Int = when (issue) {
+    OnlineSearchHistoryIssue.READ_FAILED -> R.string.online_search_history_read_failed
+    OnlineSearchHistoryIssue.WRITE_FAILED -> R.string.online_search_history_write_failed
+    OnlineSearchHistoryIssue.CLEAR_FAILED -> R.string.online_search_history_clear_failed
+    OnlineSearchHistoryIssue.CORRUPT -> R.string.online_search_history_corrupt
+    OnlineSearchHistoryIssue.BUSY -> R.string.online_search_history_busy
+    OnlineSearchHistoryIssue.STALE_ACCOUNT -> R.string.online_search_history_stale
 }
 
 private fun onlinePlaybackIssueText(issue: QueuePlaybackIssue): Int = when (issue) {

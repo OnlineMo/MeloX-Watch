@@ -1,5 +1,7 @@
 package io.github.onlinemo.meloxwatch.data.auth
 
+import java.util.UUID
+
 enum class AuthIssue {
     NETWORK_UNAVAILABLE, TIMEOUT, RATE_LIMITED, CERTIFICATE, LOGIN_REQUIRED,
     INVALID_RESPONSE, KEY_UNAVAILABLE, STORAGE_UNAVAILABLE, SESSION_CORRUPT, BUSY, CLOSED,
@@ -29,6 +31,7 @@ data class SessionSnapshot(
     val validity: SessionValidity = SessionValidity.SIGNED_OUT,
     val generation: Long = 0,
     val issue: AuthIssue? = null,
+    val lineageId: String? = null,
 ) {
     override fun toString(): String = "SessionSnapshot(validity=$validity, generation=$generation, issue=$issue, redacted)"
 }
@@ -48,7 +51,10 @@ internal class SessionCredential private constructor(private val value: String) 
     }
 }
 
-internal class StoredSession(val account: AccountIdentity, val credential: SessionCredential) {
+/** The opaque persisted lineage carries no credential and is renewed by each explicit login commit. */
+internal class StoredSession(val account: AccountIdentity, val credential: SessionCredential,
+    val lineageId: String = UUID.randomUUID().toString()) {
+    init { require(lineageId.length == 36 && UUID.fromString(lineageId).toString() == lineageId) }
     override fun toString(): String = "StoredSession(redacted)"
 }
 
