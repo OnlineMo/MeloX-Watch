@@ -2,6 +2,7 @@ package io.github.onlinemo.meloxwatch.data.auth
 
 import io.github.onlinemo.meloxwatch.data.netease.NeteaseLoginApi
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
@@ -76,7 +77,7 @@ internal class SessionRepository(
                     active = restored
                     mutableSnapshot.value = SessionSnapshot(restored?.account,
                         if (restored == null) SessionValidity.SIGNED_OUT else SessionValidity.RESTORED_UNVERIFIED,
-                        nextGeneration())
+                        nextGeneration(), lineageId = restored?.lineageId)
                 }
                 mutableSnapshot.value
             }
@@ -99,7 +100,8 @@ internal class SessionRepository(
             if (verified.stored.account.providerId != captured.first.account.providerId ||
                 verified.stored.account.accountId != captured.first.account.accountId
             ) throw AuthException(AuthIssue.LOGIN_REQUIRED)
-            commit(verified, captured.second) { accept ->
+            // Only this real restoration verification can continue the persisted session lineage.
+            commitSession(verified, captured.second, PRE_ACCEPT_TIMEOUT_MS, captured.first.lineageId) { accept ->
                 synchronized(memory) {
                     active === captured.first && mutableSnapshot.value.generation == captured.third && accept()
                 }
@@ -132,8 +134,19 @@ internal class SessionRepository(
         expectedLogoutEpoch: Long,
         preAcceptTimeoutMs: Long = PRE_ACCEPT_TIMEOUT_MS,
         authorize: (accept: () -> Boolean) -> Boolean,
+    ): Boolean = commitSession(session, expectedLogoutEpoch, preAcceptTimeoutMs, null, authorize)
+
+    private suspend fun commitSession(
+        session: VerifiedSession,
+        expectedLogoutEpoch: Long,
+        preAcceptTimeoutMs: Long,
+        continuedLineage: String?,
+        authorize: (accept: () -> Boolean) -> Boolean,
     ): Boolean {
         if (preAcceptTimeoutMs <= 0) throw AuthException(AuthIssue.TIMEOUT)
+        // A public commit always creates a new login, even if an API result reuses an old identity.
+        val committing = VerifiedSession(StoredSession(session.stored.account, session.stored.credential,
+            continuedLineage ?: UUID.randomUUID().toString()))
         val caller = currentCoroutineContext()
         var locked = false
         var sealed: SealedSession? = null
@@ -144,7 +157,7 @@ internal class SessionRepository(
                     awaitLogout()
                     mutations.lock()
                     locked = true
-                    sealed = store.seal(session)
+                    sealed = store.seal(committing)
                     val preparation = currentCoroutineContext()
                     preparation.ensureActive()
                     authorize {
@@ -183,9 +196,10 @@ internal class SessionRepository(
                         val previous = active?.account
                         val obsolete = requests.filter { it !== caller[Job] }
                         requests.clear()
-                        active = session.stored
+                        active = committing.stored
                         loaded = true
-                        mutableSnapshot.value = SessionSnapshot(session.stored.account, SessionValidity.VERIFIED, nextGeneration())
+                        mutableSnapshot.value = SessionSnapshot(committing.stored.account, SessionValidity.VERIFIED,
+                            nextGeneration(), lineageId = committing.stored.lineageId)
                         previous to obsolete
                     }
                 }

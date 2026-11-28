@@ -69,4 +69,20 @@
     <string name="online_issue_closed">Reopen this music page to continue.</string>
     <string name="online_issue_response">The music service returned an unusable response.</string>
     <string name="online_issue_playback">This song could not start. Retry or choose another song.</string>
+    <string name="online_search_clear_input">Clear input</string>
+    <string name="online_search_history">Recent searches</string>
+    <string name="online_search_history_empty">No recent searches on this device.</string>
+    <string name="online_search_history_local">Recent searches stay on this device. Select one, then tap Search.</string>
+    <string name="online_search_history_clear">Clear search history</string>
+    <string name="online_search_history_clear_damaged">Clear damaged search history</string>
+    <string name="online_search_history_retry">Reload search history</string>
+    <string name="online_search_history_cleanup_retry">Retry history cleanup</string>
+    <string name="online_search_history_cleanup_failed">Search history from the previous account could not be cleared.</string>
+    <string name="online_search_history_read_failed">Search history could not be read.</string>
+    <string name="online_search_history_write_failed">Search history could not be saved. Search is still available.</string>
+    <string name="online_search_history_clear_failed">Search history could not be fully cleared. Retry when ready.</string>
+    <string name="online_search_history_corrupt">Saved search history is damaged. Clear it to start again.</string>
+    <string name="online_search_history_busy">Search history is busy. Retry shortly.</string>
+    <string name="online_search_history_stale">The account or search history changed. Reopen Search.</string>
+    <string name="online_search_history_clear_retry">Retry clearing search history</string>
 </resources>

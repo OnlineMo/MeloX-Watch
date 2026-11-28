@@ -31,10 +31,13 @@ internal class OnlineCatalogFeatureOwner(
         val database = OnlineCatalogDatabase.open(context)
         try {
             val artworks = OnlineArtworkRepository(runtime.sessions, images(), http())
+            val history = OnlineSearchHistory.create(context.applicationContext.noBackupFilesDir, runtime.sessions)
             OnlineCatalogFeature(runtime.sessions,
                 OnlineCatalogRepository(runtime.sessions, runtime.loginApi, runtime.catalogApi(),
                     RoomOnlineCatalogCache(database, context.applicationContext.noBackupFilesDir), registerArtwork = artworks::register),
-                artworks, login = { scope -> OnlineLoginPresenter(runtime.loginApi, runtime.sessions, scope, clearLyricsAccount) }, database = database)
+                artworks, searchHistory = history,
+                login = { scope -> OnlineLoginPresenter(runtime.loginApi, runtime.sessions, scope,
+                    searchHistory = history, clearLyricsAccount = clearLyricsAccount) }, database = database)
                 .also { feature = it }
         } catch (failure: Exception) {
             withContext(NonCancellable + Dispatchers.IO) { database.close() }
@@ -47,6 +50,7 @@ internal class OnlineCatalogFeature(
     val sessions: SessionRepository,
     val catalog: OnlineCatalogRepository,
     val artworks: OnlineArtworkRepository,
+    val searchHistory: OnlineSearchHistory,
     private val login: (CoroutineScope) -> OnlineLoginPresenter,
     private val database: OnlineCatalogDatabase,
 ) : AutoCloseable {

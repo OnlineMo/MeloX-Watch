@@ -14,6 +14,11 @@ import io.github.onlinemo.meloxwatch.data.online.OnlineLoginSnapshot
 import io.github.onlinemo.meloxwatch.data.online.OnlineNetworkMonitor
 import io.github.onlinemo.meloxwatch.data.online.OnlineQueueDirectory
 import io.github.onlinemo.meloxwatch.data.online.OnlineQueueTicket
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryCleanup
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryException
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryIssue
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryScope
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryView
 import io.github.onlinemo.meloxwatch.data.online.authCatalogIssue
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogEntry
 import io.github.onlinemo.meloxwatch.model.OnlineCatalogEntryKind
@@ -48,6 +53,9 @@ internal data class OnlineUiState(
     val kind: OnlineCatalogKind? = null,
     val title: String? = null,
     val searchDraft: String = "",
+    val searchHistory: OnlineSearchHistoryView? = null,
+    val searchHistoryIssue: OnlineSearchHistoryIssue? = null,
+    val searchHistoryCleanup: OnlineSearchHistoryCleanup? = null,
     val snapshot: OnlineCatalogSnapshot? = null,
     val rows: List<OnlineCatalogEntry> = emptyList(),
     val pageStart: Long = 0L,
@@ -84,6 +92,7 @@ internal class OnlineViewModel(
     private var sessionObserver: Job? = null
     private var networkObserver: Job? = null
     private var loginObserver: Job? = null
+    private var historyCleanupObserver: Job? = null
     private var network: OnlineNetworkMonitor? = null
     private var login: OnlineLoginPresenter? = null
     private var queueOperationId: String? = null
@@ -97,6 +106,8 @@ internal class OnlineViewModel(
             login?.leave()
             loginObserver?.cancel()
             loginObserver = null
+            historyCleanupObserver?.cancel()
+            historyCleanupObserver = null
             sessionObserver?.cancel()
             sessionObserver = null
             networkObserver?.cancel()
@@ -104,6 +115,7 @@ internal class OnlineViewModel(
             network?.close()
             network = null
             mutableState.value = mutableState.value.copy(login = OnlineLoginSnapshot(), busy = false, progress = null, selected = null,
+                searchHistory = null, searchHistoryIssue = null,
                 screen = if (mutableState.value.screen == OnlineScreen.TRACK_ACTION) OnlineScreen.CATALOG else mutableState.value.screen)
             return
         }
@@ -112,27 +124,48 @@ internal class OnlineViewModel(
             current.sessions.restore()
             observe(current)
             if (mutableState.value.screen == OnlineScreen.LOGIN) enterLogin(current)
+            else if (mutableState.value.screen == OnlineScreen.SEARCH) loadSearchHistory(current)
             else if (query != null && mutableState.value.screen == OnlineScreen.CATALOG) load(current, refresh = false)
         }
     }
 
     private fun observe(current: OnlineCatalogFeature) {
         sessionObserver?.cancel()
-        sessionObserver = viewModelScope.launch {
+        sessionObserver = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            var initial = true
             current.sessions.snapshot.collect { account ->
                 if (!visible) return@collect
+                val first = initial
+                initial = false
                 val previous = mutableState.value.account
-                mutableState.value = mutableState.value.copy(account = account)
+                val historyChanged = !OnlineSearchHistoryScope.of(previous).matches(OnlineSearchHistoryScope.of(account))
+                mutableState.value = mutableState.value.copy(account = account,
+                    searchHistory = if (historyChanged) null else mutableState.value.searchHistory,
+                    searchHistoryIssue = if (historyChanged) null else mutableState.value.searchHistoryIssue)
                 val scopeChanged = previous.account?.let { old ->
                     old.providerId != account.account?.providerId || old.accountId != account.account?.accountId
                 } == true
                 if (scopeChanged || account.validity == SessionValidity.SIGNED_OUT || account.validity == SessionValidity.UNAVAILABLE) {
-                    mutableState.value = mutableState.value.copy(rows = emptyList(), snapshot = null, selected = null, title = null)
+                    query = null
+                    mutableState.value = mutableState.value.copy(rows = emptyList(), snapshot = null, selected = null, title = null,
+                        searchDraft = "", searchHistory = null, searchHistoryIssue = null)
+                }
+                if (!first && historyChanged && mutableState.value.screen == OnlineScreen.SEARCH) {
+                    intent += 1L
+                    cancelOperation()
+                    start { loadSearchHistory(current) }
                 }
                 if (account.validity == SessionValidity.VERIFIED && mutableState.value.screen == OnlineScreen.LOGIN) {
                     login?.leave()
                     mutableState.value = mutableState.value.copy(screen = OnlineScreen.HOME, login = OnlineLoginSnapshot(), issue = null)
                 }
+            }
+        }
+        val presenter = login ?: current.login(viewModelScope).also { login = it }
+        historyCleanupObserver?.cancel()
+        historyCleanupObserver = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            presenter.historyCleanup.collect { cleanup ->
+                if (visible) mutableState.value = mutableState.value.copy(searchHistoryCleanup = cleanup)
             }
         }
         val monitor = network ?: networkFactory().also { network = it }
@@ -182,7 +215,9 @@ internal class OnlineViewModel(
             presenter.logout().join()
             query = null
             mutableState.value = mutableState.value.copy(screen = OnlineScreen.HOME, account = current.sessions.snapshot.value,
-                rows = emptyList(), snapshot = null, selected = null, searchDraft = "", issue = current.sessions.snapshot.value.issue?.let(::authCatalogIssue)
+                rows = emptyList(), snapshot = null, selected = null, searchDraft = "", searchHistory = null,
+                searchHistoryIssue = null, searchHistoryCleanup = presenter.historyCleanup.value,
+                issue = current.sessions.snapshot.value.issue?.let(::authCatalogIssue)
                     ?: presenter.lyricsCleanupIssue?.let { OnlineCatalogIssue.STORAGE_UNAVAILABLE })
         }
     }
@@ -191,23 +226,103 @@ internal class OnlineViewModel(
         if (!visible) return
         query = null
         navigate(OnlineScreen.SEARCH)
-        mutableState.value = mutableState.value.copy(rows = emptyList(), snapshot = null, title = null, kind = OnlineCatalogKind.SEARCH)
+        mutableState.value = mutableState.value.copy(rows = emptyList(), snapshot = null, title = null, kind = OnlineCatalogKind.SEARCH,
+            searchHistory = null, searchHistoryIssue = null)
+        start { loadSearchHistory(requireFeature()) }
     }
     fun editSearch(value: String) {
+        if (!visible || mutableState.value.screen != OnlineScreen.SEARCH || mutableState.value.busy) return
         if (value.length <= 256 && value.none { it.code < 32 }) mutableState.value = mutableState.value.copy(searchDraft = value)
+    }
+    fun clearSearchDraft() { editSearch("") }
+    fun chooseSearchHistory(expected: OnlineSearchHistoryView, index: Int) {
+        if (!visible || mutableState.value.screen != OnlineScreen.SEARCH || mutableState.value.busy ||
+            mutableState.value.searchHistory !== expected || expected.issue != null || index !in expected.queries.indices ||
+            !historyScopeCurrent(expected.scope)) return
+        query = null
+        navigate(OnlineScreen.SEARCH)
+        mutableState.value = mutableState.value.copy(searchDraft = expected.queries[index], rows = emptyList(), snapshot = null,
+            title = null, kind = OnlineCatalogKind.SEARCH)
+    }
+    fun clearSearchHistory(expected: OnlineSearchHistoryView) {
+        if (!visible || mutableState.value.screen != OnlineScreen.SEARCH || mutableState.value.busy ||
+            mutableState.value.searchHistory !== expected || expected.queries.isEmpty() && expected.issue != OnlineSearchHistoryIssue.CORRUPT &&
+            expected.clearToken == null) return
+        val owner = intent
+        start {
+            if (!historyPageCurrent(owner, expected.scope) || mutableState.value.searchHistory !== expected) return@start
+            try {
+                val cleared = requireFeature().searchHistory.clear(expected)
+                currentCoroutineContext().ensureActive()
+                if (historyPageCurrent(owner, expected.scope) && mutableState.value.searchHistory === expected) {
+                    mutableState.value = mutableState.value.copy(searchHistory = cleared, searchHistoryIssue = null)
+                }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: OnlineSearchHistoryException) {
+                if (historyPageCurrent(owner, expected.scope) && mutableState.value.searchHistory === expected) {
+                    mutableState.value = mutableState.value.copy(searchHistory = error.recoverableView ?: expected, searchHistoryIssue = error.issue)
+                }
+            }
+        }
+    }
+    fun retrySearchHistoryCleanup(expected: OnlineSearchHistoryCleanup) {
+        if (!visible || mutableState.value.busy || mutableState.value.searchHistoryCleanup !== expected) return
+        start {
+            if (mutableState.value.searchHistoryCleanup === expected) login?.retryHistoryCleanup(expected)?.join()
+        }
     }
     fun search() {
         val value = mutableState.value.searchDraft.trim()
-        if (value.isBlank() || !visible) return
-        open(OnlineCatalogQuery(OnlineCatalogKind.SEARCH, value))
+        if (value.isBlank() || !visible || mutableState.value.screen != OnlineScreen.SEARCH || mutableState.value.busy) return
+        open(OnlineCatalogQuery(OnlineCatalogKind.SEARCH, value), historySnapshot = mutableState.value.account)
+    }
+    private fun historyScopeCurrent(scope: OnlineSearchHistoryScope): Boolean =
+        scope.matches(OnlineSearchHistoryScope.of(mutableState.value.account)) &&
+            feature?.sessions?.snapshot?.value?.let { scope.matches(OnlineSearchHistoryScope.of(it)) } == true
+    private fun historyPageCurrent(owner: Long, scope: OnlineSearchHistoryScope): Boolean =
+        visible && intent == owner && mutableState.value.screen == OnlineScreen.SEARCH && historyScopeCurrent(scope)
+    private suspend fun loadSearchHistory(current: OnlineCatalogFeature) {
+        val captured = current.sessions.snapshot.value
+        val scope = OnlineSearchHistoryScope.of(captured)
+        val owner = intent
+        try {
+            val loaded = current.searchHistory.read(captured)
+            currentCoroutineContext().ensureActive()
+            if (historyPageCurrent(owner, scope)) mutableState.value = mutableState.value.copy(searchHistory = loaded,
+                searchHistoryIssue = loaded.issue)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: OnlineSearchHistoryException) {
+            if (historyPageCurrent(owner, scope)) mutableState.value = mutableState.value.copy(searchHistoryIssue = error.issue)
+        }
+    }
+    private suspend fun recordSearch(current: OnlineCatalogFeature, captured: SessionSnapshot, value: String) {
+        val owner = intent
+        val scope = OnlineSearchHistoryScope.of(captured)
+        if (!historyScopeCurrent(scope)) throw CancellationException("Online account changed")
+        if (scope.accountHash == null) return
+        try {
+            val recorded = current.searchHistory.record(captured, value)
+            currentCoroutineContext().ensureActive()
+            if (visible && intent == owner && historyScopeCurrent(scope)) mutableState.value = mutableState.value.copy(
+                searchHistory = recorded, searchHistoryIssue = null)
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (error: OnlineSearchHistoryException) {
+            if (visible && intent == owner && historyScopeCurrent(scope)) mutableState.value = mutableState.value.copy(searchHistoryIssue = error.issue)
+        }
+        currentCoroutineContext().ensureActive()
+        if (!historyScopeCurrent(scope)) throw CancellationException("Online account changed")
     }
     fun open(kind: OnlineCatalogKind) { if (kind != OnlineCatalogKind.PLAYLIST && kind != OnlineCatalogKind.SEARCH) open(OnlineCatalogQuery(kind)) }
-    private fun open(value: OnlineCatalogQuery, title: String? = null) {
+    private fun open(value: OnlineCatalogQuery, title: String? = null, historySnapshot: SessionSnapshot? = null) {
         if (!visible) return
         query = value
         navigate(OnlineScreen.CATALOG)
         mutableState.value = mutableState.value.copy(kind = value.kind, title = title, snapshot = null, rows = emptyList(), pageStart = 0L)
-        start { load(requireFeature(), refresh = false) }
+        start {
+            val current = requireFeature()
+            if (historySnapshot != null) recordSearch(current, historySnapshot, value.argument)
+            load(current, refresh = false)
+        }
     }
 
     fun choose(row: OnlineCatalogEntry) {
@@ -342,7 +457,7 @@ internal class OnlineViewModel(
         intent += 1L
         cancelOperation()
         if (screen != OnlineScreen.LOGIN) login?.leave()
-        mutableState.value = mutableState.value.copy(screen = screen, selected = null, issue = null, submission = null, progress = null)
+        mutableState.value = mutableState.value.copy(screen = screen, selected = null, issue = null, submission = null, progress = null, searchHistoryIssue = null)
     }
 
     private fun progress(value: OnlineCatalogProgress) {
