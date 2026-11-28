@@ -18,4 +18,4 @@
 
 PR #50 的首轮 `46166183461/1` 因菜单缺少 `padding` 导入停止，后继 `46172652851/1` 已通过生产编译，手机 12 份正式 XML 的 134 项测试全部通过。后继整轮 353 秒、compile 329 秒；手表测试编译唯一错误为 `WatchSearchHistoryControlsTest` 导入不存在的顶层 `assertDoesNotExist`。该断言是 `SemanticsNodeInteraction` 成员，删除导入并保留断言正文。真实 merge build `4dbc869a33fdb9ec7625586464a5d3d312ea535b` 的 tree 与 source `a1b2aa91e644205bab8ba60821c5b6a9eb89047c` 相同，parents 为 [contribution, source]；原日志和 reports ZIP 各收取一次，未解压或复制源码。
 
-手表没有正式 JUnit XML，28 个新增回归定义仍未运行；lint、双 APK、设备及完整验收继续未完成。全部 128 本地必需能力及 256 原 AC、既定在线范围、Meting、手机伴侣及双端互操作验收保持完整；readiness 仍 false，candidate 仍为空。
+最新 `46174484418/1` 已执行全部新增定义及原范围：Watch3321项中3319成功、2失败，Phone134项全成功；多SDK的实际病例数按正式XML记录。跨账号夹具补充新generation/scope及原Main pump下的read完成屏障；滚动helper锁定测试宿主外层LazyColumn，保留布局、全部断言和原期限。修复后的完整新云验、lint、双 APK、设备及完整验收继续未完成。全部 128 本地必需能力及 256 原 AC、既定在线范围、Meting、手机伴侣及双端互操作验收保持完整；readiness 仍 false，candidate 仍为空。

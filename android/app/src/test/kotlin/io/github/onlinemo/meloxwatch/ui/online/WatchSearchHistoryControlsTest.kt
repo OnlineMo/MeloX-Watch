@@ -13,13 +13,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasClickAction
-import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
@@ -154,7 +155,7 @@ class WatchSearchHistoryControlsTest {
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val round = fixture.context.resources.configuration.isScreenRound
                     val contentWidth = if (round) maxWidth * .78f else maxWidth - 24.dp
-                    LazyColumn(Modifier.width(contentWidth).align(Alignment.Center),
+                    LazyColumn(Modifier.width(contentWidth).align(Alignment.Center).testTag(HISTORY_LIST_TAG),
                         contentPadding = PaddingValues(vertical = 44.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         onlineContent(state, model, visible = true)
                     }
@@ -164,6 +165,7 @@ class WatchSearchHistoryControlsTest {
         compose.waitForIdle()
         return model
     }
-    private fun scrollTo(label: String) = compose.onNode(hasScrollAction()).performScrollToNode(hasText(label) and hasClickAction())
-    private fun scrollTextTo(label: String) = compose.onNode(hasScrollAction()).performScrollToNode(hasText(label))
+    private fun scrollTo(label: String) = compose.onNodeWithTag(HISTORY_LIST_TAG).performScrollToNode(hasText(label) and hasClickAction())
+    private fun scrollTextTo(label: String) = compose.onNodeWithTag(HISTORY_LIST_TAG).performScrollToNode(hasText(label))
+    private companion object { const val HISTORY_LIST_TAG = "watch-search-history-list" }
 }

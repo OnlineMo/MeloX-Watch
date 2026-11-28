@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.res.Configuration
 import io.github.onlinemo.meloxwatch.R
 import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryIssue
+import io.github.onlinemo.meloxwatch.data.online.OnlineSearchHistoryScope
 import io.github.onlinemo.meloxwatch.ui.ProbePage
 import io.github.onlinemo.meloxwatch.ui.ProbeUiState
 import io.github.onlinemo.meloxwatch.ui.fonts.ThemeUiFontText
@@ -15,6 +16,7 @@ import io.github.onlinemo.meloxwatch.ui.probePageVisibleText
 import io.github.onlinemo.meloxwatch.ui.queue.QueueViewerState
 import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
@@ -84,8 +86,17 @@ class OnlineViewModelSearchHistoryTest {
         model.showSearch()
         val old = checkNotNull(awaitOnlineState(model) { !it.busy && it.searchHistory != null }.searchHistory)
         fixture.signIn("102")
-        awaitOnlineState(model) { !it.busy && it.account.account?.accountId == "102" && it.searchHistory != null }
-        fixture.history.record(fixture.sessions.snapshot.value, "Shared fixture")
+        val newAccount = fixture.sessions.snapshot.value
+        val newScope = OnlineSearchHistoryScope.of(newAccount)
+        awaitOnlineState(model) {
+            !it.busy && it.account.account?.accountId == "102" && it.account.generation == newAccount.generation &&
+                it.searchHistory != null && it.searchHistory?.scope?.matches(newScope) == true
+        }
+        // Pump the paused Main looper until the new owner's native history IO has retired.
+        val retiredRead = async { fixture.history.read(newAccount) }
+        awaitOnlineCondition { retiredRead.isCompleted }
+        retiredRead.await()
+        fixture.history.record(newAccount, "Shared fixture")
         model.showSearch()
         val current = checkNotNull(awaitOnlineState(model) { !it.busy && it.searchHistory?.queries?.isNotEmpty() == true }.searchHistory)
         assertNotSame(old, current)
