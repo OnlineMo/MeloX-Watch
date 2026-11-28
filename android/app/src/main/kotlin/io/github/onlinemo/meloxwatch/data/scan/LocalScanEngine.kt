@@ -26,16 +26,19 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -108,27 +111,38 @@ class LocalScanEngine(
                     throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
                 } else sinceGeneration = null
             }
-            val token = store.beginScan(source.spec.sourceId, source.authEpoch, rulesRevision, mode)
-            val task = Active(token, cueEncoding, sinceGeneration, checkpoint)
-            task.job = scope.launch(start = CoroutineStart.LAZY) { task.entered.set(true); run(task, source, sinceGeneration) }
-            synchronized(activeLock) { active = task }
-            publish(task, ScanState(token, ScanPhase.PREPARING))
-            task.job.invokeOnCompletion {
-                if (!task.entered.get()) scope.launch(NonCancellable) {
-                    try {
-                        io.awaitIdle()
-                        val terminal = if (backgrounded) ScanPhase.PAUSED_BACKGROUND else task.terminal
-                        val state = try { store.setScanState(task.token, terminal) }
-                            catch (_: LibraryException) { ScanState(task.token, terminal) }
-                        publish(task, state)
-                    } finally {
-                        synchronized(activeLock) { if (active === task) active = null }
-                        task.settled.complete(Unit)
+            var accepted: Active? = null
+            try {
+                // Native acceptance can outlive its caller. Register the exact owner before the
+                // cancellation boundary can hide a committed token from this process.
+                val task = withContext(NonCancellable) {
+                    val token = store.beginScan(source.spec.sourceId, source.authEpoch, rulesRevision, mode)
+                    val task = Active(token, cueEncoding, sinceGeneration, checkpoint, io.trackReads())
+                    accepted = task
+                    task.job = scope.launch(task.readRetirement, start = CoroutineStart.LAZY) {
+                        task.entered.set(true)
+                        run(task, source, sinceGeneration)
                     }
+                    synchronized(activeLock) { active = task }
+                    publish(task, ScanState(token, ScanPhase.PREPARING))
+                    task.job.invokeOnCompletion {
+                        if (!task.entered.get()) scope.launch(NonCancellable) {
+                            requestTerminal(task, if (backgrounded) ScanPhase.PAUSED_BACKGROUND else ScanPhase.CANCELLED)
+                            retireAndAcknowledge(task)
+                        }
+                    }
+                    task.job.start()
+                    task
                 }
+                currentCoroutineContext().ensureActive()
+                return task.token
+            } catch (cancelled: CancellationException) {
+                accepted?.let { task ->
+                    requestTerminal(task, if (backgrounded) ScanPhase.PAUSED_BACKGROUND else ScanPhase.CANCELLED)
+                    task.job.cancel(cancelled)
+                }
+                throw cancelled
             }
-            task.job.start()
-            return token
         } finally { startLock.unlock() }
     }
 
@@ -140,6 +154,8 @@ class LocalScanEngine(
         stop(scanId, ScanPhase.CANCELLED)
         if (withTimeoutOrNull(5_000L) {
                 task.settled.await()
+                task.job.join()
+                task.acknowledgement?.join()
                 true
             } != true) {
             throw SourceReadException(SourceReadIssue.BUSY)
@@ -164,26 +180,53 @@ class LocalScanEngine(
     fun onBackground() {
         backgrounded = true
         val task = synchronized(activeLock) { active } ?: return
-        if (!task.stopping.compareAndSet(false, true)) return
-        task.terminal = ScanPhase.PAUSED_BACKGROUND
-        scope.launch { stopAccepted(task) }
+        if (!requestTerminal(task, ScanPhase.PAUSED_BACKGROUND)) return
+        task.job.cancel(CancellationException("Scan paused in background"))
+        scope.launch {
+            try { stopAccepted(task) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (failure: Exception) { publishStopFailure(task, failure) }
+        }
     }
 
     private suspend fun stop(scanId: String, terminal: ScanPhase) {
         val task = synchronized(activeLock) { active?.takeIf { it.token.scanId == scanId } } ?: return
-        if (!task.stopping.compareAndSet(false, true)) return
-        task.terminal = terminal
+        if (!requestTerminal(task, terminal)) return
+        task.job.cancel(CancellationException("Scan stop requested"))
         stopAccepted(task)
     }
 
     private suspend fun stopAccepted(task: Active) {
-        publish(task, (mutableState.value ?: ScanState(task.token, ScanPhase.RUNNING)).copy(phase = ScanPhase.STOPPING))
-        try { store.setScanState(task.token, ScanPhase.STOPPING) }
-        catch (error: LibraryException) {
-            // A stale rules/source fence blocks writes, but cannot prevent this owned job from stopping.
-            if (error.issue != LibraryIssue.SOURCE_CHANGED) throw error
+        if (!task.stopMutex.tryLock()) return
+        try {
+            if (task.settled.isCompleted || task.physicalRetired) return
+            withContext(NonCancellable) {
+                try {
+                    val state = store.setScanState(task.token, ScanPhase.STOPPING)
+                    if (state.phase in TERMINAL_PHASES) task.durableState = state
+                } catch (error: LibraryException) {
+                    // An invalidated write fence cannot delay owned physical cancellation.
+                    if (error.issue != LibraryIssue.SOURCE_CHANGED) throw error
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            publishStopFailure(task, failure)
+            throw SourceReadException(readIssue(failure), failure)
+        } finally { task.stopMutex.unlock() }
+    }
+
+    /** Retry the original terminal, with one owned writer and a bounded caller wait. */
+    suspend fun retryStop(scanId: String) {
+        val task = synchronized(activeLock) { active?.takeIf { it.token.scanId == scanId } } ?: return
+        if (!task.stopping.get() || !task.physicalRetired) throw SourceReadException(SourceReadIssue.BUSY)
+        val attempt = synchronized(activeLock) {
+            if (task.acknowledgement?.isCompleted == false) null else terminalAttempt(task)
+        } ?: throw SourceReadException(SourceReadIssue.BUSY)
+        if (withTimeoutOrNull(5_000L) { attempt.await(); true } != true) {
+            throw SourceReadException(SourceReadIssue.BUSY)
         }
-        finally { task.job.cancel(CancellationException("Scan stop requested")) }
     }
 
     private suspend fun run(task: Active, source: LibrarySource, sinceGeneration: Long?) {
@@ -194,7 +237,7 @@ class LocalScanEngine(
         var mediaFactsValid = true
         try {
             if (backgrounded || task.stopping.get()) {
-                task.terminal = if (backgrounded) ScanPhase.PAUSED_BACKGROUND else task.terminal
+                requestTerminal(task, if (backgrounded) ScanPhase.PAUSED_BACKGROUND else ScanPhase.CANCELLED)
                 throw CancellationException("Scan starts while hidden")
             }
             val first = provider { sources.observe(source.spec) }
@@ -352,39 +395,103 @@ class LocalScanEngine(
                 store.setWatermark(task.token, checkpoint.encode())
             }
             val final = store.finishScan(task.token, counters, coverage)
-            publish(task, final)
+            if (final.token != task.token || final.phase != ScanPhase.COMPLETED) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+            task.durableState = final
         } catch (error: CancellationException) {
-            withContext(NonCancellable) {
-                // The channel stays occupied if a provider is still physically stopping.
-                io.awaitIdle()
-                val terminal = if (backgrounded) ScanPhase.PAUSED_BACKGROUND else task.terminal
-                val state = try { store.setScanState(task.token, terminal) }
-                    catch (_: LibraryException) { ScanState(task.token, terminal, counters) }
-                publish(task, state)
-            }
+            requestTerminal(task, if (backgrounded) ScanPhase.PAUSED_BACKGROUND else ScanPhase.CANCELLED)
         } catch (error: Exception) {
-            val issue = when (error) {
-                is SourceReadException -> error.issue
-                is LibraryException -> when (error.issue) {
-                    LibraryIssue.BUSY -> SourceReadIssue.BUSY
-                    LibraryIssue.CONFLICT, LibraryIssue.SOURCE_CHANGED -> SourceReadIssue.SOURCE_CHANGED
-                    LibraryIssue.PERMISSION_REVOKED -> SourceReadIssue.PERMISSION_REVOKED
-                    LibraryIssue.STORAGE_FULL -> SourceReadIssue.STORAGE_FULL
-                    LibraryIssue.INVALID_INPUT -> SourceReadIssue.INVALID_SOURCE
-                    LibraryIssue.FILE_MISSING -> SourceReadIssue.FILE_MISSING
-                    else -> SourceReadIssue.SOURCE_UNAVAILABLE
-                }
-                else -> SourceReadIssue.SOURCE_UNAVAILABLE
-            }
-            withContext(NonCancellable) {
-                val state = try { store.setScanState(task.token, ScanPhase.FAILED, issue) }
-                    catch (_: LibraryException) { ScanState(task.token, ScanPhase.FAILED, counters, issue = issue) }
-                publish(task, state)
-            }
+            requestTerminal(task, ScanPhase.FAILED, readIssue(error))
         } finally {
-            synchronized(activeLock) { if (active === task) active = null }
-            task.settled.complete(Unit)
+            retireAndAcknowledge(task)
         }
+    }
+
+    private fun requestTerminal(task: Active, terminal: ScanPhase, issue: SourceReadIssue? = null): Boolean {
+        synchronized(activeLock) {
+            if (active !== task || !task.stopping.compareAndSet(false, true)) return false
+            task.terminal = terminal
+            task.terminalIssue = issue
+        }
+        publish(task, task.lastState.copy(phase = ScanPhase.STOPPING, issue = issue))
+        return true
+    }
+
+    /** No global-idle borrow: this scan waits only for the reads its context actually admitted. */
+    private suspend fun retireAndAcknowledge(task: Active) = withContext(NonCancellable) {
+        task.readRetirement.awaitRetired()
+        task.physicalRetired = true
+        val durable = task.durableState
+        if (durable != null) acknowledge(task, ScanStopAcknowledgement.Terminal(durable))
+        else {
+            if (!task.stopping.get()) requestTerminal(task, if (backgrounded) ScanPhase.PAUSED_BACKGROUND else ScanPhase.CANCELLED)
+            try { terminalAttempt(task).await() }
+            catch (failure: Exception) { publishStopFailure(task, failure) }
+        }
+    }
+
+    /** One writer survives caller timeout/cancellation; explicit retry never queues another writer. */
+    private fun terminalAttempt(task: Active): Deferred<Unit> = synchronized(activeLock) {
+        task.acknowledgement?.takeUnless { it.isCompleted } ?: scope.async(NonCancellable, start = CoroutineStart.LAZY) {
+            task.stopMutex.withLock {
+                if (task.settled.isCompleted) return@withLock
+                try {
+                    val durable = task.durableState
+                    if (durable != null) acknowledge(task, ScanStopAcknowledgement.Terminal(durable))
+                    else {
+                        val state = try { store.setScanState(task.token, task.terminal, task.terminalIssue) }
+                        catch (failure: Exception) {
+                            // A write can commit before its acknowledgement fails. Read the real
+                            // terminal or replaced active pointer; a revision change alone is insufficient.
+                            val proof = try { store.acknowledgeScanStop(task.token) }
+                            catch (checking: Exception) { if (checking !== failure) failure.addSuppressed(checking); null }
+                            if (proof != null) { acknowledge(task, proof); return@withLock }
+                            throw failure
+                        }
+                        acknowledge(task, ScanStopAcknowledgement.Terminal(state))
+                    }
+                } catch (failure: Exception) {
+                    publishStopFailure(task, failure)
+                    throw SourceReadException(readIssue(failure), failure)
+                }
+            }
+        }.also { task.acknowledgement = it; it.start() }
+    }
+
+    private fun acknowledge(task: Active, proof: ScanStopAcknowledgement) {
+        if (proof.token != task.token || !task.physicalRetired) throw SourceReadException(SourceReadIssue.SOURCE_CHANGED)
+        val state = when (proof) {
+            is ScanStopAcknowledgement.Terminal -> proof.state
+            is ScanStopAcknowledgement.ReplacedFence -> task.lastState.copy(phase = ScanPhase.INTERRUPTED,
+                issue = SourceReadIssue.SOURCE_CHANGED)
+        }
+        val released = synchronized(activeLock) {
+            if (active !== task) false else {
+                task.lastState = state
+                mutableState.value = state
+                active = null
+                true
+            }
+        }
+        if (released) task.settled.complete(Unit)
+    }
+
+    private fun publishStopFailure(task: Active, failure: Exception) {
+        publish(task, task.lastState.copy(phase = ScanPhase.STOPPING, issue = readIssue(failure)))
+    }
+
+    private fun readIssue(error: Exception): SourceReadIssue = when (error) {
+        is SourceReadException -> error.issue
+        is CancellationException -> SourceReadIssue.BUSY
+        is LibraryException -> when (error.issue) {
+            LibraryIssue.BUSY -> SourceReadIssue.BUSY
+            LibraryIssue.CONFLICT, LibraryIssue.SOURCE_CHANGED -> SourceReadIssue.SOURCE_CHANGED
+            LibraryIssue.PERMISSION_REVOKED -> SourceReadIssue.PERMISSION_REVOKED
+            LibraryIssue.STORAGE_FULL -> SourceReadIssue.STORAGE_FULL
+            LibraryIssue.INVALID_INPUT -> SourceReadIssue.INVALID_SOURCE
+            LibraryIssue.FILE_MISSING -> SourceReadIssue.FILE_MISSING
+            else -> SourceReadIssue.SOURCE_UNAVAILABLE
+        }
+        else -> SourceReadIssue.SOURCE_UNAVAILABLE
     }
 
     private suspend fun <T> provider(action: suspend () -> T): T {
@@ -399,14 +506,31 @@ class LocalScanEngine(
     }
 
     private fun publish(task: Active, value: ScanState) {
-        synchronized(activeLock) { if (active === task && (!task.stopping.get() || value.phase != ScanPhase.RUNNING)) mutableState.value = value }
+        synchronized(activeLock) {
+            if (active === task && (!task.stopping.get() || value.phase != ScanPhase.RUNNING)) {
+                task.lastState = value
+                mutableState.value = value
+            }
+        }
     }
 
-    private class Active(val token: ScanToken, val cueEncoding: CueEncoding, val sinceGeneration: Long?, val checkpoint: MediaScanCheckpoint?) {
+    private class Active(val token: ScanToken, val cueEncoding: CueEncoding, val sinceGeneration: Long?, val checkpoint: MediaScanCheckpoint?,
+        val readRetirement: LocalProviderIo.ReadRetirement) {
         lateinit var job: Job
         val stopping = AtomicBoolean(false)
         val entered = AtomicBoolean(false)
+        val stopMutex = Mutex()
         val settled = CompletableDeferred<Unit>()
+        @Volatile var physicalRetired = false
+        @Volatile var durableState: ScanState? = null
+        @Volatile var lastState = ScanState(token, ScanPhase.PREPARING)
+        @Volatile var acknowledgement: Deferred<Unit>? = null
         @Volatile var terminal = ScanPhase.CANCELLED
+        @Volatile var terminalIssue: SourceReadIssue? = null
+    }
+
+    private companion object {
+        val TERMINAL_PHASES = setOf(ScanPhase.COMPLETED, ScanPhase.CANCELLED,
+            ScanPhase.PAUSED_BACKGROUND, ScanPhase.FAILED, ScanPhase.INTERRUPTED)
     }
 }

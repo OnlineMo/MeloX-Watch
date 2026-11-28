@@ -37,14 +37,9 @@ class TransferRequestProcessor(
 
     private suspend fun processAuthorized(request: TransferRequest.Authorized): TransferProcessedResponse {
         val allowed = when (request) {
-            is TransferRequest.ReadPage -> when (request.kind) {
-                TransferCatalogKind.TRACKS -> setOf(TransferCapability.READ_LIBRARY)
-                TransferCatalogKind.PLAYLISTS, TransferCatalogKind.PLAYLIST_MEMBERS ->
-                    setOf(TransferCapability.READ_LIBRARY, TransferCapability.WRITE_PLAYLISTS)
-                TransferCatalogKind.ALBUMS, TransferCatalogKind.ARTISTS,
-                TransferCatalogKind.ALBUM_TRACKS, TransferCatalogKind.ARTIST_TRACKS ->
-                    setOf(TransferCapability.READ_LIBRARY, TransferCapability.WRITE_DISPLAY_METADATA)
-            }
+            is TransferRequest.ReadPage -> catalogCapabilities(request.kind)
+            is TransferRequest.CloseCatalogView -> catalogCapabilities(request.kind)
+            is TransferRequest.ReadReceipt -> setOf(request.kind.capability)
             is TransferRequest.EditPlaylist -> setOf(TransferCapability.WRITE_PLAYLISTS)
             is TransferRequest.ReadDisplay, is TransferRequest.PreviewDisplay, is TransferRequest.ApplyDisplay ->
                 setOf(TransferCapability.WRITE_DISPLAY_METADATA)
@@ -54,6 +49,16 @@ class TransferRequestProcessor(
         }
         val permit = authority.authorizeOneOf(peer, request.scope, allowed)
         val response = try { when (request) {
+            is TransferRequest.ReadReceipt -> {
+                val binding = TransferOperationBinding(request.operationId, request.kind, permit.target, peer, request.payloadHash)
+                val receipt = backend.readReceipt(binding, permit)
+                receipt?.let { validateReceipt(binding, it) }
+                TransferResponse.ReceiptState(request.requestId, receipt)
+            }
+            is TransferRequest.CloseCatalogView -> {
+                backend.closeCatalogView(request, permit)
+                TransferResponse.Cancelled(request.requestId)
+            }
             is TransferRequest.ReadPage -> {
                 val page = backend.readPage(request, permit)
                 if (page.kind != request.kind || page.rows.size > request.limit || request.viewId != null && (page.viewId != request.viewId || page.revision != request.expectedRevision || !page.libraryRevision.sameAs(checkNotNull(request.expectedLibraryRevision)))) throw TransferException(TransferIssue.CONFLICT)
@@ -132,6 +137,15 @@ class TransferRequestProcessor(
     }
 
     suspend fun close() { retireStage() }
+
+    private fun catalogCapabilities(kind: TransferCatalogKind): Set<TransferCapability> = when (kind) {
+        TransferCatalogKind.TRACKS -> setOf(TransferCapability.READ_LIBRARY)
+        TransferCatalogKind.PLAYLISTS, TransferCatalogKind.PLAYLIST_MEMBERS ->
+            setOf(TransferCapability.READ_LIBRARY, TransferCapability.WRITE_PLAYLISTS)
+        TransferCatalogKind.ALBUMS, TransferCatalogKind.ARTISTS,
+        TransferCatalogKind.ALBUM_TRACKS, TransferCatalogKind.ARTIST_TRACKS ->
+            setOf(TransferCapability.READ_LIBRARY, TransferCapability.WRITE_DISPLAY_METADATA)
+    }
 
     private suspend fun retireStage(issue: TransferIssue = TransferIssue.INTERRUPTED, cancelled: Boolean = true) = withContext(NonCancellable) {
         val current = stage

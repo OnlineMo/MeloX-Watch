@@ -61,4 +61,4 @@ Media3 精确版本 `1.8.0`，对应 [androidx/media source commit](https://gith
 
 `DEPRECATION` / `OVERRIDE_DEPRECATION` 仅用于固定 `ExtractorsFactory` 已弃用配置入口及其最小测试 override；准确接口在 source jar 核对，仓库 `allWarningsAsErrors` 仍开启。升级该接口后移除窄抑制，并重跑 factory 配置/identity 回归。文本/delimiter/声明检查不能代替编译或 API linking。
 
-尚需云端实际编译/测试/lint、对应 APK hash 与设备矩阵；MP4 多 codec 正常样本、MediaPlayer native 内部内存行为、provider 硬中断与功耗/PSS均不因本文存在而完成。DSD/APE 虚拟 WAV 原 ReplayGain `Format.metadata` 缺失是独立 LP-06 集成缺口，不猜、不借用相邻曲值。
+尚需云端实际编译/测试/lint、对应 APK hash 与设备矩阵；MP4 多 codec 正常样本、MediaPlayer native 内部内存行为、provider 硬中断与功耗/PSS均不因本文存在而完成。DSD/APE 虚拟 WAV 原 ReplayGain 的同源有界提取、实际来源及 Format 接线详见[LP-06 记录](LP-06-codec-replaygain.md)；新增回归定义与云端/设备验收分开记账，不猜、不借用相邻曲值。

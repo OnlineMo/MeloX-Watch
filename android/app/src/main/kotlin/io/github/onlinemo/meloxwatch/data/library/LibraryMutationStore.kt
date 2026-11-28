@@ -11,6 +11,7 @@ import io.github.onlinemo.meloxwatch.data.scan.ScanCoverage
 import io.github.onlinemo.meloxwatch.data.scan.ScanMode
 import io.github.onlinemo.meloxwatch.data.scan.ScanPhase
 import io.github.onlinemo.meloxwatch.data.scan.ScanState
+import io.github.onlinemo.meloxwatch.data.scan.ScanStopAcknowledgement
 import io.github.onlinemo.meloxwatch.data.scan.ScanToken
 import kotlinx.coroutines.flow.Flow
 
@@ -33,6 +34,8 @@ interface LibraryMutationStore {
     suspend fun stageAbsence(token: ScanToken, afterAliasId: String? = null, limit: Int = LibraryLimits.PAGE_SIZE): AbsencePage
     suspend fun finishScan(token: ScanToken, counters: ScanCounters, coverage: ScanCoverage): ScanState
     suspend fun setScanState(token: ScanToken, phase: ScanPhase, issue: SourceReadIssue? = null): ScanState
+    /** No positive default proof: a failed terminal write cannot release a still-current scan. */
+    suspend fun acknowledgeScanStop(token: ScanToken): ScanStopAcknowledgement? = null
     suspend fun latestScan(sourceId: String): ScanState?
     fun observeScan(scanId: String): Flow<ScanState?>
 }

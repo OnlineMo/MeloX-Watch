@@ -96,7 +96,15 @@ class CompanionTransferClientTest {
         val requests: MutableList<TransferRequest> = Collections.synchronizedList(ArrayList())
         val closeCalls = AtomicInteger()
         private var closing: Deferred<Unit>? = null
-        override suspend fun exchange(request: TransferRequest): TransferResponse { requests += request; return handler(request) }
+        override suspend fun exchange(request: TransferRequest): TransferResponse {
+            requests += request
+            // These legacy control fixtures have no retained view or receipt; real owner state is tested through Room/TLS.
+            return when (request) {
+                is TransferRequest.CloseCatalogView -> TransferResponse.Cancelled(request.requestId)
+                is TransferRequest.ReadReceipt -> TransferResponse.ReceiptState(request.requestId, null)
+                else -> handler(request)
+            }
+        }
         override suspend fun page(request: TransferRequest.ReadPage): TransferCatalogPage { requests += request; return pageHandler(request) }
         @Synchronized override fun close(): Deferred<Unit> {
             closeCalls.incrementAndGet()
@@ -651,7 +659,7 @@ class CompanionTransferClientTest {
                 }
                 val next = first + count
                 val page = TransferCatalogPage(request.kind, id(4), revision, fence, total, first, rows, if (next < total) "cursor_$next" else null)
-                // 每页经真实 schema2 帧/校验和消费者；不构造包含两万成员的整页或整库缓冲。
+                // 每页经完整共享协议帧/校验和消费者；不构造包含两万成员的整页或整库缓冲。
                 val bytes = ByteArrayOutputStream()
                 TransferProtocolCodec.writeResponse(bytes, TransferResponse.Page(request.requestId, page))
                 val streamed = ArrayList<TransferCatalogRow>(TransferLimits.PAGE_SIZE)

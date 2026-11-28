@@ -10,8 +10,6 @@ import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.TransferListener
 import java.io.InterruptedIOException
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.Collections
-import java.util.TreeMap
 
 /** Service-owned local inputs. A blocked/failed close retains its slot and prevents silent reuse. */
 @UnstableApi
@@ -55,6 +53,7 @@ internal class LocalCodecDataSource(
     private val listeners = ArrayList<TransferListener>()
     private var input: DataSourceCodecInput? = null
     private var pcm: PcmWaveStream? = null
+    private var codecHeaders: CodecPcmResponseHeaders? = null
     @Volatile private var ticket: ReadTicket? = null
     private var remaining = C.LENGTH_UNSET.toLong()
     private var originalUri: Uri? = null
@@ -89,6 +88,8 @@ internal class LocalCodecDataSource(
             } else {
                 val stream = PcmWaveStream(decoded)
                 pcm = stream
+                codecHeaders = CodecPcmResponseHeaders(dataSpec.uri, decoded.format,
+                    CodecReplayGainMetadata.read(raw, decoded.format), current::metadataIsCurrent)
                 if (dataSpec.position > stream.length) throw DataSourceException(PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
                 stream.seek(dataSpec.position)
                 stream.length - dataSpec.position
@@ -131,25 +132,14 @@ internal class LocalCodecDataSource(
 
     override fun getUri(): Uri? = originalUri
 
-    override fun getResponseHeaders(): Map<String, List<String>> {
-        val format = pcm?.format ?: return input?.responseHeaders.orEmpty()
-        // These are in-process decoder observations, not HTTP requests or a verified-support flag.
-        val headers = TreeMap<String, List<String>>(String.CASE_INSENSITIVE_ORDER)
-        headers.putAll(mapOf("Content-Type" to listOf("audio/wav"),
-            "X-MeloX-Input-Container" to listOf(format.container),
-            "X-MeloX-Input-Encoding" to listOf(format.encoding),
-            "X-MeloX-Input-Rate" to listOf(format.inputSampleRate.toString()),
-            "X-MeloX-Input-Bits" to listOf(format.inputBitsPerSample.toString()),
-            "X-MeloX-Channels" to listOf(format.channels.toString()),
-            "X-MeloX-PCM-Rate" to listOf(format.pcm.sampleRate.toString()),
-            "X-MeloX-PCM-Bits" to listOf(format.pcm.bitsPerSample.toString())))
-        return Collections.unmodifiableMap(headers)
-    }
+    override fun getResponseHeaders(): Map<String, List<String>> =
+        codecHeaders ?: input?.responseHeaders.orEmpty()
 
     internal fun requestCancellation() { ticket?.cancel() }
 
     override fun close() {
         ticket?.cancel()
+        codecHeaders = null
         var failure: Exception? = null
         try { pcm?.close(); pcm = null }
         catch (error: Exception) { failure = error }
@@ -171,6 +161,7 @@ private class ReadTicket(private val powerSaveMode: () -> Boolean) {
     private var codec = false
     private var policyRead: Long? = null
     fun cancel() { cancelled.set(true) }
+    fun metadataIsCurrent(): Boolean = !cancelled.get() && !Thread.currentThread().isInterrupted
     fun enableCodecPolicy() { codec = true; policyRead = null; check() }
     fun check() {
         if (cancelled.get() || Thread.currentThread().isInterrupted) throw InterruptedIOException("Local codec read cancelled")

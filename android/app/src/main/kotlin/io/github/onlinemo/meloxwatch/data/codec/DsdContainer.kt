@@ -12,9 +12,11 @@ internal data class DsdLayout(
     val bitOrder: DsdBitOrder,
     val channelBlockBytes: Int?,
     val tagOffset: Long? = null,
+    val tagEndExclusive: Long? = null,
 ) {
     val format: LocalCodecFormat get() = LocalCodecFormat(container, "DSD", sampleRate, 1, channels,
-        PcmFormat(88_200, channels), bitSamples, (bitSamples - 1) / 32 + 1, tagOffset = tagOffset)
+        PcmFormat(88_200, channels), bitSamples, (bitSamples - 1) / 32 + 1,
+        tagOffset = tagOffset, tagEndExclusive = tagEndExclusive)
 }
 
 /** Structural extraction reads fixed headers and seeks over bounded-count chunks; audio stays on disk. */
@@ -63,7 +65,7 @@ internal object DsdContainer {
         }
         return DsdLayout("DSF", channels.toInt(), rate.toInt(), samples, dataOffset, audioBytes,
             if (bits == 1L) DsdBitOrder.LSB_FIRST else DsdBitOrder.MSB_FIRST, block.toInt(),
-            metadata.takeIf { it > 0 })
+            metadata.takeIf { it > 0 }, input.length.takeIf { metadata > 0 })
     }
 
     fun dff(input: CodecInput): DsdLayout {
@@ -76,6 +78,7 @@ internal object DsdContainer {
         var dataOffset: Long? = null
         var dataBytes = 0L
         var tagOffset: Long? = null
+        var tagEndExclusive: Long? = null
         var chunks = 0
         while (input.position < input.length) {
             codecRequire(++chunks <= MAX_CHUNKS, CodecReadIssue.RESOURCE_LIMIT)
@@ -102,6 +105,7 @@ internal object DsdContainer {
                 "ID3 " -> {
                     codecRequire(tagOffset == null && chunk.size >= 10L)
                     tagOffset = input.position
+                    tagEndExclusive = chunk.end
                 }
             }
             finishChunk(input, chunk)
@@ -111,7 +115,7 @@ internal object DsdContainer {
         val samples = codecMultiply(dataBytes / props.channels, 8)
         codecRequire(samples > 0 && samples <= Long.MAX_VALUE - 1024)
         return DsdLayout("DFF", props.channels, props.rate, samples, checkNotNull(dataOffset), dataBytes,
-            DsdBitOrder.MSB_FIRST, null, tagOffset)
+            DsdBitOrder.MSB_FIRST, null, tagOffset, tagEndExclusive)
     }
 
     private data class Properties(val channels: Int, val rate: Int)

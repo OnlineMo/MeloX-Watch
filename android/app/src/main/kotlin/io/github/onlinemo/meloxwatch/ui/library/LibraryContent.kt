@@ -92,7 +92,7 @@ fun LazyListScope.libraryContent(
     onPlayPreview: (QueueEntry) -> Unit,
     onChooseFile: () -> Unit,
     onChooseTree: () -> Unit,
-    onMediaStore: () -> Unit,
+    onMediaStore: (Boolean) -> Unit,
     listening: ListeningUiState,
     listeningModel: ListeningViewModel,
     onPermissionSettings: () -> Unit,
@@ -100,6 +100,8 @@ fun LazyListScope.libraryContent(
     playlistEntryModel: PlaylistEntryViewModel,
     onPlaylists: () -> Unit,
     onAddToPlaylist: (LibraryViewToken, TrackKey?, String?) -> Unit,
+    onSourceHelp: () -> Unit,
+    onSourceTransfer: () -> Unit,
 ) {
     item(key = "library:navigation") {
         LibraryNavigation(state, model)
@@ -109,7 +111,8 @@ fun LazyListScope.libraryContent(
             LibraryScreen.STATISTICS)) state.page?.view?.viewId else null)
     }
     if (state.screen == LibraryScreen.SOURCES) {
-        sourcesContent(sources, sourceModel, commandPending, onPlayPreview, onChooseFile, onChooseTree, onMediaStore, onPermissionSettings)
+        sourcesContent(sources, sourceModel, commandPending, onPlayPreview, onChooseFile, onChooseTree, onMediaStore,
+            onPermissionSettings, onSourceHelp, onSourceTransfer)
         return
     }
     if (state.screen in setOf(LibraryScreen.HISTORY, LibraryScreen.STATISTICS)) {

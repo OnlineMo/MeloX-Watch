@@ -446,6 +446,9 @@ class _OutputSink:
     def __init__(self, output):
         self.output, self.pending = output, bytearray()
         self.dropped_bytes = 0
+        self.overflow_dropped_bytes = 0
+        self.close_dropped_bytes = 0
+        self.blocked_writes = 0
         self.descriptor, self.original_flags = None, None
 
     def activate(self):
@@ -462,7 +465,9 @@ class _OutputSink:
     def enqueue(self, raw):
         admitted = min(len(raw), MAX_PENDING_OUTPUT_BYTES - len(self.pending))
         self.pending.extend(raw[:admitted])
-        self.dropped_bytes += len(raw) - admitted
+        dropped = len(raw) - admitted
+        self.dropped_bytes += dropped
+        self.overflow_dropped_bytes += dropped
 
     def pump(self):
         for _ in range(8):
@@ -476,6 +481,7 @@ class _OutputSink:
                 try:
                     count = os.write(self.descriptor, batch)
                 except BlockingIOError:
+                    self.blocked_writes += 1
                     break
             if count <= 0:
                 raise OSError('Cloud output accepted no bytes')
@@ -487,13 +493,16 @@ class _OutputSink:
             self.pump()
         finally:
             self.dropped_bytes += len(self.pending)
+            self.close_dropped_bytes += len(self.pending)
             self.pending.clear()
             if self.original_flags is not None:
                 import fcntl
                 fcntl.fcntl(self.descriptor, fcntl.F_SETFL, self.original_flags)
 
     def snapshot(self):
-        return {'dropped_bytes': self.dropped_bytes, 'pending_bytes': len(self.pending),
+        return {'dropped_bytes': self.dropped_bytes, 'overflow_dropped_bytes': self.overflow_dropped_bytes,
+                'close_dropped_bytes': self.close_dropped_bytes, 'blocked_writes': self.blocked_writes,
+                'pending_bytes': len(self.pending),
                 'maximum_pending_bytes': MAX_PENDING_OUTPUT_BYTES}
 
 
@@ -1116,6 +1125,8 @@ def run_gradle(command, *, cwd, env, phase, build_sha=None, total_deadline=None,
                         available = min(len(chunk), MAX_LOG_BYTES - log_bytes)
                         if available:
                             log.write(chunk[:available])
+                            # Draining between reads preserves the bounded queue during writable bursts.
+                            sink.pump()
                             sink.enqueue(chunk[:available])
                             log_bytes += available
                         lines.consume(chunk, last_output)

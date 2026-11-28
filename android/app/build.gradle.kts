@@ -145,9 +145,25 @@ val prepareBundledSqliteHost by tasks.registering(Sync::class) {
     include("natives/${bundledSqliteHostPlatform.first}/${bundledSqliteHostPlatform.second}")
     into(bundledSqliteHostDirectory)
 }
+
+// The interop regressions compile these exact phone transport sources only in the watch Test source set.
+val companionInteropTestDirectory = layout.buildDirectory.dir("companion-interop-test-sources")
+val prepareCompanionInteropTestSources by tasks.registering(Sync::class) {
+    from(rootProject.file("companion/src/main/kotlin")) {
+        include("io/github/onlinemo/meloxwatch/companion/data/CompanionModels.kt")
+        include("io/github/onlinemo/meloxwatch/companion/transfer/CompanionTransferClient.kt")
+        include("io/github/onlinemo/meloxwatch/companion/transfer/CompanionConnection.kt")
+        include("io/github/onlinemo/meloxwatch/companion/transfer/CompanionResponseValidator.kt")
+    }
+    into(companionInteropTestDirectory)
+}
+android.sourceSets.getByName("test").java.srcDir(companionInteropTestDirectory)
+tasks.matching { it.name.contains("UnitTest") && (it.name.startsWith("compile") || it.name.startsWith("ksp")) }
+    .configureEach { dependsOn(prepareCompanionInteropTestSources) }
 tasks.withType<Test>().configureEach {
     dependsOn(prepareRobolectricSdk)
     dependsOn(prepareBundledSqliteHost)
+    dependsOn(prepareCompanionInteropTestSources)
     // Keep host workers on tiered C1 while the pinned JDK C2 crash is under investigation.
     jvmArgs("-XX:+TieredCompilation", "-XX:TieredStopAtLevel=1")
     val nativeCrashPhase = System.getenv("MELOX_CI_BUILD_PHASE")
@@ -174,8 +190,9 @@ tasks.withType<Test>().configureEach {
         nativeCrashDirectory.get().asFile.mkdirs()
         maxParallelForks = 1
         val workerLimit = gradle.startParameter.maxWorkerCount
+        // Ordinary PRs use temporary Debug signing; that flag does not determine test resources.
         val eligible = System.getenv("GITHUB_ACTIONS") == "true" &&
-            System.getenv("CI_UNSIGNED_APK") == "true" && System.getenv("GITHUB_EVENT_NAME") == "pull_request"
+            System.getenv("GITHUB_EVENT_NAME") == "pull_request" && nativeCrashPhase == "package-test-debug"
         var probeStatus = if (eligible) "unavailable" else "not-requested"
         var resources: Map<*, *>? = null
         var interrupted: InterruptedException? = null

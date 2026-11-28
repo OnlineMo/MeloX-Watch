@@ -47,6 +47,20 @@ data class ScanState(
     val issue: SourceReadIssue? = null,
 )
 
+/** Database evidence is separate from the engine's physical-provider retirement proof. */
+sealed interface ScanStopAcknowledgement {
+    val token: ScanToken
+
+    data class Terminal(val state: ScanState) : ScanStopAcknowledgement {
+        override val token: ScanToken get() = state.token
+        init { require(state.phase in setOf(ScanPhase.COMPLETED, ScanPhase.CANCELLED,
+            ScanPhase.PAUSED_BACKGROUND, ScanPhase.FAILED, ScanPhase.INTERRUPTED)) }
+    }
+
+    /** The source's durable active pointer no longer grants this token mutation rights. */
+    data class ReplacedFence(override val token: ScanToken) : ScanStopAcknowledgement
+}
+
 data class MetadataOutcome(
     val objectId: String,
     val metadata: LocalAudioMetadata? = null,

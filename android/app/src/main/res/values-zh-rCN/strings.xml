@@ -143,7 +143,8 @@
     <string name="dsp_tag_none">没有可识别的音量补偿标签</string>
     <string name="dsp_tag_id3">来源：ID3 音量补偿标签</string>
     <string name="dsp_tag_vorbis">来源：Vorbis 音量补偿标签</string>
-    <string name="dsp_tag_mixed">来源：ID3 与 Vorbis 标签</string>
+    <string name="dsp_tag_ape">来源：APE 音量补偿标签</string>
+    <string name="dsp_tag_mixed">来源：多种格式的标签</string>
     <string name="dsp_track_tag">原曲目增益：%1$s</string>
     <string name="dsp_album_tag">原专辑增益：%1$s</string>
     <string name="dsp_track_peak">原曲目峰值：%1$s</string>

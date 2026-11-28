@@ -86,6 +86,9 @@ class LocalTransferServer internal constructor(
         var rejectedConnection: Connection? = null
         val stopping = AtomicBoolean(false)
         val retirementMutex = Mutex()
+        // One peer can be approved in this session; its logical views outlive an idle socket.
+        var viewPeer: TransferFingerprint? = null
+        var viewRetirement: Deferred<Unit>? = null
         var acceptRetirement: Deferred<Unit>? = null
         var retirementJob: Job? = null
         val listenerClose = PhysicalClose {
@@ -370,6 +373,10 @@ class LocalTransferServer internal constructor(
                 val request = timed(current, connection, TransferLimits.IDLE_MS) { TransferProtocolCodec.readRequest(input) }
                 try {
                     timed(current, connection, TransferLimits.OPERATION_MS) {
+                        if (request is TransferRequest.Authorized && authority.state.value.approvedPeer == peer) {
+                            // Record the logical owner before allocation, so a concurrent revoke cannot lose cleanup.
+                            synchronized(lock) { if (current.viewPeer == null) current.viewPeer = peer }
+                        }
                         val result = handler.process(request)
                         writeWithIdleDeadline(current, connection, output, result.response, result.checkActive)
                     }
@@ -451,13 +458,22 @@ class LocalTransferServer internal constructor(
             val lastPeer = synchronized(lock) {
                 connection.peer?.takeIf { peer -> current.connections.none { it !== connection && it.peer == peer } }
             }
-            lastPeer?.let { backend.closePeerViews(it, current.opening.sessionId) }
+            lastPeer?.let { peer ->
+                if (current.stopping.get() || authority.state.value.approvedPeer != peer || authority.remainingMs() == 0L) {
+                    // A closing/revoked session keeps its last connection slot until the logical owner retires.
+                    backend.closePeerViews(peer, current.opening.sessionId)
+                    synchronized(lock) { if (current.viewPeer == peer) current.viewPeer = null }
+                } else backend.closePeerPreviews(peer, current.opening.sessionId)
+            }
             synchronized(lock) {
                 current.connections.remove(connection)
                 if (current.rejectedConnection === connection) current.rejectedConnection = null
                 mutableConnectionCount.value = current.connections.size
             }
         }
+        // Stop/revoke may arrive while idle preview cleanup suspends. After releasing the
+        // connection slot and mutex, the session must retain and await its logical close.
+        requestPeerViewRetirement(current, retry).await()
     }
 
     private fun requestAcceptRetirement(current: Resources, retry: Boolean): Deferred<Unit> {
@@ -475,15 +491,52 @@ class LocalTransferServer internal constructor(
     }
 
     private fun closeConnections(peer: TransferFingerprint?) {
-        val snapshot = synchronized(lock) { resources?.let { current -> current to current.connections.filter { peer == null || it.peer == peer } } } ?: return
+        val snapshot = synchronized(lock) { resources?.let { current ->
+            if (peer != null && current.viewPeer == null) current.viewPeer = peer
+            current to current.connections.filter { peer == null || it.peer == peer }
+        } } ?: return
         // 撤权可在 Main 调用；这里只派发已有连接所有者，取消监听在其后台任务执行。
         snapshot.second.forEach { connection -> requestConnectionRetirement(snapshot.first, connection) }
+        requestPeerViewRetirement(snapshot.first)
+    }
+
+    /** An idle wire owns no catalog lease; the authorized session owns its independent close receipt. */
+    private fun requestPeerViewRetirement(current: Resources, retry: Boolean = false): Deferred<Unit> {
+        val worker = synchronized(lock) {
+            val peer = current.viewPeer ?: return@synchronized CompletableDeferred(Unit)
+            // Retirement of another/idle wire cannot retire this still-authorized logical owner.
+            if (!current.stopping.get() && authority.state.value.approvedPeer == peer && authority.remainingMs() > 0L) {
+                return@synchronized CompletableDeferred(Unit)
+            }
+            // Live processors own their logical close after raw/TLS/provider retirement. With no
+            // matching wire left, the session instead needs this independent retained receipt.
+            if (current.connections.any { it.peer == peer }) return@synchronized CompletableDeferred(Unit)
+            val previous = current.viewRetirement
+            if (previous != null && (!retry || !previous.isCompleted || !previous.isCancelled)) return@synchronized previous
+            retirementScope.async(start = CoroutineStart.LAZY) {
+                try {
+                    current.retirementMutex.withLock {
+                        backend.closePeerViews(peer, current.opening.sessionId)
+                        synchronized(lock) { if (current.viewPeer == peer) current.viewPeer = null }
+                    }
+                } catch (cancelled: CancellationException) {
+                    requestStop(current, TransferIssue.RECOVERY_REQUIRED)
+                    throw cancelled
+                } catch (_: Exception) {
+                    requestStop(current, TransferIssue.RECOVERY_REQUIRED)
+                    throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+                }
+            }.also { current.viewRetirement = it }
+        }
+        worker.start()
+        return worker
     }
 
     private fun requestStop(current: Resources, issue: TransferIssue) {
         if (!current.stopping.compareAndSet(false, true)) return
         val worker = synchronized(lock) {
             if (resources === current) mutablePhase.value = TransferServerPhase.CLOSING
+            if (current.viewPeer == null) current.viewPeer = authority.state.value.approvedPeer
             val receipt = current.stopped
             retirementScope.launch(start = CoroutineStart.LAZY) {
                 completeRetirement(current, receipt, retry = false)
@@ -531,13 +584,20 @@ class LocalTransferServer internal constructor(
         fun ownedConnections(): List<Connection> = synchronized(lock) { current.connections.toList() + listOfNotNull(current.rejectedConnection) }
         val acceptRetirement = requestAcceptRetirement(current, retry)
         val connectionRetirements = ownedConnections().map { requestConnectionRetirement(current, it, retry) }
+        val viewRetirement = requestPeerViewRetirement(current, retry)
         // 各 Deferred 有独立应用所有者；awaitAll 及时报告已知错误，
         // 被阻塞的其他任务仍保留各自物理票据。
-        (connectionRetirements + acceptRetirement).awaitAll()
+        (connectionRetirements + acceptRetirement + viewRetirement).awaitAll()
         // 实际 accept job 已退出；把其最后一条拒绝连接纳入退役后才能置 OFF。
         ownedConnections().map { requestConnectionRetirement(current, it, retry) }.awaitAll()
         val allRetired = synchronized(lock) { current.connections.isEmpty() && current.rejectedConnection == null }
         if (!allRetired) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
+        // The initial view request can defer to a then-live connection; recheck its exact owner.
+        requestPeerViewRetirement(current, retry).await()
+        val viewsRetired = synchronized(lock) {
+            current.viewPeer == null && current.viewRetirement?.let { it.isCompleted && !it.isCancelled } != false
+        }
+        if (!viewsRetired) throw TransferException(TransferIssue.RECOVERY_REQUIRED)
         store.retireAbandoned()
         store.awaitIdle()
     }

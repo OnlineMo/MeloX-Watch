@@ -134,14 +134,14 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
                 NativeCatalogIndex(ids, seed, total)
             }
             OnlineCatalogKind.LIKED -> {
-                val ids = array(response["ids"], emptyAllowed = true).map {
+                val ids = array(response["ids"], emptyAllowed = false).map {
                     currentCoroutineContext().ensureActive()
                     id(it)
                 }
                 NativeCatalogIndex(ids, emptyList(), ids.size.toLong())
             }
             OnlineCatalogKind.DAILY -> {
-                val songs = array(response["data"].jsonObject()["dailySongs"], emptyAllowed = true)
+                val songs = array(response["data"].jsonObject()["dailySongs"], emptyAllowed = false)
                     .mapIndexed { order, value -> track(value.jsonObject(), order.toLong()) }
                 NativeCatalogIndex(songs.map { it.entry.id }, songs, songs.size.toLong())
             }
@@ -214,6 +214,7 @@ internal class NeteaseCatalogApi(private val eapi: NeteaseEapi) {
         if (!onlineCanonicalId(result)) invalid()
         return result
     }
+    // Only optional lists may be absent or null; an explicit empty array remains a valid empty result.
     private fun array(value: JsonValue?, emptyAllowed: Boolean): List<JsonValue> = when (value) {
         is JsonArray -> value.values
         null, JsonNull -> if (emptyAllowed) emptyList() else invalid()

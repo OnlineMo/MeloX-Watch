@@ -1,5 +1,9 @@
 package io.github.onlinemo.meloxwatch.ui
 
+import androidx.annotation.MainThread
+import androidx.compose.runtime.mutableStateOf
+import io.github.onlinemo.meloxwatch.data.fonts.LyricsFontIssue
+import io.github.onlinemo.meloxwatch.playback.dsp.DspLimits
 import io.github.onlinemo.meloxwatch.ui.library.LibraryUiState
 import io.github.onlinemo.meloxwatch.ui.online.OnlineScreen
 import io.github.onlinemo.meloxwatch.ui.online.OnlineUiState
@@ -9,6 +13,116 @@ import io.github.onlinemo.meloxwatch.ui.playlists.PlaylistUiState
 import io.github.onlinemo.meloxwatch.ui.queue.QueueViewerState
 import io.github.onlinemo.meloxwatch.ui.about.AboutUiState
 import io.github.onlinemo.meloxwatch.data.about.ProjectUpdateState
+import java.util.Collections
+
+internal enum class DspNamedTextRole { CHOICE, RENAME, REPLACE, DELETE, INPUT }
+
+/** Only current, clipped-visible controls contribute private names to the page font corpus. */
+@MainThread
+internal class DspVisibleFontText(private val visibleNow: () -> Boolean) : AutoCloseable {
+    private data class Key(val presetId: String?, val role: DspNamedTextRole)
+    private data class Entry(val token: Any, val text: String? = null)
+    private val entries = LinkedHashMap<Key, Entry>()
+    private val published = mutableStateOf(DspFontTextSnapshot.EMPTY)
+    private var closed = false
+    private var failed = false
+
+    val snapshot: DspFontTextSnapshot
+        get() = if (!closed && visibleNow()) published.value else DspFontTextSnapshot.EMPTY
+
+    fun preset(presetId: String, role: DspNamedTextRole): Registration {
+        require(role != DspNamedTextRole.INPUT)
+        return Registration(presetId, role)
+    }
+
+    fun input(): Registration = Registration(null, DspNamedTextRole.INPUT)
+
+    /** Registration starts after old DisposableEffects retire, so replacement never needs extra slots. */
+    inner class Registration internal constructor(presetId: String?, role: DspNamedTextRole) : AutoCloseable {
+        private val key = Key(presetId, role)
+        private val token = Any()
+        private var attached = false
+        private var retired = false
+
+        fun attach() {
+            if (attached || retired || !usable()) return
+            val ids = entries.keys.mapNotNull { it.presetId }.toSet()
+            if (key.presetId != null && key.presetId !in ids && ids.size == DspLimits.MAX_PRESETS) {
+                reject()
+                return
+            }
+            // Replacing this exact control retires its old token before accepting the new one.
+            entries[key] = Entry(token)
+            attached = true
+            publish()
+        }
+
+        fun present(text: String, displayed: Boolean) {
+            if (!usable() || !attached || entries[key]?.token !== token) return
+            if (displayed && text.length > DspLimits.MAX_NAME_CHARACTERS) {
+                reject()
+                return
+            }
+            val next = text.takeIf { displayed && it.isNotEmpty() }
+            if (entries[key]?.text == next) return
+            entries[key] = Entry(token, next)
+            publish()
+        }
+
+        override fun close() {
+            retired = true
+            attached = false
+            if (entries[key]?.token !== token) return
+            entries.remove(key)
+            publish()
+        }
+    }
+
+    private fun usable(): Boolean {
+        if (closed) return false
+        if (!visibleNow()) { close(); return false }
+        return !failed
+    }
+
+    private fun reject() {
+        failed = true
+        entries.replaceAll { _, entry -> entry.copy(text = null) }
+        publish()
+    }
+
+    private fun publish() {
+        val next = if (closed) DspFontTextSnapshot.EMPTY
+            else if (failed) DspFontTextSnapshot(emptyList(), LyricsFontIssue.INVALID_INPUT)
+            else {
+                val names = LinkedHashMap<String, String>()
+                var input: String? = null
+                for ((key, entry) in entries) entry.text?.let { text ->
+                    if (key.presetId == null) input = text else names[key.presetId] = text
+                }
+                val parts = names.values.toMutableList()
+                input?.let(parts::add)
+                DspFontTextSnapshot(Collections.unmodifiableList(parts.distinct().sorted()), null)
+            }
+        // Layout/position callbacks and duplicate occurrences do not create a new font identity.
+        if (published.value != next) published.value = next
+    }
+
+    override fun close() {
+        closed = true
+        failed = false
+        entries.clear()
+        publish()
+    }
+}
+
+internal data class DspFontTextSnapshot(
+    val parts: List<String>,
+    val issue: LyricsFontIssue?,
+) {
+    companion object {
+        val EMPTY = DspFontTextSnapshot(emptyList(), null)
+    }
+}
 
 /** Font coverage uses bounded current-page text and visible keys, never a full music directory. */
 internal fun probePageVisibleText(
@@ -22,8 +136,10 @@ internal fun probePageVisibleText(
     online: OnlineUiState? = null,
     meting: MetingSettingsState? = null,
     about: AboutUiState? = null,
+    dspText: DspFontTextSnapshot? = null,
 ): List<String> = buildList {
     val keys = visibleKeys.toSet()
+    if (page == ProbePage.DSP && "dsp:settings" in keys && dspText != null) addAll(dspText.parts)
     if (page == ProbePage.PLAYBACK) {
         state.playback.title?.let(::add)
         state.playback.artist?.let(::add)

@@ -1,12 +1,15 @@
 package io.github.onlinemo.meloxwatch.playback.resources.metadata
 
 import android.net.Uri
+import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorInput
 import androidx.media3.extractor.ExtractorOutput
 import androidx.media3.extractor.ExtractorsFactory
+import androidx.media3.extractor.ForwardingTrackOutput
 import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SniffFailure
 import androidx.media3.extractor.SeekMap
@@ -19,6 +22,8 @@ import androidx.media3.extractor.ogg.OggExtractor
 import androidx.media3.extractor.text.SubtitleParser
 import androidx.media3.extractor.ts.AdtsExtractor
 import androidx.media3.extractor.wav.WavExtractor
+import io.github.onlinemo.meloxwatch.data.codec.CodecPcmObservation
+import io.github.onlinemo.meloxwatch.data.codec.CodecPcmResponseHeaders
 import io.github.onlinemo.meloxwatch.playback.QueuePlaybackIssue
 import io.github.onlinemo.meloxwatch.playback.resources.MediaTransportException
 
@@ -27,7 +32,8 @@ import io.github.onlinemo.meloxwatch.playback.resources.MediaTransportException
 internal class BoundedExtractorsFactory(private var delegate: ExtractorsFactory = DefaultExtractorsFactory()) : ExtractorsFactory {
     override fun createExtractors(): Array<Extractor> = wrap(delegate.createExtractors())
     override fun createExtractors(uri: Uri, responseHeaders: Map<String, List<String>>): Array<Extractor> =
-        wrap(delegate.createExtractors(uri, responseHeaders))
+        wrap(delegate.createExtractors(uri, responseHeaders),
+            (responseHeaders as? CodecPcmResponseHeaders)?.forSource(uri))
     override fun setSubtitleParserFactory(subtitleParserFactory: SubtitleParser.Factory): ExtractorsFactory {
         delegate = delegate.setSubtitleParserFactory(subtitleParserFactory)
         return this
@@ -43,7 +49,7 @@ internal class BoundedExtractorsFactory(private var delegate: ExtractorsFactory 
         delegate = delegate.experimentalSetCodecsToParseWithinGopSampleDependencies(codecsToParseWithinGopSampleDependencies)
         return this
     }
-    private fun wrap(extractors: Array<Extractor>): Array<Extractor> = extractors.mapNotNull { extractor ->
+    private fun wrap(extractors: Array<Extractor>, observation: CodecPcmObservation? = null): Array<Extractor> = extractors.mapNotNull { extractor ->
         val kind = when (extractor.underlyingImplementation) {
             is Mp3Extractor -> GuardedContainer.MP3
             is FlacExtractor -> GuardedContainer.FLAC
@@ -56,7 +62,7 @@ internal class BoundedExtractorsFactory(private var delegate: ExtractorsFactory 
             else -> null
         }
         val guarded: Extractor? = if (kind != null) {
-            BoundedExtractor(extractor, kind)
+            BoundedExtractor(extractor, kind, observation.takeIf { kind == GuardedContainer.WAVE })
         } else {
             // factory 创建但不会交给 adapter 的实例，由这里释放。
             extractor.release()
@@ -69,7 +75,11 @@ internal class BoundedExtractorsFactory(private var delegate: ExtractorsFactory 
 internal enum class GuardedContainer { MP3, FLAC, OGG, MP4, FRAGMENTED_MP4, WAVE, ADTS }
 
 @UnstableApi
-internal class BoundedExtractor(private val delegate: Extractor, private val kind: GuardedContainer) : Extractor {
+internal class BoundedExtractor(
+    private val delegate: Extractor,
+    private val kind: GuardedContainer,
+    private var codecObservation: CodecPcmObservation? = null,
+) : Extractor {
     private var budget = MetadataBudget()
     private var id3 = Id3Admission(budget)
     private var admission: ContainerAdmission = container()
@@ -96,7 +106,24 @@ internal class BoundedExtractor(private val delegate: Extractor, private val kin
         result
     }
     override fun init(output: ExtractorOutput) = delegate.init(object : ExtractorOutput {
-        override fun track(id: Int, type: Int): TrackOutput = output.track(id, type)
+        override fun track(id: Int, type: Int): TrackOutput {
+            val track = output.track(id, type)
+            if (kind != GuardedContainer.WAVE || type != C.TRACK_TYPE_AUDIO || codecObservation == null) return track
+            return object : ForwardingTrackOutput(track) {
+                override fun format(format: Format) {
+                    val originalTags = codecObservation?.metadataFor(format)
+                    if (originalTags == null) {
+                        super.format(format)
+                        return
+                    }
+                    admit(originalTags.length() <= MetadataLimits.ENTRIES, MetadataAdmissionIssue.RESOURCE_LIMIT)
+                    admit((format.metadata?.length() ?: 0) <= MetadataLimits.ENTRIES - originalTags.length(),
+                        MetadataAdmissionIssue.RESOURCE_LIMIT)
+                    val merged = format.metadata?.copyWithAppendedEntriesFrom(originalTags) ?: originalTags
+                    super.format(format.buildUpon().setMetadata(merged).build())
+                }
+            }
+        }
         override fun endTracks() = output.endTracks()
         override fun seekMap(seekMap: SeekMap) {
             output.seekMap(seekMap)
@@ -132,6 +159,7 @@ internal class BoundedExtractor(private val delegate: Extractor, private val kin
         try {
             delegate.release()
         } finally {
+            codecObservation = null
             admission.release()
         }
     }

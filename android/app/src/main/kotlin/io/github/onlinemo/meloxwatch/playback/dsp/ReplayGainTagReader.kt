@@ -4,10 +4,12 @@ import androidx.media3.common.Metadata
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.metadata.vorbis.VorbisComment
 import androidx.media3.extractor.metadata.id3.TextInformationFrame
+import io.github.onlinemo.meloxwatch.data.codec.ApeReplayGainEntry
+import io.github.onlinemo.meloxwatch.data.codec.CodecReplayGainReadFailure
 import java.util.Locale
 
-enum class ReplayGainTagSource { NONE, ID3, VORBIS, MIXED }
-enum class ReplayGainTagIssue { INVALID_VALUE, CONFLICTING_VALUES, METADATA_TOO_LARGE }
+enum class ReplayGainTagSource { NONE, ID3, VORBIS, APE, MIXED }
+enum class ReplayGainTagIssue { INVALID_VALUE, CONFLICTING_VALUES, METADATA_TOO_LARGE, TAG_UNREADABLE }
 
 data class ReplayGainTagResult(
     val tags: ReplayGainTags = ReplayGainTags(),
@@ -28,14 +30,13 @@ internal object ReplayGainTagReader {
         val values = LinkedHashMap<String, Double>()
         val invalid = HashSet<String>()
         var issue: ReplayGainTagIssue? = null
-        var id3 = false
-        var vorbis = false
+        val sources = HashSet<ReplayGainTagSource>()
 
-        fun accept(key: String?, value: String, fromId3: Boolean) {
+        fun accept(key: String?, value: String, source: ReplayGainTagSource) {
             if (key == null || key.length > 64) return
             val name = key.trim().uppercase(Locale.ROOT)
             if (name !in fields) return
-            if (fromId3) id3 = true else vorbis = true
+            sources += source
             val peak = name.endsWith("_PEAK")
             val parsed = parse(value, peak)
             if (parsed == null) {
@@ -52,10 +53,13 @@ internal object ReplayGainTagReader {
 
         for (index in 0 until metadata.length()) {
             when (val entry = metadata[index]) {
-                is VorbisComment -> accept(entry.key, entry.value, false)
+                is CodecReplayGainReadFailure -> return ReplayGainTagResult(issue =
+                    if (entry.resourceLimit) ReplayGainTagIssue.METADATA_TOO_LARGE else ReplayGainTagIssue.TAG_UNREADABLE)
+                is ApeReplayGainEntry -> accept(entry.key, entry.value, ReplayGainTagSource.APE)
+                is VorbisComment -> accept(entry.key, entry.value, ReplayGainTagSource.VORBIS)
                 is TextInformationFrame -> if (entry.id == "TXXX") {
                     if (entry.values.size > 16) return ReplayGainTagResult(issue = ReplayGainTagIssue.METADATA_TOO_LARGE)
-                    for (value in entry.values) accept(entry.description, value, true)
+                    for (value in entry.values) accept(entry.description, value, ReplayGainTagSource.ID3)
                 }
             }
         }
@@ -63,9 +67,8 @@ internal object ReplayGainTagReader {
         val tags = ReplayGainTags(value("REPLAYGAIN_TRACK_GAIN"), value("REPLAYGAIN_TRACK_PEAK"),
             value("REPLAYGAIN_ALBUM_GAIN"), value("REPLAYGAIN_ALBUM_PEAK"))
         return ReplayGainTagResult(tags, when {
-            id3 && vorbis -> ReplayGainTagSource.MIXED
-            id3 -> ReplayGainTagSource.ID3
-            vorbis -> ReplayGainTagSource.VORBIS
+            sources.size > 1 -> ReplayGainTagSource.MIXED
+            sources.size == 1 -> sources.single()
             else -> ReplayGainTagSource.NONE
         }, issue)
     }

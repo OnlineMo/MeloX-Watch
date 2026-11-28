@@ -14,6 +14,10 @@ pluginManagement {
         google {
             content { excludeModule("org.jetbrains.kotlin.android", "org.jetbrains.kotlin.android.gradle.plugin") }
         }
+        // Strict checksum verification also applies to the Central mirror.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/") {
+            content { includeGroupByRegex("org\\.jetbrains\\.kotlin(\\..*)?") }
+        }
         mavenCentral()
         gradlePluginPortal {
             content { excludeModule("org.jetbrains.kotlin.android", "org.jetbrains.kotlin.android.gradle.plugin") }
@@ -30,6 +34,10 @@ dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
         google()
+        // Strict checksum verification also applies to the Central mirror.
+        maven("https://maven-central.storage-download.googleapis.com/maven2/") {
+            content { includeGroupByRegex("org\\.jetbrains\\.kotlin(\\..*)?") }
+        }
         mavenCentral()
     }
 }

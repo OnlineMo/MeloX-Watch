@@ -10,9 +10,13 @@ internal data class ApeLayout(
     val sourceFrames: Int,
     val seekBytes: IntArray,
     val audioEnd: Long,
+    val tagMinimumOffset: Long,
+    val leadingId3EndExclusive: Long? = null,
 ) {
     val format: LocalCodecFormat get() = LocalCodecFormat("APE", "Monkey's Audio", sampleRate, 16, channels,
-        PcmFormat(sampleRate, channels), sourceFrames.toLong(), sourceFrames.toLong(), version, compression)
+        PcmFormat(sampleRate, channels), sourceFrames.toLong(), sourceFrames.toLong(), version, compression,
+        tagOffset = leadingId3EndExclusive?.let { 0L }, tagEndExclusive = leadingId3EndExclusive,
+        apeTagMinimumOffset = tagMinimumOffset)
 }
 
 /** Validate modern header dimensions before the Java decoder can allocate any frame or seek table. */
@@ -76,6 +80,6 @@ internal object ApeContainer {
             codecRequire(end - seeks[index] >= 12)
         }
         return ApeLayout(version, compression, rate.toInt(), channels, blocks.toInt(), last.toInt(),
-            totalBlocks.toInt(), seeks, dataEnd)
+            totalBlocks.toInt(), seeks, dataEnd, codecAdd(dataEnd, terminatingBytes), macOffset.takeIf { it > 0 })
     }
 }

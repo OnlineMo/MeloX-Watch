@@ -79,15 +79,27 @@ internal object LocalCodecMetadata {
 
     private fun auxiliaryTags(input: CodecInput, format: LocalCodecFormat, signal: CancellationSignal): AudioTextTags = try {
         val offset = format.tagOffset
-        if (offset != null) {
+        if (offset != null && format.container != "APE") {
+            val end = format.tagEndExclusive ?: throw CodecReadException(CodecReadIssue.INVALID_CONTAINER)
+            codecRequire(end <= input.length && end - offset >= 10)
             input.moveTo(offset)
             AudioTagReader.readText(object : InputStream() {
                 private val one = ByteArray(1)
-                override fun read(): Int = if (input.read(one, 0, 1) < 0) -1 else one[0].toInt() and 255
-                override fun read(bytes: ByteArray, offset: Int, count: Int): Int = input.read(bytes, offset, count)
+                override fun read(): Int = if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 255
+                override fun read(bytes: ByteArray, offset: Int, count: Int): Int {
+                    codecRequire(offset >= 0 && count >= 0 && offset <= bytes.size - count)
+                    input.checkCancellation()
+                    codecRequire(input.position <= end)
+                    if (count == 0) return 0
+                    if (input.position == end) return -1
+                    val read = input.read(bytes, offset, minOf(count.toLong(), end - input.position, 16 * 1024L).toInt())
+                    input.checkCancellation()
+                    return read
+                }
             }, signal)
         } else if (format.container == "APE") {
-            val fields = ApeTagFields.read(input)
+            val minimum = format.apeTagMinimumOffset ?: throw CodecReadException(CodecReadIssue.INVALID_CONTAINER)
+            val fields = ApeTagFields.read(input, minimum)
             val artist = fields["ARTIST"]
             val artists = artist?.split('\u0000', limit = 129).orEmpty()
             codecRequire(artists.size <= 128, CodecReadIssue.RESOURCE_LIMIT)

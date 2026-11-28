@@ -12,6 +12,7 @@ internal object ApeTagFields {
     fun read(input: CodecInput, minimumOffset: Long = 0): Map<String, String> {
         input.checkCancellation()
         codecRequire(input.length > 0, CodecReadIssue.UNKNOWN_LENGTH)
+        codecRequire(minimumOffset in 0..input.length)
         if (input.length - minimumOffset < 32) return emptyMap()
         var end = input.length
         if (end - minimumOffset >= 128) {
@@ -64,7 +65,8 @@ internal object ApeTagFields {
                 codecRequire(!result.containsKey(key))
                 val end = minOf(value.length, 4096)
                 val safe = if (end < value.length && end > 0 && value[end - 1].isHighSurrogate()) end - 1 else end
-                result[key] = value.substring(0, safe)
+                // Gain parsing must see the entire admitted literal, including invalid trailing text.
+                result[key] = if (key.startsWith("REPLAYGAIN_")) value else value.substring(0, safe)
             } else input.moveTo(codecAdd(input.position, valueBytes))
         }
         codecRequire(input.position == end - 32)
