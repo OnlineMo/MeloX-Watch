@@ -7,6 +7,7 @@ import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
 import io.github.onlinemo.meloxwatch.data.auth.QrLoginController
 import io.github.onlinemo.meloxwatch.data.auth.QrLoginPhase
 import io.github.onlinemo.meloxwatch.data.auth.SessionRepository
+import io.github.onlinemo.meloxwatch.data.auth.SessionSnapshot
 import io.github.onlinemo.meloxwatch.data.auth.AuthIssue
 import io.github.onlinemo.meloxwatch.data.netease.NeteaseLoginApi
 import io.github.onlinemo.meloxwatch.data.lyrics.online.OnlineLyricsIssue
@@ -23,6 +24,9 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -47,20 +51,29 @@ internal class OnlineLoginPresenter(
     api: NeteaseLoginApi,
     private val sessions: SessionRepository,
     private val scope: CoroutineScope,
+    private val searchHistory: OnlineSearchHistory? = null,
     private val clearLyricsAccount: suspend (String) -> OnlineLyricsIssue? = { null },
 ) : AutoCloseable {
     @Volatile var lyricsCleanupIssue: OnlineLyricsIssue? = null
         private set
     private val controller = QrLoginController(api, sessions, scope)
+    private val mutableHistoryCleanup = MutableStateFlow<OnlineSearchHistoryCleanup?>(null)
+    val historyCleanup = mutableHistoryCleanup.asStateFlow()
     // Register the initial account before construction can return to an account switch.
     private val accountCleanup = scope.launch(start = CoroutineStart.UNDISPATCHED) {
-        var previous = sessions.snapshot.value.account
+        var previous = sessions.snapshot.value
         sessions.snapshot.collect { current ->
             val old = previous
-            previous = current.account
-            if (old != null && old != current.account && current.issue != AuthIssue.CLOSED) {
-                withContext(NonCancellable) { lyricsCleanupIssue = cleanupAccount(old.accountId) }
+            previous = current
+            val oldAccount = old.account
+            val oldHistory = OnlineSearchHistoryScope.of(old)
+            val clearHistory = oldHistory.lineageId != null && !oldHistory.sameLineage(OnlineSearchHistoryScope.of(current)) &&
+                current.issue != AuthIssue.CLOSED
+            if (clearHistory) searchHistory?.retireAccount(old)
+            if (oldAccount != null && oldAccount != current.account && current.issue != AuthIssue.CLOSED) {
+                withContext(NonCancellable) { lyricsCleanupIssue = cleanupAccount(oldAccount.accountId) }
             }
+            if (clearHistory) withContext(NonCancellable) { cleanupHistory(old) }
         }
     }
     val state: Flow<OnlineLoginSnapshot> = controller.state
@@ -79,16 +92,35 @@ internal class OnlineLoginPresenter(
     fun refresh() = controller.refresh()
     fun networkChanged(online: Boolean) = controller.networkChanged(online)
     fun logout(): Job {
-        val accountId = sessions.snapshot.value.account?.accountId
+        val captured = sessions.snapshot.value
+        val accountId = captured.account?.accountId
+        searchHistory?.retireAccount(captured)
         lyricsCleanupIssue = null
         val logout = controller.logout()
         return scope.launch(start = CoroutineStart.UNDISPATCHED) {
             // Navigation may cancel its waiter, but the explicit logout still completes account
-            // persistence and only that account's bounded lyric cleanup before releasing this job.
+            // persistence and the captured account's bounded lyric/search cleanup before releasing this job.
             withContext(NonCancellable) {
                 logout.join()
                 if (accountId != null) lyricsCleanupIssue = cleanupAccount(accountId)
+                cleanupHistory(captured)
             }
+        }
+    }
+    fun retryHistoryCleanup(expected: OnlineSearchHistoryCleanup): Job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        withContext(NonCancellable) {
+            if (mutableHistoryCleanup.value === expected) cleanupHistory(expected.snapshot)
+        }
+    }
+    private suspend fun cleanupHistory(snapshot: SessionSnapshot) {
+        val history = searchHistory ?: return
+        val issue = history.clearAccount(snapshot)
+        val target = OnlineSearchHistoryScope.of(snapshot)
+        mutableHistoryCleanup.update { old ->
+            if (issue == null) {
+                if (old != null && OnlineSearchHistoryScope.of(old.snapshot).matches(target)) null else old
+            } else if (old == null || old.snapshot.generation <= snapshot.generation) OnlineSearchHistoryCleanup(snapshot, issue)
+            else old
         }
     }
     private suspend fun cleanupAccount(accountId: String): OnlineLyricsIssue? = try { clearLyricsAccount(accountId) }

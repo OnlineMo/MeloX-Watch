@@ -12,6 +12,8 @@ import java.nio.charset.CodingErrorAction
 import java.nio.CharBuffer
 import java.security.GeneralSecurityException
 import java.security.ProviderException
+import java.security.MessageDigest
+import java.util.UUID
 import javax.crypto.BadPaddingException
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
@@ -79,7 +81,19 @@ internal class SessionCipher(private val keys: SessionKeyProvider, applicationId
         } catch (_: SecurityException) {
             throw AuthException(AuthIssue.KEY_UNAVAILABLE)
         }
-        return try { SessionRecordCodec.decode(plaintext) } finally { plaintext.fill(0) }
+        return try { SessionRecordCodec.decode(plaintext) { legacyLineage(bytes) } } finally { plaintext.fill(0) }
+    }
+
+    // A legacy authenticated envelope has no lineage field. Its stable ciphertext identity
+    // keeps repeated offline restores consistent without exposing plaintext outside this layer.
+    private fun legacyLineage(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").apply {
+            update("MeloXWatch/session-lineage/legacy-v1".toByteArray(Charsets.UTF_8))
+            update(associatedData)
+            update(bytes)
+        }.digest()
+        return try { ByteBuffer.wrap(digest).let { UUID(it.long, it.long).toString() } }
+        finally { digest.fill(0) }
     }
 
     companion object {
@@ -94,7 +108,7 @@ internal class SessionCipher(private val keys: SessionKeyProvider, applicationId
 
 private object SessionRecordCodec {
     private const val MAGIC = 0x4d585352
-    private const val VERSION = 1
+    private const val VERSION = 2
     fun encode(session: StoredSession): ByteArray {
         val output = ByteArrayOutputStream()
         DataOutputStream(output).use {
@@ -104,19 +118,26 @@ private object SessionRecordCodec {
             text(it, session.account.accountId, 32)
             text(it, session.account.displayName, 512)
             text(it, session.credential.headerValue(), SessionCredential.MAX_BYTES)
+            text(it, session.lineageId, 36)
         }
         return output.toByteArray()
     }
 
-    fun decode(bytes: ByteArray): StoredSession = try {
+    fun decode(bytes: ByteArray, legacyLineage: () -> String): StoredSession = try {
         DataInputStream(ByteArrayInputStream(bytes)).use {
-            if (it.readInt() != MAGIC || it.readInt() != VERSION) corrupt()
+            if (it.readInt() != MAGIC) corrupt()
+            val version = it.readInt()
+            if (version !in 1..VERSION) corrupt()
             val provider = text(it, 32)
             val id = text(it, 32)
             val name = text(it, 512)
             val credential = text(it, SessionCredential.MAX_BYTES)
+            val lineage = if (version == VERSION) text(it, 36) else null
             if (it.available() != 0) corrupt()
-            StoredSession(AccountIdentity(provider, id, name), SessionCredential.fromValidatedHeader(credential))
+            val account = AccountIdentity(provider, id, name)
+            val validatedCredential = SessionCredential.fromValidatedHeader(credential)
+            // Derive legacy identity only after authentication and full record validation succeeded.
+            StoredSession(account, validatedCredential, lineage ?: legacyLineage())
         }
     } catch (_: IOException) { corrupt() }
     catch (_: IllegalArgumentException) { corrupt() }

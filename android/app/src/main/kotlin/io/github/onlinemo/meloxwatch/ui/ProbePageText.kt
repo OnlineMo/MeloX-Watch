@@ -155,7 +155,12 @@ internal fun probePageVisibleText(
     if (page == ProbePage.ONLINE && online != null) {
         when (online.screen) {
             OnlineScreen.HOME -> if ("online:account" in keys) online.account.account?.displayName?.let(::add)
-            OnlineScreen.SEARCH -> if ("online:search" in keys) add(online.searchDraft)
+            OnlineScreen.SEARCH -> {
+                if ("online:search" in keys) add(online.searchDraft)
+                online.searchHistory?.queries?.forEachIndexed { index, value ->
+                    if ("online:history:$index" in keys) add(value)
+                }
+            }
             OnlineScreen.CATALOG -> {
                 if ("online:title" in keys) online.title?.let(::add)
                 val snapshotId = online.snapshot?.id

@@ -76,6 +76,8 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
@@ -1398,6 +1400,14 @@ private fun ProbePageContent(
     }
 }
 
+private fun LazyListScope.homeSection(key: String, title: Int) {
+    item(key = key) {
+        WatchText(stringResource(title), Modifier.fillMaxWidth()
+            .padding(horizontal = watchSpacing(12.dp), vertical = watchSpacing(4.dp))
+            .semantics { heading() })
+    }
+}
+
 private fun LazyListScope.homeContent(
     state: ProbeUiState,
     viewModel: ProbeViewModel,
@@ -1406,20 +1416,24 @@ private fun LazyListScope.homeContent(
     openMedia: () -> Unit,
     openSettings: () -> Unit,
 ) {
+    homeSection("menu:group:listen", R.string.watch_menu_listen)
     item { ProbeButton(stringResource(R.string.probe_playback), primary = true) { viewModel.showPage(ProbePage.PLAYBACK) } }
+    item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
+    homeSection("menu:group:library", R.string.watch_menu_library)
     item { ProbeButton(stringResource(R.string.library_title), primary = true) { viewModel.showPage(ProbePage.LIBRARY) } }
+    item { ProbeButton(stringResource(R.string.playlist_heading)) { viewModel.showPage(ProbePage.PLAYLISTS) } }
     item { ProbeButton(stringResource(R.string.online_title)) { viewModel.showPage(ProbePage.ONLINE) } }
     item { ProbeButton(stringResource(R.string.online_meting)) { viewModel.showPage(ProbePage.METING) } }
-    item { ProbeButton(stringResource(R.string.playlist_heading)) { viewModel.showPage(ProbePage.PLAYLISTS) } }
-    item { ProbeButton(stringResource(R.string.playback_queue), onClick = { viewModel.showPage(ProbePage.QUEUE) }) }
+    homeSection("menu:group:preferences", R.string.watch_menu_preferences)
     item { ProbeButton(stringResource(R.string.playback_settings), onClick = { viewModel.showPage(ProbePage.SETTINGS) }) }
     item { ProbeButton(stringResource(R.string.dsp_title), onClick = { viewModel.showPage(ProbePage.DSP) }) }
     item { ProbeButton(stringResource(R.string.appearance_title), onClick = { viewModel.showPage(ProbePage.APPEARANCE) }) }
-    item { ProbeButton(stringResource(R.string.transfer_title), onClick = { viewModel.showPage(ProbePage.TRANSFER) }) }
     item { ProbeButton(stringResource(R.string.lyrics_settings), onClick = { viewModel.showPage(ProbePage.LYRICS_OPTIONS) }) }
     item { ProbeButton(stringResource(R.string.sleep_timer_title), onClick = { viewModel.showPage(ProbePage.SLEEP_TIMER) }) }
-    item { ProbeButton(stringResource(R.string.help_title), onClick = { viewModel.showPage(ProbePage.HELP) }) }
+    homeSection("menu:group:tools", R.string.watch_menu_tools)
+    item { ProbeButton(stringResource(R.string.transfer_title), onClick = { viewModel.showPage(ProbePage.TRANSFER) }) }
     item { ProbeButton(stringResource(R.string.backup_ui_title), onClick = { viewModel.showPage(ProbePage.BACKUP) }) }
+    item { ProbeButton(stringResource(R.string.help_title), onClick = { viewModel.showPage(ProbePage.HELP) }) }
     item(key = "menu:device-checks") {
         var expanded by rememberSaveable { mutableStateOf(false) }
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
