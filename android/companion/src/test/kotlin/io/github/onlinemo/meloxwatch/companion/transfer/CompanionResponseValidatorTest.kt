@@ -49,12 +49,12 @@ class CompanionResponseValidatorTest {
     private fun encoded(request: TransferRequest): ByteArray = ByteArrayOutputStream().also { TransferProtocolCodec.writeRequest(it, request) }.toByteArray()
     private fun encoded(response: TransferResponse): ByteArray = ByteArrayOutputStream().also { TransferProtocolCodec.writeResponse(it, response) }.toByteArray()
 
-    @Test fun schema2ReadDisplayHasItsOwnTagsAndRoundTripsMinimumState() {
+    @Test fun schema3ReadDisplayHasItsOwnTagsAndRoundTripsMinimumState() {
         val request = TransferRequest.ReadDisplay(id(2), scope(), TransferDisplayKind.ALBUM, "album:fixture")
         val wire = encoded(request)
-        assertEquals(2, wire[5].toInt())
+        assertEquals(3, wire[5].toInt())
         assertEquals(11, wire[6].toInt())
-        assertEquals("4d58545200020b000000000000000000000000000000000200000065" +
+        assertEquals("4d58545200030b000000000000000000000000000000000200000065" +
             "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a" +
             "000000000000000000000000000000010909090909090909090909090909090909090909090909090909090909090909" +
             "000000010000000d616c62756d3a66697874757265", hex(wire))
@@ -65,7 +65,7 @@ class CompanionResponseValidatorTest {
         val state = TransferDisplayState(request.kind, request.entityId, 7L, fence, "", 20001L)
         val responseWire = encoded(TransferResponse.DisplayState(request.requestId, state))
         assertEquals(76, responseWire[6].toInt())
-        assertEquals("4d58545200024c000000000000000000000000000000000200000039" +
+        assertEquals("4d58545200034c000000000000000000000000000000000200000039" +
             "000000010000000d616c62756d3a66697874757265000000000000000700000000000000070000000000000003" +
             "000000000000000000004e21", hex(responseWire))
         val response = TransferProtocolCodec.readResponse(ByteArrayInputStream(responseWire))
