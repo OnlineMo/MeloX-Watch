@@ -453,7 +453,10 @@ class SourcesViewModel(application: Application, private val savedState: SavedSt
 
     private suspend fun registerPreparedMedia(input: SourcesReturnedInput) {
         if (!input.isCurrent()) return
-        val volume = if (input.kind == SourcesPickerKind.MEDIA_PRIMARY) MediaStore.VOLUME_EXTERNAL_PRIMARY else "external"
+        val volume = if (input.kind == SourcesPickerKind.MEDIA_PRIMARY) {
+            if (Build.VERSION.SDK_INT >= 29) MediaStore.VOLUME_EXTERNAL_PRIMARY
+            else throw SourceReadException(SourceReadIssue.SOURCE_UNAVAILABLE)
+        } else "external"
         val source = LocalSourceSpec(UUID.randomUUID().toString(), LocalSourceKind.MEDIA_STORE,
             MediaStore.Audio.Media.getContentUri(volume).toString(), mediaVolume = volume)
         val observed = try { app.localSources.observe(source) }
